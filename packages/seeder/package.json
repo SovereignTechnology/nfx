@@ -22,6 +22,12 @@
     "lint": "eslint src"
   },
   "dependencies": {
-    "@sovit/core": "0.0.0"
+    "@sovit/core": "0.0.0",
+    "compact-encoding": "3.4.0",
+    "corestore": "7.12.2",
+    "hyperblobs": "2.12.1",
+    "hypercore": "11.35.3",
+    "hyperswarm": "4.17.0",
+    "protomux": "3.11.0"
   }
 }

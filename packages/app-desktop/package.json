@@ -24,7 +24,8 @@
   "dependencies": {
     "@sovit/core": "0.0.0",
     "@sovit/seeder": "0.0.0",
-    "@sovit/ui": "0.0.0"
+    "@sovit/ui": "0.0.0",
+    "bare-subprocess": "6.1.0"
   },
   "devDependencies": {
     "jsdom": "29.1.1"
