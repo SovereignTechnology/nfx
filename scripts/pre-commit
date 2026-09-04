@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Git pre-commit hook. Installed by `npm run hooks:install` (scripts/install-hooks.sh).
+#
+# Two mechanical guards from docs/plan/execution.md §0:
+#   rule 2 — a lane may only commit paths in its allowlist (.lane file in the worktree root)
+#   rule 3 — locked directories stay interface-only until Stage 2
+#
+# Lane allowlist format (.lane, gitignored, one entry per line, `#` comments):
+#   lane: L2
+#   allow: packages/seeder/
+#   allow: docs/lanes/L2.md
+#   allow: docs/contract-requests/L2.md
+# A worktree with no .lane file is treated as the orchestrator and is unrestricted.
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+staged=$(git diff --cached --name-only --diff-filter=ACMRD)
+[[ -z "$staged" ]] && exit 0
+
+# ---- rule 2: path allowlist ---------------------------------------------------------
+if [[ -f .lane ]]; then
+  lane=$(sed -n 's/^lane:[[:space:]]*//p' .lane | head -1)
+  mapfile -t allow < <(sed -n 's/^allow:[[:space:]]*//p' .lane)
+  bad=()
+  while IFS= read -r f; do
+    ok=0
+    for a in "${allow[@]}"; do
+      [[ "$f" == "$a"* ]] && { ok=1; break; }
+    done
+    [[ $ok -eq 0 ]] && bad+=("$f")
+  done <<<"$staged"
+  if [[ ${#bad[@]} -gt 0 ]]; then
+    echo "pre-commit: lane ${lane:-?} may not commit these paths (see .lane allowlist):"
+    printf '  %s\n' "${bad[@]}"
+    echo "If you need a contract change, write docs/contract-requests/${lane:-LANE}.md and stop."
+    exit 1
+  fi
+  # A lane never touches contracts, full stop.
+  if grep -q '^packages/core/src/contracts/' <<<"$staged"; then
+    echo "pre-commit: lanes may not modify packages/core/src/contracts/ (frozen)."
+    exit 1
+  fi
+fi
+
+# ---- rule 3: locked directories ---------------------------------------------------
+if grep -qE '^(packages/core/src/(payment|signer|pay-protocol)/|packages/core/src/wallet/spend\.ts|packages/gateway/src/auth/)' <<<"$staged"; then
+  bash scripts/check-locked-dirs.sh
+fi
+
+exit 0

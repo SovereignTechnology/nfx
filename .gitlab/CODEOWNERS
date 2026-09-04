@@ -1,0 +1,12 @@
+# Execution plan §0 rules 1 and 3.
+# Contracts: orchestrator-only writer.
+/packages/core/src/contracts/        @sovtech
+# Locked audit surface: interface + tests only until Stage 2; Stage 2 diffs are read by the owner.
+/packages/core/src/payment/          @sovtech
+/packages/core/src/signer/           @sovtech
+/packages/core/src/pay-protocol/     @sovtech
+/packages/core/src/wallet/spend.ts   @sovtech
+/packages/gateway/src/auth/          @sovtech
+# The threat model is normative for the adversary suite.
+/SECURITY.md                         @sovtech
+/docs/plan/                          @sovtech

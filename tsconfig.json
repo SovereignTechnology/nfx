@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/seeder" },
+    { "path": "packages/gateway" },
+    { "path": "packages/ui" },
+    { "path": "packages/app-desktop" },
+    { "path": "packages/app-web" }
+  ]
+}

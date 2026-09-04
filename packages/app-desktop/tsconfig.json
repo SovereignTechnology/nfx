@@ -1,0 +1,22 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "lib": ["ES2023", "DOM"],
+    "jsx": "react-jsx"
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.stories.tsx"],
+  "references": [
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../seeder"
+    },
+    {
+      "path": "../ui"
+    }
+  ]
+}

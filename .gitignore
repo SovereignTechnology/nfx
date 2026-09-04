@@ -59,6 +59,17 @@ htmlcov/
 /target/
 *.rs.bk
 vendor/
+# docs/vendor/ holds the pinned upstream specs every lane must read (execution plan §0 rule 6)
+!docs/vendor/
+
+# --- Nutflix build artefacts ------------------------------------------------
+# screenshots/diffs are generated per lane run; only the directory skeleton is tracked
+artifacts/**/*.png
+artifacts/**/*.jpg
+artifacts/**/*.webm
+artifacts/**/*.json
+storybook-static/
+.worktrees/
 
 # --- Media (large binaries do not belong in git) ----------------------------
 *.mp4
@@ -67,3 +78,4 @@ vendor/
 *.mov
 *.webm
 *.iso
+.lane

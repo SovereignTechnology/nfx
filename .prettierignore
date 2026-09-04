@@ -1,0 +1,8 @@
+node_modules
+dist
+coverage
+artifacts
+storybook-static
+docs/vendor
+package-lock.json
+*.md

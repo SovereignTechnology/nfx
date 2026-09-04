@@ -1,0 +1,49 @@
+# CI skeleton (execution plan Stage 0 deliverable 1; hardened by lane L9).
+#
+# NOT YET ACTIVE: no runner is registered against the private GitLab namespace, so this
+# lives in ci/ rather than at the repo root. When a runner exists, `git mv ci/gitlab-ci.yml
+# .gitlab-ci.yml` and every MR gets the same gates that `npm run ci` runs locally.
+
+stages: [verify, test, build]
+
+default:
+  image: node:22-bookworm
+  cache:
+    key:
+      files: [package-lock.json]
+    paths: [.npm/]
+  before_script:
+    # Threat T12: lockfile-only, no lifecycle scripts, exact pins.
+    - npm ci --ignore-scripts --cache .npm --prefer-offline
+
+lint:
+  stage: verify
+  script:
+    - npm run lint
+
+locked-dirs:
+  stage: verify
+  script:
+    - bash scripts/check-locked-dirs.sh
+    - bash scripts/check-contracts-version.sh "origin/$CI_DEFAULT_BRANCH"
+
+native-modules:
+  stage: verify
+  script:
+    # Explicit inventory of native modules; any change must be reviewed (build-plan §7).
+    - bash scripts/native-module-inventory.sh --check
+
+test:
+  stage: test
+  script:
+    - npm test -- --coverage
+  coverage: '/All files[^|]*\|[^|]*\s+([\d.]+)/'
+  artifacts:
+    when: always
+    paths: [coverage/]
+    expire_in: 1 week
+
+build:
+  stage: build
+  script:
+    - npm run build
