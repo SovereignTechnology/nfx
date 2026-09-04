@@ -1,0 +1,69 @@
+# --- Secrets: never commit these -------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials.json
+*.credentials
+
+# --- OS ---------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Editors / IDEs ---------------------------------------------------------
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.direnv/
+
+# --- Logs & temp ------------------------------------------------------------
+*.log
+npm-debug.log*
+yarn-error.log*
+tmp/
+temp/
+*.tmp
+
+# --- Node -------------------------------------------------------------------
+node_modules/
+dist/
+build/
+.cache/
+coverage/
+.next/
+.nuxt/
+.turbo/
+*.tsbuildinfo
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.tox/
+htmlcov/
+
+# --- Rust / Go --------------------------------------------------------------
+/target/
+*.rs.bk
+vendor/
+
+# --- Media (large binaries do not belong in git) ----------------------------
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.webm
+*.iso
