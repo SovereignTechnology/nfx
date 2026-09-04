@@ -90,7 +90,12 @@ export interface PayProtocol {
   sendAck(ack: Omit<AckMessage, 'type'>): void;
   sendPrice(price: Omit<PriceMessage, 'type'>): void;
 
-  /** Destroy the underlying stream (assumption A4) — or use the finer API if spike S-A found one. */
+  /**
+   * Cut this peer. Per spike S-A there is no per-peer upload pause in Hypercore, so this is
+   * `peerInfo.ban(true)` (hyperswarm, prevents reconnect) followed by `stream.destroy()`.
+   * For `window-exceeded` it MUST run synchronously inside the `upload` handler (no await,
+   * no ACK first); for protocol decisions an `ACK{ok:false}` may be sent before the cut.
+   */
   cut(reason: Parameters<PayProtocolEvents['close']>[0]): void;
 
   on<K extends keyof PayProtocolEvents>(event: K, cb: PayProtocolEvents[K]): () => void;

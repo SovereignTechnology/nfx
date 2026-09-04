@@ -1,0 +1,283 @@
+<!-- vendored from npm bare-media@2.10.5 on 2026-09-04 -->
+# bare-media
+
+A set of media APIs for Bare
+
+## Install
+
+```
+npm i bare-media
+```
+
+## Usage
+
+Image:
+
+```js
+import { image } from 'bare-media'
+
+const preview = await image(path)
+  .decode({ maxFrames })
+  .resize({ maxWidth, maxHeight })
+  .encode({ mimetype: 'image/webp' })
+```
+
+Video:
+
+```js
+import { video } from 'bare-media'
+
+const frames = video(path).extractFrames({ frameIndex })
+```
+
+Each method can also be used independently:
+
+```js
+const rgba = await image.decode(buffer, { maxFrames })
+```
+
+## Image API
+
+### decode()
+
+Decode an image to RGBA
+
+| Parameter        | Type   | Description                                               |
+| ---------------- | ------ | --------------------------------------------------------- |
+| `buffer`         | object | The encoded image                                         |
+| `opts.maxFrames` | number | Max number of frames to decode in case of animated images |
+
+### encode()
+
+Encodes an image to a specific format
+
+| Parameter       | Type   | Description                                                                         |
+| --------------- | ------ | ----------------------------------------------------------------------------------- |
+| `buffer`        | object | The rgba image                                                                      |
+| `opts.mimetype` | string | The mimetype of the output image                                                    |
+| `opts.maxBytes` | number | Max bytes for the encoded image (reduces quality or fps in case of animated images) |
+| `opts...`       | any    | Additional encoder-specific options                                                 |
+
+### crop()
+
+Crop an image
+
+| Parameter     | Type   | Description                  |
+| ------------- | ------ | ---------------------------- |
+| `buffer`      | object | The rgba image               |
+| `opts.left`   | number | Offset from left edge        |
+| `opts.top`    | number | Offset from top edge         |
+| `opts.width`  | number | Width of the region to crop  |
+| `opts.height` | number | Height of the region to crop |
+
+### resize()
+
+Resize an image
+
+| Parameter        | Type   | Description                   |
+| ---------------- | ------ | ----------------------------- |
+| `buffer`         | object | The rgba image                |
+| `opts.maxWidth`  | number | Max width of the output rgba  |
+| `opts.maxHeight` | number | Max height of the output rgba |
+
+### slice()
+
+Limits an animated image to a subset of frames. If the image is not animated, it returns the same rgba.
+
+| Parameter    | Type   | Description                                                              |
+| ------------ | ------ | ------------------------------------------------------------------------ |
+| `buffer`     | object | The rgba image                                                           |
+| `opts.start` | number | Frame index at which to start extraction. Default 0.                     |
+| `opts.end`   | number | Frame index at which to end extraction. Defaults to end of the animation |
+
+### orientate()
+
+Apply EXIF orientation.
+
+| Parameter        | Type   | Description                                                     |
+| ---------------- | ------ | --------------------------------------------------------------- |
+| `buffer`         | object | The rgba image                                                  |
+| `opts.file`      | Buffer | Optional. Input image used to extract EXIF metadata.            |
+| `opts.exif`      | number | Optional. EXIF orientation value.                               |
+| `opts.transform` | object | Optional. Transform object with `rotate`, `flipH`, and `flipV`. |
+
+At least one of `opts.file`, `opts.exif`, or `opts.transform` is required. In a pipeline, `orientate()` can be called without options:
+
+```js
+const rgba = await image(path).decode().orientate()
+```
+
+### rotate()
+
+Rotate an image in 90-degree multiples.
+
+| Parameter  | Type   | Description                                                    |
+| ---------- | ------ | -------------------------------------------------------------- |
+| `buffer`   | object | The rgba image                                                 |
+| `opts.deg` | number | Rotation in degrees. Allowed values: [`0`, `90`, `180`, `270`] |
+
+### flip()
+
+Flip an image horizontally or vertically.
+
+| Parameter | Type    | Description                                 |
+| --------- | ------- | ------------------------------------------- |
+| `buffer`  | object  | The rgba image                              |
+| `opts.h`  | boolean | Optional. Flip horizontally. Default `true` |
+| `opts.v`  | boolean | Optional. Flip vertically                   |
+
+### read()
+
+Read an image from a file path, URL, or buffer.
+
+| Parameter | Type   | Description                                 |
+| --------- | ------ | ------------------------------------------- |
+| `input`   | object | File path, http(s) URL, or raw image buffer |
+
+### save()
+
+Write an encoded image buffer to a file.
+
+| Parameter  | Type   | Description                              |
+| ---------- | ------ | ---------------------------------------- |
+| `filename` | string | Destination file path                    |
+| `buffer`   | object | Encoded image buffer                     |
+| `opts`     | object | Options passed through to `fs.writeFile` |
+
+### metadata()
+
+> [!IMPORTANT]
+> This feature is experimental. The API is subject to change and may break at any time.
+
+Read image metadata.
+
+```js
+const data = await image(path).metadata()
+const orientation = await image(path).metadata({ tag: 'orientation' })
+```
+
+| Parameter  | Type   | Description                         |
+| ---------- | ------ | ----------------------------------- |
+| `opts.tag` | string | Optional. Read a single tag by name |
+
+**Supported formats**: `jpeg`, `tiff`.
+
+### metadata.strip()
+
+> [!IMPORTANT]
+> This feature is experimental. The API is subject to change and may break at any time.
+
+Strip metadata from an image returning a new image buffer.
+
+```js
+await image(path).metadata.strip().save(outPath)
+```
+
+| Parameter              | Type    | Description                                                         |
+| ---------------------- | ------- | ------------------------------------------------------------------- |
+| `opts.keepColor`       | boolean | Keep color-transform metadata to avoid color shifts. Default `true` |
+| `opts.keepOrientation` | boolean | Keep orientation to avoid image rotations. Default `false`          |
+
+Check with `isStripMetadataSupported()` for supported types, only `jpeg` at the moment.
+
+## Video API
+
+### extractFrames()
+
+Extracts frames from a video in RGBA
+
+| Parameter         | Type   | Description                    |
+| ----------------- | ------ | ------------------------------ |
+| `opts.frameIndex` | number | Number of the frame to extract |
+
+### metadata()
+
+Basic metadata for the primary video stream
+
+Returns:
+
+| Field                      | Type    | Description                                            |
+| -------------------------- | ------- | ------------------------------------------------------ |
+| `width`                    | number  | Width of the primary video stream                      |
+| `height`                   | number  | Height of the primary video stream                     |
+| `codec.id`                 | number  | FFmpeg codec id of the primary video stream            |
+| `codec.name`               | string  | FFmpeg codec name of the primary video stream          |
+| `duration`                 | number  | Stream duration in seconds                             |
+| `avgFramerate.numerator`   | number  | Average frame rate numerator                           |
+| `avgFramerate.denominator` | number  | Average frame rate denominator                         |
+| `displayRotation`          | number  | Rotation stored in display metadata                    |
+| `rotation`                 | number  | Corrective rotation to display the video upright       |
+| `flipH`                    | boolean | Whether the display metadata applies a horizontal flip |
+| `flipV`                    | boolean | Whether the display metadata applies a vertical flip   |
+
+Throws if the input has no video stream.
+
+### transcode()
+
+> [!IMPORTANT]
+> This feature is experimental. The API is subject to change and may break at any time.
+
+Transcode a media file to a different format
+
+| Parameter     | Type   | Description                                                         |
+| ------------- | ------ | ------------------------------------------------------------------- |
+| `opts.format` | string | Output format name (e.g., `mp4`, `webm`, `matroska`). Default `mp4` |
+| `opts.width`  | number | Width of the output video                                           |
+| `opts.height` | number | Height of the output video                                          |
+
+**Supported formats**: `mp4` (VP9+Opus), `webm` (VP9+Opus), `matroska`/`mkv` (VP9+Opus)
+
+#### Example
+
+```javascript
+import { video } from 'bare-media'
+
+for await (const chunk of video('input.mkv').transcode({
+  format: 'mp4',
+  width: 1280,
+  height: 720
+})) {
+  console.log('Received chunk:', chunk.buffer.length)
+}
+```
+
+## CLI
+
+`bare-media [flags] [command]`
+
+```sh
+Flags:
+  --version|-v   Print version
+  --help|-h      Show help
+
+Commands:
+  metadata       Print image or video metadata (experimental)
+  convert        Convert an image
+  transcode      Transcode a video
+  types          List supported MIME types
+```
+
+## Supported Types
+
+Helpers to check supported media types are exposed in `bare-media/types`:
+
+- `supportedImageMimetypes`: list of supported image mimetypes.
+- `supportedVideoMimetypes`: list of supported video mimetypes.
+- `isImageSupported(mimetype)`: returns `true` if the mimetype is a supported image format.
+- `isVideoSupported(mimetype)`: returns `true` if the mimetype is a supported video format.
+- `isMediaSupported(mimetype)`: returns `true` if the mimetype is either a supported image or video format.
+- `isStripMetadataSupported(mimetype)`: returns `true` if `metadata.strip()` supports the mimetype.
+
+Detect the MIME type of a buffer:
+
+```js
+import { detectMimeType } from 'bare-media'
+
+const mimetype = detectMimeType(buffer)
+```
+
+> This may return non-media MIME types, use `isMediaSupported()` to validate support.
+
+## License
+
+Apache-2.0

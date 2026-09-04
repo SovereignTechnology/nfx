@@ -35,10 +35,10 @@ export interface HyperblobRef {
   readonly blob: HyperblobId;
 }
 
-/** Default Hyperblobs block size, assumption A9 — CONFIRM in spike/vendor docs. */
+/** Hyperblobs default block size. Assumption A9 CONFIRMED against hyperblobs@2.12.1 README (`blockSize: 64KB`). */
 export const DEFAULT_BLOCK_SIZE = 65_536 as const;
 
-/** Default unpaid window in blocks (assumption A4, threat T3). */
+/** Default unpaid window in blocks (assumption A4 — refined by spike S-A; threat T3). */
 export const DEFAULT_WINDOW_BLOCKS = 4 as const;
 
 export interface Rendition {

@@ -94,7 +94,13 @@ export interface PaymentEngineSeeder {
    */
   verify(peer: NostrPubkey, msg: PayMessage, policy: PricePolicy): Promise<VerifyResult>;
 
-  /** Record that `blocks` were uploaded to `peer` (from Hypercore `upload` events). */
+  /**
+   * Record that `blocks` were uploaded to `peer`. MUST be called synchronously from inside
+   * Hypercore's `upload` event handler: spike S-A established that `upload` fires BEFORE the
+   * block is written to the wire, so a stream destroy in the same tick prevents the block
+   * that crosses the window from ever leaving. `onWindowExceeded` callbacks therefore fire
+   * synchronously from this call, and the returned window is post-update.
+   */
   recordUpload(peer: NostrPubkey, blocks: number): PeerWindow;
 
   window(peer: NostrPubkey): PeerWindow | undefined;
@@ -120,9 +126,22 @@ export interface PaymentEngineSeeder {
    */
   flush(): Promise<{ readonly swapped: Sats; readonly nutzapped: Sats; readonly failed: number }>;
 
-  ban(peer: NostrPubkey, reason: string): void;
+  /**
+   * Bans are keyed on the Nostr pubkey bound in `HELLO`; the transport layer additionally
+   * bans the Noise key (`hyperswarm` `peerInfo.ban(true)`) so the peer cannot reconnect.
+   * Both keys are persisted by the seeder (SECURITY.md invariant 6).
+   */
+  ban(peer: NostrPubkey, reason: string, noiseKey?: Uint8Array): void;
   unban(peer: NostrPubkey): void;
   isBanned(peer: NostrPubkey): boolean;
+  bans(): readonly BanEntry[];
+}
+
+export interface BanEntry {
+  readonly pubkey: NostrPubkey;
+  readonly noiseKey?: Uint8Array;
+  readonly reason: string;
+  readonly at: UnixSeconds;
 }
 
 /** Full engine = both sides plus configuration. */

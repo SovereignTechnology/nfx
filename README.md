@@ -2,60 +2,70 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
-> Status: **scaffold**. The repository skeleton, license and contribution rules are in
-> place; the application itself has not been designed yet.
+> Status: **Stage 0 complete** (scaffold, frozen contracts, mocks, spikes). Stage 1 parallel
+> build not yet started. See [`docs/nfx/status.md`](docs/nfx/status.md).
 
-## What this is
+A Nostr-native peer-to-peer video network where seeders are paid per block in Cashu ecash,
+the creator picks the mint, and the UI aims at YouTube rather than at a protocol demo.
 
-A placeholder for the `nutflix` project. Nothing has been committed to a language,
-framework or architecture yet — that decision is deliberately deferred so the first
-implementation choice can be made against a real requirement rather than a guess.
+**"Nutflix" is the brand name only.** Package scope is `@sovit/*`, the wire protocol is
+`pay/1`, and nothing in the code depends on the brand (build plan §9.11).
 
-## What is decided
+## Read first
 
-| Decision | Value |
-| --- | --- |
-| Licence | AGPL-3.0-or-later |
-| Visibility | Public |
-| Default branch | `main` |
-| Canonical remote | <https://example.invalid/sovtech/nutflix> |
+| Document | What it is |
+|----------|------------|
+| [`docs/plan/build-plan.md`](docs/plan/build-plan.md) | The *what*: assumptions, threat model, architecture, data model, `pay/1`, payment flow, UI, hardening, phases, open questions |
+| [`SECURITY.md`](SECURITY.md) | Threat table (normative for the adversary suite), money-path invariants, locked directories |
+| [`docs/decisions/`](docs/decisions/) | ADRs — 0002 stack, 0003 spike resolutions |
+| [`docs/spikes/`](docs/spikes/) | S-A per-peer gating, S-B browser Hypercore, S-C transcode |
+| [`docs/vendor/`](docs/vendor/) | Pinned upstream specs and READMEs. **The API is what is in here and in `node_modules/`, not what you remember.** |
 
-The AGPL is a deliberate choice: if this ever becomes a network-facing service, anyone
-who runs a modified copy for others has to publish their changes. See §13 of the
-[LICENSE](LICENSE).
+## Layout
+
+```
+packages/core         @sovit/core        runtime-agnostic protocol lib: contracts, mocks, (nostr, manifest, media, payment…)
+packages/seeder       @sovit/seeder      Corestore + Hyperblobs seeder daemon, pay/1 server side
+packages/gateway      @sovit/gateway     seeder + WS bridge + Blossom HTTP
+packages/ui           @sovit/ui          React design system + screens, talks only to NetworkAdapter
+packages/app-desktop  @sovit/app-desktop Electron + pear-runtime Bare worker shell
+packages/app-web      @sovit/app-web     static web shell: in-page Hypercore over WS, service-worker player
+```
+
+`packages/core/src/contracts/` is the frozen interface surface (`CONTRACTS_VERSION`).
+`payment/`, `signer/`, `pay-protocol/`, `wallet/spend.ts` and `gateway/src/auth/` are
+**locked** — interfaces and tests only — until the Stage 2 security session.
 
 ## Getting started
 
 ```sh
 git clone nostr://npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx
 cd nfx
+npm ci --ignore-scripts     # .npmrc already sets ignore-scripts + exact pins
+npm run hooks:install       # pre-commit: lane path allowlist + locked-dir check
+npm run ci                  # lint + typecheck/build + test + locked-dir check
 ```
 
-There is nothing to build or run yet. When a stack is chosen, this section gets the real
-install/build/test commands.
+Requires Node ≥ 22.12. Refresh vendored docs with `scripts/vendor-docs.sh`.
 
-There is deliberately **no `.gitlab-ci.yml`** yet: no CI runner is registered against this
-namespace, so a pipeline definition would only produce jobs stuck in `pending`. It gets
-added at the same time as a runner.
+### Working in a lane
+
+```sh
+scripts/new-lane-worktree.sh L2 packages/seeder/
+cd .worktrees/L2            # .lane holds the allowlist; the hook enforces it
+```
+
+## CI
+
+There is deliberately **no `.gitlab-ci.yml`** at the root yet: no runner is registered
+against this namespace. The pipeline skeleton lives in [`ci/gitlab-ci.yml`](ci/gitlab-ci.yml)
+and mirrors `npm run ci`; move it to the root when a runner exists.
 
 ## Contributing
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) first, and note the
-[Code of Conduct](CODE_OF_CONDUCT.md). Contributions are accepted under the AGPL-3.0.
-
-## Roadmap
-
-- [ ] Decide what nutflix does
-- [ ] Choose a stack and record the reasoning in `docs/decisions/`
-- [ ] Register a CI runner, then add `.gitlab-ci.yml` with lint/test/build jobs
-- [ ] First release
+Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md).
+Security issues: see [SECURITY.md](SECURITY.md) — do not open a public issue.
 
 ## Licence
 
-Copyright (C) 2026 sovtech.
-
-This program is free software: you can redistribute it and/or modify it under the terms
-of the GNU Affero General Public License as published by the Free Software Foundation,
-either version 3 of the License, or (at your option) any later version. It is
-distributed WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
-or FITNESS FOR A PARTICULAR PURPOSE. See the [LICENSE](LICENSE) file for the full text.
+Copyright (C) 2026 sovtech. AGPL-3.0-or-later — see [LICENSE](LICENSE).

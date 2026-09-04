@@ -17,4 +17,5 @@ Frozen interface surface for the whole monorepo. See the execution plan (not pub
 | `manifest.ts` | `VideoManifest`, `Rendition`, `HyperblobRef`, NIP-71 tag schema, price policy |
 | `payment.ts` | `PaymentEngine` viewer + seeder sides, `PayMessage`, `VerifyResult`, `PeerWindow` |
 | `pay-protocol.ts` | `pay/1` messages `HELLO/PAY/ACK/PRICE`, `PayProtocol`, codec |
+| `media.ts` | Probe/ladder/transcode planning with injected `ProcessRunner` + `FsAdapter`, `BlobSink` (spike S-C) |
 | `network-adapter.ts` | Everything the UI may call |

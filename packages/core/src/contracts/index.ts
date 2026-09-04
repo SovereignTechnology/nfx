@@ -11,4 +11,5 @@ export * from './wallet.js';
 export * from './manifest.js';
 export * from './payment.js';
 export * from './pay-protocol.js';
+export * from './media.js';
 export * from './network-adapter.js';

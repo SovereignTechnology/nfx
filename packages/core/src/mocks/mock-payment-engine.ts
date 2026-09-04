@@ -15,6 +15,7 @@
  * same tests. Nothing here is crypto. Nothing here may be imported by production code.
  */
 import type {
+  BanEntry,
   BlockRange,
   CashuP2pkPubkey,
   CashuProof,
@@ -92,7 +93,7 @@ export class MockPaymentEngine implements PaymentEngine {
 
   private readonly now: () => UnixSeconds;
   private readonly windowMap = new Map<NostrPubkey, MutableWindow>();
-  private readonly bans = new Map<NostrPubkey, string>();
+  private readonly banMap = new Map<NostrPubkey, BanEntry>();
   private readonly seenSecrets = new Set<string>();
   private readonly pending: { peer: NostrPubkey; msg: PayMessage }[] = [];
   private readonly windowListeners = new Set<(w: PeerWindow) => void>();
@@ -207,7 +208,7 @@ export class MockPaymentEngine implements PaymentEngine {
     const reject = (reason: RejectReason, detail?: string): VerifyResult =>
       detail === undefined ? { ok: false, reason } : { ok: false, reason, detail };
 
-    if (this.bans.has(peer)) return reject('peer-banned');
+    if (this.banMap.has(peer)) return reject('peer-banned');
     if (!isPayMessage(msg)) return reject('malformed');
     const { range, seederProofs, creatorProofs } = msg;
     if (range.toBlock < range.fromBlock || range.fromBlock < 0)
@@ -330,22 +331,31 @@ export class MockPaymentEngine implements PaymentEngine {
     return Promise.resolve({ swapped: swapped as Sats, nutzapped: nutzapped as Sats, failed });
   }
 
-  ban(peer: NostrPubkey, reason: string): void {
-    this.bans.set(peer, reason);
+  ban(peer: NostrPubkey, reason: string, noiseKey?: Uint8Array): void {
+    this.banMap.set(
+      peer,
+      noiseKey
+        ? { pubkey: peer, noiseKey, reason, at: this.now() }
+        : { pubkey: peer, reason, at: this.now() },
+    );
     const w = this.windowMap.get(peer);
     if (w) w.banned = true;
     this.log.push({ at: this.now(), kind: 'ban', peer, detail: reason });
   }
 
   unban(peer: NostrPubkey): void {
-    this.bans.delete(peer);
+    this.banMap.delete(peer);
     const w = this.windowMap.get(peer);
     if (w) w.banned = false;
     this.log.push({ at: this.now(), kind: 'unban', peer });
   }
 
   isBanned(peer: NostrPubkey): boolean {
-    return this.bans.has(peer);
+    return this.banMap.has(peer);
+  }
+
+  bans(): readonly BanEntry[] {
+    return [...this.banMap.values()];
   }
 
   /** Test hook: pending (unswapped) proof count. */
@@ -361,7 +371,7 @@ export class MockPaymentEngine implements PaymentEngine {
         uploaded: 0,
         paid: 0,
         windowBlocks: this.config.windowBlocks,
-        banned: this.bans.has(peer),
+        banned: this.banMap.has(peer),
         lastActivity: this.now(),
         paidRanges: [],
       };

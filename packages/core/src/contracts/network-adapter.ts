@@ -77,10 +77,16 @@ export interface MediaSourceLike {
   readonly readyState: 'closed' | 'open' | 'ended';
 }
 
+/**
+ * Spike S-B PASSED: Hypercore 11 + Hyperblobs run in-page over a WebSocket Duplex with an
+ * in-memory `hypercore-storage` backend, so the web shell's primary source is
+ * `service-worker` (SW answers `<video>` range requests from the in-page core). `mediasource`
+ * is the A8 fallback (gateway-served sha256 segments + MSE) and stays available.
+ */
 export type PlaySource =
   | { readonly kind: 'url'; readonly url: string } // desktop: hypercore-blob-server localhost range URL
-  | { readonly kind: 'mediasource'; readonly mediaSource: MediaSourceLike } // web MSE fallback
-  | { readonly kind: 'service-worker'; readonly url: string }; // web: SW-served range URL
+  | { readonly kind: 'service-worker'; readonly url: string } // web: SW-served range URL from in-page core
+  | { readonly kind: 'mediasource'; readonly mediaSource: MediaSourceLike }; // web fallback: MSE
 
 export interface PlaySession {
   readonly videoId: NostrEventId;
