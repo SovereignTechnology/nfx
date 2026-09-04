@@ -11,6 +11,8 @@ export default tseslint.config(
       'artifacts/**',
       'docs/vendor/**',
       '**/storybook-static/**',
+      // Deliberately non-compliant inputs for scripts/electron-security-lint.mjs and csp-sri.mjs.
+      'scripts/__fixtures__/**',
     ],
   },
   js.configs.recommended,
@@ -66,5 +68,14 @@ export default tseslint.config(
   {
     files: ['eslint.config.js', 'vitest.config.ts', 'scripts/**/*.{js,mjs}'],
     ...tseslint.configs.disableTypeChecked,
+  },
+  {
+    // Zero-dependency Node CLIs in scripts/ (lane L9): plain ESM with JSDoc, no TS
+    // annotations to require, and Node's Buffer global.
+    files: ['scripts/**/*.{js,mjs}'],
+    languageOptions: { globals: { Buffer: 'readonly', fetch: 'readonly' } },
+    rules: {
+      '@typescript-eslint/explicit-module-boundary-types': 'off',
+    },
   },
 );
