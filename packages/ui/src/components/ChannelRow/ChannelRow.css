@@ -1,0 +1,87 @@
+.nf-channel {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-12);
+  min-width: 0;
+  color: var(--nf-color-text);
+}
+
+.nf-channel--lg {
+  gap: var(--nf-space-24);
+}
+
+.nf-channel__avatar {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  border-radius: var(--nf-radius-full);
+  cursor: pointer;
+}
+
+.nf-channel__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.nf-channel__name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nf-space-4);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--nf-text-md);
+  font-weight: var(--nf-weight-medium);
+  color: inherit;
+  cursor: pointer;
+  align-self: flex-start;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.nf-channel__name > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.nf-channel--lg .nf-channel__name {
+  font-size: var(--nf-text-2xl);
+  line-height: var(--nf-line-2xl);
+  font-weight: var(--nf-weight-bold);
+}
+
+.nf-channel__name .nf-icon {
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-channel__sub,
+.nf-channel__seeding {
+  font-size: var(--nf-text-xs);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-channel__seeding {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nf-space-4);
+  color: var(--nf-color-success);
+}
+
+.nf-channel__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-8);
+  flex: none;
+}
+
+.nf-channel__actions .nf-skeleton--block {
+  border-radius: var(--nf-radius-full);
+}

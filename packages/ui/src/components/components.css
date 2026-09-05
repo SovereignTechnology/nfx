@@ -1,0 +1,20 @@
+/*
+ * @sovit/ui component stylesheet. Load once per shell, after tokens.css:
+ *   <link rel="stylesheet" href="…/tokens.css"><link rel="stylesheet" href="…/components.css">
+ * Plain CSS with an `nf-` class namespace — no bundler-specific processing needed, so the
+ * Electron and web shells render byte-identical styles (docs/lanes/L4.md "styling").
+ * `npm run -w packages/ui build:css` flattens these imports into dist/ui.css.
+ */
+@import './Button/Button.css';
+@import './Avatar/Avatar.css';
+@import './SatsBadge/SatsBadge.css';
+@import './MintChip/MintChip.css';
+@import './Skeleton/Skeleton.css';
+@import './VideoCard/VideoCard.css';
+@import './ChannelRow/ChannelRow.css';
+@import './PeerMeter/PeerMeter.css';
+@import './EmptyState/EmptyState.css';
+@import './Sheet/Sheet.css';
+@import './Toast/Toast.css';
+@import './Markdown/Markdown.css';
+@import './Player/Player.css';
