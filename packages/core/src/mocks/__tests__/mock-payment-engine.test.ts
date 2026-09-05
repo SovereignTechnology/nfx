@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as fc from 'fast-check';
 
 import type {
   CashuP2pkPubkey,
@@ -8,7 +9,12 @@ import type {
   UnixSeconds,
 } from '../../contracts/index.js';
 import { DEFAULT_BLOCK_SIZE } from '../../contracts/index.js';
-import { MockPaymentEngine, denominate, type MockPaymentMode } from '../mock-payment-engine.js';
+import {
+  MockPaymentEngine,
+  denominate,
+  isPayMessage,
+  type MockPaymentMode,
+} from '../mock-payment-engine.js';
 
 const MINT = 'https://mint.fixture-a.example' as MintUrl;
 const OTHER_MINT = 'https://mint.unknown.example' as MintUrl;
@@ -187,5 +193,150 @@ describe('MockPaymentEngine cheating modes are rejected (adversary seed for L10)
     expect(doubles).toEqual([VIEWER]);
     // Residual loss bounded to ≤ window (4 blocks × 2 sat = 8 sat), exactly as SECURITY.md T5 says.
     expect(r.swapped + r.nutzapped).toBe(8);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// L10 extensions — pins the reference model's test hooks and edges the adversary suite in
+// core/src/payment/__tests__/ relies on. Interface-level properties live there, not here.
+// ---------------------------------------------------------------------------------------
+
+describe('MockPaymentEngine reference-model hooks (L10)', () => {
+  it('isPayMessage never throws and rejects everything that is not a PayMessage; accepts what pay() emits', async () => {
+    fc.assert(
+      fc.property(fc.anything(), (x) => {
+        expect(isPayMessage(x)).toBe(false);
+      }),
+      { numRuns: 300 },
+    );
+    const { viewer } = pair();
+    const msg = await viewer.pay({ fromBlock: 0, toBlock: 3 }, seederInfo, policy);
+    expect(isPayMessage(msg)).toBe(true);
+    // Proof amounts must be positive integers; unit must be the literal 'sat'.
+    const p0 = msg.seederProofs.proofs[0]!;
+    for (const bad of [0, -1, 1.5, '1', null]) {
+      expect(
+        isPayMessage({
+          ...msg,
+          seederProofs: { ...msg.seederProofs, proofs: [{ ...p0, amount: bad }] },
+        }),
+      ).toBe(false);
+    }
+    expect(isPayMessage({ ...msg, creatorProofs: { ...msg.creatorProofs, unit: 'usd' } })).toBe(
+      false,
+    );
+  });
+
+  it('ban() keeps the Noise key, unban() restores service, and both are visible in log + bans()', async () => {
+    const { viewer, seeder } = pair();
+    const noise = new Uint8Array([1, 2, 3, 4]);
+    seeder.ban(VIEWER, 'manual', noise);
+    expect(seeder.bans()).toEqual([
+      { pubkey: VIEWER, noiseKey: noise, reason: 'manual', at: 1000 },
+    ]);
+    seeder.recordUpload(VIEWER, 2);
+    expect(seeder.window(VIEWER)?.banned).toBe(true);
+    const msg = await viewer.pay({ fromBlock: 0, toBlock: 1 }, seederInfo, policy);
+    expect(await seeder.verify(VIEWER, msg, policy)).toMatchObject({
+      ok: false,
+      reason: 'peer-banned',
+    });
+    seeder.unban(VIEWER);
+    expect(seeder.bans()).toEqual([]);
+    expect(seeder.window(VIEWER)?.banned).toBe(false);
+    expect(await seeder.verify(VIEWER, msg, policy)).toMatchObject({ ok: true });
+    expect(seeder.log.map((l) => l.kind)).toEqual(['ban', 'unban']);
+    // A ban without a Noise key omits the field rather than writing `undefined`.
+    seeder.ban(VIEWER, 'again');
+    expect(Object.keys(seeder.bans()[0]!).sort()).toEqual(['at', 'pubkey', 'reason']);
+  });
+
+  it('window snapshots are immutable copies; window() is undefined for unknown peers; windows() lists every peer', () => {
+    const { seeder } = pair();
+    expect(seeder.window(VIEWER)).toBeUndefined();
+    expect(seeder.windows()).toEqual([]);
+    const snap = seeder.recordUpload(VIEWER, 1);
+    seeder.recordUpload(VIEWER, 1);
+    expect(snap.uploaded).toBe(1); // the earlier snapshot did not move
+    expect(seeder.window(VIEWER)?.uploaded).toBe(2);
+    seeder.recordUpload(SEEDER, 3);
+    expect(seeder.windows().map((w) => [w.peer, w.uploaded])).toEqual([
+      [VIEWER, 2],
+      [SEEDER, 3],
+    ]);
+  });
+
+  it('listeners can unsubscribe and are not called afterwards', async () => {
+    const { viewer, seeder } = pair('double-spend');
+    let windowCalls = 0;
+    let doubleCalls = 0;
+    const offW = seeder.onWindowExceeded(() => windowCalls++);
+    const offD = seeder.onDoubleSpend(() => doubleCalls++);
+    offW();
+    offD();
+    seeder.recordUpload(VIEWER, 4);
+    const a = await viewer.pay({ fromBlock: 0, toBlock: 3 }, seederInfo, policy);
+    expect(await seeder.verify(VIEWER, a, policy)).toMatchObject({ ok: true });
+    seeder.recordUpload(VIEWER, 4);
+    const b = await viewer.pay({ fromBlock: 4, toBlock: 7 }, seederInfo, policy);
+    expect(await seeder.verify(VIEWER, b, policy)).toMatchObject({ ok: true });
+    seeder.recordUpload(VIEWER, 5); // crosses the window
+    expect((await seeder.flush()).failed).toBe(1);
+    expect(windowCalls).toBe(0);
+    expect(doubleCalls).toBe(0);
+    // The engine still did its job without listeners.
+    expect(seeder.isBanned(VIEWER)).toBe(true);
+    expect(seeder.log.filter((l) => l.kind === 'window-exceeded')).toHaveLength(1);
+    expect(seeder.log.filter((l) => l.kind === 'double-spend')).toHaveLength(1);
+  });
+
+  it('flush() with nothing pending is a no-op that still logs; pendingCount tracks accepted PAYs only', async () => {
+    const { viewer, seeder } = pair('overpay');
+    expect(await seeder.flush()).toEqual({ swapped: 0, nutzapped: 0, failed: 0 });
+    expect(seeder.log.at(-1)).toMatchObject({ kind: 'flush' });
+    seeder.recordUpload(VIEWER, 4);
+    const rejected = await viewer.pay({ fromBlock: 0, toBlock: 3 }, seederInfo, policy);
+    expect(await seeder.verify(VIEWER, rejected, policy)).toMatchObject({
+      ok: false,
+      reason: 'overpay',
+    });
+    expect(seeder.pendingCount()).toBe(0);
+    const honest = new MockPaymentEngine({ mode: 'honest' });
+    const ok = await honest.pay({ fromBlock: 0, toBlock: 3 }, seederInfo, policy);
+    expect(await seeder.verify(VIEWER, ok, policy)).toMatchObject({ ok: true });
+    expect(seeder.pendingCount()).toBe(1);
+    await seeder.flush();
+    expect(seeder.pendingCount()).toBe(0);
+  });
+
+  it('viewer spent() is accounted per seeder pubkey and includes what cheating modes actually put on the wire', async () => {
+    const viewer = new MockPaymentEngine({ mode: 'overpay' });
+    const other = { ...seederInfo, pubkey: VIEWER };
+    await viewer.pay({ fromBlock: 0, toBlock: 3 }, seederInfo, policy); // 8 owed, +1 overpaid
+    await viewer.pay({ fromBlock: 0, toBlock: 0 }, other, policy); // 2 owed, +1 overpaid
+    const s = viewer.spent();
+    expect(s.perPeer.get(SEEDER)).toBe(9);
+    expect(s.perPeer.get(VIEWER)).toBe(3);
+    expect(s.total).toBe(12);
+  });
+
+  it('the mock event log never carries proof material (the mock is what lanes log against)', async () => {
+    for (const mode of ['honest', 'forge', 'double-spend'] as const) {
+      const { viewer, seeder } = pair(mode);
+      seeder.recordUpload(VIEWER, 4);
+      const a = await viewer.pay({ fromBlock: 0, toBlock: 3 }, seederInfo, policy);
+      await seeder.verify(VIEWER, a, policy);
+      seeder.recordUpload(VIEWER, 4);
+      const b = await viewer.pay({ fromBlock: 4, toBlock: 7 }, seederInfo, policy);
+      await seeder.verify(VIEWER, b, policy);
+      seeder.recordUpload(VIEWER, 1);
+      await seeder.flush();
+      const text = JSON.stringify(seeder.log);
+      for (const m of [a, b]) {
+        for (const set of [m.seederProofs, m.creatorProofs]) {
+          for (const p of set.proofs) expect(text, mode).not.toContain(p.secret);
+        }
+      }
+    }
   });
 });
