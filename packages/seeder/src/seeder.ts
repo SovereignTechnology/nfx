@@ -11,6 +11,7 @@
  *   Logger (redacting; the only output path)
  */
 import type {
+  CoreKeyHex,
   MintUrl,
   NostrPubkey,
   PaymentEngineSeeder,
@@ -44,6 +45,7 @@ import type { PersistedBan } from './store/ban-list.js';
 import { CasIndex } from './store/cas-index.js';
 import type { CasEntry } from './store/cas-index.js';
 import { DiskCap } from './store/disk-cap.js';
+import { toHex } from './util/hex.js';
 
 export interface SeederDeps {
   readonly engine: PaymentEngineSeeder & { readonly config?: EngineConfigLike };
@@ -102,6 +104,7 @@ export class Seeder {
   private readonly protocols = new Map<PeerSession, PayProtocol>();
   private readonly unsubs: (() => void)[] = [];
   private policyOverride: PricePolicy | null;
+  private readonly corePolicies = new Map<CoreKeyHex, PricePolicy>();
   private started = false;
   private closed = false;
 
@@ -313,7 +316,8 @@ export class Seeder {
     const detach = attachPayBridge({
       session,
       protocol,
-      policy: () => this.policy(),
+      policy: (core) => this.policyFor(core),
+      replicatedCores: () => this.replicatedCores(session),
       scheduler: this.scheduler,
       logger: this.log,
     });
@@ -325,6 +329,7 @@ export class Seeder {
     };
   }
 
+  /** The DEFAULT policy (`config.policy` / `setPolicy()`): what a core without its own gets. */
   policy(): PricePolicy {
     if (this.policyOverride === null)
       throw new Error('seeder has no PricePolicy configured; cannot verify PAY');
@@ -332,7 +337,38 @@ export class Seeder {
   }
 
   /**
-   * Change the price policy. With `announce` (default) every live `pay/1` peer gets a
+   * v3 (ADR 0004 (c)): the policy a `PAY` for `core` is verified against — the per-core
+   * policy set with `setCorePolicy()`, else the default. `PricePolicy` is per video
+   * (`creatorP2pk`, `satsPerBlock`, mints), so a multi-video seeder or a gateway sets one
+   * per core; a single-video seeder just uses the default. Throws like `policy()` when
+   * neither exists.
+   */
+  policyFor(core?: CoreKeyHex): PricePolicy {
+    if (core !== undefined) {
+      const p = this.corePolicies.get(core);
+      if (p !== undefined) return p;
+    }
+    return this.policy();
+  }
+
+  /**
+   * Set (or with `null` clear) the policy for one core. No `PRICE` is announced: the v2
+   * `PRICE` message carries no core, so it cannot express a per-core change (a PRICE from
+   * `setPolicy()` applies to every core on a connection). Peers learn the price for a core
+   * from the manifest / `HELLO` and their `PAY` is verified against this policy from now on.
+   */
+  setCorePolicy(core: CoreKeyHex, policy: PricePolicy | null): void {
+    if (policy === null) this.corePolicies.delete(core);
+    else this.corePolicies.set(core, policy);
+  }
+
+  /** Per-core policies currently set (does not include the default). */
+  corePolicyMap(): ReadonlyMap<CoreKeyHex, PricePolicy> {
+    return this.corePolicies;
+  }
+
+  /**
+   * Change the DEFAULT price policy. With `announce` (default) every live `pay/1` peer gets a
    * `PRICE` message; blocks already uploaded stay at the old price (`effectiveFromBlock`).
    */
   setPolicy(policy: PricePolicy, opts: { readonly announce?: boolean } = {}): void {
@@ -409,6 +445,27 @@ export class Seeder {
   private afterPut(r: PutResult): PutResult {
     if (r.ok) this.emit({ type: 'blob-added', entry: r.entry, deduplicated: r.deduplicated });
     return r;
+  }
+
+  /**
+   * Cores this session's stream replicates, as Corestore sees it: every open core with a
+   * replication peer whose Noise key is the session's. Hypercore attaches a core to a
+   * stream when both sides announce its discovery key, so this counts cores the peer has
+   * opened even before it pulls a block. The bridge takes the max of this and the cores
+   * the session has actually uploaded from.
+   */
+  private replicatedCores(session: PeerSession): number {
+    let n = 0;
+    for (const sc of this.blobs.openCores()) {
+      if (sc.core.closed) continue;
+      for (const peer of sc.core.peers) {
+        if (peer.stream === session.stream || toHex(peer.remotePublicKey) === session.noiseKeyHex) {
+          n++;
+          break;
+        }
+      }
+    }
+    return n;
   }
 
   private onCoreOpened(sc: SeedCore): void {

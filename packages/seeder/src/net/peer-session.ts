@@ -4,16 +4,20 @@
  * Identity: the Noise public key (transport, known at handshake) and, once `pay/1` `HELLO`
  * binds one, the Nostr pubkey (payment identity). Accounting always goes to the
  * `PaymentEngineSeeder` under `accountId()`; before `HELLO` that is the Noise key hex used
- * *as* the pubkey string (same 32-byte hex shape), and the blocks uploaded in that state
- * are replayed onto the real pubkey when it binds (see `bindPubkey`). A viewer that never
- * sends `HELLO` is therefore cut after `windowBlocks` like any other non-payer.
+ * *as* the pubkey string (same 32-byte hex shape — the provisional identity of ADR 0004
+ * (d)), and on `bindPubkey()` the engine moves that accounting onto the real pubkey with
+ * `rebind(noiseHex, pubkey)` (per-core counts included, provisional entry dropped). A
+ * viewer that never sends `HELLO` is therefore cut after `windowBlocks` like any other
+ * non-payer.
  *
  * The cut (spike S-A, ADR 0003): `onUpload()` is called synchronously from Hypercore's
- * `upload` event, calls `recordUpload` (synchronous by contract), and if the returned
- * window has `outstanding > windowBlocks` bans (ban list + engine + hyperswarm `PeerInfo`)
- * and destroys the stream IN THE SAME TICK. No `await` anywhere on that path.
+ * `upload` event, calls `recordUpload(id, 1, core)` (synchronous by contract), and if the
+ * returned window has `outstanding > windowBlocks` bans (ban list + engine + hyperswarm
+ * `PeerInfo`) and destroys the stream IN THE SAME TICK. No `await` anywhere on that path.
  */
 import type {
+  CoreKeyHex,
+  MuxLike,
   NostrPubkey,
   PayMessage,
   PaymentEngineSeeder,
@@ -65,6 +69,7 @@ export class PeerSession {
   private provisionalUploads = 0;
   private uploaded = 0;
   private uploadedBytesTotal = 0;
+  private readonly coresUploaded = new Set<string>();
   private cutWith: CutReason | null = null;
   private isClosed = false;
   private readonly engine: PaymentEngineSeeder;
@@ -103,6 +108,21 @@ export class PeerSession {
     return this.uploaded;
   }
 
+  /** Distinct cores this session has uploaded at least one block from (hex keys). */
+  get uploadedCores(): ReadonlySet<string> {
+    return this.coresUploaded;
+  }
+
+  /**
+   * The `Protomux` instance of this connection, when the stream went through Hypercore's
+   * `createProtocolStream()` (every `Seeder.replicate()` / swarm stream does). This is what
+   * a `PayProtocol` attaches to; `null` on a stream that carries no muxer.
+   */
+  get mux(): MuxLike | null {
+    const m: unknown = this.stream.noiseStream.userData;
+    return isMuxLike(m) ? m : null;
+  }
+
   /** Identity the PaymentEngine accounts under. See the module comment. */
   accountId(): NostrPubkey {
     return this.pubkeyBound ?? (this.noiseKeyHex as NostrPubkey);
@@ -129,8 +149,11 @@ export class PeerSession {
     if (this.cutWith !== null || this.isClosed) return null;
     this.uploaded++;
     this.uploadedBytesTotal += byteLength;
+    this.coresUploaded.add(coreKeyHex);
     if (this.pubkeyBound === null) this.provisionalUploads++;
-    const w = this.engine.recordUpload(this.accountId(), 1);
+    // v3: the core travels with the count so the engine can answer `range-not-uploaded`
+    // per core (ADR 0004 (c)); the window itself stays per peer, summed over cores.
+    const w = this.engine.recordUpload(this.accountId(), 1, coreKeyHex as CoreKeyHex);
     if (w.outstanding > w.windowBlocks) {
       this.log.warn('window exceeded — cutting', {
         core: coreKeyHex,
@@ -145,8 +168,13 @@ export class PeerSession {
 
   /**
    * Bind the Nostr pubkey from a verified `HELLO`. Refuses (and cuts) a banned pubkey.
-   * Replays blocks uploaded before the bind so the engine's window for `pubkey` reflects
-   * what this connection actually received.
+   * Moves the provisional accounting (blocks uploaded before the bind, per core) onto
+   * `pubkey` with `engine.rebind()` (ADR 0004 (d)): the engine SUMS it into any window the
+   * pubkey already has from another session, drops the provisional entry, and — if the
+   * merged `outstanding` crosses the window — bans and fires `onWindowExceeded`
+   * synchronously, exactly like `recordUpload`. The seeder's `onWindowExceeded`
+   * subscription then cuts this session before `rebind` even returns; the check below is
+   * belt and braces for an engine without listeners.
    */
   bindPubkey(pubkey: NostrPubkey): boolean {
     if (this.cutWith !== null || this.isClosed) return false;
@@ -161,17 +189,23 @@ export class PeerSession {
       this.cut('protocol-error');
       return false;
     }
+    const alreadyBound = this.pubkeyBound === pubkey;
     this.pubkeyBound = pubkey;
-    const replay = this.provisionalUploads;
+    const provisional = this.provisionalUploads;
     this.provisionalUploads = 0;
-    if (replay > 0) {
-      const w = this.engine.recordUpload(pubkey, replay);
+    if (!alreadyBound) {
+      const w = this.engine.rebind(this.noiseKeyHex as NostrPubkey, pubkey);
       if (w.outstanding > w.windowBlocks) {
         this.cut('window-exceeded');
         return false;
       }
+      if (w.banned) {
+        // A ban carried over by the merge (engine-side state we could not see above).
+        this.cut('banned');
+        return false;
+      }
     }
-    this.log.info('pubkey bound', { pubkey, replayedBlocks: replay });
+    this.log.info('pubkey bound', { pubkey, provisionalBlocks: provisional });
     return true;
   }
 
@@ -208,4 +242,13 @@ export class PeerSession {
     this.log.info('cut', { reason, pubkey: this.pubkeyBound, banned: banning });
     if (!this.stream.destroyed) this.stream.destroy();
   }
+}
+
+/** Structural check for the contract's `MuxLike` (a protomux instance has `createChannel`). */
+function isMuxLike(x: unknown): x is MuxLike {
+  return (
+    typeof x === 'object' &&
+    x !== null &&
+    typeof (x as { createChannel?: unknown }).createChannel === 'function'
+  );
 }

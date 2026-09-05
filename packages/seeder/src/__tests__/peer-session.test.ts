@@ -1,3 +1,5 @@
+import type { NostrPubkey } from '@sovit/core';
+import { mocks } from '@sovit/core';
 import type { PeerInfo } from 'hyperswarm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -28,6 +30,9 @@ function fakePeerInfo(): PeerInfo & { banCalls: boolean[] } {
   };
   return p;
 }
+
+const CORE_A = mocks.asCoreKey('A');
+const CORE_B = mocks.asCoreKey('B');
 
 describe('PeerSession', () => {
   let dir: string;
@@ -85,18 +90,101 @@ describe('PeerSession', () => {
     expect(reloaded.isNoiseBanned(noiseKey(1))).toBe(true);
   });
 
-  it('accounts pre-HELLO uploads under the noise key and replays them onto the bound pubkey', async () => {
+  it('v3: accounts pre-HELLO uploads under the noise key and rebind()s them onto the bound pubkey (no provisional entry left)', async () => {
     const { engine, session } = await make(4);
-    expect(session.accountId()).toBe(toHex(noiseKey(1)));
-    session.onUpload('core', 0, 1);
-    session.onUpload('core', 1, 1);
+    const noiseHex = toHex(noiseKey(1)) as NostrPubkey;
+    expect(session.accountId()).toBe(noiseHex);
+    session.onUpload(CORE_A, 0, 1);
+    session.onUpload(CORE_A, 1, 1);
+    expect(engine.windows().map((w) => w.peer)).toEqual([noiseHex]);
+
     const pk = pubkey('viewer');
     expect(session.bindPubkey(pk)).toBe(true);
     expect(session.accountId()).toBe(pk);
-    expect(engine.window(pk)?.uploaded).toBe(2);
-    session.onUpload('core', 2, 1);
-    expect(engine.window(pk)?.uploaded).toBe(3);
-    expect(engine.window(pk)?.outstanding).toBe(3);
+    // (b) the provisional (Noise-hex) window is GONE and the pubkey's carries the pre-HELLO blocks
+    expect(engine.windows().map((w) => w.peer)).toEqual([pk]);
+    expect(engine.window(noiseHex)).toBeUndefined();
+    expect(engine.window(pk)).toMatchObject({ uploaded: 2, paid: 0, outstanding: 2 });
+    expect(engine.log.some((e) => e.kind === 'rebind' && e.peer === pk)).toBe(true);
+
+    session.onUpload(CORE_A, 2, 1);
+    expect(engine.window(pk)).toMatchObject({ uploaded: 3, outstanding: 3 });
+    // The per-core breakdown travelled with the rebind: a PAY naming core A for all 3 verifies.
+    const viewer = honestEngine();
+    const policy = {
+      satsPerBlock: 2 as never,
+      blockSize: 1,
+      mints: engine.config.acceptedMints,
+      split: { seeder: 50, creator: 50 },
+      creatorP2pk: ('02' + '11'.repeat(32)) as never,
+    };
+    const ref = {
+      pubkey: engine.config.ownPubkey,
+      p2pk: engine.config.ownP2pk,
+      mint: engine.config.acceptedMints[0]!,
+    };
+    const msg = await viewer.pay({ core: CORE_A, fromBlock: 0, toBlock: 2 }, ref, policy);
+    expect(await session.verifyPay(msg, policy)).toMatchObject({ ok: true, blocks: 3 });
+    expect(engine.window(pk)).toMatchObject({ uploaded: 3, paid: 3, outstanding: 0 });
+    // binding the same pubkey again is a no-op (no second rebind, no double count)
+    expect(session.bindPubkey(pk)).toBe(true);
+    expect(engine.window(pk)).toMatchObject({ uploaded: 3, paid: 3 });
+    expect(engine.log.filter((e) => e.kind === 'rebind')).toHaveLength(1);
+  });
+
+  it('v3: recordUpload carries the core — the engine keeps per-core counts and the session lists its cores', async () => {
+    const { engine, session } = await make(8);
+    session.onUpload(CORE_A, 0, 1);
+    session.onUpload(CORE_A, 1, 1);
+    session.onUpload(CORE_B, 0, 1);
+    expect([...session.uploadedCores]).toEqual([CORE_A, CORE_B]);
+    const pk = pubkey('v');
+    session.bindPubkey(pk);
+    const viewer = honestEngine();
+    const policy = {
+      satsPerBlock: 2 as never,
+      blockSize: 1,
+      mints: engine.config.acceptedMints,
+      split: { seeder: 50, creator: 50 },
+      creatorP2pk: ('02' + '11'.repeat(32)) as never,
+    };
+    const ref = {
+      pubkey: engine.config.ownPubkey,
+      p2pk: engine.config.ownP2pk,
+      mint: engine.config.acceptedMints[0]!,
+    };
+    // 3 blocks in total, but only 1 on core B: B[0..1] is `range-not-uploaded` per core.
+    const lie = await viewer.pay({ core: CORE_B, fromBlock: 0, toBlock: 1 }, ref, policy);
+    expect(await session.verifyPay(lie, policy)).toMatchObject({
+      ok: false,
+      reason: 'range-not-uploaded',
+    });
+    const ok = await viewer.pay({ core: CORE_B, fromBlock: 0, toBlock: 0 }, ref, policy);
+    expect(await session.verifyPay(ok, policy)).toMatchObject({ ok: true, blocks: 1 });
+  });
+
+  it('v3: a rebind whose merged outstanding crosses the window cuts synchronously (engine listener or session check)', async () => {
+    const { engine, stream, session } = await make(4);
+    const pk = pubkey('two-sessions');
+    engine.recordUpload(pk, 3, CORE_A); // an earlier session of the same pubkey, unpaid
+    session.onUpload(CORE_A, 0, 1);
+    session.onUpload(CORE_A, 1, 1);
+    expect(stream.destroyed).toBe(false);
+    expect(session.bindPubkey(pk)).toBe(false);
+    expect(session.cutReason).toBe('window-exceeded');
+    expect(stream.destroyed).toBe(true);
+    expect(engine.window(pk)).toMatchObject({ uploaded: 5, outstanding: 5, banned: true });
+    expect(engine.window(toHex(noiseKey(1)) as NostrPubkey)).toBeUndefined();
+  });
+
+  it('v3: mux getter exposes the protomux on the noise stream (null on a bare stream)', async () => {
+    const { session, stream } = await make();
+    expect(session.mux).toBeNull();
+    const fakeMux = { createChannel: () => ({}) };
+    stream.userData = fakeMux;
+    expect(session.mux).toBe(fakeMux);
+    stream.userData = { notAMux: true };
+    expect(session.mux).toBeNull();
   });
 
   it('cuts with "banned" when a banned pubkey binds, and persists the noise key with it', async () => {
@@ -137,7 +225,7 @@ describe('PeerSession', () => {
     session.bindPubkey(pk);
     for (let i = 0; i < 4; i++) session.onUpload('c', i, 1);
     const policy = {
-      satsPerBlock: 1 as never,
+      satsPerBlock: 2 as never,
       blockSize: 1,
       mints: engine.config.acceptedMints,
       split: { seeder: 50, creator: 50 },

@@ -209,6 +209,66 @@ describe('Seeder façade', () => {
     expect(s.seeder.policy().satsPerBlock).toBe(2);
   });
 
+  it('v3 (c): setCorePolicy adds a per-core policy the pay bridge resolves by range.core; setPolicy stays the default', async () => {
+    const s = await make({ windowBlocks: 16 });
+    const viewer = new mocks.MockPaymentEngine({ mode: 'honest' });
+    const base: PricePolicy = {
+      satsPerBlock: 2 as never,
+      blockSize: BLOCK,
+      mints: s.engine.config.acceptedMints,
+      split: { seeder: 50, creator: 50 },
+      creatorP2pk: mocks.asP2pk('creator-A'),
+    };
+    const forB: PricePolicy = {
+      ...base,
+      satsPerBlock: 6 as never,
+      creatorP2pk: mocks.asP2pk('creator-B'),
+    };
+    const coreA = mocks.asCoreKey('A');
+    const coreB = mocks.asCoreKey('B');
+    s.seeder.setPolicy(base);
+    s.seeder.setCorePolicy(coreB, forB);
+    expect(s.seeder.policyFor(coreA)).toBe(base);
+    expect(s.seeder.policyFor(coreB)).toBe(forB);
+    expect(s.seeder.policyFor()).toBe(base);
+    expect([...s.seeder.corePolicyMap().keys()]).toEqual([coreB]);
+
+    const st = new FakeStream(noiseKey(7));
+    const session = s.seeder.sessions.admit(st)!;
+    const protocol = new FakePayProtocol();
+    s.seeder.attachPayProtocol(session, protocol);
+    protocol.remoteHello(hello(pubkey('pc')));
+    for (let i = 0; i < 2; i++) session.onUpload(coreA, i, BLOCK);
+    for (let i = 0; i < 2; i++) session.onUpload(coreB, i, BLOCK);
+    const ref = {
+      pubkey: s.engine.config.ownPubkey,
+      p2pk: s.engine.config.ownP2pk,
+      mint: base.mints[0]!,
+    };
+    // B at the default price → refused under B's policy; B at B's price → ok; A at default → ok.
+    protocol.remotePay(await viewer.pay({ core: coreB, fromBlock: 0, toBlock: 1 }, ref, base));
+    await new Promise((r) => setTimeout(r, 0));
+    protocol.remotePay(await viewer.pay({ core: coreB, fromBlock: 0, toBlock: 1 }, ref, forB));
+    await new Promise((r) => setTimeout(r, 0));
+    protocol.remotePay(await viewer.pay({ core: coreA, fromBlock: 0, toBlock: 1 }, ref, base));
+    await new Promise((r) => setTimeout(r, 0));
+    // and a core-less PAY on this two-core session is malformed (a)
+    protocol.remotePay(await viewer.pay({ fromBlock: 0, toBlock: 1 }, ref, base));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(protocol.acks.map((a) => (a.ok ? 'ok' : a.reason))).toEqual([
+      'wrong-p2pk-target',
+      'ok',
+      'ok',
+      'malformed',
+    ]);
+    expect(s.seeder.stats().pendingPaidBlocks).toBe(4);
+
+    // clearing the override falls back to the default
+    s.seeder.setCorePolicy(coreB, null);
+    expect(s.seeder.policyFor(coreB)).toBe(base);
+    expect(s.seeder.corePolicyMap().size).toBe(0);
+  });
+
   it('policy() throws until configured; close() is idempotent and flushes', async () => {
     const s = await make();
     expect(() => s.seeder.policy()).toThrow(/PricePolicy/);

@@ -73,6 +73,8 @@ export class FakeStream implements ReplicationStream {
   publicKey: Uint8Array | null = null;
   destroyed = false;
   destroyCalls = 0;
+  /** Test hook: what `PeerSession.mux` reads (Hypercore sets this to the protomux). */
+  userData: unknown = undefined;
   private readonly closeListeners: (() => void)[] = [];
   private readonly connectListeners: (() => void)[] = [];
 
