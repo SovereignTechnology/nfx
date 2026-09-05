@@ -51,7 +51,12 @@ export interface Rendition {
   readonly height?: number;
   readonly bitrateKbps?: number;
   readonly hyper: HyperblobRef;
-  /** `hyper://<z32 core key>/<blob-id-encoded>` as written in the imeta `url`. */
+  /**
+   * As written in the imeta `url`:
+   * `hyper://<core key, 64-char lower-case hex>/<blockOffset>-<blockLength>[+<byteOffset>]`.
+   * `byteLength` is the imeta `size`; `+<byteOffset>` only when non-zero. z32 core keys are
+   * NOT accepted (`manifest/hyper-url.ts`, `media/hyper-url.ts`, `mocks/fixtures.ts` agree).
+   */
   readonly hyperUrl: string;
   /** Blossom HTTP fallbacks (`fallback` entries), all `https://host/<sha256>`. */
   readonly fallbacks: readonly string[];

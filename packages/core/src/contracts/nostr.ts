@@ -56,6 +56,15 @@ export const NostrKind = {
   BlossomAuth: 24242, // BUD-01
   ChannelSet: 30000, // NIP-51 follow set used as "subscriptions"
   VideoSet: 30005, // NIP-51 playlist
+  /**
+   * Reproducible-build release notice from the org key (build-plan §7, threat T13).
+   * Addressable (NIP-01 30000–39999): `d` = app id (e.g. `nutflix-web`), `x` = sha256 of the
+   * dist tree, `files`/`size`, optional `version`/`commit`/`r`. Emitted by
+   * `scripts/reproducible-build.mjs`; verified by the web shell (L7) against the served bundle.
+   * Deliberately NOT 30063: vendored NIP-51 defines that as "Release artifact sets" with
+   * `e`→kind-1063 tags, a different shape. ADR 0004.
+   */
+  ReleaseNotice: 30071,
 } as const;
 export type NostrKind = (typeof NostrKind)[keyof typeof NostrKind];
 

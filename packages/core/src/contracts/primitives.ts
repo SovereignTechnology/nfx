@@ -24,7 +24,7 @@ export type CashuP2pkPubkey = Branded<string, 'CashuP2pkPubkey'>;
 /** SHA-256 of a full file — the Blossom identity of a blob (BUD-01). */
 export type Sha256Hex = Branded<string, 'Sha256Hex'>;
 
-/** Hypercore public key, hex (64 chars). Also encodable as z32 for `hyper://` URLs. */
+/** Hypercore public key, hex (64 chars). `hyper://` URLs use this hex form (not z32). */
 export type CoreKeyHex = Branded<string, 'CoreKeyHex'>;
 
 /** Absolute mint URL, e.g. `https://mint.example`. Normalised: no trailing slash. */

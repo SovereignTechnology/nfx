@@ -3,6 +3,7 @@ import type { PricePolicy } from './manifest.js';
 import type {
   BlockIndex,
   CashuP2pkPubkey,
+  CoreKeyHex,
   MintUrl,
   NostrPubkey,
   Sats,
@@ -20,8 +21,19 @@ import type {
  * adversary suite (L10) assert what the real engine must reject.
  */
 
-/** Inclusive block range `[fromBlock, toBlock]` within one core. */
+/**
+ * Inclusive block range `[fromBlock, toBlock]` within one core.
+ *
+ * `core` names that core. A Corestore replication stream carries MANY cores over ONE
+ * `pay/1` channel, and `PricePolicy` (mint, split, `creatorP2pk`) is per video — so
+ * without `core` the seeder cannot pick the policy to verify against (invariant 2 exact
+ * amount, T4 creator set) nor check `range-not-uploaded` / `range-already-paid` per core.
+ * v3: optional, so v2-issued code still compiles; the seeder MUST treat a `PAY` without
+ * `core` as `malformed` when the stream replicates more than one core. **Becomes required
+ * at the Stage 2 bump.** ADR 0004.
+ */
 export interface BlockRange {
+  readonly core?: CoreKeyHex;
   readonly fromBlock: BlockIndex;
   readonly toBlock: BlockIndex;
 }
@@ -100,8 +112,27 @@ export interface PaymentEngineSeeder {
    * block is written to the wire, so a stream destroy in the same tick prevents the block
    * that crosses the window from ever leaving. `onWindowExceeded` callbacks therefore fire
    * synchronously from this call, and the returned window is post-update.
+   *
+   * `core` (v3, optional; required at the Stage 2 bump) is the core the blocks belong to,
+   * so the engine can answer `range-not-uploaded` per core once `BlockRange.core` is on
+   * the wire. The window itself (invariant 5) stays per peer, summed over cores.
    */
-  recordUpload(peer: NostrPubkey, blocks: number): PeerWindow;
+  recordUpload(peer: NostrPubkey, blocks: number, core?: CoreKeyHex): PeerWindow;
+
+  /**
+   * Move the accounting kept under `from` onto `to` and drop `from` (v3, ADR 0004).
+   *
+   * Hypercore starts serving the moment the replication channel opens; `pay/1`'s `HELLO`
+   * — which binds the Nostr pubkey — races it. The transport therefore accounts pre-`HELLO`
+   * uploads under a provisional id (the peer's Noise key as hex, same 32-byte shape; it is
+   * authenticated by the Noise handshake) and calls `rebind(noiseHex, pubkey)` once `HELLO`
+   * verifies. Semantics: `uploaded`/`paid`/paid ranges are SUMMED into `to` (a pubkey that
+   * already has a window from another session keeps it); a ban on either side sticks to
+   * `to`; `from` is removed. If the merged `outstanding` exceeds the window the engine bans
+   * `to` and fires `onWindowExceeded` synchronously, exactly as `recordUpload` would. Returns
+   * the post-merge window. Idempotent for an unknown `from` (returns `to`'s window).
+   */
+  rebind(from: NostrPubkey, to: NostrPubkey): PeerWindow;
 
   window(peer: NostrPubkey): PeerWindow | undefined;
   windows(): readonly PeerWindow[];

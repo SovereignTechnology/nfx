@@ -338,32 +338,64 @@ function manifest(def: VideoDef): VideoManifest {
 
 export const VIDEOS: readonly VideoManifest[] = videoDefs.map(manifest);
 
+/**
+ * NIP-22 comment tags on a regular (kind 21/22) video event: root = `E`/`K`/`P`, parent =
+ * `e`/`k`/`p`. A top-level comment's parent IS the root (same id, kind, pubkey); a reply's
+ * parent is the kind-1111 comment it answers. Mirrors `nostr/comments.ts` `buildCommentEvent`,
+ * which is what `fetchComments` (`#E` filter) and `parseComment` read.
+ */
+export function commentTags(
+  video: { readonly id: NostrEventId; readonly kind: 21 | 22; readonly author: NostrPubkey },
+  parent?: { readonly id: NostrEventId; readonly author: NostrPubkey },
+): string[][] {
+  const root = [
+    ['E', video.id, '', video.author],
+    ['K', String(video.kind)],
+    ['P', video.author],
+  ];
+  return parent
+    ? [
+        ...root,
+        ['e', parent.id, '', parent.author],
+        ['k', String(NostrKind.Comment)],
+        ['p', parent.author],
+      ]
+    : [...root, ['e', video.id, '', video.author], ['k', String(video.kind)], ['p', video.author]];
+}
+
+function videoRef(videoId: NostrEventId): {
+  readonly id: NostrEventId;
+  readonly kind: 21 | 22;
+  readonly author: NostrPubkey;
+} {
+  const v = VIDEOS.find((x) => x.id === videoId);
+  return { id: videoId, kind: v?.kind ?? 21, author: v?.author ?? ME };
+}
+
 export function fixtureComments(videoId: NostrEventId): Comment[] {
   const out: Comment[] = [];
+  const video = videoRef(videoId);
   const n = 3 + (parseInt(videoId.slice(0, 2), 16) % 5);
   for (let i = 0; i < n; i++) {
     const author = CHANNELS[(i + 1) % CHANNELS.length]?.pubkey ?? ME;
     const id = asEventId(`c:${videoId}:${i}`);
     const createdAt = unix(FIXTURE_NOW - (i + 1) * 1800);
-    const content =
-      i % 3 === 2
-        ? 'Reply with a *link*: https://example.com/notes'
-        : `Comment #${i + 1} on this video. Plain text only.`;
+    const isReply = i % 3 === 2;
+    const content = isReply
+      ? 'Reply with a *link*: https://example.com/notes'
+      : `Comment #${i + 1} on this video. Plain text only.`;
+    const parent = isReply ? out[i - 1] : undefined;
     const event: NostrEvent = {
       id,
       pubkey: author,
       kind: NostrKind.Comment,
       created_at: createdAt,
       content,
-      tags: [
-        ['A', `21:${videoId}`],
-        ['K', '21'],
-        ['P', ME],
-      ],
+      tags: commentTags(video, parent ? { id: parent.id, author: parent.author } : undefined),
       sig: fakeHex64(`csig:${id}`) + fakeHex64(`csig2:${id}`),
     };
     const base = { id, author, content, createdAt, reactions: (i * 7) % 23, event };
-    out.push(i % 3 === 2 ? { ...base, parent: asEventId(`c:${videoId}:${i - 1}`) } : base);
+    out.push(parent ? { ...base, parent: parent.id } : base);
   }
   return out;
 }

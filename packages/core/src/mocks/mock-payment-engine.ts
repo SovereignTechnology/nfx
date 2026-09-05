@@ -19,6 +19,7 @@ import type {
   BlockRange,
   CashuP2pkPubkey,
   CashuProof,
+  CoreKeyHex,
   LockedProofSet,
   MintUrl,
   NostrPubkey,
@@ -63,8 +64,10 @@ interface MutableWindow {
   windowBlocks: number;
   banned: boolean;
   lastActivity: UnixSeconds;
-  /** Ranges accepted, for replay detection. */
+  /** Ranges accepted, for replay detection (per core when the range names one). */
   paidRanges: BlockRange[];
+  /** Blocks recorded via `recordUpload(peer, blocks, core)` — only for calls that named a core. */
+  uploadedByCore: Map<CoreKeyHex, number>;
 }
 
 function blocksIn(r: BlockRange): number {
@@ -109,7 +112,7 @@ export class MockPaymentEngine implements PaymentEngine {
   /** Test hooks — visible on purpose so the adversary suite can assert internal effects. */
   readonly log: {
     at: UnixSeconds;
-    kind: 'ban' | 'unban' | 'window-exceeded' | 'double-spend' | 'flush';
+    kind: 'ban' | 'unban' | 'window-exceeded' | 'double-spend' | 'flush' | 'rebind';
     peer?: NostrPubkey;
     detail?: string;
   }[] = [];
@@ -246,9 +249,14 @@ export class MockPaymentEngine implements PaymentEngine {
       );
 
     const w = this.windowFor(peer);
-    if (range.toBlock >= w.uploaded)
-      return reject('range-not-uploaded', `toBlock ${range.toBlock} >= uploaded ${w.uploaded}`);
+    // v3: when the PAY names a core AND uploads were recorded for that core, the check is
+    // per core; otherwise the v2 aggregate count applies (v2-issued callers never pass a core).
+    const perCore = range.core === undefined ? undefined : w.uploadedByCore.get(range.core);
+    const uploadedHere = perCore ?? w.uploaded;
+    if (range.toBlock >= uploadedHere)
+      return reject('range-not-uploaded', `toBlock ${range.toBlock} >= uploaded ${uploadedHere}`);
     for (const r of w.paidRanges) {
+      if (r.core !== range.core) continue;
       if (range.fromBlock <= r.toBlock && r.fromBlock <= range.toBlock)
         return reject('range-already-paid');
     }
@@ -261,19 +269,50 @@ export class MockPaymentEngine implements PaymentEngine {
     return { ok: true, credited: total as Sats, blocks };
   }
 
-  recordUpload(peer: NostrPubkey, blocks: number): PeerWindow {
+  recordUpload(peer: NostrPubkey, blocks: number, core?: CoreKeyHex): PeerWindow {
     const w = this.windowFor(peer);
     w.uploaded += blocks;
+    if (core !== undefined) w.uploadedByCore.set(core, (w.uploadedByCore.get(core) ?? 0) + blocks);
     w.lastActivity = this.now();
+    return this.enforceWindow(w);
+  }
+
+  rebind(from: NostrPubkey, to: NostrPubkey): PeerWindow {
+    const src = this.windowMap.get(from);
+    const srcBan = this.banMap.get(from);
+    const dst = this.windowFor(to);
+    if (from === to || (!src && !srcBan)) return this.snapshot(dst);
+    if (src) {
+      dst.uploaded += src.uploaded;
+      dst.paid += src.paid;
+      dst.paidRanges.push(...src.paidRanges);
+      for (const [c, n] of src.uploadedByCore)
+        dst.uploadedByCore.set(c, (dst.uploadedByCore.get(c) ?? 0) + n);
+      this.windowMap.delete(from);
+    }
+    dst.lastActivity = this.now();
+    if (srcBan && !this.banMap.has(to)) {
+      this.banMap.delete(from);
+      this.ban(to, srcBan.reason, srcBan.noiseKey);
+    } else if (srcBan) {
+      this.banMap.delete(from);
+    }
+    for (const p of this.pending) if (p.peer === from) p.peer = to;
+    this.log.push({ at: this.now(), kind: 'rebind', peer: to, detail: `from=${from}` });
+    return this.enforceWindow(dst);
+  }
+
+  /** Window rule (invariant 5): ban + synchronous `onWindowExceeded` on the crossing update. */
+  private enforceWindow(w: MutableWindow): PeerWindow {
     const snap = this.snapshot(w);
     if (snap.outstanding > w.windowBlocks && !w.banned) {
       this.log.push({
         at: this.now(),
         kind: 'window-exceeded',
-        peer,
+        peer: w.peer,
         detail: `outstanding=${snap.outstanding}`,
       });
-      this.ban(peer, 'window-exceeded');
+      this.ban(w.peer, 'window-exceeded');
       const after = this.snapshot(w);
       for (const cb of this.windowListeners) cb(after);
       return after;
@@ -374,6 +413,7 @@ export class MockPaymentEngine implements PaymentEngine {
         banned: this.banMap.has(peer),
         lastActivity: this.now(),
         paidRanges: [],
+        uploadedByCore: new Map(),
       };
       this.windowMap.set(peer, w);
     }
@@ -401,6 +441,9 @@ export function isPayMessage(x: unknown): x is PayMessage {
   if (typeof r !== 'object' || r === null) return false;
   const rr = r as Record<string, unknown>;
   if (!Number.isInteger(rr['fromBlock']) || !Number.isInteger(rr['toBlock'])) return false;
+  const core = rr['core'];
+  if (core !== undefined && (typeof core !== 'string' || !/^[0-9a-f]{64}$/.test(core)))
+    return false;
   return isLockedSet(m['seederProofs']) && isLockedSet(m['creatorProofs']);
 }
 

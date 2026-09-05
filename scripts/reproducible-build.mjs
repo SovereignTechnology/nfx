@@ -17,7 +17,8 @@
 // Usage:
 //   node scripts/reproducible-build.mjs <dist-dir> [options]
 //     --out <file>        write the JSON report there instead of stdout
-//     --kind <n>          Nostr event kind (default 30063; see docs/contract-requests/L9.md)
+//     --kind <n>          Nostr event kind (default 30071 = NostrKind.ReleaseNotice, contracts v3;
+//                         a test pins this default to the contract constant)
 //     --d <tag>           `d` tag for the addressable event (default nutflix-web)
 //     --version <v>       version string tag (default: package.json version of --pkg, or none)
 //     --pkg <dir>         package directory whose package.json supplies --version
@@ -26,6 +27,9 @@
 //     --url <u>           `r` tag; repeatable (where the build is served from)
 //     --manifest          also print the sha256sum-style manifest to stderr
 import { createHash } from 'node:crypto';
+
+/** = NostrKind.ReleaseNotice (contracts v3, ADR 0004). Pinned by test. */
+export const RELEASE_NOTICE_KIND = 30071;
 import { execFileSync } from 'node:child_process';
 import { lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -122,7 +126,9 @@ function gitHead(cwd) {
 }
 
 function parseArgs(argv) {
-  const opts = { kind: 30063, d: 'nutflix-web', urls: [], manifest: false };
+  // Must equal `NostrKind.ReleaseNotice` (packages/core/src/contracts/nostr.ts); this .mjs
+  // cannot import the TS contracts, so scripts/__tests__/reproducible-build.test.ts asserts it.
+  const opts = { kind: RELEASE_NOTICE_KIND, d: 'nutflix-web', urls: [], manifest: false };
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];

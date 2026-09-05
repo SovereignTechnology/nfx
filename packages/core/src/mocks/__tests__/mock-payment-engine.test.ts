@@ -3,6 +3,7 @@ import * as fc from 'fast-check';
 
 import type {
   CashuP2pkPubkey,
+  CoreKeyHex,
   MintUrl,
   NostrPubkey,
   PricePolicy,
@@ -338,5 +339,99 @@ describe('MockPaymentEngine reference-model hooks (L10)', () => {
         }
       }
     }
+  });
+});
+
+describe('MockPaymentEngine contracts v3 (ADR 0004): per-core ranges and rebind', () => {
+  const CORE_A = 'a1'.repeat(32) as CoreKeyHex;
+  const CORE_B = 'b2'.repeat(32) as CoreKeyHex;
+  const NOISE = '77'.repeat(32) as NostrPubkey; // provisional id: Noise key as hex
+
+  it('range-not-uploaded is checked per core when the PAY names a core with recorded uploads', async () => {
+    const { viewer, seeder } = pair();
+    seeder.recordUpload(VIEWER, 3, CORE_A);
+    seeder.recordUpload(VIEWER, 1, CORE_B);
+    // 4 blocks uploaded in total, but only 1 on core B: paying for B[0..2] is a lie.
+    const lie = await viewer.pay({ core: CORE_B, fromBlock: 0, toBlock: 2 }, seederInfo, policy);
+    expect(await seeder.verify(VIEWER, lie, policy)).toMatchObject({
+      ok: false,
+      reason: 'range-not-uploaded',
+    });
+    const ok = await viewer.pay({ core: CORE_A, fromBlock: 0, toBlock: 2 }, seederInfo, policy);
+    expect(await seeder.verify(VIEWER, ok, policy)).toMatchObject({ ok: true, blocks: 3 });
+  });
+
+  it('replay detection is per core: the same indexes on another core are a different range', async () => {
+    const { viewer, seeder } = pair();
+    seeder.recordUpload(VIEWER, 2, CORE_A);
+    seeder.recordUpload(VIEWER, 2, CORE_B);
+    const a = await viewer.pay({ core: CORE_A, fromBlock: 0, toBlock: 1 }, seederInfo, policy);
+    const b = await viewer.pay({ core: CORE_B, fromBlock: 0, toBlock: 1 }, seederInfo, policy);
+    expect(await seeder.verify(VIEWER, a, policy)).toMatchObject({ ok: true });
+    expect(await seeder.verify(VIEWER, b, policy)).toMatchObject({ ok: true });
+    expect(await seeder.verify(VIEWER, a, policy)).toMatchObject({
+      ok: false,
+      reason: 'range-already-paid',
+    });
+    expect(seeder.window(VIEWER)).toMatchObject({ uploaded: 4, paid: 4, outstanding: 0 });
+  });
+
+  it('isPayMessage accepts a well-formed core and rejects a malformed one', async () => {
+    const { viewer } = pair();
+    const msg = await viewer.pay({ core: CORE_A, fromBlock: 0, toBlock: 0 }, seederInfo, policy);
+    expect(isPayMessage(msg)).toBe(true);
+    expect(isPayMessage({ ...msg, range: { ...msg.range, core: 'nothex' } })).toBe(false);
+    expect(isPayMessage({ ...msg, range: { ...msg.range, core: 'A1'.repeat(32) } })).toBe(false);
+  });
+
+  it('rebind moves provisional (pre-HELLO) accounting onto the pubkey and drops the provisional entry', async () => {
+    const { viewer, seeder } = pair();
+    seeder.recordUpload(NOISE, 3, CORE_A);
+    expect(seeder.window(NOISE)).toMatchObject({ uploaded: 3, outstanding: 3 });
+
+    const w = seeder.rebind(NOISE, VIEWER);
+    expect(w).toMatchObject({ peer: VIEWER, uploaded: 3, paid: 0, outstanding: 3, banned: false });
+    expect(seeder.window(NOISE)).toBeUndefined();
+    expect(seeder.windows().map((x) => x.peer)).toEqual([VIEWER]);
+
+    // Per-core counts travelled with it: paying for the 3 blocks on core A works.
+    const ok = await viewer.pay({ core: CORE_A, fromBlock: 0, toBlock: 2 }, seederInfo, policy);
+    expect(await seeder.verify(VIEWER, ok, policy)).toMatchObject({ ok: true, blocks: 3 });
+    expect(seeder.window(VIEWER)).toMatchObject({ uploaded: 3, paid: 3, outstanding: 0 });
+    expect(seeder.log.some((e) => e.kind === 'rebind' && e.peer === VIEWER)).toBe(true);
+  });
+
+  it('rebind sums into an existing window and enforces invariant 5 synchronously on the merge', () => {
+    const { seeder } = pair();
+    const fired: string[] = [];
+    seeder.onWindowExceeded((w) => fired.push(w.peer));
+    seeder.recordUpload(VIEWER, 3); // an earlier session of the same pubkey
+    seeder.recordUpload(NOISE, 3); // pre-HELLO on a new session
+    const w = seeder.rebind(NOISE, VIEWER);
+    expect(w).toMatchObject({ uploaded: 6, outstanding: 6, banned: true });
+    expect(fired).toEqual([VIEWER]);
+    expect(seeder.isBanned(VIEWER)).toBe(true);
+    expect(seeder.isBanned(NOISE)).toBe(false);
+  });
+
+  it('rebind carries a provisional ban onto the pubkey and is a no-op for an unknown source', () => {
+    const { seeder } = pair();
+    seeder.ban(NOISE, 'window-exceeded', new Uint8Array(32));
+    const w = seeder.rebind(NOISE, VIEWER);
+    expect(w.banned).toBe(true);
+    expect(seeder.isBanned(VIEWER)).toBe(true);
+    expect(seeder.isBanned(NOISE)).toBe(false);
+    expect(seeder.bans().find((b) => b.pubkey === VIEWER)?.noiseKey).toBeInstanceOf(Uint8Array);
+
+    const before = seeder.window(VIEWER);
+    expect(seeder.rebind('00'.repeat(32) as NostrPubkey, VIEWER)).toEqual(before);
+    expect(seeder.rebind(VIEWER, VIEWER)).toEqual(before);
+  });
+
+  it('a v2-shaped PAY without core still verifies against the aggregate count', async () => {
+    const { viewer, seeder } = pair();
+    seeder.recordUpload(VIEWER, 2, CORE_A);
+    const ok = await viewer.pay({ fromBlock: 0, toBlock: 1 }, seederInfo, policy);
+    expect(await seeder.verify(VIEWER, ok, policy)).toMatchObject({ ok: true });
   });
 });

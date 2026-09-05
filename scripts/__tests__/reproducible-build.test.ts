@@ -3,7 +3,18 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { runNode, tempDir } from './helpers.js';
+import { repoRoot, runNode, tempDir } from './helpers.js';
+
+/**
+ * `NostrKind.ReleaseNotice` read from the contracts SOURCE (tsconfig.scripts.json cannot
+ * import packages/core). Contracts are `as const` literals, so a regex is exact.
+ */
+function releaseNoticeKind(): number {
+  const src = readFileSync(join(repoRoot, 'packages/core/src/contracts/nostr.ts'), 'utf8');
+  const m = /ReleaseNotice:\s*(\d+)/.exec(src);
+  if (!m) throw new Error('NostrKind.ReleaseNotice not found in contracts/nostr.ts');
+  return Number(m[1]);
+}
 
 interface Report {
   algorithm: string;
@@ -116,7 +127,7 @@ describe('scripts/reproducible-build.mjs', () => {
       '--version',
       '1.2.3',
       '--kind',
-      '30063',
+      '30071',
       '--d',
       'nutflix-web',
       '--url',
@@ -127,7 +138,7 @@ describe('scripts/reproducible-build.mjs', () => {
     expect(event.id).toBe('');
     expect(event.pubkey).toBe('');
     expect(event.sig).toBe('');
-    expect(event.kind).toBe(30063);
+    expect(event.kind).toBe(30071);
     expect(event.created_at).toBe(1700000000);
     expect(event.tags).toContainEqual(['d', 'nutflix-web']);
     expect(event.tags).toContainEqual(['x', treeHash]);
@@ -146,6 +157,15 @@ describe('scripts/reproducible-build.mjs', () => {
       'sig',
       'tags',
     ]);
+  });
+
+  it('defaults --kind to NostrKind.ReleaseNotice (contracts v3: single source of truth)', () => {
+    const r = runNode('reproducible-build.mjs', [dist, '--created-at', '0']);
+    expect(r.status, r.stderr).toBe(0);
+    const { event } = JSON.parse(r.stdout) as Report;
+    expect(event.kind).toBe(releaseNoticeKind());
+    expect(event.kind).toBeGreaterThanOrEqual(30000);
+    expect(event.kind).toBeLessThanOrEqual(39999);
   });
 
   it('takes created_at from SOURCE_DATE_EPOCH', () => {

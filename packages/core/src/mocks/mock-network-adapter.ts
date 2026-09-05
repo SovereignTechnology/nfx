@@ -33,6 +33,7 @@ import type {
   VideoStats,
   Wallet,
 } from '../contracts/index.js';
+import { NostrKind } from '../contracts/index.js';
 import {
   CHANNELS,
   FIXTURE_NOW,
@@ -42,6 +43,7 @@ import {
   VIDEOS,
   asEventId,
   asPubkey,
+  commentTags,
   fixtureComments,
   sats,
   unix,
@@ -230,6 +232,13 @@ export class MockNetworkAdapter implements NetworkAdapter {
   comment(videoId: NostrEventId, content: string, parent?: NostrEventId): Promise<Comment> {
     const id = asEventId(`mine:${videoId}:${String(this.extraComments.get(videoId)?.length ?? 0)}`);
     const createdAt = this.now();
+    const video = VIDEOS.find((v) => v.id === videoId);
+    const parentAuthor =
+      parent === undefined
+        ? undefined
+        : ([...fixtureComments(videoId), ...(this.extraComments.get(videoId) ?? [])].find(
+            (c) => c.id === parent,
+          )?.author ?? ME);
     const base = {
       id,
       author: ME,
@@ -239,10 +248,15 @@ export class MockNetworkAdapter implements NetworkAdapter {
       event: {
         id,
         pubkey: ME,
-        kind: 1111,
+        kind: NostrKind.Comment,
         created_at: createdAt,
         content,
-        tags: [['A', `21:${videoId}`]],
+        tags: commentTags(
+          { id: videoId, kind: video?.kind ?? 21, author: video?.author ?? ME },
+          parent !== undefined && parentAuthor !== undefined
+            ? { id: parent, author: parentAuthor }
+            : undefined,
+        ),
         sig: '00'.repeat(64),
       },
     };

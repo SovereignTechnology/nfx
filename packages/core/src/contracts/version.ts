@@ -11,5 +11,14 @@
  *       synchronous-in-`upload`-handler, bans carry the Noise key, `bans()` added.
  *       S-B: `PlaySource` order/docs (service-worker primary, MSE fallback). S-C: new
  *       `media.ts` (pure-planning pipeline with injected `ProcessRunner`/`FsAdapter`).
+ *   3 — 2026-09-04 Post-Wave-1 batch (ADR 0004). Additive; every v2 consumer compiles.
+ *       (a) `NostrKind.ReleaseNotice = 30071` for the reproducible-build event (L9 request;
+ *       30063 rejected — vendored NIP-51 owns it with a different shape). (b) `hyperUrl`
+ *       doc corrected to the hex grammar L1/L8/fixtures implement; z32 never accepted.
+ *       (c) L2 flag 1 ACCEPTED: `BlockRange.core?` — a `pay/1` channel spans many cores,
+ *       policy is per video, so PAY must name the core; optional now, REQUIRED at the
+ *       Stage 2 bump; `recordUpload(peer, blocks, core?)` alongside. (d) L2 flag 2
+ *       ACCEPTED: `PaymentEngineSeeder.rebind(from, to)` replaces the replay-on-HELLO
+ *       workaround for pre-HELLO accounting under the Noise-key hex.
  */
-export const CONTRACTS_VERSION = 2 as const;
+export const CONTRACTS_VERSION = 3 as const;
