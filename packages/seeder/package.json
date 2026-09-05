@@ -14,7 +14,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "systemd"
   ],
   "scripts": {
     "build": "tsc -b",
@@ -29,5 +30,8 @@
     "hypercore": "11.35.3",
     "hyperswarm": "4.17.0",
     "protomux": "3.11.0"
+  },
+  "devDependencies": {
+    "hyperdht": "6.34.0"
   }
 }
