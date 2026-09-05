@@ -1,0 +1,46 @@
+[Unit]
+Description=Nutflix seeder (@sovit/seeder)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=all
+User=nutflix-seeder
+Group=nutflix-seeder
+WorkingDirectory=/opt/nutflix
+ExecStart=/usr/bin/node /opt/nutflix/seeder-entry.js
+Environment=NUTFLIX_SEEDER_DATA_DIR=/var/lib/nutflix-seeder
+Environment=NODE_ENV=production
+Environment=NUTFLIX_SEEDER_DISK_CAP_BYTES=53687091200
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+ReadWritePaths=/var/lib/nutflix-seeder
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

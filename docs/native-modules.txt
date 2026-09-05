@@ -34,4 +34,4 @@ quickbit-native@2.4.8 | node_modules/quickbit-native | .bare,.node,addon,prebuil
 rocksdb-native@3.17.4 | node_modules/rocksdb-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/seeder>hypercore>hypercore-storage>rocksdb-native
 simdle-native@1.3.9 | node_modules/simdle-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/seeder>hypercore>quickbit-universal>simdle-universal>simdle-native
 sodium-native@5.1.0 | node_modules/sodium-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/seeder>corestore>sodium-universal>sodium-native
-udx-native@1.21.1 | node_modules/udx-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/seeder>hyperswarm>hyperdht>dht-rpc>udx-native
+udx-native@1.21.1 | node_modules/udx-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/seeder>hyperdht>dht-rpc>udx-native
