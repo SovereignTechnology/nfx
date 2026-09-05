@@ -4,7 +4,11 @@
  * Put flow (`putBytes` / `putStream`): hash → dedupe against the index → reserve disk cap
  * → chunk into `blockSize` blocks through `Hyperblobs.createWriteStream()` → commit index.
  * For files the hash pass streams the file once before the write pass (two reads, zero
- * risk of writing a duplicate or overshooting the cap).
+ * risk of writing a duplicate or overshooting the cap). The second `source()` is opened
+ * LAZILY, only once the write pass actually starts: on the dedupe / disk-cap early returns
+ * no second read stream exists, so a caller that unlinks the file right after the result
+ * cannot leave an orphaned `createReadStream` behind to raise an uncaught ENOENT (found by
+ * L3, docs/lanes/L3.md).
  */
 import type { CoreKeyHex, HyperblobId, Sha256Hex } from '@sovit/core';
 import Corestore from 'corestore';
@@ -117,7 +121,7 @@ export class BlobStore {
     const h = this.opts.crypto.createSha256();
     h.update(bytes);
     const sha = h.digestHex() as Sha256Hex;
-    return this.writeHashed(sha, bytes.byteLength, [bytes], opts);
+    return this.writeHashed(sha, bytes.byteLength, () => [bytes], opts);
   }
 
   /** `source` must be re-iterable if it is a file; `size` is enforced. */
@@ -135,7 +139,7 @@ export class BlobStore {
     if (seen !== size)
       return { ok: false, error: { code: 'size-mismatch', declared: size, actual: seen } };
     const sha = h.digestHex() as Sha256Hex;
-    return this.writeHashed(sha, size, source(), opts);
+    return this.writeHashed(sha, size, source, opts);
   }
 
   async putFile(path: string, opts: PutOptions = {}): Promise<PutResult> {
@@ -198,10 +202,11 @@ export class BlobStore {
     await this.store.close();
   }
 
+  /** `open` is called at most once, and only when the write pass really starts. */
   private async writeHashed(
     sha: Sha256Hex,
     size: number,
-    source: Iterable<Uint8Array> | AsyncIterable<Uint8Array>,
+    open: () => Iterable<Uint8Array> | AsyncIterable<Uint8Array>,
     opts: PutOptions,
   ): Promise<PutResult> {
     const dup = this.opts.index.get(sha);
@@ -222,7 +227,7 @@ export class BlobStore {
 
     try {
       const sc = await this.openCore(opts.core ?? DEFAULT_CORE_NAME);
-      const id = await this.writeBlocks(sc, source);
+      const id = await this.writeBlocks(sc, open());
       if (id.byteLength !== size) {
         await sc.blobs.clear(id);
         reservation.release();

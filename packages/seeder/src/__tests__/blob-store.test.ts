@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
+import { unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -136,6 +136,59 @@ describe('BlobStore (Corestore + Hyperblobs + CAS index + disk cap)', () => {
       error: { code: 'size-mismatch', declared: 11, actual: 10 },
     });
     expect(cap.usedBytes).toBe(0);
+  });
+
+  it('v3 (d): the second source() is opened lazily — dedupe / cap early returns never open it (no orphaned ENOENT)', async () => {
+    const data = new Uint8Array(BLOCK * 2).map((_, i) => (i * 13) % 256);
+    const first = await store.putBytes(data);
+    expect(first.ok).toBe(true);
+
+    // A source that would ENOENT on a second open (the caller unlinked the spool file).
+    const enoentOnSecondOpen = () => {
+      let opens = 0;
+      return {
+        opens: () => opens,
+        source: (): AsyncIterable<Uint8Array> => {
+          opens++;
+          if (opens > 1) throw Object.assign(new Error('ENOENT: gone'), { code: 'ENOENT' });
+          return (async function* () {
+            await Promise.resolve();
+            yield data;
+          })();
+        },
+      };
+    };
+
+    // dedupe path
+    const dup = enoentOnSecondOpen();
+    const r1 = await store.putStream(dup.source, data.byteLength, {});
+    expect(r1).toMatchObject({ ok: true, deduplicated: true });
+    expect(dup.opens()).toBe(1);
+
+    // disk-cap path (cap = 10 blocks, 2 used → 9 does not fit)
+    const big = new Uint8Array(BLOCK * 9).fill(9);
+    let bigOpens = 0;
+    const r2 = await store.putStream(() => {
+      bigOpens++;
+      if (bigOpens > 1) throw Object.assign(new Error('ENOENT: gone'), { code: 'ENOENT' });
+      return (async function* () {
+        await Promise.resolve();
+        yield big;
+      })();
+    }, big.byteLength);
+    expect(r2).toMatchObject({ ok: false, error: { code: 'disk-cap' } });
+    expect(bigOpens).toBe(1);
+    expect(cap.pendingBytes).toBe(0);
+
+    // The real shape L3 hit: putFile on an already-stored file, then unlink immediately.
+    // With an eager second createReadStream this raised an uncaught ENOENT a tick later.
+    const file = path.join(dir, 'spool.bin');
+    await writeFile(file, data);
+    const r3 = await store.putFile(file);
+    expect(r3).toMatchObject({ ok: true, deduplicated: true });
+    await unlink(file);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(index.entries()).toHaveLength(1);
   });
 
   it('serves ranges and removes blobs (index + cap)', async () => {
