@@ -7,3 +7,5 @@
  */
 export * from './contracts/index.js';
 export * as mocks from './mocks/index.js';
+export * as nostr from './nostr/index.js';
+export * as manifest from './manifest/index.js';
