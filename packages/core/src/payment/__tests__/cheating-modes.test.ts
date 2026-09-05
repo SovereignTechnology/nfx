@@ -13,6 +13,8 @@ import type { RejectReason } from '../../contracts/index.js';
 import {
   ALL_MODES,
   CHEATING_MODES,
+  CORE_A,
+  CORE_B,
   POLICY,
   SEEDER_INFO,
   VIEWER,
@@ -221,6 +223,53 @@ describe('MockPaymentEngine cheating modes (each mode, each reason)', () => {
           expect(b.range).not.toEqual(a.range);
           break;
         }
+      }
+    }
+  });
+
+  it('v3 (ADR 0004 c): naming a core is not a bypass — every cheating mode is rejected with the same reason when the PAY carries `range.core`; honest with a core is accepted; `pay()` passes `core` through unchanged in every mode', async () => {
+    for (const mode of ALL_MODES) {
+      const { viewer, seeder } = getPair(mode, WIDE_WINDOW);
+      seeder.recordUpload(VIEWER, 4, CORE_A);
+      seeder.recordUpload(VIEWER, 4, CORE_B);
+      const rangeA = { core: CORE_A, fromBlock: 0, toBlock: 3 };
+      const rangeB = { core: CORE_B, fromBlock: 0, toBlock: 3 };
+      const a = await viewer.pay(rangeA, SEEDER_INFO, POLICY);
+      const b = await viewer.pay(rangeB, SEEDER_INFO, POLICY);
+      // The wire carries exactly the core the viewer was handed — for cheats too.
+      expect(a.range, mode).toEqual(rangeA);
+      expect(b.range, mode).toEqual(rangeB);
+
+      const va = await seeder.verify(VIEWER, a, POLICY);
+      const vb = await seeder.verify(VIEWER, b, POLICY);
+      const flush = await seeder.flush();
+      const shares = expectedShares(4, POLICY);
+
+      if (mode === 'honest') {
+        expect(va, mode).toEqual({ ok: true, credited: shares.total, blocks: 4 });
+        expect(vb, mode).toEqual({ ok: true, credited: shares.total, blocks: 4 });
+        expect(flush, mode).toEqual({
+          swapped: 2 * shares.seeder,
+          nutzapped: 2 * shares.creator,
+          failed: 0,
+        });
+        expect(seeder.window(VIEWER), mode).toMatchObject({ uploaded: 8, paid: 8 });
+        continue;
+      }
+      const { offline } = EXPECTED[mode];
+      if (offline === null) {
+        // double-spend: the second PAY (core B) replays the first's proofs — a different
+        // core is not a different proof.
+        expect(va, mode).toMatchObject({ ok: true });
+        expect(vb, mode).toMatchObject({ ok: true });
+        expect(flush.failed, mode).toBe(1);
+        expect(flush.swapped + flush.nutzapped, mode).toBe(shares.total);
+        expect(seeder.isBanned(VIEWER), mode).toBe(true);
+      } else {
+        expect(va, mode).toMatchObject({ ok: false, reason: offline });
+        expect(vb, mode).toMatchObject({ ok: false, reason: offline });
+        expect(flush, mode).toEqual({ swapped: 0, nutzapped: 0, failed: 0 });
+        expect(seeder.window(VIEWER)?.paid, mode).toBe(0);
       }
     }
   });

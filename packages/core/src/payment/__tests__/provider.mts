@@ -15,8 +15,10 @@
  */
 import type {
   BanEntry,
+  BlockRange,
   CashuP2pkPubkey,
   CashuProof,
+  CoreKeyHex,
   LockedProofSet,
   MintUrl,
   NostrPubkey,
@@ -94,6 +96,43 @@ export function policyWith(overrides: Partial<PricePolicy>): PricePolicy {
 }
 
 export const SEEDER_INFO = { pubkey: SEEDER, p2pk: SEEDER_P2PK, mint: MINT_A } as const;
+
+// ---------------------------------------------------------------------------------------
+// Contracts v3 (ADR 0004 (c)/(d)) fixtures: two cores on one `pay/1` channel, and the
+// provisional (pre-HELLO) identity the transport accounts under before `rebind`.
+// ---------------------------------------------------------------------------------------
+
+/** Video A's core (creator A = `CREATOR_P2PK`, priced by `POLICY`). */
+export const CORE_A = 'a1'.repeat(32) as CoreKeyHex;
+/** Video B's core (creator B = `CREATOR_B_P2PK`; price per test). */
+export const CORE_B = 'b2'.repeat(32) as CoreKeyHex;
+/** A core nobody uploaded anything from. */
+export const CORE_NONE = 'c3'.repeat(32) as CoreKeyHex;
+export const CREATOR_B_P2PK = ('02' + 'dd'.repeat(32)) as CashuP2pkPubkey;
+
+/** Provisional ids: the peer's Noise static key as hex (same 32-byte shape as a pubkey). */
+export const NOISE_ID = '77'.repeat(32) as NostrPubkey;
+export const OTHER_NOISE_ID = '78'.repeat(32) as NostrPubkey;
+/** A pubkey no window or ban was ever recorded for. */
+export const UNKNOWN_ID = '00'.repeat(32) as NostrPubkey;
+
+/**
+ * The per-core policy lookup the seeder transport (L2 / L3) does before calling `verify`:
+ * `PricePolicy` is per video, so the policy handed to the engine is chosen by `range.core`.
+ * The engine itself is policy-agnostic — that lookup is exactly what ADR 0004 (c) makes
+ * possible, and these tests model it as a map. Throws on a core the seeder does not serve
+ * (test infrastructure: a real seeder would reject such a PAY before verify).
+ */
+export function policyByCore(
+  policies: ReadonlyMap<CoreKeyHex, PricePolicy>,
+): (range: BlockRange) => PricePolicy {
+  return (range) => {
+    if (range.core === undefined) throw new Error('policyByCore: PAY carries no core');
+    const p = policies.get(range.core);
+    if (!p) throw new Error(`policyByCore: no policy for core ${range.core}`);
+    return p;
+  };
+}
 
 /**
  * For scenarios that are NOT about the window (amounts, DLEQ, ranges…): a window wide
