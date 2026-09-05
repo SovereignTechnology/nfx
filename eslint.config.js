@@ -74,6 +74,12 @@ export default tseslint.config(
     ...tseslint.configs.disableTypeChecked,
   },
   {
+    // Storybook config + stories (L4/L5): excluded from the package tsconfigs (not emitted to
+    // dist), so they are linted with the non-type-aware rule set only.
+    files: ['packages/*/.storybook/**/*.{ts,tsx,js,mjs}', 'packages/*/src/**/*.stories.tsx'],
+    ...tseslint.configs.disableTypeChecked,
+  },
+  {
     // Zero-dependency Node CLIs in scripts/ (lane L9): plain ESM with JSDoc, no TS
     // annotations to require, and Node's Buffer global.
     files: ['scripts/**/*.{js,mjs}'],
