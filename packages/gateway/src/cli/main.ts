@@ -22,7 +22,7 @@ import type { Logger, SeederProcess } from '@sovit/seeder';
 import { createLogger, installShutdownHooks, nodeProcess, sdNotify } from '@sovit/seeder';
 
 import type { ConfigResult, GatewayConfig } from '../config.js';
-import { ENV, parseConfigText } from '../config.js';
+import { ENV, isLoopbackHost, parseConfigText } from '../config.js';
 import { Gateway } from '../gateway.js';
 import type { RuntimeDeps } from './providers.js';
 import { MISSING_PROVIDERS_REASON, getRuntimeDeps } from './providers.js';
@@ -137,6 +137,14 @@ export async function main(argv: readonly string[], o: MainOptions = {}): Promis
 
   let deps: RuntimeDeps | undefined;
   if (args.devMocks) {
+    // The mocks accept worthless proofs and every token: they may only ever face this box.
+    if (!isLoopbackHost(config.listen.host)) {
+      logger.error('refusing to start', {
+        reason: 'dev-mocks-requires-loopback',
+        host: config.listen.host,
+      });
+      return EXIT_CONFIG;
+    }
     logger.warn(
       'DEV MOCKS ENABLED: MockPaymentEngine + accept-all BlossomAuth + no-op pay/1 — never expose this listener',
     );

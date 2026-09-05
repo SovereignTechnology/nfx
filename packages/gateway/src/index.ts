@@ -35,6 +35,7 @@ export {
   applyEnvOverrides,
   gatewayPolicy,
   gatewayPrice,
+  isLoopbackHost,
   parseConfigText,
   validateConfig,
 } from './config.js';

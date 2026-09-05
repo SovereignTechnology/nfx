@@ -15,6 +15,7 @@ import { mocks } from '@sovit/core';
 import type { SeederProcess, SignalName } from '@sovit/seeder';
 
 import { EXIT_CONFIG, main, parseCliArgs } from '../cli/main.js';
+import { isLoopbackHost } from '../config.js';
 import type { RuntimeDeps } from '../cli/providers.js';
 import { MISSING_PROVIDERS_REASON, getRuntimeDeps } from '../cli/providers.js';
 import type { Gateway } from '../gateway.js';
@@ -225,6 +226,105 @@ describe('main()', () => {
     );
     proc.send('SIGINT');
     await until(() => proc.exits.length === 1);
+  });
+});
+
+describe('--dev-mocks loopback fence', () => {
+  it('isLoopbackHost: 127/8, ::1, [::1], localhost are loopback; 0.0.0.0, ::, LAN, junk are not', () => {
+    for (const h of [
+      '127.0.0.1',
+      '127.1.2.3',
+      '127.255.255.255',
+      '::1',
+      '[::1]',
+      'localhost',
+      'LOCALHOST',
+      ' 127.0.0.1 ',
+    ])
+      expect(isLoopbackHost(h), h).toBe(true);
+    for (const h of [
+      '0.0.0.0',
+      '::',
+      '192.168.1.5',
+      '10.0.0.1',
+      '128.0.0.1',
+      '127.0.0.256',
+      '127.0.0',
+      '',
+      'localhost.example',
+      '::ffff:127.0.0.1',
+    ])
+      expect(isLoopbackHost(h), h).toBe(false);
+  });
+
+  it('--dev-mocks on a non-loopback listen.host → EXIT_CONFIG before the mocks are even loaded', async () => {
+    const t = await tmpDir();
+    cleanups.push(t.rm);
+    const proc = new FakeProc();
+    let loaderCalls = 0;
+    const cfg = JSON.stringify({
+      listen: { host: '0.0.0.0', port: 0 },
+      dataDir: t.dir,
+      identity: { pubkey: GW_PUBKEY, p2pk: GW_P2PK },
+      policy: { satsPerBlock: 1, mints: [MINT_A], creatorP2pk: CREATOR_P2PK },
+    });
+    const code = await main(['--config', 'c.json', '--dev-mocks'], {
+      proc,
+      readFile: () => Promise.resolve(cfg),
+      devMocks: () => {
+        loaderCalls++;
+        return Promise.resolve(mockDeps());
+      },
+    });
+    expect(code).toBe(EXIT_CONFIG);
+    expect(loaderCalls).toBe(0);
+    const line = proc.out.find((l) => l.includes('dev-mocks-requires-loopback'));
+    expect(line).toBeDefined();
+    expect(line).toContain('"host":"0.0.0.0"');
+    expect(proc.out.some((l) => l.includes('DEV MOCKS ENABLED'))).toBe(false);
+    // The env override is part of the "effective" host: a loopback file + 0.0.0.0 env is refused too.
+    proc.envMap['NUTFLIX_GATEWAY_LISTEN_HOST'] = '0.0.0.0';
+    const viaEnv = await main(['--config', 'c.json', '--dev-mocks'], {
+      proc,
+      readFile: () => Promise.resolve(cfg.replace('0.0.0.0', '127.0.0.1')),
+      devMocks: () => {
+        loaderCalls++;
+        return Promise.resolve(mockDeps());
+      },
+    });
+    expect(viaEnv).toBe(EXIT_CONFIG);
+    expect(loaderCalls).toBe(0);
+  });
+
+  it('--dev-mocks on 127.0.0.1 starts as before (loader called once)', async () => {
+    const t = await tmpDir();
+    cleanups.push(t.rm);
+    const proc = new FakeProc();
+    let loaderCalls = 0;
+    let started: Gateway | null = null;
+    const cfg = JSON.stringify({
+      listen: { host: '127.0.0.1', port: 0 },
+      dataDir: t.dir,
+      identity: { pubkey: GW_PUBKEY, p2pk: GW_P2PK },
+      policy: { satsPerBlock: 1, mints: [MINT_A], creatorP2pk: CREATOR_P2PK },
+    });
+    void main(['--config', 'c.json', '--dev-mocks'], {
+      proc,
+      readFile: () => Promise.resolve(cfg),
+      devMocks: () => {
+        loaderCalls++;
+        return Promise.resolve(mockDeps());
+      },
+      onStarted: (gw) => {
+        started = gw;
+      },
+    });
+    await until(() => started !== null);
+    expect(loaderCalls).toBe(1);
+    expect(started!.stats().listening?.host).toBe('127.0.0.1');
+    proc.send('SIGTERM');
+    await until(() => proc.exits.length === 1);
+    expect(proc.exits).toEqual([0]);
   });
 });
 

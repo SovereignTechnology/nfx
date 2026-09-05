@@ -574,3 +574,18 @@ export function gatewayPolicy(
 }
 
 export type CoreKeyLike = CoreKeyHex | string;
+
+/**
+ * True for a listen host that can only be reached from this machine: `localhost`, `::1`
+ * (bracketed `[::1]` accepted too, since that is how it is written in URLs), and any
+ * IPv4 in `127.0.0.0/8`. `0.0.0.0` / `::` / LAN addresses are NOT loopback. Pure; used to
+ * fence `--dev-mocks` (cli/main.ts).
+ */
+export function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  if (h === 'localhost' || h === '::1' || h === '[::1]') return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (m === null) return false;
+  const octets = m.slice(1).map(Number);
+  return octets[0] === 127 && octets.every((o) => o <= 255);
+}
