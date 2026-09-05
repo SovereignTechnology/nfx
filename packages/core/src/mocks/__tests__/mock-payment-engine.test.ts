@@ -435,3 +435,102 @@ describe('MockPaymentEngine contracts v3 (ADR 0004): per-core ranges and rebind'
     expect(await seeder.verify(VIEWER, ok, policy)).toMatchObject({ ok: true });
   });
 });
+
+// ---------------------------------------------------------------------------------------
+// L10 v3 extensions — reference-model hooks for ADR 0004 (c)/(d). Interface-level v3
+// properties (T4/INV2 across cores, per-core replay, rebind merge/ban/sync-callback) live in
+// core/src/payment/__tests__/ behind provider.mts; this block pins only what is specific to
+// the mock: its `log`, its documented v3-interim fallbacks, and `pendingCount()`.
+// ---------------------------------------------------------------------------------------
+
+describe('MockPaymentEngine v3 reference-model hooks (L10 v3)', () => {
+  const CORE_A = 'a1'.repeat(32) as CoreKeyHex;
+  const CORE_B = 'b2'.repeat(32) as CoreKeyHex;
+  const CORE_NONE = 'c3'.repeat(32) as CoreKeyHex;
+  const NOISE = '77'.repeat(32) as NostrPubkey;
+
+  it('rebind logs one `rebind` entry keyed on `to` (naming `from` in detail) and the log stays free of proof material across a rebind', async () => {
+    const { viewer, seeder } = pair();
+    seeder.recordUpload(NOISE, 4, CORE_A);
+    const early = await viewer.pay({ core: CORE_A, fromBlock: 0, toBlock: 1 }, seederInfo, policy);
+    expect(await seeder.verify(NOISE, early, policy)).toMatchObject({ ok: true });
+    seeder.rebind(NOISE, VIEWER);
+    const entries = seeder.log.filter((e) => e.kind === 'rebind');
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ peer: VIEWER, detail: `from=${NOISE}` });
+    // A no-op rebind (unknown `from`, or `from === to`) is not logged.
+    seeder.rebind('00'.repeat(32) as NostrPubkey, VIEWER);
+    seeder.rebind(VIEWER, VIEWER);
+    expect(seeder.log.filter((e) => e.kind === 'rebind')).toHaveLength(1);
+    const text = JSON.stringify(seeder.log);
+    for (const p of [...early.seederProofs.proofs, ...early.creatorProofs.proofs]) {
+      expect(text).not.toContain(p.secret);
+    }
+  });
+
+  it('rebind moves pending (unswapped) proofs with the accounting: pendingCount() is unchanged and the batch is attributed to `to` at flush', async () => {
+    const { viewer, seeder } = pair();
+    seeder.recordUpload(NOISE, 2, CORE_A);
+    const msg = await viewer.pay({ core: CORE_A, fromBlock: 0, toBlock: 1 }, seederInfo, policy);
+    expect(await seeder.verify(NOISE, msg, policy)).toMatchObject({ ok: true });
+    expect(seeder.pendingCount()).toBe(1);
+    seeder.rebind(NOISE, VIEWER);
+    expect(seeder.pendingCount()).toBe(1);
+    expect(await seeder.flush()).toEqual({ swapped: 2, nutzapped: 2, failed: 0 });
+    expect(seeder.pendingCount()).toBe(0);
+    // Replaying the same proofs from `to` later is caught and banned under `to`.
+    seeder.recordUpload(VIEWER, 2, CORE_B);
+    const replay = { ...msg, range: { core: CORE_B, fromBlock: 0, toBlock: 1 } };
+    expect(await seeder.verify(VIEWER, replay, policy)).toMatchObject({ ok: true });
+    expect((await seeder.flush()).failed).toBe(1);
+    expect(seeder.isBanned(VIEWER)).toBe(true);
+    expect(seeder.isBanned(NOISE)).toBe(false);
+  });
+
+  it('rebind with both sides banned keeps `to` banned and drops `from` from bans(); the surviving entry is `to`’s own', () => {
+    const { seeder } = pair();
+    seeder.ban(VIEWER, 'double-spend');
+    seeder.ban(NOISE, 'window-exceeded', new Uint8Array(32).fill(1));
+    seeder.recordUpload(NOISE, 1);
+    const w = seeder.rebind(NOISE, VIEWER);
+    expect(w).toMatchObject({ peer: VIEWER, uploaded: 1, banned: true });
+    expect(seeder.bans().map((b) => b.pubkey)).toEqual([VIEWER]);
+    expect(seeder.bans()[0]).toMatchObject({ reason: 'double-spend' });
+    expect(seeder.isBanned(NOISE)).toBe(false);
+  });
+
+  it('DOCUMENTED v3-INTERIM FALLBACKS (ADR 0004 c) — what the mock cannot express, pinned so a change is noticed: a core-less PAY on a two-core peer is accepted, and a PAY naming a core with no recorded uploads falls back to the aggregate', async () => {
+    // (1) "stream replicates > 1 core ⇒ core-less PAY is malformed" has no engine-level
+    //     mechanism in the mock: `MockPaymentEngineOptions` carries no core set and `verify`
+    //     falls back to the v2 aggregate count when `range.core` is undefined — even after
+    //     uploads on two distinct cores. The Stage 2 expectation is the `it.skipIf(usingMock())`
+    //     test 'T4 core-less PAY on a multi-core stream …' in payment/__tests__/threat-table.
+    const wide = (): MockPaymentEngine =>
+      new MockPaymentEngine({
+        config: {
+          ownP2pk: SEEDER_P2PK,
+          ownPubkey: SEEDER,
+          acceptedMints: [MINT],
+          windowBlocks: 100,
+        },
+      });
+    const a = { viewer: pair().viewer, seeder: wide() };
+    a.seeder.recordUpload(VIEWER, 4, CORE_A);
+    a.seeder.recordUpload(VIEWER, 4, CORE_B);
+    const coreless = await a.viewer.pay({ fromBlock: 0, toBlock: 3 }, seederInfo, policy);
+    expect(await a.seeder.verify(VIEWER, coreless, policy)).toMatchObject({ ok: true });
+
+    // (2) The per-core `range-not-uploaded` check engages only for a core that HAS recorded
+    //     uploads ("whenever the PAY names a core for which uploads were recorded"); a core
+    //     with none falls back to the aggregate and is accepted. Stage 2 expectation:
+    //     'INV1 per core (v3): a PAY naming a core with NO recorded uploads …' (skipIf mock).
+    const b = pair();
+    b.seeder.recordUpload(VIEWER, 4, CORE_A);
+    const never = await b.viewer.pay(
+      { core: CORE_NONE, fromBlock: 0, toBlock: 0 },
+      seederInfo,
+      policy,
+    );
+    expect(await b.seeder.verify(VIEWER, never, policy)).toMatchObject({ ok: true, blocks: 1 });
+  });
+});

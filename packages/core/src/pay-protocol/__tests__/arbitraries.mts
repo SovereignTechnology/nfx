@@ -9,6 +9,7 @@ import type {
   AckMessage,
   CashuP2pkPubkey,
   CashuProof,
+  CoreKeyHex,
   HelloMessage,
   LockedProofSet,
   MintUrl,
@@ -107,9 +108,21 @@ export const splitArb = fc.integer({ min: 0, max: 100 }).map((seeder) => ({
   creator: 100 - seeder,
 }));
 
-export const rangeArb = fc
-  .tuple(blockIndexArb, fc.integer({ min: 0, max: 4096 }))
-  .map(([from, len]) => ({ fromBlock: from, toBlock: Math.min(from + len, MAX_BLOCK) }));
+/** Contracts v3 (ADR 0004 (c)): `BlockRange.core`, a 64-char lower-case hex core key. */
+export const coreKeyArb: fc.Arbitrary<CoreKeyHex> = hex32Arb.map((h) => h as CoreKeyHex);
+
+/**
+ * `core` is optional at v3 and required at the Stage 2 bump; generate both shapes so the
+ * codec round-trip covers the field (the Stage 2 codec encodes it as a fixed 32-byte field).
+ * When absent it is ABSENT, not `undefined` (`exactOptionalPropertyTypes`).
+ */
+export const rangeArb: fc.Arbitrary<PayMessage['range']> = fc
+  .tuple(blockIndexArb, fc.integer({ min: 0, max: 4096 }), fc.option(coreKeyArb, { freq: 3 }))
+  .map(([from, len, core]) => ({
+    ...(core === null ? {} : { core }),
+    fromBlock: from,
+    toBlock: Math.min(from + len, MAX_BLOCK),
+  }));
 
 // ---------------------------------------------------------------------------------------
 // Cashu shapes
@@ -260,8 +273,15 @@ function isLockedSet(x: unknown): x is LockedProofSet {
   );
 }
 
+const isCoreKey = (x: unknown): x is CoreKeyHex => isStr(x) && /^[0-9a-f]{64}$/.test(x);
+
 function isRange(x: unknown): x is PayMessage['range'] {
-  return isObj(x) && isUint(x['fromBlock']) && isUint(x['toBlock']);
+  return (
+    isObj(x) &&
+    isUint(x['fromBlock']) &&
+    isUint(x['toBlock']) &&
+    (x['core'] === undefined ? !('core' in x) : isCoreKey(x['core']))
+  );
 }
 
 export function isPayMessageShape(x: unknown): x is PayMessage {
