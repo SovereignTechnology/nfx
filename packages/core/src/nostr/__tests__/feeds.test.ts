@@ -179,7 +179,15 @@ describe('feeds', () => {
       v.title.startsWith('Hohmann'),
     )!;
     const rel = await relatedVideos(r.client, orbital, 3);
-    expect(rel.length).toBe(3);
+    // Derived from the fixtures, not hard-coded: the old `toBe(3)` only held because
+    // `fakeHex64` used to give two channels the same pubkey (fixed by the orchestrator).
+    const candidates = VIDEOS.filter(
+      (v) =>
+        v.id !== orbital.id &&
+        (v.author === orbital.author || v.tags.some((t) => orbital.tags.includes(t))),
+    ).length;
+    expect(candidates).toBeGreaterThanOrEqual(2);
+    expect(rel.length).toBe(Math.min(3, candidates));
     expect(rel.every((v) => v.id !== orbital.id)).toBe(true);
     expect(rel[0]!.tags).toContain('physics'); // two-tag overlap ranks first
   });

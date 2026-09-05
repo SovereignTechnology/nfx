@@ -22,13 +22,26 @@ import { DEFAULT_BLOCK_SIZE, NostrKind } from '../contracts/index.js';
 
 /** Deterministic 64-hex from a seed string (NOT a hash function — fixture data only). */
 export function fakeHex64(seed: string): string {
+  // Two 32-bit lanes folded over the seed, then 16 avalanche rounds emitting 4 hex chars
+  // each. The previous single-lane mixer collapsed ~21 000 distinct seeds into 16 outputs
+  // (found by L4: `asPubkey('orbital') === asPubkey('kilnfire')`), which made every
+  // fixture id class collide. Deterministic; not cryptographic; test data only.
+  let h1 = 0x9e3779b9;
+  let h2 = 0x85ebca6b;
+  for (let i = 0; i < seed.length; i++) {
+    const c = seed.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x2c1b3c6d);
+    h1 = (h1 ^ (h1 >>> 15)) >>> 0;
+    h2 = Math.imul(h2 ^ c, 0x297a2d39);
+    h2 = (h2 ^ (h2 >>> 13)) >>> 0;
+  }
   let out = '';
-  let x = 0x9e3779b9;
-  for (let i = 0; i < seed.length; i++)
-    x = (Math.imul(x ^ seed.charCodeAt(i), 0x85ebca6b) >>> 0) ^ (x >>> 13);
-  for (let i = 0; i < 64; i++) {
-    x = (Math.imul(x, 0xc2b2ae35) + i + 1) >>> 0;
-    out += (x & 0xf).toString(16);
+  for (let i = 0; i < 16; i++) {
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 0x45d9f3b) >>> 0;
+    h1 ^= h2 + i;
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 0x119de1f3) >>> 0;
+    h2 ^= h1;
+    out += (h1 >>> 0).toString(16).padStart(8, '0').slice(0, 4);
   }
   return out;
 }

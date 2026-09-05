@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { PeerSpend } from '../../contracts/index.js';
-import { CHANNELS, ME, MINTS, VIDEOS } from '../fixtures.js';
+import { CHANNELS, fakeHex64, ME, MINTS, VIDEOS } from '../fixtures.js';
 import { MockNetworkAdapter } from '../mock-network-adapter.js';
 import { MockWallet } from '../mock-wallet.js';
 
@@ -17,6 +17,18 @@ describe('fixtures', () => {
       expect(v.price.split.seeder + v.price.split.creator).toBe(100);
       expect(v.event.tags.filter((t) => t[0] === 'imeta').length).toBe(v.renditions.length);
     }
+  });
+
+  it('fakeHex64 does not collide across fixture ids (L4 finding: channels shared pubkeys)', () => {
+    const pubkeys = new Set(CHANNELS.map((c) => c.pubkey));
+    expect(pubkeys.size).toBe(CHANNELS.length);
+    const ids = new Set(VIDEOS.map((v) => v.id));
+    expect(ids.size).toBe(VIDEOS.length);
+    const cores = new Set(VIDEOS.flatMap((v) => v.renditions.map((r) => r.hyper.core)));
+    expect(cores.size).toBe(VIDEOS.reduce((n, v) => n + v.renditions.length, 0));
+    const many = new Set<string>();
+    for (let i = 0; i < 5000; i++) many.add(fakeHex64(`pk:x${i}`));
+    expect(many.size).toBe(5000);
   });
 });
 
