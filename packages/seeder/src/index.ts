@@ -1,6 +1,7 @@
 /**
  * @sovit/seeder — Corestore + Hyperblobs seeder daemon (build-plan §2.1, §2.3, §7).
- * Issued against CONTRACTS_VERSION = 2. Public API documented in docs/lanes/L2.md.
+ * Issued against CONTRACTS_VERSION = 2, re-issued at CONTRACTS_VERSION = 3 (ADR 0004).
+ * Public API documented in docs/lanes/L2.md.
  */
 export const PACKAGE = '@sovit/seeder' as const;
 
@@ -33,6 +34,7 @@ export type { PersistedBan } from './store/ban-list.js';
 export { FlushScheduler } from './payment/flush-scheduler.js';
 export type { FlushResult, FlushTrigger } from './payment/flush-scheduler.js';
 export { attachPayBridge } from './payment/pay-bridge.js';
+export type { PayBridgeOptions } from './payment/pay-bridge.js';
 
 // Logging (the only output path)
 export { createLogger, silentLogger } from './log/logger.js';
@@ -40,13 +42,9 @@ export type { Logger, LogFields, LogLevel, LogRecord, LogSink } from './log/logg
 export { redact, redactString, REDACTED } from './log/redact.js';
 
 // Host / CLI
-export {
-  renderSystemdUnit,
-  sdNotify,
-  installShutdownHooks,
-  HARDENING_DIRECTIVES,
-} from './host/systemd.js';
-export type { SystemdUnitOptions } from './host/systemd.js';
+// The systemd unit itself is `deploy/systemd/nutflix-seeder.service` (not rendered here).
+export { sdNotify, installShutdownHooks } from './host/systemd.js';
+export type { SdState, ShutdownHooksOptions } from './host/systemd.js';
 export { runMelt, parseMeltArgs, MELT_USAGE } from './cli/melt.js';
 export type { MeltCliDeps } from './cli/melt.js';
 export {

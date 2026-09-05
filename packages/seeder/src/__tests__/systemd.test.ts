@@ -2,12 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { SeederProcess, SignalName } from '../adapters/process.js';
 import { ENV_DATA_DIR, ENV_DISK_CAP, ENV_MAX_STREAMS, parseDaemonEnv } from '../cli/daemon.js';
-import {
-  HARDENING_DIRECTIVES,
-  installShutdownHooks,
-  renderSystemdUnit,
-  sdNotify,
-} from '../host/systemd.js';
+import { installShutdownHooks, sdNotify } from '../host/systemd.js';
 import { capturedLogger } from './helpers.js';
 
 class FakeProcess implements SeederProcess {
@@ -51,37 +46,6 @@ class FakeProcess implements SeederProcess {
     return this.handlers.get(s)?.size ?? 0;
   }
 }
-
-describe('systemd unit', () => {
-  it('renders every §7 hardening directive, a dedicated user and a single writable path', () => {
-    const unit = renderSystemdUnit({
-      user: 'nutflix',
-      execStart: '/usr/bin/node /opt/nutflix/seeder.js',
-      dataDir: '/var/lib/nutflix',
-      environment: { NUTFLIX_SEEDER_DISK_CAP_BYTES: '1000' },
-    });
-    for (const d of [
-      'NoNewPrivileges=yes',
-      'ProtectSystem=strict',
-      'ProtectHome=yes',
-      'PrivateTmp=yes',
-      'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX',
-      'User=nutflix',
-      'Group=nutflix',
-      'ReadWritePaths=/var/lib/nutflix',
-      'Type=notify',
-      'Environment=NUTFLIX_SEEDER_DATA_DIR=/var/lib/nutflix',
-      'Environment=NUTFLIX_SEEDER_DISK_CAP_BYTES=1000',
-      'ExecStart=/usr/bin/node /opt/nutflix/seeder.js',
-    ])
-      expect(unit).toContain(d);
-    for (const d of HARDENING_DIRECTIVES) expect(unit).toContain(d);
-    // deliberately absent: V8 JIT dies under it
-    expect(unit).not.toMatch(/^MemoryDenyWriteExecute=/m);
-    expect(unit.startsWith('[Unit]\n')).toBe(true);
-    expect(unit).toContain('\n[Install]\nWantedBy=multi-user.target');
-  });
-});
 
 describe('sdNotify', () => {
   it('is a no-op without NOTIFY_SOCKET and shells out to systemd-notify with it', async () => {
