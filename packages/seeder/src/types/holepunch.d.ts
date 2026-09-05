@@ -27,6 +27,12 @@ declare module 'hypercore' {
     readonly rawStream: ReplicationStream | null;
     readonly opened: Promise<boolean>;
     readonly destroyed: boolean;
+    /**
+     * On the Noise stream: set by `Hypercore.createProtocolStream()` to the `Protomux`
+     * instance of this connection (`hypercore/index.js` `noiseStream.userData = protocol`).
+     * Absent on stand-ins that never went through Hypercore.
+     */
+    readonly userData?: unknown;
     destroy(err?: Error): void;
     on(event: 'close' | 'connect', cb: () => void): this;
     on(event: 'error', cb: (err: Error) => void): this;
