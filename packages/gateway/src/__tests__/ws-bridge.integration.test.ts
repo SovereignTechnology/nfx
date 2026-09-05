@@ -8,7 +8,8 @@
  *   - the cut: a non-paying WS client is cut by the seeder's window logic exactly as over
  *     hyperswarm (S-A finding 3) — window+1 uploads recorded, `session-cut{window-exceeded}`,
  *     Noise key banned, viewer holds ≤ window blocks, socket closed;
- *   - `HELLO` on the socket discloses the gateway's OWN price = base + markup;
+ *   - `HELLO` on the socket discloses the gateway's OWN price = base marked up by
+ *     `markupPercent` (ADR 0005 Q4, ceil);
  *   - the `pay/1` instance is attached to the connection's protomux.
  */
 import { afterEach, describe, expect, it } from 'vitest';
@@ -201,8 +202,9 @@ describe('WS bridge: one WebSocket = one replication stream + pay/1', () => {
     await until(() => r.gateway.stats().wsConnections === 0, 3000);
   });
 
-  it('HELLO discloses the gateway price = base policy + markup, and pay/1 is attached to the protomux', async () => {
-    const r = await rig({ windowBlocks: 100, raw: { markupSatsPerBlock: 3 } });
+  it('HELLO discloses the gateway price = ceil(base × (100 + markupPercent) / 100), and pay/1 is attached to the protomux', async () => {
+    // Base policy is 2 sats/block (helpers.basePolicy); 150 % markup → ceil(2 × 2.5) = 5.
+    const r = await rig({ windowBlocks: 100, raw: { markupPercent: 150 } });
     const { entry } = await putFixture(r, 2);
     const v = await viewer();
     const vcore = await v.seeder.blobs.openCoreByKey(Buffer.from(entry.coreKey, 'hex'));
@@ -212,7 +214,9 @@ describe('WS bridge: one WebSocket = one replication stream + pay/1', () => {
 
     const p = r.protocols[0]!;
     const hello = p.hellos[0]!;
-    expect(hello.satsPerBlock).toBe((2 + 3) as Sats);
+    expect(r.config.policy.satsPerBlock).toBe(2);
+    expect(hello.satsPerBlock).toBe(Math.ceil((2 * (100 + 150)) / 100) as Sats);
+    expect(hello.satsPerBlock).toBe(5 as Sats);
     expect(r.gateway.price()).toBe(5);
     expect(hello.pubkey).toBe(r.config.identity.pubkey);
     expect(hello.p2pk).toBe(r.config.identity.p2pk);
@@ -229,7 +233,8 @@ describe('WS bridge: one WebSocket = one replication stream + pay/1', () => {
   });
 
   it('a downstream PAY at the gateway price is verified and ACKed through the seeder pay bridge', async () => {
-    const r = await rig({ windowBlocks: 100, raw: { markupSatsPerBlock: 1 } });
+    // 25 % on 2 sats/block → ceil(2.5) = 3: the ceil case, end to end through verify.
+    const r = await rig({ windowBlocks: 100, raw: { markupPercent: 25 } });
     const { entry } = await putFixture(r, 6);
     const v = await viewer();
     const vcore = await v.seeder.blobs.openCoreByKey(Buffer.from(entry.coreKey, 'hex'));
@@ -245,6 +250,8 @@ describe('WS bridge: one WebSocket = one replication stream + pay/1', () => {
     // The viewer pays through ITS engine at the disclosed price, naming the core (v3).
     const viewerEngine = new mocks.MockPaymentEngine({ mode: 'honest' });
     const policy = r.gateway.seeder.policy();
+    expect(policy.satsPerBlock).toBe(3);
+    expect(r.gateway.price()).toBe(3);
     const msg = await viewerEngine.pay(
       { core: entry.coreKey, fromBlock: 0, toBlock: 5 },
       { pubkey: r.config.identity.pubkey, p2pk: r.config.identity.p2pk, mint: policy.mints[0]! },
