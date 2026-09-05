@@ -11,6 +11,10 @@ export default tseslint.config(
       'artifacts/**',
       'docs/vendor/**',
       '**/storybook-static/**',
+      // Lane worktrees (execution plan §0 rule 2) live inside the main checkout and are
+      // gitignored; flat config does not read .gitignore, and type-checked linting of five
+      // extra checkouts OOMs the default heap.
+      '.worktrees/**',
       // Deliberately non-compliant inputs for scripts/electron-security-lint.mjs and csp-sri.mjs.
       'scripts/__fixtures__/**',
     ],
