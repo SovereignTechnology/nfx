@@ -11,13 +11,16 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./ui.css": "./dist/ui.css",
+    "./tokens.css": "./dist/tokens.css",
+    "./components.css": "./dist/components.css"
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && node scripts/build-css.ts",
     "build:tokens": "tsc -b && node scripts/build-tokens.ts",
     "build:css": "node scripts/build-css.ts",
     "test": "vitest run",
