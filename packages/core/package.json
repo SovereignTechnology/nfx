@@ -11,6 +11,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./media/node": {
+      "types": "./dist/media/node/index.d.ts",
+      "default": "./dist/media/node/index.js"
     }
   },
   "files": [
