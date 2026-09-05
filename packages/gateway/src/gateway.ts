@@ -5,8 +5,8 @@
  *
  * To a browser the gateway IS a seeder: every session (WS-bridged or swarm) gets a `pay/1`
  * instance from the injected factory, the seeder's pay bridge (HELLO → bind, PAY → verify
- * → ACK) and a `HELLO` disclosing the gateway's OWN price = base policy + markup
- * (build-plan §9 Q4 is open; the markup is a config value, default 0). Toward upstream
+ * → ACK) and a `HELLO` disclosing the gateway's OWN price = base policy marked up by
+ * `markupPercent` (build-plan §9 Q4, resolved by ADR 0005; default 0). Toward upstream
  * seeders it is a viewer: `UpstreamPayer` pays per verified block with `range.core` set.
  *
  * One `PaymentEngine` interface, two roles (contracts/payment.ts): `seederEngine` accounts
@@ -236,7 +236,7 @@ export class Gateway {
     gw.log.info('gateway created', {
       dataDir: config.dataDir,
       satsPerBlock: gw.price(),
-      markup: config.markupSatsPerBlock,
+      markupPercent: config.markupPercent,
       auth: deps.auth !== null,
       payProtocol: deps.payProtocol !== null,
     });
@@ -296,7 +296,7 @@ export class Gateway {
 
   // ------------------------------------------------------------------ pricing
 
-  /** What `HELLO` discloses: base `policy.satsPerBlock` + `markupSatsPerBlock`. */
+  /** What `HELLO` discloses: `ceil(policy.satsPerBlock × (100 + markupPercent) / 100)`. */
   price(): Sats {
     return gatewayPrice(this.config);
   }
@@ -395,7 +395,7 @@ export class Gateway {
     void this.sendHello(session.noiseKeyHex, protocol);
   }
 
-  /** HELLO: the gateway's own price (base + markup), its mints, split and P2PK target. */
+  /** HELLO: the gateway's own price (base marked up by %), its mints, split and P2PK target. */
   private async sendHello(noiseKeyHex: string, protocol: PayProtocol): Promise<void> {
     const challenge = randomBytes(32).toString('hex');
     let signature: string;

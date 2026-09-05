@@ -4,8 +4,8 @@
  * field is checked by hand and the error list names PATHS and expected shapes only — never
  * the offending value, so a config error can be logged verbatim (SECURITY.md invariant 7).
  *
- * Defaults are safe-by-default: loopback listener, mirror disabled, markup 0 (build-plan §9
- * Q4 is open — parametrised, not resolved), modest body/connection caps.
+ * Defaults are safe-by-default: loopback listener, mirror disabled, markup 0 % (build-plan §9
+ * Q4 RESOLVED by ADR 0005: a percentage markup), modest body/connection caps.
  */
 import type {
   CashuP2pkPubkey,
@@ -101,8 +101,12 @@ export interface GatewayConfig {
   readonly identity: { readonly pubkey: NostrPubkey; readonly p2pk: CashuP2pkPubkey };
   /** Base price policy the embedded seeder verifies against (before markup). */
   readonly policy: PricePolicy;
-  /** Q4 (open): flat per-block markup disclosed in `HELLO`. Default 0. */
-  readonly markupSatsPerBlock: Sats;
+  /**
+   * Q4 (ADR 0005): percentage markup on `policy.satsPerBlock`, integer ≥ 0, default 0. The
+   * price `HELLO` discloses is `ceil(satsPerBlock × (100 + markupPercent) / 100)`.
+   * Replaces the flat `markupSatsPerBlock` L3 shipped (that key is now rejected).
+   */
+  readonly markupPercent: number;
   /** Mints this gateway accepts payment at (its `HELLO.acceptedMints`). */
   readonly acceptedMints: readonly MintUrl[];
   readonly swarm: SwarmConfig | null;
@@ -312,7 +316,7 @@ export function validateConfig(raw: unknown): ConfigResult {
   if (!HEX66.test(p2pk)) e.add(`${P}.identity.p2pk`, 'expected 66 lower-case hex chars');
 
   const pol = policy(e, sub(e, raw, 'policy', P), `${P}.policy`, blockSize);
-  const markupSatsPerBlock = int(e, raw, 'markupSatsPerBlock', P, 0, 0) as Sats;
+  const markupPercent = int(e, raw, 'markupPercent', P, 0, 0);
   const acceptedMints = strList(e, raw, 'acceptedMints', P, pol.mints, isMintUrl) as MintUrl[];
 
   let swarm: SwarmConfig | null = null;
@@ -466,7 +470,11 @@ export function validateConfig(raw: unknown): ConfigResult {
   const flushEveryBlocks = int(e, raw, 'flushEveryBlocks', P, 64, 1);
   const flushEveryMs = int(e, raw, 'flushEveryMs', P, 60_000, 1);
 
-  for (const k of Object.keys(raw)) if (!KNOWN_KEYS.has(k)) e.add(`${P}.${k}`, 'unknown key');
+  for (const k of Object.keys(raw)) {
+    const removed = REMOVED_KEYS.get(k);
+    if (removed !== undefined) e.add(`${P}.${k}`, removed);
+    else if (!KNOWN_KEYS.has(k)) e.add(`${P}.${k}`, 'unknown key');
+  }
 
   if (e.list.length > 0) return { ok: false, errors: e.list };
   return {
@@ -478,7 +486,7 @@ export function validateConfig(raw: unknown): ConfigResult {
       blockSize,
       identity: { pubkey: pubkey as NostrPubkey, p2pk: p2pk as CashuP2pkPubkey },
       policy: pol,
-      markupSatsPerBlock,
+      markupPercent,
       acceptedMints,
       swarm,
       rateLimits,
@@ -500,7 +508,7 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'blockSize',
   'identity',
   'policy',
-  'markupSatsPerBlock',
+  'markupPercent',
   'acceptedMints',
   'swarm',
   'rateLimits',
@@ -511,6 +519,14 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'logLevel',
   'flushEveryBlocks',
   'flushEveryMs',
+]);
+
+/**
+ * Keys an earlier gateway accepted and a stale config may still carry. Rejected outright
+ * (never silently ignored) so an operator cannot keep a setting that no longer applies.
+ */
+const REMOVED_KEYS: ReadonlyMap<string, string> = new Map([
+  ['markupSatsPerBlock', 'removed key (ADR 0005 Q4): use markupPercent'],
 ]);
 
 /**
@@ -561,15 +577,21 @@ export function parseConfigText(
   return validateConfig(applyEnvOverrides(raw, env));
 }
 
-/** The seeder's price with the gateway markup applied — what `HELLO` discloses. */
-export function gatewayPrice(c: Pick<GatewayConfig, 'policy' | 'markupSatsPerBlock'>): Sats {
-  return (c.policy.satsPerBlock + c.markupSatsPerBlock) as Sats;
+/**
+ * The seeder's price with the gateway markup applied — what `HELLO` discloses (ADR 0005 Q4):
+ * `ceil(satsPerBlock × (100 + markupPercent) / 100)`, integer arithmetic, rounded UP so the
+ * gateway never undercharges itself. Throws if the product is not a safe integer (a config
+ * that validated cannot reach that in practice; the guard keeps the price exact, SECURITY.md
+ * invariant 2).
+ */
+export function gatewayPrice(c: Pick<GatewayConfig, 'policy' | 'markupPercent'>): Sats {
+  const scaled = c.policy.satsPerBlock * (100 + c.markupPercent);
+  if (!Number.isSafeInteger(scaled)) throw new RangeError('gateway price is not a safe integer');
+  return Math.ceil(scaled / 100) as Sats;
 }
 
 /** The policy the embedded seeder verifies downstream `PAY`s against (marked up). */
-export function gatewayPolicy(
-  c: Pick<GatewayConfig, 'policy' | 'markupSatsPerBlock'>,
-): PricePolicy {
+export function gatewayPolicy(c: Pick<GatewayConfig, 'policy' | 'markupPercent'>): PricePolicy {
   return { ...c.policy, satsPerBlock: gatewayPrice(c) };
 }
 

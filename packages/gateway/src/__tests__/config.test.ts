@@ -25,7 +25,7 @@ describe('validateConfig', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.config.listen).toEqual({ host: '127.0.0.1', port: 8080 });
-    expect(r.config.markupSatsPerBlock).toBe(0);
+    expect(r.config.markupPercent).toBe(0);
     expect(r.config.acceptedMints).toEqual([MINT_A]);
     expect(r.config.swarm).toBeNull();
     expect(r.config.http).toEqual(DEFAULT_HTTP_LIMITS);
@@ -59,7 +59,7 @@ describe('validateConfig', () => {
         split: { seeder: 60, creator: 60 },
         creatorP2pk: 'nope',
       },
-      markupSatsPerBlock: 1.5,
+      markupPercent: 1.5,
       http: { maxUploadBytes: 0, trustProxy: 'yes' },
       ws: { path: 'ws' },
       blossom: { publicUrl: 'http://x/', allowPubkeys: ['short'] },
@@ -82,7 +82,7 @@ describe('validateConfig', () => {
       '$.policy.mints',
       '$.policy.split',
       '$.policy.creatorP2pk',
-      '$.markupSatsPerBlock',
+      '$.markupPercent',
       '$.http.maxUploadBytes',
       '$.http.trustProxy',
       '$.ws.path',
@@ -156,12 +156,78 @@ describe('validateConfig', () => {
     expect(r.config.upstream.policies[core]?.creatorP2pk).toBe(CREATOR_P2PK);
   });
 
-  it('gatewayPrice / gatewayPolicy = base + markup (Q4 parametrised, default 0)', () => {
+  it('gatewayPrice / gatewayPolicy: markupPercent default 0 leaves the base price unchanged', () => {
     const base = validateConfig(MINIMAL);
-    const marked = validateConfig({ ...MINIMAL, markupSatsPerBlock: 2 });
-    if (!base.ok || !marked.ok) throw new Error('config');
+    if (!base.ok) throw new Error('config');
+    expect(base.config.markupPercent).toBe(0);
     expect(gatewayPrice(base.config)).toBe(3);
-    expect(gatewayPrice(marked.config)).toBe(5);
-    expect(gatewayPolicy(marked.config)).toEqual({ ...marked.config.policy, satsPerBlock: 5 });
+    expect(gatewayPolicy(base.config)).toEqual(base.config.policy);
+  });
+
+  it('gatewayPrice = ceil(satsPerBlock × (100 + markupPercent) / 100) (ADR 0005 Q4)', () => {
+    const price = (satsPerBlock: number, markupPercent: number): number => {
+      const r = validateConfig({
+        ...MINIMAL,
+        policy: { ...MINIMAL.policy, satsPerBlock },
+        markupPercent,
+      });
+      if (!r.ok) throw new Error(r.errors.join('\n'));
+      return gatewayPrice(r.config);
+    };
+    expect(price(1, 50)).toBe(2); // ceil(1.5)
+    expect(price(3, 10)).toBe(4); // ceil(3.3)
+    expect(price(5, 100)).toBe(10); // exact
+    expect(price(3, 0)).toBe(3);
+    expect(price(0, 250)).toBe(0);
+    expect(price(7, 33)).toBe(10); // ceil(9.31): never rounds down
+    expect(Number.isInteger(price(3, 1))).toBe(true);
+  });
+
+  it('gatewayPolicy carries the marked-up price; everything else is the base policy', () => {
+    const r = validateConfig({ ...MINIMAL, markupPercent: 50 });
+    if (!r.ok) throw new Error('config');
+    expect(gatewayPolicy(r.config)).toEqual({ ...r.config.policy, satsPerBlock: 5 });
+    expect(r.config.policy.satsPerBlock).toBe(3);
+  });
+
+  it('gatewayPrice refuses a product outside the safe-integer range', () => {
+    const r = validateConfig(MINIMAL);
+    if (!r.ok) throw new Error('config');
+    const huge = {
+      policy: { ...r.config.policy, satsPerBlock: Number.MAX_SAFE_INTEGER as never },
+      markupPercent: 1,
+    };
+    expect(() => gatewayPrice(huge)).toThrow(RangeError);
+  });
+
+  it('rejects a negative or non-integer markupPercent by path only', () => {
+    for (const bad of [-1, 1.5, '10', null, Number.NaN]) {
+      const r = validateConfig({ ...MINIMAL, markupPercent: bad });
+      expect(r.ok, String(bad)).toBe(false);
+      if (r.ok) continue;
+      expect(r.errors).toHaveLength(1);
+      expect(r.errors[0]).toMatch(/^\$\.markupPercent: expected integer/);
+      expect(r.errors[0]).not.toContain('1.5');
+      expect(r.errors[0]).not.toContain('-1');
+    }
+    // Any integer ≥ 0 is accepted (percentages above 100 are legal: price × 2+).
+    expect(validateConfig({ ...MINIMAL, markupPercent: 0 }).ok).toBe(true);
+    expect(validateConfig({ ...MINIMAL, markupPercent: 400 }).ok).toBe(true);
+  });
+
+  it('rejects a config still carrying the removed markupSatsPerBlock (never silently ignored)', () => {
+    const r = validateConfig({ ...MINIMAL, markupSatsPerBlock: 0 });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0]).toMatch(/^\$\.markupSatsPerBlock: removed key/);
+    expect(r.errors[0]).toContain('markupPercent');
+    // Even a value the old schema would have accepted, alongside the new key, is refused.
+    const both = validateConfig({ ...MINIMAL, markupSatsPerBlock: 2, markupPercent: 10 });
+    expect(both.ok).toBe(false);
+    if (!both.ok) {
+      expect(both.errors).toEqual([expect.stringMatching(/^\$\.markupSatsPerBlock: /)]);
+      expect(both.errors.join('\n')).not.toContain(' 2');
+    }
   });
 });
