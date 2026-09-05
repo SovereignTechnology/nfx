@@ -23,6 +23,17 @@
   },
   "dependencies": {
     "@sovit/core": "0.0.0",
-    "@sovit/seeder": "0.0.0"
+    "@sovit/seeder": "0.0.0",
+    "compact-encoding": "3.4.0",
+    "corestore": "7.12.2",
+    "hyperblobs": "2.12.1",
+    "hypercore": "11.35.3",
+    "hypercore-blob-server": "1.15.0",
+    "protomux": "3.11.0",
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@types/ws": "8.18.1",
+    "nostr-tools": "2.25.2"
   }
 }
