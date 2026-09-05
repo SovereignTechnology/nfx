@@ -6,6 +6,7 @@
     { "path": "packages/gateway" },
     { "path": "packages/ui" },
     { "path": "packages/app-desktop" },
-    { "path": "packages/app-web" }
+    { "path": "packages/app-web" },
+    { "path": "tsconfig.scripts.json" }
   ]
 }

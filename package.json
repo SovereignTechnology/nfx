@@ -21,7 +21,10 @@
     "check:locked": "bash scripts/check-locked-dirs.sh",
     "check:contracts": "bash scripts/check-contracts-version.sh",
     "hooks:install": "bash scripts/install-hooks.sh",
-    "ci": "npm run lint && npm run build && npm test && npm run check:locked"
+    "check:native": "bash scripts/native-module-inventory.sh --check",
+    "lint:electron": "node scripts/electron-security-lint.mjs packages/app-desktop",
+    "build:web:reproducible": "bash scripts/reproducible-web-build.sh",
+    "ci": "npm run lint && npm run build && npm test && npm run check:locked && npm run check:native && npm run lint:electron"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

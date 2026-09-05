@@ -6,3 +6,4 @@ storybook-static
 docs/vendor
 package-lock.json
 *.md
+scripts/__fixtures__

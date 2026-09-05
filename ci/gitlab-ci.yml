@@ -1,8 +1,22 @@
-# CI skeleton (execution plan Stage 0 deliverable 1; hardened by lane L9).
+# CI pipeline (execution plan Stage 0 deliverable 1; hardened by lane L9, build-plan §7).
 #
 # NOT YET ACTIVE: no runner is registered against the private GitLab namespace, so this
 # lives in ci/ rather than at the repo root. When a runner exists, `git mv ci/gitlab-ci.yml
-# .gitlab-ci.yml` and every MR gets the same gates that `npm run ci` runs locally.
+# .gitlab-ci.yml` and every MR gets the same gates that `npm run ci` runs locally, plus the
+# network-only checks (registry signatures / provenance, advisories, lockfile drift) that
+# the local gate deliberately does not run.
+#
+# Supply-chain policy in one place (threat T12):
+#   - install is `npm ci --ignore-scripts`: lockfile-only, exact pins, no lifecycle scripts
+#     (.npmrc already says the same for local installs — CI repeats it so a runner without
+#     the repo .npmrc behaves identically)
+#   - the lockfile may not drift: package.json ↔ package-lock.json must be in sync AND
+#     `npm install --package-lock-only` must be a no-op
+#   - `npm audit signatures` verifies every registry ECDSA signature and every Sigstore
+#     provenance attestation the registry serves (npm 10.9.4: `npm help audit`, "Audit
+#     Signatures"); exit 1 on any missing/invalid signature or attestation
+#   - the native-module inventory is frozen in docs/native-modules.txt and diffed
+#   - Electron security config lint and the locked-directory / contracts-version guards
 
 stages: [verify, test, build]
 
@@ -13,13 +27,61 @@ default:
       files: [package-lock.json]
     paths: [.npm/]
   before_script:
-    # Threat T12: lockfile-only, no lifecycle scripts, exact pins.
+    - node --version && npm --version
+    # Threat T12: lockfile-only, no lifecycle scripts, exact pins. Fails if package.json and
+    # package-lock.json disagree — that is the first half of the lockfile-drift check.
     - npm ci --ignore-scripts --cache .npm --prefer-offline
 
+variables:
+  # The reviewed inventory is a linux-x64 list and the runner is linux-x64: mismatches fail.
+  NATIVE_INVENTORY_STRICT: '1'
+  # Never let a runner's environment inject loaders into anything we execute here.
+  NODE_OPTIONS: ''
+
+# ---------------------------------------------------------------------------- verify --
 lint:
   stage: verify
   script:
     - npm run lint
+
+typecheck:
+  stage: verify
+  script:
+    - npm run typecheck
+
+lockfile-drift:
+  stage: verify
+  script:
+    # Second half of the drift check: re-resolving from package.json must not change the
+    # lockfile (stale/extraneous entries, formatting rewrites, registry URL changes…).
+    - npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+    - git diff --exit-code --stat package-lock.json
+    # And nothing may have been installed from outside the registry (git/http tarballs).
+    - |
+      node -e '
+        const p = require("./package-lock.json").packages;
+        const bad = Object.entries(p).filter(([k, v]) => k.startsWith("node_modules/") && !v.link && v.resolved && !/^https:\/\/registry\.npmjs\.org\//.test(v.resolved));
+        if (bad.length) { console.error("non-registry resolutions:", bad.map(([k]) => k)); process.exit(1); }
+        console.log("lockfile: every dependency resolves to registry.npmjs.org");'
+
+provenance:
+  stage: verify
+  script:
+    # Registry signatures + Sigstore provenance attestations for every installed package.
+    - npm audit signatures
+    # Which direct dependencies have NO provenance to verify — reviewed on every bump.
+    - node scripts/provenance-report.mjs | tee provenance-report.txt
+    - node scripts/provenance-report.mjs --json > provenance-report.json
+  artifacts:
+    when: always
+    paths: [provenance-report.txt, provenance-report.json]
+    expire_in: 1 month
+
+advisories:
+  stage: verify
+  script:
+    # Known-vulnerability gate. Blocking at high/critical; `npm audit` output is the report.
+    - npm audit --audit-level=high
 
 locked-dirs:
   stage: verify
@@ -33,6 +95,13 @@ native-modules:
     # Explicit inventory of native modules; any change must be reviewed (build-plan §7).
     - bash scripts/native-module-inventory.sh --check
 
+electron-security:
+  stage: verify
+  script:
+    # build-plan §7 / T15: contextIsolation, no nodeIntegration, sandboxed renderer.
+    - npm run lint:electron
+
+# ------------------------------------------------------------------------------ test --
 test:
   stage: test
   script:
@@ -43,7 +112,22 @@ test:
     paths: [coverage/]
     expire_in: 1 week
 
+# systemd hardening (deploy/systemd/test-hardening.sh) needs a user systemd instance,
+# which a container job does not have. Run it on a real host on every Node major bump and
+# paste the table into deploy/systemd/MDWE-RESULTS.md.
+
+# ----------------------------------------------------------------------------- build --
 build:
   stage: build
   script:
     - npm run build
+
+web-build-reproducible:
+  stage: build
+  script:
+    # Two clean builds of the web shell must hash identically; the report carries the tree
+    # hash and the UNSIGNED Nostr event template (T13). Signing happens offline, never in CI.
+    - bash scripts/reproducible-web-build.sh --no-install --twice
+  artifacts:
+    paths: [artifacts/web-build/]
+    expire_in: 1 month

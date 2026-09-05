@@ -55,11 +55,22 @@ scripts/new-lane-worktree.sh L2 packages/seeder/
 cd .worktrees/L2            # .lane holds the allowlist; the hook enforces it
 ```
 
-## CI
+## CI and hardening
 
 There is deliberately **no `.gitlab-ci.yml`** at the root yet: no runner is registered
-against this namespace. The pipeline skeleton lives in [`ci/gitlab-ci.yml`](ci/gitlab-ci.yml)
-and mirrors `npm run ci`; move it to the root when a runner exists.
+against this namespace. The pipeline lives in [`ci/gitlab-ci.yml`](ci/gitlab-ci.yml) and
+mirrors `npm run ci`, plus the network-only supply-chain gates (`npm audit signatures`,
+lockfile drift, advisories); move it to the root when a runner exists.
+
+`npm run ci` = lint → typecheck/build → test → locked-dir check → native-module inventory
+(`docs/native-modules.txt`, `scripts/native-module-inventory.sh --check`) → Electron
+security lint (`scripts/electron-security-lint.mjs`). Other tooling from build-plan §7:
+
+| Tool | Purpose |
+|------|---------|
+| `scripts/reproducible-web-build.sh --twice` | Clean build → deterministic tree hash → unsigned Nostr event template (`artifacts/web-build/`) |
+| `scripts/csp-sri.mjs <index.html>` | SRI on every script/stylesheet + strict CSP as `<meta>` and a headers file; fails on inline or third-party code |
+| `deploy/systemd/` | Hardened seeder/gateway units, directive-by-directive README, and the measured `MemoryDenyWriteExecute` result |
 
 ## Contributing
 

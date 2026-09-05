@@ -1,0 +1,87 @@
+# Nutflix gateway — seeder + WebSocket bridge + Blossom HTTP. Build-plan §7 hardening set.
+# Every directive is explained in deploy/systemd/README.md; the MemoryDenyWriteExecute /
+# --jitless decision is backed by deploy/systemd/MDWE-RESULTS.md. Do not loosen a line
+# without updating the README.
+#
+# The gateway is the seeder unit plus an inbound HTTP/WS listener. Put TLS termination in
+# front of it (a reverse proxy on the host, or a systemd socket) — the gateway itself binds
+# an unprivileged port and never sees a private TLS key. The response headers emitted by
+# scripts/csp-sri.mjs (_headers.txt) belong on the proxy that serves the web build.
+#
+# Install: cp nutflix-gateway.service /etc/systemd/system/
+#          cp nutflix.sysusers.conf /etc/sysusers.d/nutflix.conf && systemd-sysusers
+#          systemctl daemon-reload && systemctl enable --now nutflix-gateway
+
+[Unit]
+Description=Nutflix gateway (seeder + WS bridge + Blossom HTTP)
+Documentation=https://gitworkshop.dev/npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=nutflix-gateway
+Group=nutflix-gateway
+WorkingDirectory=/opt/nutflix
+# --jitless: see MDWE-RESULTS.md. Entry point / flags are lane L3's to confirm.
+ExecStart=/usr/bin/node --jitless /opt/nutflix/packages/gateway/dist/index.js --config /etc/nutflix/gateway.json
+Environment=NODE_ENV=production
+Environment=NODE_OPTIONS=
+UnsetEnvironment=NODE_EXTRA_CA_CERTS NODE_PATH NODE_DEBUG NODE_PENDING_DEPRECATION
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+StateDirectory=nutflix-gateway
+StateDirectoryMode=0700
+RuntimeDirectory=nutflix-gateway
+RuntimeDirectoryMode=0700
+ConfigurationDirectory=nutflix
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nutflix-gateway
+
+# ---- Isolation (build-plan §7 set) -------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=yes
+# AF_NETLINK: required by the embedded seeder's swarm (getifaddrs), see the seeder unit.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @mount @reboot @swap @cpu-emulation @debug @module @raw-io
+SystemCallErrorNumber=EPERM
+
+# ---- Resource caps (T11) --------------------------------------------------------------
+# The gateway takes inbound connections from the internet: per-pubkey rate limits and the
+# global stream cap live in the application (build-plan §7); these are the host backstop.
+LimitNOFILE=65536
+LimitCORE=0
+TasksMax=1024
+MemoryHigh=3G
+MemoryMax=4G
+CPUQuota=300%
+
+[Install]
+WantedBy=multi-user.target

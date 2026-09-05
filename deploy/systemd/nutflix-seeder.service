@@ -1,0 +1,92 @@
+# Nutflix seeder daemon — build-plan §7 host hardening set.
+# Every directive is explained in deploy/systemd/README.md; the MemoryDenyWriteExecute /
+# --jitless decision is backed by deploy/systemd/MDWE-RESULTS.md. Do not loosen a line
+# without updating the README.
+#
+# Install: cp nutflix-seeder.service /etc/systemd/system/
+#          cp nutflix.sysusers.conf /etc/sysusers.d/nutflix.conf && systemd-sysusers
+#          systemctl daemon-reload && systemctl enable --now nutflix-seeder
+# Verify:  systemd-analyze security nutflix-seeder   (expect "SAFE"-band score)
+
+[Unit]
+Description=Nutflix seeder (Corestore + Hyperblobs over Hyperswarm, pay/1 server side)
+Documentation=https://gitworkshop.dev/npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx
+After=network-online.target
+Wants=network-online.target
+# T11: a crash loop must not turn into a CPU DoS of the host.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=nutflix-seeder
+Group=nutflix-seeder
+WorkingDirectory=/opt/nutflix
+# --jitless: V8 never maps W+X or flips pages to executable, so MemoryDenyWriteExecute can
+# stay on (see MDWE-RESULTS.md: default-JIT Node 22 aborts under MDWE at startup).
+# Entry point is the @sovit/seeder package main; the CLI flags are owned by lane L2 — this
+# is the one line that lane must confirm (see README "Assumptions").
+ExecStart=/usr/bin/node --jitless /opt/nutflix/packages/seeder/dist/index.js --config /etc/nutflix/seeder.json
+Environment=NODE_ENV=production
+# T12: an injected NODE_OPTIONS (e.g. --require) is the classic way to hijack a Node service.
+# Pin it empty so nothing from the host environment can add loaders or flags.
+Environment=NODE_OPTIONS=
+UnsetEnvironment=NODE_EXTRA_CA_CERTS NODE_PATH NODE_DEBUG NODE_PENDING_DEPRECATION
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+# Directories systemd creates for the service user (only these are writable, see ProtectSystem).
+StateDirectory=nutflix-seeder
+StateDirectoryMode=0700
+RuntimeDirectory=nutflix-seeder
+RuntimeDirectoryMode=0700
+ConfigurationDirectory=nutflix
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nutflix-seeder
+
+# ---- Isolation (build-plan §7 set) -------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=yes
+# §7 says "AF_INET AF_INET6 AF_UNIX". AF_NETLINK is added because getifaddrs(3) — which
+# udx-native's networkInterfaces()/watchNetworkInterfaces() and therefore dht-rpc and
+# hyperdht call at construction — opens a NETLINK_ROUTE socket; without it the swarm
+# throws EAFNOSUPPORT before it binds a port (verified, MDWE-RESULTS.md §3).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @mount @reboot @swap @cpu-emulation @debug @module @raw-io
+SystemCallErrorNumber=EPERM
+
+# ---- Resource caps (T11) --------------------------------------------------------------
+# Tune per host; these are conservative defaults for a small VPS.
+LimitNOFILE=65536
+LimitCORE=0
+TasksMax=512
+MemoryHigh=1536M
+MemoryMax=2G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,37 @@
+# Reviewed native-module inventory (build-plan §7, threat T12).
+# Regenerate with: scripts/native-module-inventory.sh --accept   (only AFTER reading every new line)
+# Verify with:     scripts/native-module-inventory.sh --check    (part of npm run ci and CI)
+# Columns: name@version | install path | native markers | lifecycle install scripts | scope | shortest dependency chain from a workspace package
+# Every line has been read by a human on the stated version; the review notes live in the lane report (not published).
+# platform: linux-x64
+@esbuild/linux-x64@0.28.2 | node_modules/@esbuild/linux-x64 | platform-pkg | scripts=none | dev-only | via @sovit/ui>storybook>esbuild>@esbuild/linux-x64
+@oxc-parser/binding-linux-x64-gnu@0.127.0 | node_modules/@oxc-parser/binding-linux-x64-gnu | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>storybook>oxc-parser>@oxc-parser/binding-linux-x64-gnu
+@oxc-parser/binding-linux-x64-musl@0.127.0 | node_modules/@oxc-parser/binding-linux-x64-musl | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>storybook>oxc-parser>@oxc-parser/binding-linux-x64-musl
+@oxc-resolver/binding-linux-x64-gnu@11.21.2 | node_modules/@oxc-resolver/binding-linux-x64-gnu | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>storybook>oxc-resolver>@oxc-resolver/binding-linux-x64-gnu
+@oxc-resolver/binding-linux-x64-musl@11.21.2 | node_modules/@oxc-resolver/binding-linux-x64-musl | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>storybook>oxc-resolver>@oxc-resolver/binding-linux-x64-musl
+@rolldown/binding-linux-x64-gnu@1.2.7 | node_modules/@rolldown/binding-linux-x64-gnu | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>vite>rolldown>@rolldown/binding-linux-x64-gnu
+@rolldown/binding-linux-x64-musl@1.2.7 | node_modules/@rolldown/binding-linux-x64-musl | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>vite>rolldown>@rolldown/binding-linux-x64-musl
+lightningcss-linux-x64-gnu@1.32.0 | node_modules/@tailwindcss/node/node_modules/lightningcss-linux-x64-gnu | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>@tailwindcss/vite>@tailwindcss/node>lightningcss>lightningcss-linux-x64-gnu
+lightningcss-linux-x64-musl@1.32.0 | node_modules/@tailwindcss/node/node_modules/lightningcss-linux-x64-musl | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>@tailwindcss/vite>@tailwindcss/node>lightningcss>lightningcss-linux-x64-musl
+@tailwindcss/oxide-linux-x64-gnu@4.3.3 | node_modules/@tailwindcss/oxide-linux-x64-gnu | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>@tailwindcss/vite>@tailwindcss/oxide>@tailwindcss/oxide-linux-x64-gnu
+@tailwindcss/oxide-linux-x64-musl@4.3.3 | node_modules/@tailwindcss/oxide-linux-x64-musl | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>@tailwindcss/vite>@tailwindcss/oxide>@tailwindcss/oxide-linux-x64-musl
+bare-buffer@3.7.1 | node_modules/bare-buffer | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-buffer
+bare-dns@2.2.0 | node_modules/bare-dns | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-tcp>bare-dns
+bare-fs@4.8.1 | node_modules/bare-fs | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/seeder>hypercore>hypercore-storage>device-file>bare-fs
+bare-inspect@3.1.10 | node_modules/bare-inspect | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/seeder>corestore>sodium-universal>sodium-native>bare-assert>bare-inspect
+bare-os@3.9.3 | node_modules/bare-os | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-os
+bare-path@3.1.2 | node_modules/bare-path | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-url>bare-path
+bare-pipe@4.3.1 | node_modules/bare-pipe | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-pipe
+bare-structured-clone@1.6.0 | node_modules/bare-structured-clone | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-structured-clone
+bare-subprocess@6.1.0 | node_modules/bare-subprocess | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess
+bare-tcp@2.6.1 | node_modules/bare-tcp | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-tcp
+bare-type@1.1.1 | node_modules/bare-type | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-structured-clone>bare-type
+bare-url@2.5.4 | node_modules/bare-url | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-url
+fs-native-extensions@1.5.1 | node_modules/fs-native-extensions | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/seeder>hypercore>hypercore-storage>device-file>fs-native-extensions
+lightningcss-linux-x64-gnu@1.33.0 | node_modules/lightningcss-linux-x64-gnu | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>vite>lightningcss>lightningcss-linux-x64-gnu
+lightningcss-linux-x64-musl@1.33.0 | node_modules/lightningcss-linux-x64-musl | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>vite>lightningcss>lightningcss-linux-x64-musl
+quickbit-native@2.4.8 | node_modules/quickbit-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/seeder>hypercore>quickbit-universal>quickbit-native
+rocksdb-native@3.17.4 | node_modules/rocksdb-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/seeder>hypercore>hypercore-storage>rocksdb-native
+simdle-native@1.3.9 | node_modules/simdle-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/seeder>hypercore>quickbit-universal>simdle-universal>simdle-native
+sodium-native@5.1.0 | node_modules/sodium-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/seeder>corestore>sodium-universal>sodium-native
+udx-native@1.21.1 | node_modules/udx-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/seeder>hyperswarm>hyperdht>dht-rpc>udx-native
