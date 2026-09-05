@@ -1,0 +1,46 @@
+.nf-avatar {
+  --nf-avatar-hue: 200;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: var(--nf-size-avatar-md);
+  height: var(--nf-size-avatar-md);
+  border-radius: var(--nf-radius-full);
+  overflow: hidden;
+  background: var(--nf-color-bg-subtle);
+  color: var(--nf-color-text);
+  font-weight: var(--nf-weight-medium);
+  font-size: var(--nf-text-sm);
+  line-height: 1;
+}
+
+.nf-avatar--sm {
+  width: var(--nf-size-avatar-sm);
+  height: var(--nf-size-avatar-sm);
+  font-size: 10px;
+}
+
+.nf-avatar--lg {
+  width: var(--nf-size-avatar-lg);
+  height: var(--nf-size-avatar-lg);
+}
+
+.nf-avatar--xl {
+  width: var(--nf-size-avatar-xl);
+  height: var(--nf-size-avatar-xl);
+  font-size: var(--nf-text-2xl);
+}
+
+.nf-avatar__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.nf-avatar--fallback {
+  background: hsl(var(--nf-avatar-hue) 45% 45%);
+  color: #fff;
+}

@@ -1,0 +1,67 @@
+.nf-mint {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nf-space-8);
+  height: 32px;
+  padding: 0 var(--nf-space-12);
+  border: 1px solid var(--nf-color-border);
+  border-radius: var(--nf-radius-md);
+  font: inherit;
+  font-size: var(--nf-text-sm);
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--nf-color-text);
+  background: var(--nf-color-bg-elevated);
+}
+
+.nf-mint--sm {
+  height: 26px;
+  padding: 0 var(--nf-space-8);
+  font-size: var(--nf-text-xs);
+  gap: 6px;
+}
+
+.nf-mint__icon {
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-mint__host {
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-mint__balance {
+  color: var(--nf-color-text-secondary);
+  padding-left: var(--nf-space-8);
+  border-left: 1px solid var(--nf-color-border);
+}
+
+.nf-mint__status {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--nf-radius-full);
+  background: var(--nf-color-text-muted);
+}
+
+.nf-mint__status--ok {
+  background: var(--nf-color-success);
+}
+
+.nf-mint__status--unreachable {
+  background: var(--nf-color-danger);
+}
+
+.nf-mint--button {
+  cursor: pointer;
+  transition:
+    background-color var(--nf-motion-fast) var(--nf-ease),
+    border-color var(--nf-motion-fast) var(--nf-ease);
+}
+
+.nf-mint--button:hover {
+  background: var(--nf-color-bg-hover);
+}
+
+.nf-mint--selected {
+  border-color: var(--nf-color-text);
+  background: var(--nf-color-bg-subtle);
+}

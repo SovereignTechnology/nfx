@@ -1,0 +1,34 @@
+.nf-md {
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text);
+  overflow-wrap: anywhere;
+}
+
+.nf-md__p {
+  margin: 0 0 var(--nf-space-12);
+}
+
+.nf-md__p:last-child {
+  margin-bottom: 0;
+}
+
+.nf-md__link {
+  color: var(--nf-color-text-link);
+  text-decoration: none;
+}
+
+.nf-md__link:hover {
+  text-decoration: underline;
+}
+
+.nf-md__nostr {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: var(--nf-radius-sm);
+  font-family: var(--nf-font-mono);
+  font-size: 0.9em;
+  color: var(--nf-color-text-link);
+  background: var(--nf-color-bg-subtle);
+  vertical-align: baseline;
+}

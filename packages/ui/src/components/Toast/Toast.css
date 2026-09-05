@@ -1,0 +1,125 @@
+.nf-toasts {
+  position: fixed;
+  z-index: var(--nf-z-toast);
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-8);
+  width: 360px;
+  max-width: calc(100vw - var(--nf-space-32));
+  pointer-events: none;
+}
+
+.nf-toasts--bottom-left {
+  left: var(--nf-space-16);
+  bottom: var(--nf-space-16);
+}
+
+.nf-toasts--bottom-right {
+  right: var(--nf-space-16);
+  bottom: var(--nf-space-16);
+}
+
+.nf-toasts--top-right {
+  right: var(--nf-space-16);
+  top: var(--nf-space-16);
+}
+
+.nf-toasts--inline {
+  position: relative;
+  inset: auto;
+}
+
+.nf-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--nf-space-12);
+  padding: var(--nf-space-12) var(--nf-space-12) var(--nf-space-12) var(--nf-space-16);
+  border-radius: var(--nf-radius-md);
+  color: var(--nf-color-text-inverse);
+  background: var(--nf-color-bg-inverse);
+  box-shadow: var(--nf-shadow-md);
+  pointer-events: auto;
+  animation: nf-toast-in var(--nf-motion-slow) var(--nf-ease);
+}
+
+.nf-toast__icon {
+  flex: none;
+  display: inline-flex;
+  margin-top: 1px;
+}
+
+.nf-toast--success .nf-toast__icon {
+  color: var(--nf-color-success);
+}
+
+.nf-toast--error .nf-toast__icon {
+  color: var(--nf-color-danger);
+}
+
+.nf-toast--sats .nf-toast__icon {
+  color: var(--nf-color-paid);
+}
+
+.nf-toast__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nf-toast__title {
+  font-size: var(--nf-text-sm);
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-toast__desc {
+  font-size: var(--nf-text-xs);
+  opacity: 0.8;
+}
+
+.nf-toast__action {
+  flex: none;
+  padding: 4px var(--nf-space-8);
+  border: 0;
+  border-radius: var(--nf-radius-sm);
+  font: inherit;
+  font-size: var(--nf-text-sm);
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-text-link);
+  background: transparent;
+  cursor: pointer;
+}
+
+.nf-toast__action:hover {
+  background: rgba(128, 128, 128, 0.2);
+}
+
+.nf-toast__close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: -4px -4px -4px 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--nf-radius-full);
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.nf-toast__close:hover {
+  opacity: 1;
+  background: rgba(128, 128, 128, 0.2);
+}
+
+@keyframes nf-toast-in {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+}

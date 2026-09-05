@@ -18,8 +18,13 @@
   ],
   "scripts": {
     "build": "tsc -b",
+    "build:tokens": "tsc -b && node scripts/build-tokens.ts",
+    "build:css": "node scripts/build-css.ts",
     "test": "vitest run",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "storybook": "storybook dev -p 6006 --no-open",
+    "storybook:build": "storybook build -o storybook-static --quiet",
+    "screenshots": "node scripts/screenshots.ts"
   },
   "dependencies": {
     "@sovit/core": "0.0.0",
