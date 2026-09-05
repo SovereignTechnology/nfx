@@ -1,0 +1,54 @@
+.nf-sats {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+  padding: 0 var(--nf-space-8) 0 var(--nf-space-4);
+  border-radius: var(--nf-radius-sm);
+  font-size: var(--nf-text-xs);
+  font-weight: var(--nf-weight-medium);
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--nf-color-sats);
+  background: var(--nf-color-sats-bg);
+}
+
+.nf-sats--sm {
+  height: 20px;
+  padding-right: 6px;
+}
+
+.nf-sats__icon {
+  color: var(--nf-color-paid);
+}
+
+.nf-sats__prefix,
+.nf-sats__suffix {
+  font-weight: var(--nf-weight-regular);
+  opacity: 0.85;
+}
+
+.nf-sats--rate {
+  color: var(--nf-color-success);
+  background: var(--nf-color-success-bg);
+}
+
+.nf-sats--earned {
+  color: var(--nf-color-text-secondary);
+  background: var(--nf-color-bg-subtle);
+}
+
+.nf-sats--neutral {
+  color: var(--nf-color-text);
+  background: transparent;
+  padding-left: 0;
+}
+
+.nf-sats--overlay {
+  color: var(--nf-color-overlay-fg);
+  background: var(--nf-color-overlay-strong);
+}
+
+.nf-sats--overlay .nf-sats__icon {
+  color: var(--nf-color-paid);
+}

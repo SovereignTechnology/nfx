@@ -1,0 +1,168 @@
+.nf-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--nf-space-8);
+  height: var(--nf-size-control);
+  padding: 0 var(--nf-space-16);
+  border: 1px solid transparent;
+  border-radius: var(--nf-radius-full);
+  font: inherit;
+  font-size: var(--nf-text-sm);
+  font-weight: var(--nf-weight-medium);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  color: var(--nf-color-text);
+  background: var(--nf-color-bg-subtle);
+  transition:
+    background-color var(--nf-motion-fast) var(--nf-ease),
+    color var(--nf-motion-fast) var(--nf-ease),
+    opacity var(--nf-motion-fast) var(--nf-ease);
+}
+
+.nf-button:hover {
+  background: var(--nf-color-bg-active);
+}
+
+.nf-button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.nf-button--sm {
+  height: var(--nf-size-control-sm);
+  padding: 0 var(--nf-space-12);
+  font-size: var(--nf-text-xs);
+}
+
+.nf-button--icon-only {
+  width: var(--nf-size-control);
+  padding: 0;
+}
+
+.nf-button--icon-only.nf-button--sm {
+  width: var(--nf-size-control-sm);
+}
+
+.nf-button--primary {
+  color: var(--nf-color-text-inverse);
+  background: var(--nf-color-bg-inverse);
+}
+
+.nf-button--primary:hover {
+  background: var(--nf-color-bg-inverse);
+  opacity: 0.85;
+}
+
+.nf-button--accent {
+  color: var(--nf-color-accent-fg);
+  background: var(--nf-color-accent);
+}
+
+.nf-button--accent:hover {
+  background: var(--nf-color-accent);
+  opacity: 0.9;
+}
+
+.nf-button--ghost {
+  background: transparent;
+}
+
+.nf-button--ghost:hover {
+  background: var(--nf-color-bg-hover);
+}
+
+.nf-button--danger {
+  color: var(--nf-color-danger);
+  background: var(--nf-color-danger-bg);
+}
+
+.nf-button--danger:hover {
+  background: var(--nf-color-danger-bg);
+  opacity: 0.85;
+}
+
+.nf-button[aria-pressed='true'] {
+  color: var(--nf-color-text-inverse);
+  background: var(--nf-color-bg-inverse);
+}
+
+.nf-button--loading .nf-button__label {
+  opacity: 0.6;
+}
+
+/* Icon button */
+
+.nf-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--nf-size-control);
+  height: var(--nf-size-control);
+  padding: 0;
+  border: 0;
+  border-radius: var(--nf-radius-full);
+  color: var(--nf-color-text);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color var(--nf-motion-fast) var(--nf-ease);
+}
+
+.nf-icon-button:hover {
+  background: var(--nf-color-bg-hover);
+}
+
+.nf-icon-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.nf-icon-button--sm {
+  width: var(--nf-size-control-sm);
+  height: var(--nf-size-control-sm);
+}
+
+.nf-icon-button--lg {
+  width: var(--nf-size-player-control);
+  height: var(--nf-size-player-control);
+}
+
+.nf-icon-button--overlay {
+  color: var(--nf-color-overlay-fg);
+  border-radius: var(--nf-radius-sm);
+}
+
+.nf-icon-button--overlay:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.nf-icon-button--overlay:focus-visible {
+  outline-color: var(--nf-color-overlay-fg);
+  outline-offset: -2px;
+}
+
+.nf-icon-button[aria-pressed='true']:not(.nf-icon-button--overlay) {
+  color: var(--nf-color-text-link);
+}
+
+.nf-icon-button--overlay[aria-pressed='true']::after {
+  content: '';
+  position: absolute;
+  bottom: 4px;
+  width: 18px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--nf-color-accent);
+}
+
+.nf-icon-button--overlay {
+  position: relative;
+}
+
+.nf-icon {
+  flex: none;
+  display: inline-block;
+  vertical-align: middle;
+}

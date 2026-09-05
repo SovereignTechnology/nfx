@@ -1,0 +1,105 @@
+.nf-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: var(--nf-z-sheet);
+  display: flex;
+}
+
+.nf-sheet--right {
+  justify-content: flex-end;
+}
+
+.nf-sheet--bottom {
+  align-items: flex-end;
+}
+
+.nf-sheet--inline {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  min-height: 420px;
+  overflow: hidden;
+  border-radius: var(--nf-radius-lg);
+}
+
+.nf-sheet__backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--nf-color-overlay);
+  animation: nf-fade var(--nf-motion-base) var(--nf-ease);
+}
+
+.nf-sheet__panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  max-width: 100%;
+  color: var(--nf-color-text);
+  background: var(--nf-color-bg-elevated);
+  box-shadow: var(--nf-shadow-md);
+  outline: none;
+}
+
+.nf-sheet--right .nf-sheet__panel {
+  width: 400px;
+  height: 100%;
+  animation: nf-slide-right var(--nf-motion-slow) var(--nf-ease);
+}
+
+.nf-sheet--bottom .nf-sheet__panel {
+  width: 100%;
+  max-height: 70%;
+  border-radius: var(--nf-radius-xl) var(--nf-radius-xl) 0 0;
+  animation: nf-slide-up var(--nf-motion-slow) var(--nf-ease);
+}
+
+.nf-sheet__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nf-space-8);
+  padding: var(--nf-space-12) var(--nf-space-12) var(--nf-space-12) var(--nf-space-24);
+  border-bottom: 1px solid var(--nf-color-border);
+}
+
+.nf-sheet__title {
+  margin: 0;
+  font-size: var(--nf-text-lg);
+  line-height: var(--nf-line-lg);
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-sheet__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--nf-space-16) var(--nf-space-24);
+}
+
+.nf-sheet__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--nf-space-8);
+  padding: var(--nf-space-12) var(--nf-space-24);
+  border-top: 1px solid var(--nf-color-border);
+}
+
+@keyframes nf-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes nf-slide-right {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+
+@keyframes nf-slide-up {
+  from {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+}
