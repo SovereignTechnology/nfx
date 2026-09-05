@@ -18,6 +18,8 @@ is how YouTube and Rumble work and feel, a clean experience like those mainstrea
   brief (neutral palette with light + dark themes, a system UI font stack, YouTube-like
   density and radii) and **records every such choice in the lane report (not published)** so sovtech can
   react to the PNGs in `artifacts/screens/` (execution plan §0 rule 8) rather than to JSX.
-- Anything in this file beyond the quoted brief is the orchestrator's reading of it, not a
-  requirement from sovtech. Open styling questions go to sovtech via `docs/status.md` "Inputs
+- **Theme (sovtech, 2026-09-05, ADR 0005): light + dark, follow the system
+  (`prefers-color-scheme`), with a user toggle in Settings.** Both themes are token sets.
+- Anything in this file beyond the quoted brief and the theme answer is the orchestrator's
+  reading of it, not a requirement from sovtech. Open styling questions go to sovtech via `docs/status.md` "Inputs
   still needed", not into invented spec.

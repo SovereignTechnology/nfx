@@ -4,7 +4,8 @@
 # Columns: name@version | install path | native markers | lifecycle install scripts | scope | shortest dependency chain from a workspace package
 # Every line has been read by a human on the stated version; the review notes live in the lane report (not published).
 # platform: linux-x64
-@esbuild/linux-x64@0.28.2 | node_modules/@esbuild/linux-x64 | platform-pkg | scripts=none | dev-only | via @sovit/ui>storybook>esbuild>@esbuild/linux-x64
+@electron-internal/extract-zip@1.0.5 | node_modules/@electron-internal/extract-zip | .node | scripts=none | dev-only | via @sovit/app-desktop>electron>@electron-internal/extract-zip
+@esbuild/linux-x64@0.28.2 | node_modules/@esbuild/linux-x64 | platform-pkg | scripts=none | dev-only | via @sovit/app-web>esbuild>@esbuild/linux-x64
 @oxc-parser/binding-linux-x64-gnu@0.127.0 | node_modules/@oxc-parser/binding-linux-x64-gnu | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>storybook>oxc-parser>@oxc-parser/binding-linux-x64-gnu
 @oxc-parser/binding-linux-x64-musl@0.127.0 | node_modules/@oxc-parser/binding-linux-x64-musl | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>storybook>oxc-parser>@oxc-parser/binding-linux-x64-musl
 @oxc-resolver/binding-linux-x64-gnu@11.21.2 | node_modules/@oxc-resolver/binding-linux-x64-gnu | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>storybook>oxc-resolver>@oxc-resolver/binding-linux-x64-gnu
@@ -15,23 +16,32 @@ lightningcss-linux-x64-gnu@1.32.0 | node_modules/@tailwindcss/node/node_modules/
 lightningcss-linux-x64-musl@1.32.0 | node_modules/@tailwindcss/node/node_modules/lightningcss-linux-x64-musl | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>@tailwindcss/vite>@tailwindcss/node>lightningcss>lightningcss-linux-x64-musl
 @tailwindcss/oxide-linux-x64-gnu@4.3.3 | node_modules/@tailwindcss/oxide-linux-x64-gnu | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>@tailwindcss/vite>@tailwindcss/oxide>@tailwindcss/oxide-linux-x64-gnu
 @tailwindcss/oxide-linux-x64-musl@4.3.3 | node_modules/@tailwindcss/oxide-linux-x64-musl | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>@tailwindcss/vite>@tailwindcss/oxide>@tailwindcss/oxide-linux-x64-musl
+bare-broadcast-channel@0.2.0 | node_modules/bare-broadcast-channel | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>pear-runtime>bare-worker>bare-broadcast-channel
 bare-buffer@3.7.1 | node_modules/bare-buffer | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-buffer
+bare-channel@5.2.4 | node_modules/bare-channel | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>pear-runtime>bare-worker>bare-channel
 bare-dns@2.2.0 | node_modules/bare-dns | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-tcp>bare-dns
-bare-fs@4.8.1 | node_modules/bare-fs | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/gateway>hypercore>hypercore-storage>device-file>bare-fs
-bare-hrtime@2.1.2 | node_modules/bare-hrtime | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/gateway>hypercore-blob-server>bare-http1>bare-hrtime
+bare-fs@4.8.1 | node_modules/bare-fs | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>pear-runtime>bare-sidecar>bare-fs
+bare-hrtime@2.1.2 | node_modules/bare-hrtime | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>hypercore-blob-server>bare-http1>bare-hrtime
 bare-inspect@3.1.10 | node_modules/bare-inspect | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/gateway>corestore>sodium-universal>sodium-native>bare-assert>bare-inspect
+bare-module@6.4.0 | node_modules/bare-module | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>pear-runtime>bare-sidecar>bare-module
+bare-module-lexer@1.6.6 | node_modules/bare-module-lexer | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>pear-runtime>bare-sidecar>bare-module>bare-module-lexer
 bare-os@3.9.3 | node_modules/bare-os | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-os
-bare-path@3.1.2 | node_modules/bare-path | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-url>bare-path
+bare-path@3.1.2 | node_modules/bare-path | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>pear-runtime>bare-path
 bare-pipe@4.3.1 | node_modules/bare-pipe | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-pipe
+bare-sidecar@0.5.4 | node_modules/bare-sidecar | prebuilds | scripts=none | runtime | via @sovit/app-desktop>pear-runtime>bare-sidecar
 bare-structured-clone@1.6.0 | node_modules/bare-structured-clone | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-structured-clone
 bare-subprocess@6.1.0 | node_modules/bare-subprocess | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess
 bare-tcp@2.6.1 | node_modules/bare-tcp | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-tcp
+bare-thread@1.2.4 | node_modules/bare-thread | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>pear-runtime>bare-worker>bare-thread
 bare-type@1.1.1 | node_modules/bare-type | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-structured-clone>bare-type
+bare-type-stripper@0.1.6 | node_modules/bare-type-stripper | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>pear-runtime>bare-sidecar>bare-module>bare-type-stripper
 bare-url@2.5.4 | node_modules/bare-url | .bare,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>bare-subprocess>bare-url
-fs-native-extensions@1.5.1 | node_modules/fs-native-extensions | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/gateway>hypercore>hypercore-storage>device-file>fs-native-extensions
+fs-native-extensions@1.5.1 | node_modules/fs-native-extensions | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>pear-runtime>pear-runtime-updater>fs-native-extensions
 lightningcss-linux-x64-gnu@1.33.0 | node_modules/lightningcss-linux-x64-gnu | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>vite>lightningcss>lightningcss-linux-x64-gnu
 lightningcss-linux-x64-musl@1.33.0 | node_modules/lightningcss-linux-x64-musl | .node,platform-pkg | scripts=none | dev-only | via @sovit/ui>vite>lightningcss>lightningcss-linux-x64-musl
+msix-manager@0.2.5 | node_modules/msix-manager | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>pear-runtime>pear-runtime-updater>msix-manager
 quickbit-native@2.4.8 | node_modules/quickbit-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/gateway>hypercore>quickbit-universal>quickbit-native
+rabin-native@2.0.0 | node_modules/rabin-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/app-desktop>pear-runtime>pear-runtime-updater>hyperdrive>mirror-drive>rabin-stream>rabin-native
 rocksdb-native@3.17.4 | node_modules/rocksdb-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/gateway>hypercore>hypercore-storage>rocksdb-native
 simdle-native@1.3.9 | node_modules/simdle-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/gateway>hypercore>quickbit-universal>simdle-universal>simdle-native
 sodium-native@5.1.0 | node_modules/sodium-native | .bare,.node,addon,prebuilds | scripts=none | runtime | via @sovit/gateway>corestore>sodium-universal>sodium-native

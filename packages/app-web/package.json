@@ -22,10 +22,13 @@
     "lint": "eslint src"
   },
   "dependencies": {
+    "@noble/curves": "1.9.7",
     "@sovit/core": "0.0.0",
-    "@sovit/ui": "0.0.0"
+    "@sovit/ui": "0.0.0",
+    "sodium-javascript": "0.8.0"
   },
   "devDependencies": {
+    "esbuild": "0.28.2",
     "jsdom": "29.1.1"
   }
 }
