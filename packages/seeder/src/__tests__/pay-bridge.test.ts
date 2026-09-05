@@ -1,4 +1,4 @@
-import type { PricePolicy } from '@sovit/core';
+import type { CoreKeyHex, PricePolicy } from '@sovit/core';
 import { mocks } from '@sovit/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -17,6 +17,8 @@ import {
 } from './helpers.js';
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+const CORE_A = mocks.asCoreKey('A');
+const CORE_B = mocks.asCoreKey('B');
 
 describe('pay bridge (PayProtocol ⇄ PeerSession ⇄ PaymentEngine.verify)', () => {
   let dir: string;
@@ -28,7 +30,14 @@ describe('pay bridge (PayProtocol ⇄ PeerSession ⇄ PaymentEngine.verify)', ()
   });
   afterEach(() => cleanup());
 
-  async function rig(windowBlocks = 4, mode: mocks.MockPaymentMode = 'honest') {
+  async function rig(
+    windowBlocks = 4,
+    mode: mocks.MockPaymentMode = 'honest',
+    v3: {
+      readonly corePolicies?: ReadonlyMap<CoreKeyHex, PricePolicy>;
+      readonly replicatedCores?: () => number;
+    } = {},
+  ) {
     const engine = honestEngine(windowBlocks);
     const viewer = new mocks.MockPaymentEngine({ mode });
     const banList = await loadedBanList(dir);
@@ -57,7 +66,8 @@ describe('pay bridge (PayProtocol ⇄ PeerSession ⇄ PaymentEngine.verify)', ()
     const detach = attachPayBridge({
       session,
       protocol,
-      policy: () => policy,
+      policy: (core) => (core === undefined ? undefined : v3.corePolicies?.get(core)) ?? policy,
+      ...(v3.replicatedCores ? { replicatedCores: v3.replicatedCores } : {}),
       scheduler,
       logger: log.logger,
     });
@@ -160,5 +170,115 @@ describe('pay bridge (PayProtocol ⇄ PeerSession ⇄ PaymentEngine.verify)', ()
     expect(res.failed).toBe(1);
     expect(r.engine.isBanned(pk)).toBe(true);
     await r.scheduler.stop({ flush: false });
+  });
+
+  // ---------------------------------------------------------------- contracts v3 (ADR 0004)
+
+  it('v3 (a): a core-less PAY on a stream replicating 2 cores is refused as malformed before the engine sees it', async () => {
+    const r = await rig(8);
+    const pk = pubkey('v2-client');
+    r.protocol.remoteHello(hello(pk));
+    for (let i = 0; i < 2; i++) r.session.onUpload(CORE_A, i, 1024);
+    for (let i = 0; i < 2; i++) r.session.onUpload(CORE_B, i, 1024);
+    expect(r.session.uploadedCores.size).toBe(2);
+
+    const v2pay = await r.viewer.pay({ fromBlock: 0, toBlock: 1 }, r.seederRef, r.policy);
+    r.protocol.remotePay(v2pay);
+    await tick();
+    expect(r.protocol.acks).toEqual([
+      { type: 'ACK', fromBlock: 0, toBlock: 1, ok: false, reason: 'malformed' },
+    ]);
+    // nothing was credited, nothing queued, the session is NOT cut (a refusal, not a ban)
+    expect(r.engine.window(pk)).toMatchObject({ uploaded: 4, paid: 0, outstanding: 4 });
+    expect(r.engine.pendingCount()).toBe(0);
+    expect(r.scheduler.pendingBlocks).toBe(0);
+    expect(r.stream.destroyed).toBe(false);
+    expect(
+      r.log.records.some((x) => x.msg === 'PAY rejected' && x.fields['reason'] === 'malformed'),
+    ).toBe(true);
+
+    // The same PAY WITH a core is fine.
+    const v3pay = await r.viewer.pay(
+      { core: CORE_A, fromBlock: 0, toBlock: 1 },
+      r.seederRef,
+      r.policy,
+    );
+    r.protocol.remotePay(v3pay);
+    await tick();
+    expect(r.protocol.acks[1]).toMatchObject({ ok: true });
+    expect(r.engine.window(pk)).toMatchObject({ paid: 2, outstanding: 2 });
+    await r.scheduler.stop({ flush: false });
+    r.detach();
+  });
+
+  it('v3 (a): the seeder-supplied replicatedCores view counts too, even before a block was uploaded from the 2nd core', async () => {
+    let cores = 1;
+    const r = await rig(8, 'honest', { replicatedCores: () => cores });
+    const pk = pubkey('v2-client-2');
+    r.protocol.remoteHello(hello(pk));
+    for (let i = 0; i < 2; i++) r.session.onUpload(CORE_A, i, 1024);
+    // one core on the stream: v2 aggregate semantics still apply
+    r.protocol.remotePay(await r.viewer.pay({ fromBlock: 0, toBlock: 0 }, r.seederRef, r.policy));
+    await tick();
+    expect(r.protocol.acks[0]).toMatchObject({ ok: true });
+    // the peer attached a second core (no upload from it yet): core-less PAY now malformed
+    cores = 2;
+    r.protocol.remotePay(await r.viewer.pay({ fromBlock: 1, toBlock: 1 }, r.seederRef, r.policy));
+    await tick();
+    expect(r.protocol.acks[1]).toMatchObject({ ok: false, reason: 'malformed' });
+    await r.scheduler.stop({ flush: false });
+  });
+
+  it("v3 (c): the policy is resolved per range.core — a PAY for core B is verified against B's policy, not the default", async () => {
+    const policyB: PricePolicy = {
+      satsPerBlock: 5 as never,
+      blockSize: 1024,
+      mints: honestEngine().config.acceptedMints,
+      split: { seeder: 50, creator: 50 },
+      creatorP2pk: mocks.asP2pk('creator-B'),
+    };
+    const r = await rig(16, 'honest', { corePolicies: new Map([[CORE_B, policyB]]) });
+    const pk = pubkey('per-core');
+    r.protocol.remoteHello(hello(pk));
+    for (let i = 0; i < 4; i++) r.session.onUpload(CORE_A, i, 1024);
+    for (let i = 0; i < 4; i++) r.session.onUpload(CORE_B, i, 1024);
+
+    // Paying core B's blocks at the DEFAULT price (2 sat, creator A) fails on B's policy:
+    // the creator set is locked to the wrong creator (T4) — the first check that differs.
+    const cheap = await r.viewer.pay(
+      { core: CORE_B, fromBlock: 0, toBlock: 1 },
+      r.seederRef,
+      r.policy,
+    );
+    r.protocol.remotePay(cheap);
+    await tick();
+    expect(r.protocol.acks[0]).toMatchObject({ ok: false, reason: 'wrong-p2pk-target' });
+
+    // Right creator, still the cheap price → exact-amount check under B's policy.
+    const underpaid = await r.viewer.pay({ core: CORE_B, fromBlock: 0, toBlock: 1 }, r.seederRef, {
+      ...policyB,
+      satsPerBlock: r.policy.satsPerBlock,
+    });
+    r.protocol.remotePay(underpaid);
+    await tick();
+    expect(r.protocol.acks[1]).toMatchObject({ ok: false, reason: 'wrong-amount' });
+
+    // Paid under B's policy → accepted, credited at 2 × 5 sat.
+    const right = await r.viewer.pay(
+      { core: CORE_B, fromBlock: 0, toBlock: 1 },
+      r.seederRef,
+      policyB,
+    );
+    r.protocol.remotePay(right);
+    await tick();
+    expect(r.protocol.acks[2]).toMatchObject({ ok: true });
+    // Core A has no override → default policy.
+    const a = await r.viewer.pay({ core: CORE_A, fromBlock: 0, toBlock: 3 }, r.seederRef, r.policy);
+    r.protocol.remotePay(a);
+    await tick();
+    expect(r.protocol.acks[3]).toMatchObject({ ok: true });
+    expect(r.engine.window(pk)).toMatchObject({ uploaded: 8, paid: 6, outstanding: 2 });
+    await r.scheduler.stop({ flush: false });
+    for (const line of r.log.lines) expect(line).not.toContain('mock:');
   });
 });

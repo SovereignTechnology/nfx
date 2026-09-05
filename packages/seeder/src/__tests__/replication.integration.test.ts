@@ -8,7 +8,7 @@
 import path from 'node:path';
 
 import { mocks } from '@sovit/core';
-import type { PricePolicy } from '@sovit/core';
+import type { NostrPubkey, PricePolicy } from '@sovit/core';
 import DHT from 'hyperdht';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -335,5 +335,122 @@ describe('replication over a direct stream pair (offline)', () => {
     expect(all).not.toContain('mock:');
     expect(all).not.toMatch(/"secret"|"C":/);
     expect(all).toContain('PAY accepted');
+  });
+
+  it('v3: two cores on one stream — pre-HELLO rebind, core-less PAY malformed, per-core policy + per-core range check', async () => {
+    const seeder = await node(8);
+    const viewer = await node(100);
+    const viewerEngine = viewer.engine;
+    // Two videos on this seeder: core A (default) and core B ('other').
+    const a = await fixtureBlob(seeder.seeder, 4);
+    const dataB = new Uint8Array(BLOCK * 4).map((_, i) => (i * 17 + 3) % 256);
+    const putB = await seeder.seeder.putBytes(dataB, { core: 'other' });
+    if (!putB.ok) throw new Error('put B failed');
+    const b = putB.entry;
+    expect(b.coreKey).not.toBe(a.entry.coreKey);
+
+    const policyA: PricePolicy = {
+      satsPerBlock: 2 as never,
+      blockSize: BLOCK,
+      mints: seeder.engine.config.acceptedMints,
+      split: { seeder: 50, creator: 50 },
+      creatorP2pk: mocks.asP2pk('creator-A'),
+    };
+    const policyB: PricePolicy = {
+      ...policyA,
+      satsPerBlock: 6 as never,
+      creatorP2pk: mocks.asP2pk('creator-B'),
+    };
+    seeder.seeder.setPolicy(policyA);
+    seeder.seeder.setCorePolicy(b.coreKey, policyB);
+
+    const vA = await viewer.seeder.blobs.openCoreByKey(Buffer.from(a.entry.coreKey, 'hex'));
+    const vB = await viewer.seeder.blobs.openCoreByKey(Buffer.from(b.coreKey, 'hex'));
+    const { sa, sb } = connect(seeder.seeder, viewer.seeder);
+    await sb.noiseStream.opened;
+    await settle(50);
+    const viewerNoise = toHex(sb.noiseStream.publicKey!) as NostrPubkey;
+    const session = seeder.seeder.session(viewerNoise)!;
+    // (6) the protomux Hypercore put on the seeder's stream is reachable without userData reach-through
+    expect(session.mux).not.toBeNull();
+    expect(session.mux).toBe(sa.noiseStream.userData);
+
+    // Pre-HELLO: 2 blocks of A land under the provisional (Noise-hex) identity.
+    for (let i = 0; i < 2; i++)
+      expect(await vA.core.get(i, { wait: true, timeout: 2000 })).not.toBeNull();
+    await settle(50);
+    expect(seeder.engine.window(viewerNoise)).toMatchObject({ uploaded: 2, outstanding: 2 });
+    expect([...session.uploadedCores]).toEqual([a.entry.coreKey]);
+
+    // HELLO → rebind: (b) no provisional entry left, the pubkey's window carries the 2 blocks.
+    const protocol = new FakePayProtocol();
+    seeder.seeder.attachPayProtocol(session, protocol);
+    const viewerPubkey = mocks.asPubkey('two-core-viewer');
+    protocol.remoteHello(hello(viewerPubkey));
+    expect(session.pubkey).toBe(viewerPubkey);
+    expect(seeder.engine.windows().map((w) => w.peer)).toEqual([viewerPubkey]);
+    expect(seeder.engine.window(viewerNoise)).toBeUndefined();
+    expect(seeder.engine.window(viewerPubkey)).toMatchObject({
+      uploaded: 2,
+      paid: 0,
+      outstanding: 2,
+    });
+
+    const ref = {
+      pubkey: seeder.engine.config.ownPubkey,
+      p2pk: seeder.engine.config.ownP2pk,
+      mint: policyA.mints[0]!,
+    };
+    // (a) a v2 core-less PAY → malformed: nothing has been uploaded from B yet, so only the
+    // Corestore view (both cores have a replication peer on this stream) can know it is a
+    // two-core stream — that is `Seeder.replicatedCores()`.
+    protocol.remotePay(await viewerEngine.pay({ fromBlock: 0, toBlock: 1 }, ref, policyA));
+    await settle(20);
+    expect(protocol.acks[0]).toMatchObject({ ok: false, reason: 'malformed' });
+    expect(session.cutReason).toBeNull();
+
+    // Now pull one block of B (post-HELLO, accounted straight to the pubkey, per core).
+    expect(await vB.core.get(0, { wait: true, timeout: 2000 })).not.toBeNull();
+    await settle(50);
+    expect(seeder.engine.window(viewerPubkey)).toMatchObject({ uploaded: 3, outstanding: 3 });
+    expect([...session.uploadedCores].sort()).toEqual([a.entry.coreKey, b.coreKey].sort());
+
+    // per-core range check: B[0..1] when only B[0] was uploaded (3 blocks in aggregate would pass)
+    protocol.remotePay(
+      await viewerEngine.pay({ core: b.coreKey, fromBlock: 0, toBlock: 1 }, ref, policyB),
+    );
+    await settle(20);
+    expect(protocol.acks[1]).toMatchObject({ ok: false, reason: 'range-not-uploaded' });
+
+    // (c) B paid at A's price/creator → refused under B's policy; at B's → ok
+    protocol.remotePay(
+      await viewerEngine.pay({ core: b.coreKey, fromBlock: 0, toBlock: 0 }, ref, policyA),
+    );
+    await settle(20);
+    expect(protocol.acks[2]).toMatchObject({ ok: false, reason: 'wrong-p2pk-target' });
+    protocol.remotePay(
+      await viewerEngine.pay({ core: b.coreKey, fromBlock: 0, toBlock: 0 }, ref, policyB),
+    );
+    await settle(20);
+    expect(protocol.acks[3]).toMatchObject({ ok: true });
+    protocol.remotePay(
+      await viewerEngine.pay({ core: a.entry.coreKey, fromBlock: 0, toBlock: 1 }, ref, policyA),
+    );
+    await settle(20);
+    expect(protocol.acks[4]).toMatchObject({ ok: true });
+    expect(seeder.engine.window(viewerPubkey)).toMatchObject({
+      uploaded: 3,
+      paid: 3,
+      outstanding: 0,
+    });
+
+    // The stream is still up and both blobs complete.
+    const fullA = await vA.blobs.get(a.entry.blob, { wait: true, timeout: 5000 });
+    const fullB = await vB.blobs.get(b.blob, { wait: true, timeout: 5000 });
+    expect(Buffer.from(fullA!).equals(Buffer.from(a.data))).toBe(true);
+    expect(Buffer.from(fullB!).equals(Buffer.from(dataB))).toBe(true);
+    expect(session.cutReason).toBeNull();
+    const all = seeder.log.lines.join('\n');
+    expect(all).not.toContain('mock:');
   });
 });
