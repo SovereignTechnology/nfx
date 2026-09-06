@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Component screenshots (execution plan §0 rule 8): one PNG per story per theme into
- * artifacts/screens/components/<Component>--<state>--<theme>.png.
+ * artifacts/screens/components/<Component>--<state>--<theme>.png for `Components/*` stories and
+ * artifacts/screens/<screen>/<Screen>--<state>--<theme>.png for `Screens/*` stories (L5).
  *
  *   npm run -w packages/ui screenshots            # storybook build → static server → capture
  *   … screenshots -- --static <dir>               # reuse an existing storybook-static
@@ -32,7 +33,14 @@ import { chromium } from 'playwright-core';
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgDir = resolve(here, '..');
 const repoRoot = resolve(pkgDir, '..', '..');
-const OUT_DIR = join(repoRoot, 'artifacts', 'screens', 'components');
+const SCREENS_ROOT = join(repoRoot, 'artifacts', 'screens');
+
+/** `Components/VideoCard` → components/; `Screens/Watch` → watch/ (one dir per screen). */
+function outDirFor(title: string): string {
+  const [group, ...rest] = title.split('/');
+  const leaf = (rest[rest.length - 1] ?? group ?? 'misc').toLowerCase();
+  return join(SCREENS_ROOT, group?.toLowerCase() === 'screens' ? leaf : 'components');
+}
 const DEFAULT_CHROMIUM = '/home/user/Applications/ungoogled-chromium/current/chrome';
 
 interface StoryEntry {
@@ -145,7 +153,6 @@ async function main(): Promise<void> {
     .sort((a, b) => a.id.localeCompare(b.id));
   if (stories.length === 0) throw new Error('no stories in index.json');
 
-  mkdirSync(OUT_DIR, { recursive: true });
   const { server, origin } = await serve(staticDir);
   log(
     `serving ${staticDir} at ${origin}; ${stories.length} stories × ${args.themes.length} themes`,
@@ -153,6 +160,7 @@ async function main(): Promise<void> {
 
   const browser = await chromium.launch({ executablePath, headless: true });
   const written = new Set<string>();
+  const dirs = new Set<string>();
   try {
     for (const theme of args.themes) {
       const ctx = await browser.newContext({
@@ -200,9 +208,12 @@ async function main(): Promise<void> {
           );
         });
         await p.waitForTimeout(120);
-        const target = join(OUT_DIR, file);
+        const dir = outDirFor(story.title);
+        mkdirSync(dir, { recursive: true });
+        dirs.add(dir);
+        const target = join(dir, file);
         await frame.screenshot({ path: target, type: 'png' });
-        written.add(file);
+        written.add(target);
         log(`  ${file}`);
       }
       await ctx.close();
@@ -212,15 +223,20 @@ async function main(): Promise<void> {
     server.close();
   }
 
-  // Prune PNGs from earlier runs that no story produces any more (only our own naming).
+  // Prune PNGs from earlier runs that no story produces any more (only our own naming, only
+  // in directories this run wrote to — a `--filter` run never touches other screens' PNGs).
   let pruned = 0;
-  for (const f of readdirSync(OUT_DIR)) {
-    if (f.endsWith('.png') && f.includes('--') && !written.has(f)) {
-      unlinkSync(join(OUT_DIR, f));
-      pruned += 1;
+  for (const dir of dirs) {
+    for (const f of readdirSync(dir)) {
+      if (f.endsWith('.png') && f.includes('--') && !written.has(join(dir, f))) {
+        unlinkSync(join(dir, f));
+        pruned += 1;
+      }
     }
   }
-  log(`wrote ${written.size} PNGs to ${OUT_DIR}${pruned > 0 ? ` (pruned ${pruned} stale)` : ''}`);
+  log(
+    `wrote ${written.size} PNGs under ${SCREENS_ROOT} (${[...dirs].map((d) => d.slice(SCREENS_ROOT.length + 1)).join(', ')})${pruned > 0 ? ` (pruned ${pruned} stale)` : ''}`,
+  );
   process.stdout.write(`${written.size}\n`);
 }
 
