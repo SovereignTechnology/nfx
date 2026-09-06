@@ -1,0 +1,219 @@
+/*
+ * Home screen (L5). Screen-scoped, `nf-home` namespace, L4 tokens only. Loaded by the shells
+ * as a file after tokens.css + components.css (never injected — CSP `style-src 'self'`).
+ */
+.nf-home {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-24);
+  min-width: 0;
+  color: var(--nf-color-text);
+}
+
+/* Visually hidden heading: the landmark keeps its name, the layout stays YouTube-clean. */
+.nf-home__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Chip bar (YouTube's filter chips): sticky so the feed switch is always in reach. */
+.nf-home__bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nf-space-8) var(--nf-space-16);
+  padding: var(--nf-space-12) 0;
+  background: var(--nf-color-bg);
+}
+
+.nf-home__tabs {
+  display: flex;
+  gap: var(--nf-space-12);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.nf-home__tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.nf-home__tab {
+  flex: none;
+}
+
+.nf-home__hint {
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-home__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-40);
+  min-width: 0;
+  outline: none;
+}
+
+/* The grid: 16 px between columns, 40 px between rows, cards no narrower than 280 px. */
+.nf-home__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--nf-space-40) var(--nf-space-16);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-home__item {
+  position: relative;
+  min-width: 0;
+}
+
+/*
+ * L4 workaround (reported in docs/lanes/L5-Home.md): `.nf-card__text` is a flex item with no
+ * `flex-grow`, so `VideoCardSkeleton`'s percentage-width text lines collapse to 0 px and the
+ * skeleton shows only a thumbnail + circle. Letting the text column grow inside this grid
+ * restores the three placeholder lines; real cards are unaffected (their text already fills).
+ */
+.nf-home__item .nf-card__text {
+  flex: 1 1 auto;
+}
+
+/*
+ * Hover-preview affordance: sits on the thumbnail's top-left corner (the card's thumb is
+ * its first child, full width, 16:9), never intercepts the pointer so the card's own hover
+ * state and click keep working. Only rendered while the setting is on and the card is
+ * hovered/focused; it is decorative for assistive tech (aria-hidden) — playback starts on
+ * the Watch screen, after the price.
+ */
+.nf-home__preview {
+  position: absolute;
+  top: var(--nf-space-8);
+  left: var(--nf-space-8);
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nf-space-4);
+  height: 24px;
+  padding: 0 var(--nf-space-4) 0 var(--nf-space-8);
+  border-radius: var(--nf-radius-full);
+  font-size: var(--nf-text-xs);
+  font-weight: var(--nf-weight-medium);
+  line-height: 1;
+  color: var(--nf-color-overlay-fg);
+  background: var(--nf-color-overlay-strong);
+  pointer-events: none;
+}
+
+.nf-home__preview .nf-sats {
+  height: 18px;
+  border-radius: var(--nf-radius-full);
+}
+
+.nf-home__preview-label {
+  margin-right: var(--nf-space-4);
+}
+
+/* Shorts shelf (kind 22 in a feed page): a horizontal row of 9:16 cards, like YouTube's. */
+.nf-home__shorts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+  min-width: 0;
+}
+
+.nf-home__shorts-title {
+  margin: 0;
+  font-size: var(--nf-text-xl);
+  line-height: var(--nf-line-xl);
+  font-weight: var(--nf-weight-bold);
+}
+
+.nf-home__shorts-list {
+  display: flex;
+  gap: var(--nf-space-16);
+  margin: 0;
+  padding: 0 0 var(--nf-space-8);
+  list-style: none;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.nf-home__shorts-list > .nf-home__item {
+  flex: 0 0 210px;
+}
+
+/* Empty states with a follow-up section (suggested channels). */
+.nf-home__empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+}
+
+.nf-home__suggest {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
+}
+
+.nf-home__suggest-title {
+  margin: 0;
+  font-size: var(--nf-text-lg);
+  line-height: var(--nf-line-lg);
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-home__suggest-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-home__suggest-none {
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+/* Infinite scroll: the sentinel is observed 600 px ahead; the button only appears where
+   IntersectionObserver is unavailable. */
+.nf-home__more {
+  display: flex;
+  justify-content: center;
+  min-height: var(--nf-space-8);
+}
+
+.nf-home__sentinel {
+  width: 100%;
+  height: 1px;
+}
+
+/* Mini-player slot: floats bottom-right above the grid while a video keeps playing. */
+.nf-home__mini {
+  position: fixed;
+  right: var(--nf-space-16);
+  bottom: var(--nf-space-16);
+  z-index: var(--nf-z-mini-player);
+  box-shadow: var(--nf-shadow-md);
+  border-radius: var(--nf-radius-lg);
+  overflow: hidden;
+}
