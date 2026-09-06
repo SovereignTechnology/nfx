@@ -181,10 +181,12 @@ describe('feeds', () => {
     const rel = await relatedVideos(r.client, orbital, 3);
     // Derived from the fixtures, not hard-coded: the old `toBe(3)` only held because
     // `fakeHex64` used to give two channels the same pubkey (fixed by the orchestrator).
+    // (Events are re-signed by `signerFor`, so compare by title/fixture author, not event id.)
+    const fixture = VIDEOS.find((v) => v.title === orbital.title)!;
     const candidates = VIDEOS.filter(
       (v) =>
-        v.id !== orbital.id &&
-        (v.author === orbital.author || v.tags.some((t) => orbital.tags.includes(t))),
+        v.title !== fixture.title &&
+        (v.author === fixture.author || v.tags.some((t) => fixture.tags.includes(t))),
     ).length;
     expect(candidates).toBeGreaterThanOrEqual(2);
     expect(rel.length).toBe(Math.min(3, candidates));
