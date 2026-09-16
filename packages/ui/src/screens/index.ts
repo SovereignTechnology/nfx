@@ -3,3 +3,5 @@
  * `./<Screen>/index.ts`; the orchestrator adds the re-export line here at merge.
  */
 export * from './shared/index.js';
+export { Home } from './Home/index.js';
+export type { HomeProps, HomeTab } from './Home/index.js';
