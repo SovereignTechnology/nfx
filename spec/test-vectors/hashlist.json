@@ -1,0 +1,77 @@
+{
+  "description": "NFX-05 hash list for the 2026-09 test vector video. Its exact byte content hashed with sha256 gives the manifest root.",
+  "video": "nutflix:mainnet:1:salt-flats-dusk",
+  "rendered_bytes_sha256": "1a7143aaef6a79a0d757ee24613c9aad6a7cddbbf6816b1a1014170c3d922ec0",
+  "note": "Vectors for fabricated bytes: 'fabricated' maps name -> base64 content.",
+  "hashlist": {
+    "v": 1,
+    "video": "nutflix:mainnet:1:salt-flats-dusk",
+    "files": [
+      {
+        "name": "master.m3u8",
+        "role": "playlist-master",
+        "sha256": "52fac7f6a42a3df0682c870e0424c85cadb70c1c02d10931aa69225ab697538c",
+        "size": 210
+      },
+      {
+        "name": "r720.m3u8",
+        "role": "playlist",
+        "sha256": "024b287dd868144c1c66eb3bd5025f6a64f22418f27d455868d53c60b5f555b3",
+        "size": 430
+      },
+      {
+        "name": "init-720.mp4",
+        "role": "init",
+        "sha256": "0445210eb8755a75f545c3ae58de1162d6ec6490ad8d197ed613d7bbe17f3569",
+        "size": 53
+      },
+      {
+        "name": "seg0.m4s",
+        "role": "segment",
+        "sha256": "601d8df40fa7854d1e336a04eec641cdc705d0855c24060957072aa161f49f0b",
+        "size": 27,
+        "dur_ms": 2000
+      },
+      {
+        "name": "seg1.m4s",
+        "role": "segment",
+        "sha256": "8ef971da21a4d0c21e20be4e7b8c2ec90dcacff9f2c43947291625b062427a3d",
+        "size": 27,
+        "dur_ms": 2000
+      },
+      {
+        "name": "seg2.m4s",
+        "role": "segment",
+        "sha256": "37d3f6f65fcaff6b0a161c02f5e47930ddb109c381b23e1debda7a96fed33bd8",
+        "size": 27,
+        "dur_ms": 2000
+      },
+      {
+        "name": "thumb.jpg",
+        "role": "thumb",
+        "sha256": "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+        "size": 27
+      }
+    ],
+    "renditions": [
+      {
+        "id": "720p",
+        "playlist": "r720.m3u8",
+        "bandwidth": 2500000,
+        "codecs": "avc1.64001f,mp4a.40.2",
+        "resolution": "1280x720"
+      }
+    ]
+  },
+  "fabricated": {
+    "init-720.mp4": "TkZYLVZFQ1RPUiBpbml0IHNlZ21lbnQgYnl0ZXMgKG5vdCBhIHJlYWwgZk1QNCBpbml0KQo=",
+    "seg-0": "TkZYLVZFQ1RPUiBzZWdtZW50IDAgYnl0ZXMK",
+    "seg-1": "TkZYLVZFQ1RPUiBzZWdtZW50IDEgYnl0ZXMK",
+    "seg-2": "TkZYLVZFQ1RPUiBzZWdtZW50IDIgYnl0ZXMK",
+    "thumb.jpg": "TkZYLVZFQ1RPUiB0aHVtYm5haWwgYnl0ZXMK"
+  },
+  "playlists": {
+    "master.m3u8": "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS=\"avc1.64001f,mp4a.40.2\"\n024b287dd868144c1c66eb3bd5025f6a64f22418f27d455868d53c60b5f555b3.m3u8\n",
+    "r720.m3u8": "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"0445210eb8755a75f545c3ae58de1162d6ec6490ad8d197ed613d7bbe17f3569.mp4\"\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXTINF:2.000,\n601d8df40fa7854d1e336a04eec641cdc705d0855c24060957072aa161f49f0b.m4s\n#EXTINF:2.000,\n8ef971da21a4d0c21e20be4e7b8c2ec90dcacff9f2c43947291625b062427a3d.m4s\n#EXTINF:2.000,\n37d3f6f65fcaff6b0a161c02f5e47930ddb109c381b23e1debda7a96fed33bd8.m4s\n#EXT-X-ENDLIST\n"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sovit.xyz/nutflix/spec/schemas/beacon-content.schema.json",
+  "title": "NFX-03 beacon content",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["v", "video", "endpoints", "chunks", "price_hint"],
+  "properties": {
+    "v": { "const": 1 },
+    "video": {
+      "type": "string",
+      "pattern": "^nutflix:[a-z0-9-]{2,32}:(0|[1-9][0-9]*):[a-z0-9][a-z0-9-]{6,62}$"
+    },
+    "endpoints": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["t"],
+        "properties": {
+          "t": { "enum": ["iroh", "https", "webrtc"] },
+          "node": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "relay": { "type": "string" },
+          "addrs": { "type": "array", "items": { "type": "string" } },
+          "tickets": {
+            "type": "object",
+            "additionalProperties": { "type": "string", "minLength": 8 }
+          },
+          "url": { "type": "string", "pattern": "^https://" },
+          "tracker_urls": { "type": "array", "items": { "type": "string", "pattern": "^wss?://" } },
+          "infohash": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+        }
+      }
+    },
+    "chunks": { "anyOf": [{ "const": "all" }, { "type": "integer", "minimum": 0 }] },
+    "price_hint": { "type": "integer", "minimum": 0 },
+    "accepts_mints": { "type": "array", "items": { "type": "string", "pattern": "^https://" } },
+    "free": { "type": "boolean" }
+  }
+}

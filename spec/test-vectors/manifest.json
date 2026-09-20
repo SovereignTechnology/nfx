@@ -1,0 +1,83 @@
+{
+  "description": "NFX-02 manifest (kind 38504), licensed mode. Deterministic signature: aux_rand = 32 zero bytes.",
+  "secret_keys_DO_NOT_USE": {
+    "creator": "bdabb76590ff1cd7f14b86be0747913d9efaf04473f3c06a3d4736063f72ad92",
+    "seeder": "115ac24798fa94a35206459d31583a3ad9c57955a9e9784f749cb38327714683",
+    "cashu": "131c142b85851c3ca357b6c859664a92dcbfcd838cddc58a4694d41cf35d0991"
+  },
+  "event": {
+    "id": "a3cbf2664524918da4a27dbdc16bd54607e50f46a190f77a7fa03deb45a66013",
+    "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+    "created_at": 1790000000,
+    "kind": 38504,
+    "tags": [
+      [
+        "d",
+        "nutflix:mainnet:1:salt-flats-dusk"
+      ],
+      [
+        "n",
+        "nutflix:mainnet:1"
+      ],
+      [
+        "title",
+        "Salt Flats at Dusk"
+      ],
+      [
+        "published_at",
+        "1790000000"
+      ],
+      [
+        "license",
+        "licensed"
+      ],
+      [
+        "root",
+        "1a7143aaef6a79a0d757ee24613c9aad6a7cddbbf6816b1a1014170c3d922ec0"
+      ],
+      [
+        "segs",
+        "7"
+      ],
+      [
+        "duration",
+        "6"
+      ],
+      [
+        "thumb",
+        "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+        "image/jpeg"
+      ],
+      [
+        "key_price",
+        "200"
+      ],
+      [
+        "split",
+        "5000"
+      ],
+      [
+        "mint",
+        "https://mint.example"
+      ],
+      [
+        "cashu_key",
+        "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+      ],
+      [
+        "free_seeder",
+        "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+      ],
+      [
+        "t",
+        "travel"
+      ],
+      [
+        "alt",
+        "Drone footage over salt flats at sunset, 6 seconds."
+      ]
+    ],
+    "content": "A walk through the salt flats at dusk.",
+    "sig": "a4c78c570b8c38e8c03b07925bc5bfcc3ff903ae8d918cf04a00eb606aea2dd97027de923ac85e233c91e4117818e3163d759149eab59a12bd5ba724fe551737"
+  }
+}

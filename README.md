@@ -8,6 +8,13 @@
 A Nostr-native peer-to-peer video network where seeders are paid per block in Cashu ecash,
 the creator picks the mint, and the UI aims at YouTube rather than at a protocol demo.
 
+> **Standardization (2026-09-16):** the normative protocol going forward is the NFX suite
+> in [`spec/`](spec/README.md) (iroh transport, content-addressed fMP4/CMAF segments,
+> open + licensed modes). The TypeScript workspace below is the **v0 prototype** — a
+> Pear-runtime-only desktop app (the web shell lane never shipped); see
+> [ADR 0006](docs/decisions/0006-standardization-suite-nfx.md) for the fork and its
+> consequences. Implementers: read `spec/`, not `packages/`.
+
 **"Nutflix" is the brand name only.** Package scope is `@sovit/*`, the wire protocol is
 `pay/1`, and nothing in the code depends on the brand (build plan §9.11).
 
