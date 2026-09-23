@@ -29,10 +29,12 @@ pub enum Endpoint {
     },
     /// NFX-05 §6.
     Https { url: String },
-    /// NFX-10 §2.
+    /// NFX-10 §2: a bridge. Swarm ids and infohashes are derived per rendition, never carried.
     Webrtc {
         tracker_urls: Vec<String>,
-        infohash: String,
+        /// Renditions whose swarms the bridge joins; empty means every rendition.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        renditions: Vec<String>,
     },
     /// NFX-12 (optional).
     Hyper { drive: String },
@@ -99,7 +101,7 @@ impl BeaconContent {
         let mut endpoints = Vec::new();
         let mut skipped = Vec::new();
         for raw in raw_endpoints {
-            match parse_endpoint(raw, &video)? {
+            match parse_endpoint(raw)? {
                 Parsed::Known(e) => endpoints.push(e),
                 Parsed::Unknown(t) => skipped.push(t),
             }
@@ -124,6 +126,12 @@ impl BeaconContent {
             Some(Value::Bool(b)) => *b,
             Some(_) => return Err(bad("`free` must be a boolean")),
         };
+        // NFX-03 §4: a paying seeder names its mints; there is no "any mint".
+        if !free && accepts_mints.is_empty() {
+            return Err(bad(
+                "`accepts_mints` is required and non-empty unless `free`",
+            ));
+        }
         Ok(Self {
             v: 1,
             video,
@@ -148,7 +156,7 @@ enum Parsed {
     Unknown(String),
 }
 
-fn parse_endpoint(raw: &Value, video: &VideoAddr) -> Result<Parsed> {
+fn parse_endpoint(raw: &Value) -> Result<Parsed> {
     let obj = raw
         .as_object()
         .ok_or_else(|| bad("endpoint is not an object"))?;
@@ -194,21 +202,21 @@ fn parse_endpoint(raw: &Value, video: &VideoAddr) -> Result<Parsed> {
             }
         }
         "webrtc" => {
-            let infohash = str_field(obj, "infohash")?;
-            if infohash != hex::encode(video.web_infohash()) {
-                return Err(bad(
-                    "webrtc `infohash` does not match the video (NFX-10 §2)",
-                ));
-            }
             let tracker_urls = strings(
                 obj.get("tracker_urls")
                     .ok_or_else(|| bad("webrtc endpoint needs `tracker_urls`"))?,
                 "tracker_urls",
                 |u| u.starts_with("wss://") || u.starts_with("ws://"),
             )?;
+            let renditions = match obj.get("renditions") {
+                None => Vec::new(),
+                Some(v) => strings(v, "renditions", |r| {
+                    !r.is_empty() && r != crate::hashlist::RESERVED_RENDITION_ID
+                })?,
+            };
             Endpoint::Webrtc {
                 tracker_urls,
-                infohash: infohash.to_owned(),
+                renditions,
             }
         }
         "hyper" => {

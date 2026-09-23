@@ -100,18 +100,26 @@ impl HashList {
             return Err(bad("`renditions` is empty"));
         }
         let mut ids = BTreeSet::new();
+        let mut playlist_names = BTreeSet::new();
+        let mut playlist_hashes = BTreeSet::new();
         for r in &self.renditions {
             if r.id.is_empty() || r.id == RESERVED_RENDITION_ID || !ids.insert(r.id.as_str()) {
                 return Err(bad(
                     "rendition ids must be unique, non-empty and not `meta`",
                 ));
             }
-            if !self
+            let Some(playlist) = self
                 .files
                 .iter()
-                .any(|f| f.role == Role::Playlist && f.name == r.playlist)
-            {
+                .find(|f| f.role == Role::Playlist && f.name == r.playlist)
+            else {
                 return Err(bad("rendition `playlist` does not name a playlist file"));
+            };
+            // NFX-05 §2: a playlist's content name identifies its rendition (NFX-10 §2).
+            if !playlist_names.insert(r.playlist.as_str())
+                || !playlist_hashes.insert(playlist.sha256.as_str())
+            {
+                return Err(bad("renditions must name distinct playlists"));
             }
             if r.bandwidth == 0 {
                 return Err(bad("`bandwidth` must be >= 1"));
@@ -152,6 +160,21 @@ impl HashList {
             return None;
         }
         self.files.iter().find(|f| f.sha256 == hash)
+    }
+
+    /// The rendition whose playlist has this content name (`<sha256>.m3u8`): how a web
+    /// player maps a stream to its swarm (NFX-10 §2). `None` for anything else.
+    #[must_use]
+    pub fn rendition_for_playlist(&self, content_name: &str) -> Option<&Rendition> {
+        let (hash, ext) = content_name.split_once('.')?;
+        if ext.is_empty() || !is_lower_hex(hash, 64) {
+            return None;
+        }
+        let file = self
+            .files
+            .iter()
+            .find(|f| f.role == Role::Playlist && f.sha256 == hash)?;
+        self.renditions.iter().find(|r| r.playlist == file.name)
     }
 
     /// NFX-05 §3: every URI in a playlist is a content name listed in `files`.

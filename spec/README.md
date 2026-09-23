@@ -73,3 +73,6 @@ the repository license. Rationale and full context: `docs/decisions/0006-*` (f).
 - 2026-09-16 — initial suite (ADR 0006).
 - 2026-09-23 — brand-neutral wire token `nfx` and NFX-01 re-freeze; NFX-12 added as
   Draft; the demo described in the present tense (it is still being built). ADR 0008.
+- 2026-09-23 — decisions after the A1 spikes (ADR 0008 addendum): per-rendition web
+  swarms, paid iroh delivery per member, mint state keyed by manifest address, voucher
+  presenter binding, no "any mint", fees off the top, seeder blank outputs.

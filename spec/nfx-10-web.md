@@ -16,15 +16,43 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
      answers relayed as short-lived nostr ephemerals (profile TBD before freeze;
      never carry blob bytes).
 
-## 2. Bridges
+## 2. Swarms and bridges
 
-A **bridge seeder** is an NFX node that speaks iroh (NFX-06) *and* WebRTC — the only
-required coupling between the native and web meshes. Bridges appear in beacons with an
-extra endpoint `{ "t": "webrtc", "tracker_urls": [wss…], "infohash": "<t>" }` where
-`infohash = hex( sha256(utf8(namespace + ":" + video-id))[0..20] )` — take the first
-20 **bytes** of the digest, then hex-encode (40 lowercase hex chars). Native↔web chunk
-accounting happens on the bridge's own books; it acts as a normal seeder upstream and
-a normal p2p-media-loader peer downstream.
+**One swarm per rendition.** A browser-mesh swarm carries exactly one rendition of one
+video:
+
+```
+stream swarm ID  = "nfx/1/web/" + namespace + ":" + video-id + "/" + rendition-id
+tracker infohash = base64( sha1( utf8(stream swarm ID) )[0..15] )
+```
+
+- `rendition-id` is the hash list's `renditions[].id` (NFX-05 §2).
+- `base64` is the standard alphabet of RFC 4648 §4. Fifteen bytes encode to exactly 20
+  characters, so there is no padding. The tracker infohash is that 20-character ASCII
+  string, not a hex digest. It is exactly what the pinned p2p-media-loader v4 announces
+  for a custom stream swarm ID (`computeInfoHash`, NFX-11 §4). A native bridge
+  reproduces it with any sha1 and base64 library.
+- **Mapping a player stream to its rendition.** Use the stream's playlist URL. Its last
+  path element is `<sha256>.m3u8`, which names exactly one `files` entry of role
+  `playlist`, and exactly one rendition lists that file as its `playlist` (NFX-05 §2).
+  The mapping never uses bitrate or resolution. A stream that maps to no rendition
+  joins no swarm and is fetched over HTTPS only.
+- Why per rendition: mesh peers trade segments of the stream they are playing, so one
+  swarm across renditions would pair peers with nothing to trade. p2p-media-loader also
+  refuses two streams with one ID.
+
+A **bridge seeder** is an NFX node that speaks iroh (NFX-06) *and* WebRTC. It is the
+only required coupling between the native and web meshes. Bridges appear in beacons
+with an extra endpoint:
+
+```json
+{ "t": "webrtc", "tracker_urls": ["wss://…"], "renditions": ["720p", "360p"] }
+```
+
+`renditions` lists the rendition ids whose swarms the bridge joins. Absent means every
+rendition in the hash list. Swarm IDs and infohashes are always derived and never
+carried. Native↔web chunk accounting happens on the bridge's own books: it acts as a
+normal seeder upstream and a normal p2p-media-loader peer downstream.
 
 ## 3. Payments in the browser
 
@@ -97,3 +125,9 @@ NFX-05 byte formats.
   mesh window is counted in whole NFX-05 files, and earnings are written through to
   NIP-60, never to browser storage. The earlier text left mesh payment to bridge
   policy. §4 maps ad mode onto licensed videos.
+- Draft 2026-09-23 (spike S3; sovtech's decision, ADR 0008 addendum). One swarm per
+  rendition: stream swarm ID `nfx/1/web/<namespace>:<video-id>/<rendition-id>`, tracker
+  infohash `base64(sha1(id)[0..15])` (p2p-media-loader v4 `computeInfoHash`), streams
+  mapped to renditions by playlist content name. The `webrtc` endpoint drops `infohash`
+  and gains an optional `renditions`. The old per-video `hex(sha256(…)[0..20])` could not
+  be announced by any p2p-media-loader v4 peer.

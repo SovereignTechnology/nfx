@@ -132,6 +132,11 @@ fn beacon_parses_all_endpoint_types_and_is_reproduced() {
         })
         .collect();
     assert_eq!(kinds, ["iroh", "https", "webrtc", "hyper"]);
+    let webrtc = b.content.endpoints.iter().find_map(|e| match e {
+        Endpoint::Webrtc { renditions, .. } => Some(renditions.clone()),
+        _ => None,
+    });
+    assert_eq!(webrtc, Some(vec!["720p".to_string()]));
     assert!(b.content.skipped.is_empty());
 
     // The publisher side renders the exact content string, and the event re-signs identically.
@@ -200,6 +205,23 @@ fn hashlist_bytes_root_files_and_playlists() {
         verify_file(&entry.sha256, bytes).unwrap();
         list.check_playlist(bytes).unwrap();
     }
+    // A playlist's content name identifies its rendition (NFX-10 §2 stream mapping).
+    for r in &list.renditions {
+        let playlist = list.files.iter().find(|f| f.name == r.playlist).unwrap();
+        assert_eq!(
+            list.rendition_for_playlist(&format!("{}.m3u8", playlist.sha256)),
+            Some(r)
+        );
+    }
+    let master = list
+        .files
+        .iter()
+        .find(|f| f.role == Role::PlaylistMaster)
+        .unwrap();
+    assert_eq!(
+        list.rendition_for_playlist(&format!("{}.m3u8", master.sha256)),
+        None
+    );
     let init = list.files.iter().find(|f| f.role == Role::Init).unwrap();
     assert_eq!(list.resolve(&format!("{}.mp4", init.sha256)), Some(init));
     assert_eq!(list.resolve("seg/0001.m4s"), None);
@@ -254,7 +276,8 @@ fn voucher_is_reproduced_verified_and_bound_to_the_manifest() {
     assert_eq!(manifest.author, str_of(&v, "creator_pubkey"));
     assert_eq!(manifest.a_tag(), str_of(&v, "manifest_a"));
 
-    let voucher = Voucher::verify(str_of(&v, "wire"), sig, &manifest, now).unwrap();
+    let presenter = manifest_seeder(&manifest);
+    let voucher = Voucher::verify(str_of(&v, "wire"), sig, &manifest, &presenter, now).unwrap();
     assert_eq!(voucher.canon().unwrap(), str_of(&v, "canon"));
     assert_eq!(hex::encode(voucher.digest().unwrap()), str_of(&v, "digest"));
     assert_eq!(voucher.sign(&secret(&v, "creator")).unwrap(), sig);
@@ -263,10 +286,16 @@ fn voucher_is_reproduced_verified_and_bound_to_the_manifest() {
         str_of(&v, "canon")
     );
 
+    // Presented by anyone but its seeder (NIP-98 signer), it is worthless.
+    assert!(
+        Voucher::verify(str_of(&v, "wire"), sig, &manifest, &manifest.author, now).is_err(),
+        "wrong presenter"
+    );
+
     // Bound to a licensed manifest that lists the seeder, by that manifest's author.
     let open = Manifest::from_event(&event(&vector!("manifest-open.json")["event"])).unwrap();
     assert!(
-        Voucher::verify(str_of(&v, "wire"), sig, &open, now).is_err(),
+        Voucher::verify(str_of(&v, "wire"), sig, &open, &presenter, now).is_err(),
         "open manifest"
     );
     let mut not_listed = manifest.clone();
@@ -274,22 +303,36 @@ fn voucher_is_reproduced_verified_and_bound_to_the_manifest() {
         terms.free_seeders.clear();
     }
     assert!(
-        Voucher::verify(str_of(&v, "wire"), sig, &not_listed, now).is_err(),
+        Voucher::verify(str_of(&v, "wire"), sig, &not_listed, &presenter, now).is_err(),
         "not a free_seeder"
     );
     let mut other_author = manifest.clone();
     other_author.author = public_key_hex(&[7u8; 32]).unwrap();
     assert!(
-        Voucher::verify(str_of(&v, "wire"), sig, &other_author, now).is_err(),
+        Voucher::verify(str_of(&v, "wire"), sig, &other_author, &presenter, now).is_err(),
         "wrong signer"
     );
 
     let tampered = serde_json::to_string(&v["tampered"]).unwrap();
-    assert!(Voucher::verify(&tampered, sig, &manifest, now).is_err());
+    assert!(Voucher::verify(&tampered, sig, &manifest, &presenter, now).is_err());
     assert!(
-        Voucher::verify(str_of(&v, "wire"), sig, &manifest, voucher.not_after).is_err(),
+        Voucher::verify(
+            str_of(&v, "wire"),
+            sig,
+            &manifest,
+            &presenter,
+            voucher.not_after
+        )
+        .is_err(),
         "expired"
     );
+}
+
+fn manifest_seeder(manifest: &Manifest) -> String {
+    match &manifest.license {
+        License::Licensed(terms) => terms.free_seeders[0].clone(),
+        License::Open => panic!("licensed vector"),
+    }
 }
 
 #[test]
@@ -330,7 +373,17 @@ fn derived_identifiers_and_grammar() {
         assert_eq!(addr.namespace().to_string(), str_of(d, "namespace"));
         assert_eq!(addr.video_id(), str_of(d, "video_id"));
         assert_eq!(hex::encode(addr.swarm_topic()), str_of(d, "swarm_topic"));
-        assert_eq!(hex::encode(addr.web_infohash()), str_of(d, "web_infohash"));
+        for w in d["web_swarms"].as_array().unwrap() {
+            let rendition = str_of(w, "rendition");
+            assert_eq!(
+                addr.web_stream_swarm_id(rendition),
+                str_of(w, "stream_swarm_id")
+            );
+            assert_eq!(
+                addr.web_tracker_infohash(rendition),
+                str_of(w, "tracker_infohash")
+            );
+        }
         assert_eq!(hex::encode(addr.hyper_topic()), str_of(d, "hyper_topic"));
     }
     let a = &v["a_tag"];

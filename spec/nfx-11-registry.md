@@ -29,7 +29,8 @@ else; `nutflix:*` namespaces are void (NFX-01 §2).
 | payment channel | `nfx/pay/1` |
 | gossip | `nfx/gossip/1` |
 | swarm topic | `sha256("nfx/1/swarm/" + namespace + "/" + video-id)` (hex) — NFX-06 §4 |
-| web infohash | `hex(sha256(namespace + ":" + video-id)[0..20])` — NFX-10 §2 |
+| web stream swarm ID | `nfx/1/web/<namespace>:<video-id>/<rendition-id>` (one swarm per rendition) — NFX-10 §2 |
+| web tracker infohash | `base64(sha1(stream swarm ID)[0..15])`, 20 ASCII chars (p2p-media-loader v4 `computeInfoHash`) — NFX-10 §2 |
 | Hyperswarm topic | `sha256("nfx/1/hyper/" + namespace + "/" + video-id)` — NFX-12 §3 |
 | Protomux payment protocol | `nfx/pay/1`, channel id `utf8(<namespace>:<video-id>)` — NFX-12 §5 |
 
@@ -55,11 +56,11 @@ Capability keys:
 | Component | Pin | Notes |
 |---|---|---|
 | iroh / iroh-relay | **1.x** (1.2.0 at pinning, 2026-09-23) | the iroh 1.x wire; nothing pre-1.0 is conformant |
-| iroh-blobs | **0.103.x** (depends on iroh ^1) | its standard ALPN is the NFX blob wire (NFX-06 §2) |
+| iroh-blobs | **0.103.x** (depends on iroh ^1) | its standard ALPN is the NFX blob wire; tickets are its `BlobTicket` string form (NFX-06 §2) |
 | iroh-gossip | **0.101.x** (depends on iroh ^1) | carries `nfx/gossip/1` (NFX-06 §4) |
-| p2p-media-loader | **v4** (upstream for the free mesh; maintained v4 fork for the paid mesh) | NFX-10 §§1, 3.2 |
+| p2p-media-loader | **v4** (4.0.0 at pinning; upstream for the free mesh, a maintained v4 fork for the paid mesh) | NFX-10 §§1–3; its `computeInfoHash` defines the tracker infohash |
 | Hypercore stack | hypercore 11, hyperdrive 13, hyperswarm 4, protomux 3 | NFX-12 (optional) |
-| Cashu protocol | NUT-00/02/03/06/07/11/12 | via CDK or cashu-ts |
+| Cashu protocol | NUT-00/02/03/06/07/08/11/12 | via CDK or cashu-ts; NUT-08 only for its blank outputs (NFX-09 `redeem`) |
 | Media profile | NFX-05 §1 | no external pin |
 
 The three iroh crates are one series: a bump of any of them is an NFX-11 edit only,
@@ -91,9 +92,10 @@ them.
 | `bad-lock` | licensed chunk proof not P2PK-locked to the mint's `redeem_pubkey`, locktime too near, or no valid DLEQ | NFX-08 §4.1, NFX-09 §2 |
 | `stale` | `pay.upto_chunk` ≤ last acked watermark | NFX-07 §2 |
 | `payment-required` | license requested without payment/voucher | NFX-09 §2 |
-| `bad-voucher` | voucher signature/whitelist/expiry failed | NFX-08 §5, NFX-09 §2 |
-| `unknown-root` | mint has no escrow for that root | NFX-09 §2 |
-| `root-mismatch` | escrow conflict for an existing root | NFX-09 §2 |
+| `bad-voucher` | voucher signature, presenter (NIP-98 ≠ `seeder`), whitelist or expiry failed | NFX-08 §5, NFX-09 §2 |
+| `unknown-video` | mint has no escrow for that manifest address `a` | NFX-09 §2 |
+| `root-mismatch` | escrow conflict: same `a` with a different `root` or `key` | NFX-09 §2 |
+| `below-fee` | redemption's NUT-02 input fee ≥ its total; batch and retry | NFX-09 §2 |
 
 New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 
@@ -130,7 +132,7 @@ python3 test-vectors/generate.py --verify   # byte-exact re-check
 - **L3 — seeder**: L1 + NFX-03 beacons at TTL policy + NFX-05 §5 verified pinning +
   NFX-06 collection serving (or bridge, NFX-10 §2) + NFX-07 verification duties
   §3 (window enforcement included).
-- **L4 — mint**: NFX-09 all four endpoints + NUT-03/11 interop + NUT-06
+- **L4 — mint**: NFX-09 all four endpoints + NUT-03/08/11/12 interop + NUT-06
   advertisement per NFX-09 §1.
 - **L5 — scoped relay**: NFX-04 §§1–3 including NIP-40 and the rate-limit table.
 
@@ -184,3 +186,6 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   added, along with the `bad-lock` code, the new NFX-05 §6 paths and `canon` (§9, moved
   here from NFX-08 §5 and made exact). New vectors: invalid manifests, canon, voucher,
   gossip envelope, derived identifiers.
+- 2026-09-23 — decisions after A1 (ADR 0008 addendum): the web stream swarm ID and
+  tracker infohash replace the per-video web infohash; the ticket string form is pinned;
+  `unknown-root` → `unknown-video`; new code `below-fee`; NUT-08 listed (blank outputs).

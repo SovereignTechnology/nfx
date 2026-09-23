@@ -57,7 +57,9 @@ Rules:
 - `segs` in the manifest MUST equal `len(files)`.
 - `renditions[].id` values are unique, and `meta` is reserved (NFX-03 §4).
   `renditions[].playlist` MUST equal the `name` of a `files` entry whose role is
-  `playlist`.
+  `playlist`. No two renditions name the same playlist, and their playlists' sha256
+  values are distinct, so a playlist's content name identifies its rendition (NFX-10
+  §2).
 - Licensed mode: hashes are of **stored (ciphertext)** bytes per NFX-08 §2 — so §4
   verification always runs on stored bytes, identically in both modes. (Decryption
   later contributes its own AEAD authentication on open; the sha256 anchor is
@@ -180,3 +182,5 @@ server generalizes to an origin when its admin pins NFX-05 content.
   (§6.1); the pull-through origin role (§6.2); public caching of licensed ciphertext
   (§6.3). §2: rendition ids unique with `meta` reserved, and a rendition's `playlist`
   must name a playlist file (implied before, now stated; `hashlist-invalid.json`).
+- Draft 2026-09-23: renditions name distinct playlists with distinct sha256, because
+  the web mesh maps streams to renditions by playlist content name (NFX-10 §2).

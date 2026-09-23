@@ -24,7 +24,9 @@ payment-enforced after release, so no mechanism pretends otherwise.
 ```
 
 - `hello` (watcher→seeder) opens accounting for a video; `quote` (seeder→watcher)
-  replies with the *binding* price (the beacon `price_hint` was advisory).
+  replies with the *binding* price (the beacon `price_hint` was advisory). `quote.mints`
+  MUST be non-empty, and the seeder accepts proofs only from mints it quoted
+  (`bad-mint`); there is no "any mint".
   `window` = unpaid chunks the seeder tolerates (recommended/default **8**).
 - `pay` covers chunks `(last_ack, upto_chunk]`; `token` is a NUT-00 token whose proofs'
   total MUST equal `chunks × price_per_chunk`. A `pay` with `upto_chunk` less than or
@@ -56,7 +58,7 @@ local policy; never global claims (no "bad payer list" events exist).
   per-chunk payment on every request, or serve gratis — never grant credit.
 - Response: `200` + `X-NFX-Accepted: <chunks credited so far in this session>`.
 - Payment required but absent/insufficient: `402` with `X-NFX-Price: <sat>` and
-  `X-NFX-Mints: <comma list>`. Origins MAY serve gratis (`price_hint` 0 or `free`
+  `X-NFX-Mints: <comma list>` (non-empty; proofs from other mints are refused). Origins MAY serve gratis (`price_hint` 0 or `free`
   beacons) — the website's ad/default mode is exactly this (origin at price 0).
 
 ## 5. Creator income in open mode
@@ -71,14 +73,6 @@ local policy; never global claims (no "bad payer list" events exist).
 - Lightning invoices per chunk (too heavy; ecash streams batch at redemption).
 - Any client-side split logic — there is nothing to split in open mode.
 
-## 7. Open issues (must close before the M2 freeze)
-
-- **`accepts_mints` absent means "any" (NFX-03 §4).** A seeder that takes this
-  literally swaps at whatever mint URL the watcher's token names. That URL can point
-  at an attacker-run mint, which yields worthless ecash and makes the seeder send an
-  outbound request to an attacker-chosen host. Candidate fix: absent means "see the
-  `quote`", `quote.mints` MUST be non-empty, and a seeder accepts only mints it listed.
-
 ## Changelog
 
 - Draft 2026-09-16 — initial.
@@ -86,3 +80,6 @@ local policy; never global claims (no "bad payer list" events exist).
   `X-NFX-Session` gives HTTP counters an identity (previously uncorrelated).
 - Draft 2026-09-23 — wire token `nfx`: ALPN `nfx/pay/1`, headers `X-NFX-*` (ADR 0008
   §2). Licensed-mode pointer to NFX-08 §4.1. Open issue on `accepts_mints` (§7).
+- Draft 2026-09-23 (sovtech's decision, ADR 0008 addendum): `quote.mints` and
+  `X-NFX-Mints` are non-empty and binding. The `accepts_mints` open issue is closed and
+  §7 removed.

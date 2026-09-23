@@ -68,13 +68,24 @@ impl Voucher {
     ///   (the *received* object is re-canonicalized; the sender's layout is never trusted);
     /// - the fields are well formed, `network` matches `video`, and it has not expired;
     /// - it names this manifest's video, which is licensed, and `seeder` is one of its
-    ///   `free_seeder`s.
+    ///   `free_seeder`s;
+    /// - `presenter`, the pubkey that NIP-98-signed the license request, **is** `seeder`,
+    ///   so a leaked voucher is useless to anyone else.
     ///
     /// There is deliberately no public signature-only check, which would let a caller
-    /// forget the manifest binding.
-    pub fn verify(wire: &str, sig_hex: &str, manifest: &Manifest, now: u64) -> Result<Self> {
+    /// forget the manifest or presenter binding.
+    pub fn verify(
+        wire: &str,
+        sig_hex: &str,
+        manifest: &Manifest,
+        presenter: &str,
+        now: u64,
+    ) -> Result<Self> {
         let voucher = Self::verify_signed_fields(wire, sig_hex, &manifest.author, now)?;
         voucher.check_against(manifest)?;
+        if presenter != voucher.seeder {
+            return Err(bad("voucher must be presented by its seeder (NIP-98)"));
+        }
         Ok(voucher)
     }
 

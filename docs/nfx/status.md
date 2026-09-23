@@ -24,8 +24,12 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/`
     replacement is proposed in [`spikes/s3-web-mesh.md`](spikes/s3-web-mesh.md).
 - **S2 (Tauri) is blocked on system packages** that need sudo (see Next).
 - S1 + S3 + S4 were pushed to `main` on 2026-09-23 with sovtech's OK (a fast-forward of
-  `a1/s1-iroh`). The spike spec findings stay **proposals**, by sovtech's choice, until sovtech
-  reviews the spike pages.
+  `a1/s1-iroh`).
+- **Decisions applied (branch `spec/decisions-2026-09-23`):** sovtech accepted every
+  recommendation, covering the spike findings (2a web swarms, 2b paid iroh delivery) and
+  payment issues 3.1–3.5. They are recorded in the ADR 0008 addendum, and the spec,
+  vectors, schema and `nfx-proto` are updated. The only open issue before the M3 freeze
+  is AEAD associated data.
 - The private GitLab project exists, created 2026-09-23. `main` = `468fe1e`
   is pushed: the demo history, the spec commit `8f3b9bd` and a merge of demo `main`
   `0e35347`.
@@ -94,25 +98,12 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/`
    unblocks Playwright WebKit for S4's Safari-proxy check; `mpv` is optional for S4. Pass criteria are in the plan
    (`a local plan file`). Write one page each
    in `docs/nfx/spikes/`. Dev servers go on `http://100.64.0.1:<port>`.
-   - S1's spec findings still need sovtech's call before they go into NFX-06/NFX-11:
-     - paid delivery fetches one HashSeq member per request, and seeders may refuse
-       bulk collection requests from paying peers;
-     - the ticket string form is iroh-blobs 0.103 `BlobTicket`.
    - Risk carried forward: the iroh-blobs 0.103 README still says "not production
      quality". The containment plan is in the S1 page.
-   - S3's spec finding also needs sovtech's call. Replace NFX-10 §2's infohash with a
-     per-rendition stream swarm ID `nfx/1/web/<ns>:<video-id>/<rendition-id>`, announced
-     as p2p-media-loader v4's `computeInfoHash`. The beacon `webrtc` endpoint and the
-     `nfx-proto` beacon check then change to match.
 2. **`nfx-proto` WASM bindings.** A thin `wasm-bindgen` crate for the web client
    (verify manifest / hash list / beacon from JS). Not needed until the web work in A2.
-3. **Open spec issues** (NFX-07 §7, NFX-08 §7, NFX-09 §6). These gate the M2/M3
-   freezes, so they need sovtech's decisions:
-   - mint state is keyed by a bare `root` (escrow squatting);
-   - the voucher path of `license` is unauthenticated;
-   - `accepts_mints` absent means "any";
-   - fee handling;
-   - `redeem` mints seeder proofs with secrets the mint chose.
+3. ~~Open spec issues~~: decided 2026-09-23 (ADR 0008 addendum). Only AEAD associated
+   data (NFX-08 §7) remains, and it is due before M3.
 4. Optional: add the schema check (`jsonschema`) to `check.sh`.
 
 ## Not verified / known gaps

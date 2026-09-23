@@ -117,7 +117,7 @@ in Draft documents except the single-`n` rule, which rode the NFX-01 re-freeze:
 - New vectors: invalid manifests (signed), open-mode manifest, invalid beacons,
   invalid hash lists and playlists, voucher, gossip envelope, derived identifiers.
 
-**Open issues recorded, not decided** (NFX-07 §7, NFX-08 §7, NFX-09 §6):
+**Open issues recorded, not decided at the time** (NFX-07 §7, NFX-08 §7, NFX-09 §6). All five were decided the same day; see the Addendum:
 - mint state is keyed by a bare `root`, which allows escrow squatting and leaves "the
   manifest" ambiguous;
 - the voucher path of `license` is unauthenticated;
@@ -138,3 +138,21 @@ All must close before their document's freeze.
   conformance oracle for later TypeScript and Rust code.
 - Implementing M3 before the open issues close would build on an ambiguous mint API.
   The issues are therefore gates, not notes.
+
+## Addendum (2026-09-23, after A1): decisions on the spike findings and open issues
+
+sovtech accepted every recommendation on 2026-09-23. They are recorded here rather
+than in a new ADR, because the demo uses 0009 onward. All edited documents are
+Draft, so no `specver` changes.
+
+| # | Decision | Where |
+|---|---|---|
+| 2a | **One browser-mesh swarm per rendition.** Stream swarm ID `nfx/1/web/<namespace>:<video-id>/<rendition-id>`; tracker infohash `base64(sha1(id)[0..15])`, exactly p2p-media-loader v4's `computeInfoHash` (cross-checked 9/9 against the library). Streams map to renditions by playlist content name. The beacon `webrtc` endpoint drops `infohash` and gains an optional `renditions`. Renditions must name distinct playlists. | NFX-10 §2, NFX-03, NFX-05 §2, NFX-11 §3 |
+| 2b | **Paid iroh delivery is one member per request**, after a free member-list request. Seeders may refuse spanning requests from paying peers. Tickets are the iroh-blobs 0.103 `BlobTicket` string form. | NFX-06 §2, NFX-11 §4 |
+| 3.1 | **Mint state is keyed by the manifest address `a`** (creator + video), not `root`. Escrow requires NIP-98 by the creator in `a`, which ends root squatting. `unknown-root` → `unknown-video`. | NFX-08 §3–4, §6; NFX-09 §2–5 |
+| 3.2 | **A voucher works only for its seeder:** the license request must be NIP-98-signed by the voucher's `seeder`. | NFX-08 §5, NFX-09 §2; `Voucher::verify` takes the presenter |
+| 3.3 | **No "any mint":** `accepts_mints` is required and non-empty unless `free`; `quote.mints` and `X-NFX-Mints` are non-empty and binding. | NFX-03 §4, NFX-07 §§2, 4; schema |
+| 3.4 | **Fees come off the top:** only NUT-02 input fees. On `redeem` they are deducted before the split; on `license`, from the creator's accrual (the watcher pays exactly `key_price`). New code `below-fee`. | NFX-08 §4, NFX-09 §2 |
+| 3.5 | **The seeder supplies blank outputs** (the NUT-08 mechanism) to `redeem`, so the mint never learns the seeder's secrets. | NFX-09 §§1–2 |
+
+The only open issue left before the M3 freeze is AEAD associated data (NFX-08 §7).

@@ -38,11 +38,15 @@ Query: <code>root</code>, <code>tracker</code>, <code>validate=0|1</code>, <code
   const list = JSON.parse(new TextDecoder().decode(listBytes));
   const listed = new Set(list.files.map((f) => f.sha256));
 
-  // 2. One swarm per rendition: map hls.js stream properties to the NFX rendition id.
-  const renditionOf = (p) =>
-    list.renditions.find((r) => r.bandwidth === p.bitrate && r.resolution === `${p.width}x${p.height}`);
-  const streamSwarmIdBuilder = ({ streamType, properties }) => {
-    const r = renditionOf(properties);
+  // 2. One swarm per rendition (NFX-10 §2): the stream's playlist URL ends in the
+  //    playlist's content name, which names exactly one rendition in the hash list.
+  const renditionOf = (playlistUrl) => {
+    const sha = (new URL(playlistUrl, location.href).pathname.split('/').pop() ?? '').split('.')[0];
+    const file = list.files.find((f) => f.role === 'playlist' && f.sha256 === sha);
+    return file && list.renditions.find((r) => r.playlist === file.name);
+  };
+  const streamSwarmIdBuilder = ({ streamType, runtimeId, properties }) => {
+    const r = renditionOf(runtimeId);
     const id = r ? `nfx/1/web/${list.video}/${r.id}` : undefined;
     st.swarms.push({ streamType, height: properties.height, id });
     return id;

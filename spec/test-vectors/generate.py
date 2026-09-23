@@ -326,7 +326,6 @@ def main() -> int:
                     "event": id_mismatch})
 
     # ---- 4. Beacon event (NFX-03), signed by the seeder ----
-    infohash = hashlib.sha256(video.encode()).digest()[:20].hex()
     beacon_content = {
         "v": 1,
         "video": video,
@@ -342,7 +341,7 @@ def main() -> int:
                 },
             },
             {"t": "https", "url": "https://seed.example/nfx"},
-            {"t": "webrtc", "tracker_urls": ["wss://tracker.example/announce"], "infohash": infohash},
+            {"t": "webrtc", "tracker_urls": ["wss://tracker.example/announce"], "renditions": ["720p"]},
             {"t": "hyper", "drive": sha256(b"nfx-test-vector/hyperdrive-key")},
         ],
         "chunks": "all",
@@ -387,11 +386,12 @@ def main() -> int:
         beacon_case("a-wrong-kind", "a must address a kind-38504 manifest",
                     tags=[["n", NAMESPACE], ["a", "30023" + a_tag[5:]], ["expiration", str(CREATED_AT + TTL)]]),
         beacon_case("video-mismatch", "content.video must equal the a tag's d",
-                    content=content_with(
-                        video=f"{NAMESPACE}:another-video",
-                        endpoints=[e if e["t"] != "webrtc" else dict(
-                            e, infohash=hashlib.sha256(f"{NAMESPACE}:another-video".encode()).digest()[:20].hex())
-                            for e in beacon_content["endpoints"]])),
+                    content=content_with(video=f"{NAMESPACE}:another-video")),
+        beacon_case("paying-without-mints", "accepts_mints is required unless free (NFX-03 §4)",
+                    content=json.dumps({k: v for k, v in beacon_content.items() if k != "accepts_mints"},
+                                       separators=(",", ":"))),
+        beacon_case("paying-empty-mints", "accepts_mints is non-empty unless free (NFX-03 §4)",
+                    content=content_with(accepts_mints=[])),
         beacon_case("no-endpoints", "at least one endpoint", content=content_with(endpoints=[])),
         beacon_case("chunks-missing", "chunks is required", content=json.dumps(
             {k: v for k, v in beacon_content.items() if k != "chunks"}, separators=(",", ":"))),
@@ -435,6 +435,8 @@ def main() -> int:
         hashlist_case("rendition-playlist-missing", "rendition playlist names a playlist file",
                       set_field(["renditions", 0, "playlist"], "r1080.m3u8")),
         hashlist_case("no-files", "files is non-empty", set_field(["files"], [])),
+        hashlist_case("duplicate-rendition-playlist", "renditions name distinct playlists (NFX-05 §2)",
+                      lambda h: h["renditions"].append(dict(h["renditions"][0], id="480p", bandwidth=1_000_000))),
     ]
     path_like = r720.replace((fhash["seg-1"] + ".m4s").encode(), b"seg/0001.m4s")
     unlisted = r720.replace(fhash["seg-1"].encode(), ("ab" * 32).encode())
@@ -489,11 +491,17 @@ def main() -> int:
     gossip_wire = json.dumps(dict(gossip_body, sig=gossip_sig), ensure_ascii=False)
 
     # ---- 9. Derived identifiers (NFX-01 §2, NFX-06 §4, NFX-10 §2, NFX-12 §3) ----
+    def web_swarm(ns, vid, rendition):
+        swarm_id = f"nfx/1/web/{ns}:{vid}/{rendition}"
+        # NFX-10 §2: p2p-media-loader v4 computeInfoHash = base64(sha1(id)[0..15]).
+        infohash = base64.b64encode(hashlib.sha1(swarm_id.encode()).digest()[:15]).decode()
+        return {"rendition": rendition, "stream_swarm_id": swarm_id, "tracker_infohash": infohash}
+
     def derived_for(ns, vid):
         return {
             "namespace": ns, "video_id": vid, "d": f"{ns}:{vid}",
             "swarm_topic": sha256(f"nfx/1/swarm/{ns}/{vid}".encode()),
-            "web_infohash": hashlib.sha256(f"{ns}:{vid}".encode()).digest()[:20].hex(),
+            "web_swarms": [web_swarm(ns, vid, r) for r in ("1080p", "720p", "360p")],
             "hyper_topic": sha256(f"nfx/1/hyper/{ns}/{vid}".encode()),
         }
 
@@ -578,7 +586,9 @@ def main() -> int:
             "description": "NFX-08 §5 free-seeder voucher for the manifest vector's "
                            "free_seeder. sig = BIP-340(creator, sha256(canon(voucher))), "
                            "aux_rand = 32 zero bytes. 'wire' is a sender layout; verifiers "
-                           "MUST re-canonicalize. 'tampered' MUST fail against the same sig.",
+                           "MUST re-canonicalize. 'tampered' MUST fail against the same sig. "
+                           "A mint accepts it only from a request NIP-98-signed by 'seeder' "
+                           "(NFX-08 §5).",
             "secret_keys_DO_NOT_USE": {"creator": secrets["creator"]},
             "creator_pubkey": manifest["pubkey"],
             "manifest_a": a_tag,

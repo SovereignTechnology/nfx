@@ -1,5 +1,5 @@
 {
-  "description": "NFX-08 §5 free-seeder voucher for the manifest vector's free_seeder. sig = BIP-340(creator, sha256(canon(voucher))), aux_rand = 32 zero bytes. 'wire' is a sender layout; verifiers MUST re-canonicalize. 'tampered' MUST fail against the same sig.",
+  "description": "NFX-08 §5 free-seeder voucher for the manifest vector's free_seeder. sig = BIP-340(creator, sha256(canon(voucher))), aux_rand = 32 zero bytes. 'wire' is a sender layout; verifiers MUST re-canonicalize. 'tampered' MUST fail against the same sig. A mint accepts it only from a request NIP-98-signed by 'seeder' (NFX-08 §5).",
   "secret_keys_DO_NOT_USE": {
     "creator": "bdabb76590ff1cd7f14b86be0747913d9efaf04473f3c06a3d4736063f72ad92"
   },

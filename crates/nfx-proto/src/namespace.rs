@@ -3,6 +3,9 @@
 
 use core::fmt;
 
+use base64::Engine as _;
+use sha1::{Digest as _, Sha1};
+
 use crate::{Error, Result, sha256};
 
 /// The only wire token (NFX-01 §2). `nutflix:*` namespaces are void.
@@ -114,13 +117,20 @@ impl VideoAddr {
         sha256(format!("nfx/1/swarm/{}/{}", self.namespace, self.video_id).as_bytes())
     }
 
-    /// WebRTC infohash: the first 20 bytes of `sha256(namespace + ":" + video-id)` (NFX-10 §2).
+    /// Browser-mesh stream swarm ID of one rendition (NFX-10 §2):
+    /// `nfx/1/web/<namespace>:<video-id>/<rendition-id>`.
     #[must_use]
-    pub fn web_infohash(&self) -> [u8; 20] {
-        let digest = sha256(self.to_string().as_bytes());
-        let mut out = [0u8; 20];
-        out.copy_from_slice(&digest[..20]);
-        out
+    pub fn web_stream_swarm_id(&self, rendition_id: &str) -> String {
+        format!("nfx/1/web/{self}/{rendition_id}")
+    }
+
+    /// The tracker infohash for that swarm: `base64(sha1(id)[0..15])`, 20 ASCII characters,
+    /// exactly what p2p-media-loader v4 announces (`computeInfoHash`, NFX-10 §2). SHA-1 only
+    /// names a meeting place here; nothing is verified with it.
+    #[must_use]
+    pub fn web_tracker_infohash(&self, rendition_id: &str) -> String {
+        let digest = Sha1::digest(self.web_stream_swarm_id(rendition_id).as_bytes());
+        base64::engine::general_purpose::STANDARD.encode(&digest[..15])
     }
 
     /// Hyperswarm topic: `sha256("nfx/1/hyper/" + namespace + "/" + video-id)` (NFX-12 §3).

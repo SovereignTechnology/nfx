@@ -51,7 +51,7 @@ and one per request. The decision is a oneshot the handler may hold. What worked
 `throttle: ThrottleMode::Intercept` (a callback per ~16 KiB) is the finer-grained
 alternative. It was not needed.
 
-## Findings that change the spec (proposed; not yet applied)
+## Findings that change the spec (adopted 2026-09-23, ADR 0008 addendum 2b)
 
 - **NFX-06 §2 — the paid-delivery unit.** Paid sessions fetch the rendition's HashSeq
   blob, then one member per request. Seeders MAY refuse whole-collection requests from

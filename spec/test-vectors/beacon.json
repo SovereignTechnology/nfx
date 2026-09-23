@@ -5,7 +5,7 @@
   },
   "now": 1790000030,
   "event": {
-    "id": "8d30767bfcd5fbf7f2c7c29e38a3befa2caf85984dc04630ddf6cf9e69b7bfdd",
+    "id": "8654ae15d18928a809bdae0f529a8eb5bb6ac8e2db0e5dc28bc9efcb750c1e8c",
     "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
     "created_at": 1790000000,
     "kind": 20464,
@@ -23,7 +23,7 @@
         "1790000120"
       ]
     ],
-    "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"f09091cd8afcb7f4be82e0f8229e867811d32f08dc9bc1efd031831198d2b096\",\"relay\":\"https://iroh-relay.example\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"PLACEHOLDER-ticket-format-pinned-at-M1\",\"meta\":\"PLACEHOLDER-meta-collection-ticket-pinned-at-M1\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"infohash\":\"ec95dedc1a20122c0423aac70da2e2ef5172a937\"},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
-    "sig": "ac5c1b24b8511309c41fe2b9c8ab96693507d6aedd6d16c35df64e38cbb6fa4f121f74115cf492da4230486aac236d4864bc4177b0272f71614b76ce9ce93791"
+    "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"f09091cd8afcb7f4be82e0f8229e867811d32f08dc9bc1efd031831198d2b096\",\"relay\":\"https://iroh-relay.example\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"PLACEHOLDER-ticket-format-pinned-at-M1\",\"meta\":\"PLACEHOLDER-meta-collection-ticket-pinned-at-M1\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"renditions\":[\"720p\"]},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+    "sig": "dc07b7bbdab3b08270d7423e3a9e77ec1512440b0b56b55f8640c5f2b7de59101512ed1681b9db904738c32e66be400f3dad44f1738e95a6a23ac60837b344ee"
   }
 }

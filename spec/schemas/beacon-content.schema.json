@@ -4,9 +4,17 @@
   "title": "NFX-03 beacon content",
   "type": "object",
   "additionalProperties": true,
-  "required": ["v", "video", "endpoints", "chunks", "price_hint"],
+  "required": [
+    "v",
+    "video",
+    "endpoints",
+    "chunks",
+    "price_hint"
+  ],
   "properties": {
-    "v": { "const": 1 },
+    "v": {
+      "const": 1
+    },
     "video": {
       "type": "string",
       "pattern": "^nfx:[a-z0-9-]{2,32}:(0|[1-9][0-9]*):[a-z0-9][a-z0-9-]{6,62}$"
@@ -17,26 +25,108 @@
       "items": {
         "type": "object",
         "additionalProperties": true,
-        "required": ["t"],
+        "required": [
+          "t"
+        ],
         "properties": {
-          "t": { "type": "string", "pattern": "^[a-z0-9-]{1,32}$", "description": "endpoint type; known values in NFX-11 §3 (iroh, https, webrtc, hyper); readers skip unknown types" },
-          "node": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-          "relay": { "type": "string" },
-          "addrs": { "type": "array", "items": { "type": "string" } },
+          "t": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]{1,32}$",
+            "description": "endpoint type; known values in NFX-11 §3 (iroh, https, webrtc, hyper); readers skip unknown types"
+          },
+          "node": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "relay": {
+            "type": "string"
+          },
+          "addrs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "tickets": {
             "type": "object",
-            "additionalProperties": { "type": "string", "minLength": 8 }
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 8
+            }
           },
-          "url": { "type": "string", "pattern": "^https://" },
-          "tracker_urls": { "type": "array", "items": { "type": "string", "pattern": "^wss?://" } },
-          "infohash": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-          "drive": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          "url": {
+            "type": "string",
+            "pattern": "^https://"
+          },
+          "tracker_urls": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^wss?://"
+            }
+          },
+          "drive": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "renditions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "not": {
+                "const": "meta"
+              }
+            }
+          }
         }
       }
     },
-    "chunks": { "anyOf": [{ "const": "all" }, { "type": "integer", "minimum": 0 }] },
-    "price_hint": { "type": "integer", "minimum": 0 },
-    "accepts_mints": { "type": "array", "items": { "type": "string", "pattern": "^https://" } },
-    "free": { "type": "boolean" }
+    "chunks": {
+      "anyOf": [
+        {
+          "const": "all"
+        },
+        {
+          "type": "integer",
+          "minimum": 0
+        }
+      ]
+    },
+    "price_hint": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "accepts_mints": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^https://"
+      }
+    },
+    "free": {
+      "type": "boolean"
+    }
+  },
+  "if": {
+    "properties": {
+      "free": {
+        "const": true
+      }
+    },
+    "required": [
+      "free"
+    ]
+  },
+  "then": {},
+  "else": {
+    "required": [
+      "accepts_mints"
+    ],
+    "properties": {
+      "accepts_mints": {
+        "minItems": 1
+      }
+    }
   }
 }

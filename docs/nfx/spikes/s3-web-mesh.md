@@ -40,7 +40,7 @@ make it:
    `base64(sha1(streamSwarmId)[0..15])`, 20 ASCII characters
    (`p2p-media-loader-core/server`: `computeInfoHash`).
 
-**Proposed NFX-10 §2 replacement** (Draft, freezes at M4; sovtech's call):
+**NFX-10 §2 replacement** (adopted 2026-09-23, ADR 0008 addendum 2a; the stream→rendition mapping uses the playlist content name, and the S3 run re-passed 4/4 with it):
 
 - **Stream swarm ID** = `nfx/1/web/<namespace>:<video-id>/<rendition-id>`.
 - **Tracker infohash** = `computeInfoHash(stream swarm ID)` of the pinned

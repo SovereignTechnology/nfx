@@ -81,9 +81,10 @@ Optional tags: `["t", "nfx"]` (cosmetic), nothing else. No payments, no media.
 - `price_hint`: integer sats per chunk this seeder charges right now (**non-binding**;
   the binding quote is the seeder's `quote` message in NFX-07 §2 — the hint exists for
   peer selection).
-- `accepts_mints`: mints this seeder redeems against. Empty/absent means "any" —
-  except for **licensed videos**, where chunk payments MUST be proofs of the video's
-  escrow mint (NFX-08 §4); a seeder of licensed video MUST list exactly that mint.
+- `accepts_mints`: the mints this seeder accepts payment from, and only those.
+  - It is REQUIRED and non-empty unless `free` is `true`. There is no "any mint" value:
+    accepting any mint lets a watcher pay with tokens from a mint it runs itself.
+  - For **licensed videos** it MUST be exactly the video's escrow mint (NFX-08 §4).
 - `free`: `true` = donation seeder (e.g. an NFX-02 `free_seeder` serving licensed
   video after a zero-cost voucher); clients MUST NOT send it payments. Defaults to
   `false`. `chunks` is REQUIRED (no default).
@@ -120,3 +121,6 @@ edit in this spec is ever required to grow the relay set.
   types listed, and unknown endpoint types are skipped rather than rejected (the schema
   used to enumerate `t`, which would have made every new transport breaking). Required
   tags appear exactly once.
+- Draft 2026-09-23 (sovtech's decision, ADR 0008 addendum): `accepts_mints` is
+  required and non-empty unless `free`; the "absent means any" reading is gone. The
+  `webrtc` endpoint follows NFX-10 §2 (per-rendition swarms, no `infohash`).

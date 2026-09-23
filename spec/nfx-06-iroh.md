@@ -29,6 +29,21 @@ does not restate iroh's own specs.
 - Beacons (NFX-03) carry one ticket per held rendition. A watcher dials by ticket,
   streams the sequence, and then re-anchors every file to the sha256 in the hash list
   (NFX-05 §4) — a ticket found in a stale or lying beacon can waste time, not bytes.
+- **Paid delivery is one member per request.** A watcher in a paid session (NFX-07)
+  first fetches the rendition collection's HashSeq blob **alone**: a raw request for
+  the collection root, which yields the member list. It then requests one member per
+  request.
+  - On iroh, one chunk (NFX-07 `window`, `pay.upto_chunk`) is one member request, i.e.
+    one NFX-05 file. The member-list request is not a chunk.
+  - A seeder MAY refuse, with iroh-blobs' permission error, any request that spans
+    members (a whole or partial collection including children) from a peer that is not
+    a free seeder (NFX-08 §5) or otherwise exempt by local policy.
+  - Without this rule a single request could pull a whole rendition past the payment
+    window (spike S1).
+- **Tickets** are the string form of the pinned iroh-blobs `BlobTicket` (NFX-11 §4).
+  They are opaque to NFX and embed the provider's endpoint address (id, relay URL,
+  direct addresses), the hash and the format. Beacons still carry `node` and `relay`,
+  because `nfx/pay/1` must dial the same endpoint.
 - **Metadata rides a separate collection.** The hash list plus all playlist files form
   their own HashSeq (order: hash list first, then playlists in `files` order), offered
   under the beacon's `tickets.meta` entry. Per-rendition collections therefore contain
@@ -101,3 +116,7 @@ lands on 2/3 and verifies NFX-05 §4.
   `sig` against, since iroh-gossip only exposes the delivering node's id. `canon` now
   points at its single definition in NFX-11 §9. Networks run their own `iroh-relay`
   (plan amendment 9; pin in NFX-11 §4).
+- Draft 2026-09-23 (spike S1; sovtech's decision, ADR 0008 addendum). Paid delivery
+  fetches the member list and then one member per request, and seeders may refuse
+  spanning requests from paying peers. Tickets are the pinned iroh-blobs `BlobTicket`
+  string form.

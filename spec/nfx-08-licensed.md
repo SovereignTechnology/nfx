@@ -31,40 +31,52 @@ stored   = nonce[24] || XChaCha20-Poly1305(key=K, nonce, plaintext_semantics)
 
 ## 3. Escrow (publisher flow, once per video)
 
-`POST {mint}/v1/nfx/escrow` (NIP-98 auth from the creator key):
+`POST {mint}/v1/nfx/escrow` (NIP-98 auth by the creator key):
 
 ```json
-{ "root": "<hash-list sha256>", "key": "<K hex>" }
+{ "a": "38504:<creator-pubkey>:<namespace>:<video-id>",
+  "root": "<hash-list sha256>", "key": "<K hex>" }
 ```
 
-The mint MUST verify that some manifest (its own lookup or a presented `manifest`
-field) names *this* mint, then store `(root → key)`. Same request replayed
-identically = idempotent `200`; same `root`, different `key` = `409`.
+Escrow is keyed by the **manifest address `a`** (creator plus video), never by `root`
+alone. The mint MUST verify:
+- the NIP-98 signer is the creator named in `a`;
+- a manifest at `a` (its own lookup, or a signed one presented in a `manifest` field)
+  names *this* mint and carries this `root`.
+
+Only then does it store `a → (root, key)`. Same request replayed identically = idempotent
+`200`; same `a` with a different `root` or `key` = `409 root-mismatch` (NFX-09 §2).
+
+Keying by `root` alone would let anyone copy a public root into a manifest of their own
+and escrow first. Keyed by `a`, an impostor can only escrow under their own address.
 
 ## 4. Buying a license (watcher flow)
 
 `POST {mint}/v1/nfx/license`:
 
 ```json
-{ "root": "<…>", "payment": "cashuB…" }        // or { "voucher": {…}, "sig": "…" }
+{ "a": "<manifest address>", "payment": "cashuB…" }   // or { "a", "voucher", "sig" } (§5)
 ```
 
 - `payment` = proofs totalling **exactly** manifest `key_price` (overage and
   underage are both rejected; NFX-09 §2).
-- Success: `200 { "key": "<hex>" }`. The key travels over TLS only; clients SHOULD
+- Success: `200 { "key": "<hex>", "root": "<hex>" }`. The key travels over TLS only; clients SHOULD
   keep it in process memory and SHOULD NOT persist beyond the session.
 - Free path: §5 voucher instead of payment.
-- **Where `key_price` goes.** The mint accrues the whole `key_price` of every paid
-  license to the creator, the same way it accrues the creator's share of a redemption:
-  as proofs P2PK-locked (NUT-11) to the manifest `cashu_key`, indexed under
-  `(root, creator)`, and paid out by `claim` (§6, NFX-09 §2). A voucher license accrues
-  nothing. Whether a mint may deduct fees, and whose, is an open issue (§7).
+- **Where `key_price` goes.** The mint accrues `key_price − fee` of every paid license
+  to the creator, the same way it accrues the creator's share of a redemption: as
+  proofs P2PK-locked (NUT-11) to the manifest `cashu_key`, indexed under `a`, and paid
+  out by `claim` (§6, NFX-09 §2).
+  - `fee` is only the NUT-02 input fee of the payment proofs. Fees come off the top
+    (NFX-09 §2); the watcher still pays exactly `key_price`.
+  - A voucher license accrues nothing.
 
 After licensing, chunk payments follow NFX-07 with three differences:
 
-1. seeders redeem through the split endpoint (NFX-09 `redeem`), which forwards the
-   creator's share, P2PK-locked (NUT-11) to the manifest `cashu_key` and held for
-   `claim`, in the manifest's `split` ratio;
+1. seeders redeem through the split endpoint (NFX-09 `redeem`, naming the video's `a`),
+   which splits the amount net of fees in the manifest's `split` ratio. The creator's
+   share is held for `claim`, P2PK-locked (NUT-11) to the manifest `cashu_key`; the
+   seeder's is signed onto the seeder's own blank outputs;
 2. **the watcher's proofs MUST be issued by the manifest's escrow mint** — only that
    mint can apply the split, and NUT-03 swaps are intra-mint. Consequently the
    seeder's `quote.mints` / beacon `accepts_mints` reduce to exactly that one mint
@@ -129,35 +141,28 @@ implementation MUST serialize the *received* object with `canon` before verifyin
 never trust the sender's wire layout — so Python insertion order and Rust `serde_json`
 key order cannot diverge. `network` MUST equal the namespace prefix of `video`.
 
-Presented in `license`'s `voucher`+`sig` fields. The mint MUST verify: signature
-against the manifest author's key; `seeder` ∈ manifest `free_seeder`; `not_after` in
-the future; `network`/`video` match the request's `root`'s manifest. All-or-nothing:
-any failure = `402` with `code: "bad-voucher"`.
+Presented in `license`'s `voucher`+`sig` fields **by the seeder itself**: the license
+request MUST carry NIP-98 auth by the voucher's `seeder` key. The mint MUST verify all of:
+- the NIP-98 signer equals `seeder`;
+- the signature, against the creator named in the request's `a`;
+- `seeder` ∈ that manifest's `free_seeder`;
+- `not_after` is in the future;
+- `network`/`video` match the manifest at `a`.
+
+All-or-nothing: any failure = `402` with `code: "bad-voucher"`. Binding the presenter
+to `seeder` makes a leaked voucher useless to anyone else.
 
 Vouchers are in-band payloads, deliberately **not** a nostr kind: mints see them,
 relays don't, and they expire.
 
 ## 6. Creator settlement
 
-`POST {mint}/v1/nfx/claim` (NIP-98 auth by the manifest author key) → outstanding
-P2PK-locked payouts. Batch/never is the operator's choice; the mint API is the only
+`POST {mint}/v1/nfx/claim` (NIP-98 auth by the creator key) → outstanding
+P2PK-locked payouts, per video address `a`. Batch/never is the operator's choice; the mint API is the only
 coupling. See NFX-09 for the full mint contract.
 
 ## 7. Open issues (must close before the M3 freeze)
 
-Raised by the 2026-09-23 pre-push review (`docs/nfx/reviews/`); not yet decided.
-
-- **Escrow is keyed by a bare `root`.** Roots are public. Anyone can publish their own
-  manifest naming a victim's root and the same mint, escrow first, and so squat the
-  root: the victim's escrow then gets `409`. And when two manifests name one root,
-  "the manifest's `split`/`cashu_key`" is ambiguous at `redeem`. Candidate fix: key
-  escrow, license and redeem by the manifest address `38504:<pubkey>:<d>`, or by
-  `(author, root)`.
-- **The voucher path of `license` is unauthenticated.** Nothing binds the voucher's
-  `seeder` field to whoever presents it, so a leaked voucher is a bearer credential for
-  the key. Candidate fix: require NIP-98 by the voucher's `seeder` key.
-- **Fees.** Whether a mint may deduct NUT-02 input fees (or its own fee) from a
-  license payment or a redemption, and whether before or after the split.
 - **No AEAD associated data.** Ciphertext is not bound to its position (§2). The
   per-file sha256 anchor covers this today; revisit if files are ever reused across
   hash lists.
@@ -173,3 +178,8 @@ Raised by the 2026-09-23 pre-push review (`docs/nfx/reviews/`); not yet decided.
   seeders verify offline (§4.1, new code `bad-lock`), closing the split bypass by
   direct NUT-03 swap. Plan amendment 4: `key_price` accrues to the creator's
   `cashu_key`. `canon` moved to NFX-11 §9. Open issues listed (§7).
+- Draft 2026-09-23 (sovtech's decisions after A1; ADR 0008 addendum). Escrow, license
+  and claim are keyed by the manifest address `a` (ends root squatting). `key_price`
+  accrues net of the NUT-02 input fee (fees come off the top). The voucher path requires
+  NIP-98 by the voucher's `seeder`. The seeder share is signed onto the seeder's own
+  blank outputs. The escrow, voucher and fee open issues are closed.
