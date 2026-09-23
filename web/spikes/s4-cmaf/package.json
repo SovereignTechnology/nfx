@@ -1,0 +1,16 @@
+{
+  "name": "@nfx/spike-s4-cmaf",
+  "private": true,
+  "type": "module",
+  "description": "Spike S4 (ADR 0008 A1): NFX-05 CMAF packaging driven by the demo's L8 ladder and argv planning",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "package": "tsx package.ts",
+    "origin": "tsx origin.ts"
+  },
+  "devDependencies": {
+    "hls.js": "1.7.3",
+    "playwright": "1.63.0",
+    "tsx": "4.23.15"
+  }
+}

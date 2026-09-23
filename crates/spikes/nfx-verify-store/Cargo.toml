@@ -1,0 +1,13 @@
+[package]
+name = "nfx-verify-store"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Spike tool: verify a content-addressed NFX-05 store with nfx-proto (hash list, every file, every playlist)"
+license = "AGPL-3.0-or-later"
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+nfx-proto = { path = "../../nfx-proto" }

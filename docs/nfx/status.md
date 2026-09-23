@@ -10,8 +10,13 @@ Updated 2026-09-23 · branch `a1/s1-iroh` · plan: ADR 0008 + `spec/`
 - **Phase A0 is done and pushed:** `main` = `a645e73` on the private GitLab project, pushed
   2026-09-23 with sovtech's OK (a fast-forward of `a0/setup`).
 - **A1 spike S1 (iroh) PASSED:** 7/7 criteria on 4 runs, including a relay-down
-  negative control. See [`spikes/s1-iroh.md`](spikes/s1-iroh.md). Branch `a1/s1-iroh`,
-  not yet pushed.
+  negative control. See [`spikes/s1-iroh.md`](spikes/s1-iroh.md).
+- **A1 spike S4 (CMAF) PASSED; mpv and Safari are unverified on this host.** L8's
+  ladder/argv, with only the container tail swapped, produces NFX-05 output. It passes
+  the schema and `nfx-proto`, and plays, seeks and switches renditions in hls.js on
+  Chromium and Firefox. See [`spikes/s4-cmaf.md`](spikes/s4-cmaf.md).
+- **S2 (Tauri) is blocked on system packages** that need sudo (see Next).
+- Branch `a1/s1-iroh` carries S1 + S4 and is not yet pushed.
 - The private GitLab project exists, created 2026-09-23. `main` = `468fe1e`
   is pushed: the demo history, the spec commit `8f3b9bd` and a merge of demo `main`
   `0e35347`.
@@ -73,8 +78,11 @@ Updated 2026-09-23 · branch `a1/s1-iroh` · plan: ADR 0008 + `spec/`
 
 ## Next
 
-1. **A1 spikes, one at a time (RAM):** ~~S1 iroh~~ (done) → S2 Tauri playback → S3 web
-   mesh → S4 CMAF packaging. Pass criteria are in the plan
+1. **A1 spikes, one at a time (RAM):** ~~S1 iroh~~ → ~~S4 CMAF~~ → S3 web mesh → S2
+   Tauri playback. S2 is blocked until sovtech runs `sudo apt install
+   libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+   librsvg2-dev libxdo-dev libayatana-appindicator3-dev libavif16`. `libavif16` also
+   unblocks Playwright WebKit for S4's Safari-proxy check; `mpv` is optional for S4. Pass criteria are in the plan
    (`a local plan file`). Write one page each
    in `docs/nfx/spikes/`. Dev servers go on `http://100.64.0.1:<port>`.
    - S1's spec findings still need sovtech's call before they go into NFX-06/NFX-11:

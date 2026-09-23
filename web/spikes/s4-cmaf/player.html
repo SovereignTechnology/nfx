@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFX spike player</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #111; color: #eee; }
+  video { width: 100%; max-width: 960px; background: #000; }
+  pre { white-space: pre-wrap; font-size: 12px; }
+  button { margin: 4px 4px 4px 0; }
+</style>
+<h1>NFX spike player</h1>
+<p>Plays <code>/&lt;root&gt;/master.m3u8</code> from this origin with hls.js (native HLS as fallback).</p>
+<video id="v" controls muted playsinline></video>
+<div id="levels"></div>
+<pre id="log"></pre>
+<script src="/player/hls.min.js"></script>
+<script>
+  const root = new URLSearchParams(location.search).get('root');
+  const v = document.getElementById('v');
+  const logEl = document.getElementById('log');
+  // State for automation (Playwright reads window.__nfx).
+  const st = (window.__nfx = { root, engine: null, ready: false, levels: [], switched: [], errors: [], mse: {} });
+  const log = (m) => { logEl.textContent += `${new Date().toISOString().slice(11, 19)} ${m}\n`; };
+  for (const c of ['avc1.640028,mp4a.40.2', 'avc1.64001f,mp4a.40.2', 'avc1.64001e,mp4a.40.2']) {
+    st.mse[c] = window.MediaSource ? MediaSource.isTypeSupported(`video/mp4; codecs="${c}"`) : null;
+  }
+  const src = `/${root}/master.m3u8`;
+  if (!root || !/^[0-9a-f]{64}$/.test(root)) {
+    st.errors.push('missing ?root=');
+  } else if (window.Hls && Hls.isSupported()) {
+    st.engine = `hls.js ${Hls.version}`;
+    const hls = (window.__hls = new Hls());
+    hls.on(Hls.Events.MANIFEST_PARSED, (_, d) => {
+      st.levels = d.levels.map((l) => ({ height: l.height, bitrate: l.bitrate, codecs: l.attrs && l.attrs.CODECS }));
+      st.ready = true;
+      const box = document.getElementById('levels');
+      st.levels.forEach((l, i) => {
+        const b = document.createElement('button');
+        b.textContent = `${l.height}p`;
+        b.onclick = () => { hls.currentLevel = i; };
+        box.append(b);
+      });
+      log(`manifest: ${st.levels.map((l) => l.height + 'p').join(' ')}`);
+      v.play().catch((e) => st.errors.push(`play: ${e}`));
+    });
+    hls.on(Hls.Events.LEVEL_SWITCHED, (_, d) => { st.switched.push(d.level); log(`level -> ${st.levels[d.level]?.height}p`); });
+    hls.on(Hls.Events.ERROR, (_, d) => { st.errors.push(`${d.type}:${d.details}:${d.fatal}`); log(`error ${d.details} fatal=${d.fatal}`); });
+    hls.loadSource(src);
+    hls.attachMedia(v);
+  } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+    st.engine = 'native HLS';
+    v.src = src;
+    v.addEventListener('loadedmetadata', () => { st.ready = true; v.play().catch((e) => st.errors.push(`play: ${e}`)); });
+  } else {
+    st.errors.push('no HLS support');
+  }
+  v.addEventListener('error', () => st.errors.push(`video error ${v.error && v.error.code}`));
+</script>
+</html>
