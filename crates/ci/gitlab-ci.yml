@@ -1,0 +1,28 @@
+# NFX master-plan CI (ADR 0008). It runs only master-plan checks, never the demo's
+# `npm run ci`. Dormant: GitLab CI/CD is disabled and no runner is registered.
+# To enable: turn CI/CD on for the project and set Settings → CI/CD → "CI/CD
+# configuration file" to crates/ci/gitlab-ci.yml. The root .gitlab-ci.yml path is left
+# to the demo mirror, so `git merge demo/<tag>` stays conflict-free.
+
+stages: [check]
+
+variables:
+  GIT_DEPTH: "0"            # the add-only check needs the merge base with demo/main
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo-home
+  CARGO_TERM_COLOR: always
+
+check:
+  stage: check
+  image: rust:1.98-bookworm
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends python3 python3-venv nodejs
+    - python3 -m venv /opt/venv && /opt/venv/bin/pip install coincurve==21.0.0
+    - rustup component add clippy rustfmt && rustup target add wasm32-unknown-unknown
+    - cargo install --locked cargo-deny --version 0.20.2
+    - cargo install --locked wasm-pack --version 0.13.1
+    - git fetch --no-tags https://example.invalid/sovtech/nutflix.git +main:refs/remotes/demo/main
+  script:
+    - PYTHON=/opt/venv/bin/python crates/ci/check.sh
+  cache:
+    key: cargo-$CI_COMMIT_REF_SLUG
+    paths: [.cargo-home/registry, crates/target]
