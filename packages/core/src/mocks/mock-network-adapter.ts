@@ -77,6 +77,7 @@ export class MockNetworkAdapter implements NetworkAdapter {
   ]);
   private readonly watchLaterIds = new Set<NostrEventId>([VIDEOS[3]?.id ?? asEventId('none')]);
   private readonly likedIds = new Set<NostrEventId>([VIDEOS[1]?.id ?? asEventId('none')]);
+  private readonly dislikedIds = new Set<NostrEventId>();
   private readonly progress = new Map<NostrEventId, { positionSec: number; at: UnixSeconds }>();
   private readonly extraComments = new Map<NostrEventId, Comment[]>();
   private readonly playlists: Playlist[] = [
@@ -178,10 +179,17 @@ export class MockNetworkAdapter implements NetworkAdapter {
   stats(id: NostrEventId): Promise<VideoStats> {
     const v = VIDEOS.find((x) => x.id === id);
     const seed = v ? VIDEOS.indexOf(v) + 1 : 0;
+    // Other viewers' reactions are fixed per fixture; the mock viewer's own one is added on top.
+    const mine = this.likedIds.has(id) ? 'like' : this.dislikedIds.has(id) ? 'dislike' : undefined;
+    const likes = seed * 9 + 3 + (mine === 'like' ? 1 : 0);
+    const dislikes = seed * 2 + (mine === 'dislike' ? 1 : 0);
     return this.delay({
       paidViews: seed * 37 + 12,
       satsToCreator: sats(seed * 1830 + 240),
-      reactions: seed * 11 + 3,
+      reactions: likes + dislikes,
+      likes,
+      dislikes,
+      ...(mine === undefined ? {} : { myReaction: mine }),
       comments: fixtureComments(id).length + (this.extraComments.get(id)?.length ?? 0),
       seedersOnline: this.opts.failWith === 'no-seeders' ? 0 : 1 + (seed % 4),
     });
@@ -267,8 +275,16 @@ export class MockNetworkAdapter implements NetworkAdapter {
     return this.delay(c);
   }
   react(videoId: NostrEventId, reaction: string): Promise<void> {
-    if (reaction === '+') this.likedIds.add(videoId);
-    else this.likedIds.delete(videoId);
+    // NIP-25: the newest reaction per pubkey wins, so a new one replaces the old.
+    this.likedIds.delete(videoId);
+    this.dislikedIds.delete(videoId);
+    if (reaction === '+' || reaction === '') this.likedIds.add(videoId);
+    else if (reaction === '-') this.dislikedIds.add(videoId);
+    return this.delay(undefined);
+  }
+  unreact(videoId: NostrEventId): Promise<void> {
+    this.likedIds.delete(videoId);
+    this.dislikedIds.delete(videoId);
     return this.delay(undefined);
   }
   nutzap(_videoId: NostrEventId, amount: Sats, mint: MintUrl): Promise<void> {

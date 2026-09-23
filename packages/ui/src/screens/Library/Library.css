@@ -1,0 +1,643 @@
+/*
+ * Library screen (L5). Screen-scoped, `nf-library` namespace, L4 tokens only. Loaded by the
+ * shells as a file after tokens.css + components.css (never injected — CSP `style-src 'self'`).
+ */
+.nf-library {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+  min-width: 0;
+  color: var(--nf-color-text);
+}
+
+.nf-library__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.nf-library__title {
+  margin: 0;
+  font-size: var(--nf-text-3xl);
+  line-height: var(--nf-line-3xl);
+  font-weight: var(--nf-weight-bold);
+}
+
+/* Chip bar, as on Home: sticky so the list switch stays in reach. */
+.nf-library__bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nf-space-8) var(--nf-space-16);
+  padding: var(--nf-space-8) 0 var(--nf-space-12);
+  background: var(--nf-color-bg);
+}
+
+.nf-library__tabs {
+  display: flex;
+  gap: var(--nf-space-12);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.nf-library__tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.nf-library__tab {
+  flex: none;
+}
+
+.nf-library__hint {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nf-space-4);
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-library__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-24);
+  min-width: 0;
+  outline: none;
+}
+
+/*
+ * L4 workaround (same as Home, reported in docs/lanes/L5-Home.md): `.nf-card__text` is a flex
+ * item with no `flex-grow`, so skeleton text lines collapse to 0 px and list-layout titles do
+ * not take the row's free width. Letting the text column grow fixes both.
+ */
+.nf-library .nf-card__text {
+  flex: 1 1 auto;
+}
+
+/* Same gap one level up in list layout: the body must grow for the skeleton lines to show. */
+.nf-library .nf-card--list .nf-card__body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/*
+ * Shorts in a list row are cropped to 16:9 like every other row (YouTube's playlist lists do
+ * the same): a 9:16 frame narrow enough to keep the row height clipped the price badge.
+ */
+.nf-library .nf-card--list.nf-card--short .nf-card__thumb {
+  aspect-ratio: 16 / 9;
+}
+
+/* ---- History: day groups of wide list rows (YouTube "Watch history") ------------------ */
+.nf-library__history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-24);
+  width: 100%;
+  max-width: 1040px;
+}
+
+.nf-library__day {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-12);
+}
+
+.nf-library__day-title {
+  margin: 0;
+  font-size: var(--nf-text-xl);
+  line-height: var(--nf-line-xl);
+  font-weight: var(--nf-weight-bold);
+}
+
+.nf-library__rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-library__row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--nf-space-16);
+  min-width: 0;
+}
+
+.nf-library__row > .nf-card {
+  flex: 1 1 auto;
+  gap: var(--nf-space-16);
+}
+
+.nf-library__row .nf-card--list .nf-card__thumb {
+  width: 246px;
+}
+
+.nf-library__row .nf-card--list .nf-card__title {
+  font-size: var(--nf-text-md);
+  line-height: var(--nf-line-md);
+}
+
+.nf-library__row-aside {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--nf-space-8);
+  padding-top: var(--nf-space-4);
+}
+
+/* ---- Collections (Watch later, an open playlist): hero panel + numbered list ----------- */
+.nf-library__collection {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: var(--nf-space-24);
+  align-items: start;
+}
+
+.nf-library__hero {
+  position: sticky;
+  top: 72px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-12);
+  padding: var(--nf-space-16);
+  border-radius: var(--nf-radius-xl);
+  background: var(--nf-color-bg-subtle);
+}
+
+.nf-library__back {
+  align-self: flex-start;
+  margin-left: calc(var(--nf-space-8) * -1);
+}
+
+.nf-library__hero-cover {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--nf-radius-lg);
+  overflow: hidden;
+  background: var(--nf-color-bg-active);
+}
+
+.nf-library__hero-title {
+  margin: 0;
+  font-size: var(--nf-text-2xl);
+  line-height: var(--nf-line-2xl);
+  font-weight: var(--nf-weight-bold);
+  overflow-wrap: anywhere;
+  outline: none;
+}
+
+.nf-library__hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--nf-space-4);
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-library__hero-desc {
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text);
+  overflow-wrap: anywhere;
+}
+
+.nf-library__hero-note {
+  margin: 0;
+  font-size: var(--nf-text-xs);
+  line-height: var(--nf-line-xs);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-library__collection-body {
+  min-width: 0;
+}
+
+.nf-library__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-library__item {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-8);
+  min-width: 0;
+  padding: var(--nf-space-8) var(--nf-space-8) var(--nf-space-8) 0;
+  border-radius: var(--nf-radius-lg);
+}
+
+.nf-library__item:hover,
+.nf-library__item:focus-within {
+  background: var(--nf-color-bg-hover);
+}
+
+.nf-library__item > .nf-card,
+.nf-library__item > .nf-library__unavailable {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.nf-library__index {
+  flex: none;
+  width: 24px;
+  text-align: center;
+  font-size: var(--nf-text-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-library__remove {
+  flex: none;
+  opacity: 0.6;
+}
+
+.nf-library__item:hover .nf-library__remove,
+.nf-library__remove:focus-visible {
+  opacity: 1;
+}
+
+/* A playlist entry whose event could not be resolved. */
+.nf-library__unavailable {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-12);
+}
+
+.nf-library__unavailable-thumb {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 168px;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--nf-radius-md);
+  color: var(--nf-color-text-muted);
+  background: var(--nf-color-bg-subtle);
+}
+
+.nf-library__unavailable-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.nf-library__unavailable-title {
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-library__unavailable-desc {
+  margin: 0;
+  font-size: var(--nf-text-xs);
+  line-height: var(--nf-line-xs);
+  color: var(--nf-color-text-secondary);
+}
+
+/* ---- Playlists grid ------------------------------------------------------------------ */
+.nf-library__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nf-space-16);
+}
+
+.nf-library__count {
+  margin: 0;
+  font-size: var(--nf-text-md);
+  line-height: var(--nf-line-md);
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-library__tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--nf-space-32) var(--nf-space-16);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-library__tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-8);
+  min-width: 0;
+}
+
+.nf-library__tile-cover {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  border: 0;
+  border-radius: var(--nf-radius-lg);
+  overflow: hidden;
+  cursor: pointer;
+  background: var(--nf-color-bg-subtle);
+  /* Two offset sheets behind the cover read as "a stack of videos", like YouTube's tiles. */
+  box-shadow:
+    0 -4px 0 -2px var(--nf-color-bg-active),
+    0 -8px 0 -4px var(--nf-color-border);
+  margin-top: var(--nf-space-8);
+  overflow: visible;
+}
+
+.nf-library__tile-cover > .nf-library__cover-img,
+.nf-library__tile-cover > .nf-skeleton,
+.nf-library__tile-cover > .nf-library__cover-empty {
+  border-radius: var(--nf-radius-lg);
+}
+
+.nf-library__cover-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.nf-library__cover-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: var(--nf-color-text-muted);
+  background: var(--nf-color-bg-subtle);
+}
+
+.nf-library__hero-cover .nf-skeleton--block,
+.nf-library__tile-cover .nf-skeleton--block {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.nf-library__tile-count {
+  position: absolute;
+  right: var(--nf-space-8);
+  bottom: var(--nf-space-8);
+  padding: 2px 6px;
+  border-radius: var(--nf-radius-sm);
+  font-size: var(--nf-text-xs);
+  font-weight: var(--nf-weight-medium);
+  line-height: 1.3;
+  color: var(--nf-color-overlay-fg);
+  background: var(--nf-color-overlay-strong);
+}
+
+.nf-library__tile-title {
+  margin: 0;
+  font-size: var(--nf-text-md);
+  line-height: var(--nf-line-md);
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-library__tile-open {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.nf-library__tile-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--nf-space-4);
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+/* Private / Public indicator (private NIP-51 sets are encrypted to the viewer's key). */
+.nf-library__visibility {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nf-space-4);
+}
+
+.nf-library__visibility--private {
+  padding: 0 var(--nf-space-8);
+  border-radius: var(--nf-radius-full);
+  font-size: var(--nf-text-xs);
+  font-weight: var(--nf-weight-medium);
+  line-height: 20px;
+  color: var(--nf-color-text);
+  background: var(--nf-color-bg-active);
+}
+
+/* ---- Liked grid (Home's grid rhythm) ------------------------------------------------- */
+.nf-library__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--nf-space-40) var(--nf-space-16);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-library__cell {
+  min-width: 0;
+}
+
+/* Liked shorts: a horizontal shelf of 9:16 cards, like Home's. */
+.nf-library__shorts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+  min-width: 0;
+}
+
+.nf-library__shorts-list {
+  display: flex;
+  gap: var(--nf-space-16);
+  margin: 0;
+  padding: 0 0 var(--nf-space-8);
+  list-style: none;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.nf-library__shorts-list > .nf-library__cell {
+  flex: 0 0 210px;
+}
+
+/* ---- New playlist form (inside L4's Sheet) -------------------------------------------- */
+.nf-library__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-24);
+}
+
+.nf-library__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-4);
+}
+
+.nf-library__field--check {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: var(--nf-space-4) var(--nf-space-12);
+}
+
+.nf-library__field--check > .nf-library__help {
+  grid-column: 2;
+}
+
+.nf-library__label {
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-library__optional {
+  font-weight: var(--nf-weight-regular);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-library__input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: var(--nf-space-8) var(--nf-space-12);
+  border: 1px solid var(--nf-color-border-strong);
+  border-radius: var(--nf-radius-md);
+  font: inherit;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text);
+  background: var(--nf-color-bg);
+}
+
+.nf-library__input:focus-visible {
+  outline: 2px solid var(--nf-color-focus);
+  outline-offset: 0;
+  border-color: transparent;
+}
+
+.nf-library__textarea {
+  resize: vertical;
+  min-height: 96px;
+}
+
+.nf-library__check {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--nf-color-accent);
+}
+
+.nf-library__counter {
+  align-self: flex-end;
+  font-size: var(--nf-text-xs);
+  line-height: var(--nf-line-xs);
+  color: var(--nf-color-text-muted);
+}
+
+.nf-library__help {
+  font-size: var(--nf-text-xs);
+  line-height: var(--nf-line-xs);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-library__form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--nf-space-8);
+}
+
+/* ---- infinite scroll, toasts, mini-player -------------------------------------------- */
+.nf-library__more {
+  display: flex;
+  justify-content: center;
+  min-height: var(--nf-space-8);
+}
+
+.nf-library__sentinel {
+  width: 100%;
+  height: 1px;
+}
+
+/*
+ * The toast region sits at the end of the screen with no height of its own and sticks to the
+ * bottom of the viewport; toasts grow upward from that anchor (YouTube's bottom-left
+ * snackbar), inside the screen so Storybook and both shells place them the same way.
+ */
+.nf-library__toasts.nf-toasts--inline {
+  position: sticky;
+  bottom: var(--nf-space-16);
+  z-index: var(--nf-z-toast);
+  height: 0;
+  margin-top: calc(var(--nf-space-16) * -1);
+  justify-content: flex-end;
+}
+
+.nf-library__mini {
+  position: fixed;
+  right: var(--nf-space-16);
+  bottom: var(--nf-space-16);
+  z-index: var(--nf-z-mini-player);
+  box-shadow: var(--nf-shadow-md);
+  border-radius: var(--nf-radius-lg);
+  overflow: hidden;
+}
+
+@media (max-width: 860px) {
+  .nf-library__collection {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .nf-library__hero {
+    position: static;
+  }
+
+  .nf-library__row {
+    flex-direction: column;
+  }
+
+  .nf-library__row-aside {
+    align-items: flex-start;
+  }
+
+  .nf-library__row .nf-card--list .nf-card__thumb {
+    width: 168px;
+  }
+}

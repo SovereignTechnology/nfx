@@ -53,7 +53,17 @@ export interface VideoStats {
   /** Unique paying pubkeys from kind 9321 — labelled "paid views" in the UI. */
   readonly paidViews: number;
   readonly satsToCreator: Sats;
+  /** All NIP-25 reactions on the video (likes + dislikes + emoji), newest per pubkey. */
   readonly reactions: number;
+  /**
+   * v4: `+`/empty reactions, newest per pubkey. Dislikes are always shown (sovtech,
+   * 2026-09-23, ADR 0007), so both counts are required.
+   */
+  readonly likes: number;
+  /** v4: `-` reactions, newest per pubkey. */
+  readonly dislikes: number;
+  /** v4: the signed-in viewer's current reaction, when it is a like or a dislike. */
+  readonly myReaction?: 'like' | 'dislike';
   readonly comments: number;
   /** Seeders currently announcing this core (from swarm / 10019). */
   readonly seedersOnline: number;
@@ -191,8 +201,18 @@ export interface NetworkAdapter {
   // ---- social --------------------------------------------------------------------
   comments(videoId: NostrEventId, sort: 'new' | 'top', cursor?: string): Promise<Page<Comment>>;
   comment(videoId: NostrEventId, content: string, parent?: NostrEventId): Promise<Comment>;
-  /** NIP-25 reaction content: `+` (like), `-` (dislike) or an emoji. */
+  /**
+   * NIP-25 reaction content: `+` (like), `-` (dislike) or an emoji. Publishing a new
+   * reaction replaces the viewer's previous one (clients count the newest per pubkey), so
+   * like -> dislike is a second `react`, not an `unreact` first.
+   */
   react(videoId: NostrEventId, reaction: string): Promise<void>;
+  /**
+   * v4: withdraw the viewer's reaction on the video (NIP-09 deletion request for their
+   * kind-7 events on it). Returns the viewer to neutral. Never implemented as a `-`
+   * reaction: dislikes are public, so un-like must not register as one.
+   */
+  unreact(videoId: NostrEventId): Promise<void>;
   nutzap(videoId: NostrEventId, amount: Sats, mint: MintUrl, comment?: string): Promise<void>;
   subscribe(channel: NostrPubkey): Promise<void>;
   unsubscribe(channel: NostrPubkey): Promise<void>;

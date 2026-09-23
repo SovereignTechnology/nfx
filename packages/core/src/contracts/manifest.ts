@@ -86,7 +86,12 @@ export interface PricePolicy {
   readonly blockSize: number;
   /** Creator-chosen mint(s). Open question 2: one or several. */
   readonly mints: readonly MintUrl[];
-  /** Percentages, must sum to 100. Default 50/50 if the `split` tag is absent. */
+  /**
+   * Percentages, must sum to 100. Default 50/50 if the `split` tag is absent.
+   * Per-PAY split (ADR 0005 Q1, amended by ADR 0007 — implemented in Stage 2): the creator's
+   * fractional share is carried across PAYs on the same stream, and PAYs have a minimum size.
+   * Until then the v3 rule stands: `seederSats = ceil(amount × seeder / 100)`.
+   */
   readonly split: { readonly seeder: number; readonly creator: number };
   /** Creator's Cashu P2PK pubkey from their kind 10019. */
   readonly creatorP2pk: CashuP2pkPubkey;

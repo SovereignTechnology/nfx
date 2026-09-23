@@ -4,7 +4,8 @@
  * `<link rel="stylesheet">` (SRI-able, CSP `style-src 'self'` clean — no runtime injection):
  *   dist/tokens.css      = src/tokens/tokens.css
  *   dist/components.css  = src/components/components.css with its @imports inlined
- *   dist/ui.css          = both, in that order
+ *   dist/screens.css     = src/screens/screens.css with its @imports inlined (L5)
+ *   dist/ui.css          = all three, in that order
  * Plain CSS in, plain CSS out — no bundler, no minifier, byte-identical for every consumer.
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -31,8 +32,12 @@ function inline(file: string, seen = new Set<string>()): string {
 
 const tokens = readFileSync(join(src, 'tokens', 'tokens.css'), 'utf8');
 const components = inline(join(src, 'components', 'components.css'));
+const screens = inline(join(src, 'screens', 'screens.css'));
 mkdirSync(dist, { recursive: true });
 writeFileSync(join(dist, 'tokens.css'), tokens);
 writeFileSync(join(dist, 'components.css'), components);
-writeFileSync(join(dist, 'ui.css'), `${tokens}\n${components}`);
-process.stderr.write(`build-css: wrote dist/tokens.css, dist/components.css, dist/ui.css\n`);
+writeFileSync(join(dist, 'screens.css'), screens);
+writeFileSync(join(dist, 'ui.css'), `${tokens}\n${components}\n${screens}`);
+process.stderr.write(
+  `build-css: wrote dist/tokens.css, dist/components.css, dist/screens.css, dist/ui.css\n`,
+);

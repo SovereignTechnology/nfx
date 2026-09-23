@@ -1,0 +1,583 @@
+/*
+ * Channel screen (L5). Screen-scoped, `nf-channelpage` namespace, L4 tokens only. Loaded by
+ * the shells as a file after tokens.css + components.css (never injected — CSP
+ * `style-src 'self'`).
+ */
+.nf-channelpage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-24);
+  min-width: 0;
+  color: var(--nf-color-text);
+}
+
+/* Visually hidden heading: the landmark keeps its name where no visible h1 makes sense. */
+.nf-channelpage__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Banner: wide and rounded, YouTube's channel-page proportion. Absent banner = no block. */
+.nf-channelpage__banner {
+  position: relative;
+  aspect-ratio: 6 / 1;
+  min-height: 80px;
+  border-radius: var(--nf-radius-lg);
+  overflow: hidden;
+  background: var(--nf-color-bg-subtle);
+}
+
+.nf-channelpage__banner-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.nf-channelpage__banner-skeleton {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Header row: 80 px avatar, title + subline + blurb + seeding, action on the right. */
+.nf-channelpage__head {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-16);
+  min-width: 0;
+}
+
+.nf-channelpage__avatar-skeleton {
+  flex: none;
+  display: inline-flex;
+}
+
+.nf-channelpage__headtext {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-4);
+}
+
+.nf-channelpage__title {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-8);
+  margin: 0;
+  min-width: 0;
+  font-size: var(--nf-text-2xl);
+  line-height: var(--nf-line-2xl);
+  font-weight: var(--nf-weight-bold);
+}
+
+.nf-channelpage__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nf-channelpage__verified {
+  flex: none;
+  color: var(--nf-color-text-secondary);
+}
+
+/* "identifier · 3 videos" — YouTube's handle line. */
+.nf-channelpage__sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nf-space-4) var(--nf-space-8);
+  margin: 0;
+  min-width: 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-channelpage__dot {
+  color: var(--nf-color-text-muted);
+}
+
+.nf-channelpage__pubkey {
+  font-family: var(--nf-font-mono);
+  font-size: var(--nf-text-sm);
+}
+
+/* A pubkey with videos but no kind 0: the title already is the short pubkey. */
+.nf-channelpage__noprofile {
+  font-style: italic;
+  color: var(--nf-color-text-muted);
+}
+
+/*
+ * NIP-05, three looks: verified = plain identifier (the check sits by the name);
+ * unverified = identifier + a neutral "Unverified" flag; failed = struck-through identifier +
+ * a warning flag. No identifier at all = the short pubkey (`.nf-channelpage__pubkey`).
+ */
+.nf-channelpage__nip05 {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nf-space-8);
+  min-width: 0;
+}
+
+.nf-channelpage__nip05--verified {
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-channelpage__nip05--unverified .nf-channelpage__nip05-id {
+  color: var(--nf-color-text-muted);
+}
+
+.nf-channelpage__nip05--failed .nf-channelpage__nip05-id {
+  color: var(--nf-color-text-muted);
+  text-decoration-thickness: 1px;
+}
+
+.nf-channelpage__nip05-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nf-space-4);
+  height: 20px;
+  padding: 0 var(--nf-space-8);
+  border: 1px solid var(--nf-color-border-strong);
+  border-radius: var(--nf-radius-full);
+  font-size: var(--nf-text-xs);
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-channelpage__nip05-flag--failed {
+  border-color: transparent;
+  color: var(--nf-color-warning);
+  background: var(--nf-color-warning-bg);
+}
+
+/* One-line description teaser + "more" (→ About), as YouTube's channel header does. */
+.nf-channelpage__blurb {
+  display: flex;
+  align-items: baseline;
+  gap: var(--nf-space-4);
+  min-width: 0;
+  max-width: 720px;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-channelpage__blurb-md {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-height: var(--nf-line-sm);
+  overflow: hidden;
+}
+
+.nf-channelpage__blurb-md .nf-md__p {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nf-channelpage__blurb-md br {
+  display: none;
+}
+
+.nf-channelpage__blurb-more {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-text);
+  cursor: pointer;
+}
+
+.nf-channelpage__blurb-more:hover {
+  text-decoration: underline;
+}
+
+/* "Seeding N videos": the channel's own seeder (kind 10019 / local seeder status). */
+.nf-channelpage__seeding {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nf-space-4);
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-success);
+}
+
+.nf-channelpage__actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
+/* Tab bar (chip row, like Home's): sticky so a long video list keeps the switch in reach. */
+.nf-channelpage__bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  padding: var(--nf-space-4) 0;
+  background: var(--nf-color-bg);
+}
+
+.nf-channelpage__tabs {
+  display: flex;
+  gap: var(--nf-space-12);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.nf-channelpage__tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.nf-channelpage__tab {
+  flex: none;
+}
+
+.nf-channelpage__panel {
+  min-width: 0;
+  outline: none;
+}
+
+/* Videos / Shorts: grid, then the "Show more" row or its inline error. */
+.nf-channelpage__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-32);
+}
+
+.nf-channelpage__more-row {
+  display: flex;
+  justify-content: center;
+}
+
+/* Videos tab: the same dense grid as Home. */
+.nf-channelpage__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--nf-space-40) var(--nf-space-16);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-channelpage__item {
+  min-width: 0;
+}
+
+/*
+ * L4 workaround (reported in docs/lanes/L5-Home.md): `.nf-card__text` is a flex item with no
+ * `flex-grow`, so `VideoCardSkeleton`'s percentage-width lines collapse to 0 px. Letting the
+ * text column grow inside these grids restores the placeholder lines.
+ */
+.nf-channelpage__item .nf-card__text {
+  flex: 1 1 auto;
+}
+
+/* Channel cards hide the channel row (`hideChannel`); the skeletons must match or the
+   grid jumps when the page arrives. */
+.nf-channelpage__item .nf-card--skeleton .nf-card__avatar {
+  display: none;
+}
+
+/* Shorts tab: 9:16 cards in a narrower grid. Kind-22 cards turn 9:16 by themselves; the
+   skeleton gets the same shape here so a loading tab does not jump. */
+.nf-channelpage__shorts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--nf-space-40) var(--nf-space-16);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-channelpage__shorts-grid .nf-card__thumb {
+  aspect-ratio: 9 / 16;
+}
+
+.nf-channelpage__shorts-grid .nf-card__thumb--skeleton .nf-skeleton {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Playlists tab: a grid of stacked-thumbnail cards, as YouTube's channel Playlists tab. */
+.nf-channelpage__playlists {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--nf-space-40) var(--nf-space-16);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-channelpage__playlist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-12);
+  min-width: 0;
+}
+
+.nf-channelpage__playlist-thumb {
+  position: relative;
+  isolation: isolate;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  margin-top: var(--nf-space-8);
+  padding: 0;
+  border: 0;
+  border-radius: var(--nf-radius-lg);
+  overflow: hidden;
+  background: var(--nf-color-bg-subtle);
+  /* two thinner "cards" behind the thumbnail = a set, not a single video */
+  box-shadow:
+    0 -4px 0 -2px var(--nf-color-border-strong),
+    0 -8px 0 -4px var(--nf-color-border);
+}
+
+button.nf-channelpage__playlist-thumb {
+  cursor: pointer;
+}
+
+button.nf-channelpage__playlist-thumb:focus-visible {
+  outline-offset: -3px;
+}
+
+.nf-channelpage__playlist-thumb > img,
+.nf-channelpage__playlist-thumb > .nf-skeleton {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.nf-channelpage__playlist-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--nf-color-text-muted);
+}
+
+.nf-channelpage__playlist-price {
+  position: absolute;
+  z-index: 2;
+  left: var(--nf-space-8);
+  bottom: var(--nf-space-8);
+}
+
+.nf-channelpage__playlist-count {
+  position: absolute;
+  z-index: 2;
+  right: var(--nf-space-8);
+  bottom: var(--nf-space-8);
+  padding: 2px 4px;
+  border-radius: var(--nf-radius-sm);
+  font-size: var(--nf-text-xs);
+  font-weight: var(--nf-weight-medium);
+  line-height: 1.2;
+  color: var(--nf-color-overlay-fg);
+  background: var(--nf-color-overlay-strong);
+}
+
+/* "Play all" appears on hover/focus, after (and under) the price badge. */
+.nf-channelpage__playlist-play {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--nf-space-4);
+  font-size: var(--nf-text-sm);
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-overlay-fg);
+  background: var(--nf-color-overlay);
+  opacity: 0;
+  transition: opacity var(--nf-motion-base) var(--nf-ease);
+}
+
+.nf-channelpage__playlist-thumb:hover .nf-channelpage__playlist-play,
+.nf-channelpage__playlist-thumb:focus-visible .nf-channelpage__playlist-play {
+  opacity: 1;
+}
+
+.nf-channelpage__playlist-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-4);
+  min-width: 0;
+}
+
+.nf-channelpage__playlist-title {
+  margin: 0;
+  font-size: var(--nf-text-md);
+  line-height: var(--nf-line-md);
+  font-weight: var(--nf-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.nf-channelpage__playlist-open {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nf-channelpage__playlist-open:hover {
+  text-decoration: underline;
+}
+
+.nf-channelpage__playlist-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-8);
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-channelpage__playlist-private {
+  flex: none;
+  padding: 0 var(--nf-space-8);
+  border: 1px solid var(--nf-color-border);
+  border-radius: var(--nf-radius-sm);
+  font-size: var(--nf-text-xs);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-channelpage__playlist-note {
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-warning);
+}
+
+/* Two-line clamp for playlist descriptions, like the watch page collapses its description. */
+.nf-channelpage__playlist-desc {
+  color: var(--nf-color-text-secondary);
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+}
+
+.nf-channelpage__playlist-desc .nf-md__p {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin: 0;
+}
+
+/* About tab: description (markdown subset) + a details definition list. */
+.nf-channelpage__about {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-32);
+  max-width: 720px;
+}
+
+.nf-channelpage__about-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-12);
+  min-width: 0;
+}
+
+.nf-channelpage__section-title {
+  margin: 0;
+  font-size: var(--nf-text-lg);
+  line-height: var(--nf-line-lg);
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-channelpage__details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-12);
+  margin: 0;
+}
+
+.nf-channelpage__detail {
+  display: flex;
+  gap: var(--nf-space-16);
+  align-items: baseline;
+}
+
+.nf-channelpage__detail > dt {
+  flex: 0 0 160px;
+  font-size: var(--nf-text-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-channelpage__detail > dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--nf-text-sm);
+}
+
+.nf-channelpage__detail code {
+  font-family: var(--nf-font-mono);
+  font-size: var(--nf-text-sm);
+}
+
+/* Mini-player slot: floats bottom-right above the content while a video keeps playing. */
+.nf-channelpage__mini {
+  position: fixed;
+  right: var(--nf-space-16);
+  bottom: var(--nf-space-16);
+  z-index: var(--nf-z-mini-player);
+  box-shadow: var(--nf-shadow-md);
+  border-radius: var(--nf-radius-lg);
+  overflow: hidden;
+}
+
+/* Narrow viewports: stack the header, keep the action reachable. */
+@media (max-width: 640px) {
+  .nf-channelpage__head {
+    flex-wrap: wrap;
+  }
+
+  .nf-channelpage__actions {
+    flex-basis: 100%;
+  }
+
+  .nf-channelpage__detail {
+    flex-direction: column;
+    gap: var(--nf-space-4);
+  }
+
+  .nf-channelpage__detail > dt {
+    flex-basis: auto;
+  }
+}

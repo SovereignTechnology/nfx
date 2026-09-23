@@ -6,7 +6,57 @@ and never placed in `node_modules`**; the pipeline takes its path as injected co
 (`MediaPipelineDeps.binaries`), so a shipped desktop binary, a system package on the
 gateway, or the dev scratch copy below are all just different values.
 
-## Pinned build (dev + CI reference)
+## ⚠ The original pin was PRUNED upstream — re-pinned 2026-09-05 (orchestrator)
+
+**BtbN deletes daily `autobuild-*` releases after about twelve days.** The tag L8 recorded
+below, `autobuild-2026-09-04-14-01`, was **404 by 2026-09-05** — the whole release is gone, not
+just moved, so the documented `curl` writes a 9-byte `Not Found` body and `sha256sum -c` fails.
+The claim below that "every release tag is immutable" is only half right: a tag that still
+exists is immutable, but most are **deleted**. Retention observed via the GitHub API on
+2026-09-05: the **12 most recent dailies**, plus one **month-end** snapshot per month going back
+to 2024.
+
+**So the pin must be a month-end build.** The current dev/CI reference is:
+
+| Field | Value |
+|---|---|
+| Release tag | `autobuild-2026-08-31-13-27` (month-end → long-lived) |
+| Asset | `ffmpeg-n8.1.2-50-g1a748fe2cd-linux64-gpl-8.1.tar.xz` |
+| URL | https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n8.1.2-50-g1a748fe2cd-linux64-gpl-8.1.tar.xz |
+| ffmpeg version string | `n8.1.2-50-g1a748fe2cd-20260831` |
+| Tarball sha256 | `c733b4b2951e5957e15505f788b2c65a7a41b6da4b289e295852cc38079b4d2b` |
+| Upstream `checksums.sha256` sha256 | `5a831b23711edf09476291bfbb104cc4e9c78ab6d9a3978ff27da1ee76b01c5b` |
+| `bin/ffmpeg` sha256 | `ad7a8c8e8fe4f50972f32f63705cfcc57f44cd3531f57aa8defe388372242f5e` |
+| `bin/ffprobe` sha256 | `150bfd75016992a8d495a5f5c16cd93387a21c059f4309ed1e6342659aef48b3` |
+| Size | 128,065,756 bytes listed by the API for the *other* gpl asset; **this** tarball is 125,758,156 bytes |
+| Verified | 2026-09-05 on laptop-2, three ways: the release's own `checksums.sha256` (whose own sha256 is above), the GitHub API asset `digest` field, and `ffmpeg -version`. `npx vitest run --project core src/media/__tests__/node-real-ffmpeg.test.ts` → 10 passed |
+
+**It is the same FFmpeg revision as the original pin** (`n8.1.2-50-g1a748fe2cd`) — BtbN rebuilds
+the same source daily, so the binaries differ byte-for-byte while the version string differs
+only in its date suffix. That is why the tarball hash here is not the one recorded below.
+
+Install (no root):
+
+```sh
+mkdir -p /tmp/scratch/ffmpeg && cd /tmp/scratch/ffmpeg
+T=autobuild-2026-08-31-13-27
+A=ffmpeg-n8.1.2-50-g1a748fe2cd-linux64-gpl-8.1.tar.xz
+curl -sSLO "https://github.com/BtbN/FFmpeg-Builds/releases/download/$T/$A"
+curl -sSLO "https://github.com/BtbN/FFmpeg-Builds/releases/download/$T/checksums.sha256"
+grep " $A\$" checksums.sha256 | sha256sum -c -      # must print OK
+tar -xJf "$A"
+```
+
+**When this pin is eventually pruned too** (month-end builds are long-lived but not forever):
+pick the newest month-end tag from
+`curl -s 'https://api.github.com/repos/BtbN/FFmpeg-Builds/releases?per_page=100'`, verify the
+tarball against that release's own `checksums.sha256` **and** the API `digest`, run the
+real-ffmpeg suite, and update the table above. Do not silently switch to `latest` — it is a
+moving pointer and defeats the point of a pin.
+
+---
+
+## Original pin (2026-09-04, lane L8) — URL DEAD, kept for provenance
 
 | Field | Value |
 |---|---|

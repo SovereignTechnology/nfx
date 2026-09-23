@@ -98,3 +98,30 @@ toggle. Recorded alongside the design brief in `docs/design/README.md`.
 - L6 brief: no bundled ffmpeg; system-ffmpeg probe + "not found" state.
 - L5 Studio brief: an "ffmpeg not found" state with install instructions.
 - `docs/status.md` "Inputs still needed from sovtech" is now empty for Wave 2.
+
+## Erratum (2026-09-23) — Q1's stated consequence is wrong; the rule itself is unchanged
+
+**Superseded in part by ADR 0007** (sovtech, 2026-09-23): minimum PAY size + the creator's
+fractional remainder carried across PAYs, implemented in Stage 2.
+
+Found by lane L5-Studio, verified by the orchestrator. Q1 says "when `amount ≥ 2` and both
+`s, c > 0`, both shares are ≥ 1 sat". That is false. The rule above is untouched; only the
+consequence was misstated. Correctly:
+
+- `creatorSats = amount − ceil(amount × s / 100) = floor(amount × c / 100)`, so
+  **`creatorSats = 0` exactly when `amount × c < 100`**, not only when `amount = 1`.
+- `seederSats ≥ 1` whenever `amount ≥ 1` and `s > 0`.
+- Counter-examples to the old text: `amount 2, split 99/1 → 2/0`; `amount 2, 51/49 → 2/0`;
+  `amount 3, 70/30 → 3/0`.
+
+**Economic consequence (open for sovtech, not decided here):** with the default window of 4
+blocks at `satsPerBlock = 1`, a PAY is 4 sats, so any split with `c < 25` pays the creator
+nothing on every PAY. At `c = 10` the creator only earns on PAYs of ≥ 10 sats. Round-up
+favours the seeder by up to 1 sat per PAY, and at small PAYs that 1 sat is the whole creator
+share. Options include carrying the creator's fractional remainder across PAYs, rounding
+the creator share up instead, or a minimum PAY size. The v4 contract text must state
+whichever rule is chosen.
+
+Unaffected: L10's honest-PAY expectation ("the creator set may be empty only when
+`creatorSats = 0` by this formula") was already stated in terms of the formula and remains
+correct. Studio's split UI shows the formula's real output, including the zero case.

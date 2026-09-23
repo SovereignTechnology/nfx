@@ -56,7 +56,7 @@ export const asMint = (s: string): MintUrl => s as MintUrl;
 export const sats = (n: number): Sats => n as Sats;
 export const unix = (n: number): UnixSeconds => n as UnixSeconds;
 
-export const FIXTURE_NOW = unix(1_757_000_000); // 2025-09-04T14:13:20Z, stable
+export const FIXTURE_NOW = unix(1_757_000_000); // 2025-09-04T15:33:20Z, stable
 
 export const MINTS = {
   a: asMint('https://mint.fixture-a.example'),
