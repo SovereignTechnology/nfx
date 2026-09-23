@@ -31,6 +31,7 @@ Query: <code>root</code>, <code>tracker</code>, <code>validate=0|1</code>, <code
   const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
   const sha256 = async (buf) => hex(await crypto.subtle.digest('SHA-256', buf));
 
+  if (!/^[0-9a-f]{64}$/.test(root ?? '')) throw new Error('?root= must be 64 lowercase hex');
   // 1. The hash list, verified against root before any use (NFX-05 §2).
   const listBytes = await (await fetch(`/${root}`)).arrayBuffer();
   if ((await sha256(listBytes)) !== root) throw new Error('hash list does not match root');

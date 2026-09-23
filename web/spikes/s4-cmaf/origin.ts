@@ -15,7 +15,7 @@
  * NFX_TAMPER=<sha256> flips the last byte of that file whenever it is served (a lying
  * origin, used to seed a malicious peer in S3).
  */
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -90,7 +90,9 @@ const server = createServer((req, res) => {
 
   if (staticDir && path.startsWith('/s/')) {
     const name = path.slice(3);
-    if (!/^[a-z0-9._-]+$/.test(name) || !existsSync(join(staticDir, name))) return miss(404, 'no such static file');
+    // Flat names only, never dot-leading (`.`/`..` would name directories), regular files only.
+    const file = join(staticDir, name);
+    if (!/^[a-z0-9][a-z0-9._-]*$/.test(name) || !existsSync(file) || !statSync(file).isFile()) return miss(404, 'no such static file');
     return send(200, readFileSync(join(staticDir, name)), {
       'Content-Type': STATIC_TYPES[name.split('.').pop() ?? ''] ?? 'application/octet-stream',
       'Cache-Control': 'no-store',
