@@ -1,0 +1,714 @@
+/*
+ * Wallet screen (L5) + the shell's header `WalletChip`. Screen-scoped, `nf-wallet` /
+ * `nf-walletchip` namespaces, L4 tokens only. Loaded by the shells as a file after
+ * tokens.css + components.css (never injected — CSP `style-src 'self'`).
+ */
+.nf-wallet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-24);
+  min-width: 0;
+  color: var(--nf-color-text);
+}
+
+/* ---- page head ------------------------------------------------------------------------ */
+.nf-wallet__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--nf-space-16) var(--nf-space-24);
+  padding-top: var(--nf-space-8);
+}
+
+.nf-wallet__title {
+  margin: 0;
+  font-size: var(--nf-text-2xl);
+  line-height: var(--nf-line-2xl);
+  font-weight: var(--nf-weight-bold);
+}
+
+.nf-wallet__subtitle {
+  margin: var(--nf-space-4) 0 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-wallet__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nf-space-8);
+}
+
+/* ---- layout: main column + a 360 px settings column (stacks on narrow screens) -------- */
+.nf-wallet__layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: var(--nf-space-24);
+  align-items: start;
+}
+
+@media (max-width: 960px) {
+  .nf-wallet__layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.nf-wallet__main,
+.nf-wallet__side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-24);
+  min-width: 0;
+}
+
+.nf-wallet__card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+  min-width: 0;
+  padding: var(--nf-space-24);
+  border: 1px solid var(--nf-color-border);
+  border-radius: var(--nf-radius-lg);
+  background: var(--nf-color-bg-elevated);
+}
+
+.nf-wallet__card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nf-space-12);
+}
+
+.nf-wallet__card-title {
+  margin: 0;
+  font-size: var(--nf-text-lg);
+  line-height: var(--nf-line-lg);
+  font-weight: var(--nf-weight-bold);
+}
+
+/* ---- balance ------------------------------------------------------------------------ */
+.nf-wallet__balance-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+}
+
+.nf-wallet__total {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--nf-space-4) var(--nf-space-12);
+}
+
+/* The total is L4's SatsBadge (neutral), scaled up to a headline figure. */
+.nf-wallet__total-badge.nf-sats {
+  height: auto;
+  padding: 0;
+  gap: var(--nf-space-4);
+  font-size: var(--nf-text-3xl);
+  line-height: var(--nf-line-3xl);
+  font-weight: var(--nf-weight-bold);
+}
+
+.nf-wallet__total-badge .nf-sats__icon {
+  width: 28px;
+  height: 28px;
+  align-self: center;
+}
+
+.nf-wallet__total-sub {
+  font-size: var(--nf-text-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-wallet__mints {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-wallet__mint {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--nf-space-8) var(--nf-space-16);
+  padding: var(--nf-space-12) 0;
+  border-top: 1px solid var(--nf-color-border);
+}
+
+.nf-wallet__mint-note {
+  font-size: var(--nf-text-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-wallet__mint-note--empty {
+  color: var(--nf-color-warning);
+}
+
+.nf-wallet__mint-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--nf-space-4);
+}
+
+@media (max-width: 640px) {
+  .nf-wallet__mint {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .nf-wallet__mint-note {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
+
+.nf-wallet__tip {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--nf-space-8);
+  margin: 0;
+  font-size: var(--nf-text-xs);
+  line-height: var(--nf-line-xs);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-wallet__tip .nf-icon {
+  flex: none;
+}
+
+/* ---- history ------------------------------------------------------------------------ */
+.nf-wallet__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nf-space-8);
+}
+
+.nf-wallet__history {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-wallet__tx {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--nf-space-16);
+  padding: var(--nf-space-12) 0;
+  border-top: 1px solid var(--nf-color-border);
+}
+
+.nf-wallet__tx:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.nf-wallet__tx-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--nf-radius-full);
+  color: var(--nf-color-text-secondary);
+  background: var(--nf-color-bg-subtle);
+}
+
+.nf-wallet__tx-icon--in {
+  color: var(--nf-color-success);
+  background: var(--nf-color-success-bg);
+}
+
+.nf-wallet__tx-icon--out {
+  color: var(--nf-color-sats);
+  background: var(--nf-color-sats-bg);
+}
+
+.nf-wallet__tx-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.nf-wallet__tx-title,
+.nf-wallet__tx-memo .nf-md__p {
+  margin: 0;
+  overflow: hidden;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  font-weight: var(--nf-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--nf-color-text);
+}
+
+.nf-wallet__tx-meta {
+  font-size: var(--nf-text-xs);
+  line-height: var(--nf-line-xs);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-wallet__tx-amount.nf-sats {
+  font-size: var(--nf-text-sm);
+}
+
+.nf-wallet__tx-amount--in.nf-sats {
+  color: var(--nf-color-success);
+}
+
+/* ---- settings column ------------------------------------------------------------------ */
+.nf-wallet__pill {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 var(--nf-space-8);
+  border-radius: var(--nf-radius-full);
+  font-size: var(--nf-text-xs);
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-text-secondary);
+  background: var(--nf-color-bg-subtle);
+}
+
+.nf-wallet__pill--on {
+  color: var(--nf-color-success);
+  background: var(--nf-color-success-bg);
+}
+
+.nf-wallet__summary-line {
+  margin: calc(var(--nf-space-8) * -1) 0 0;
+  font-size: var(--nf-text-sm);
+  line-height: 24px;
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-wallet__summary-line .nf-sats {
+  padding-right: 0;
+  vertical-align: middle;
+}
+
+.nf-wallet__facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-wallet__fact {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--nf-space-12);
+}
+
+.nf-wallet__fact-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--nf-radius-full);
+  color: var(--nf-color-text-secondary);
+  background: var(--nf-color-bg-subtle);
+}
+
+.nf-wallet__fact-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nf-wallet__fact-title {
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-wallet__fact-desc {
+  font-size: var(--nf-text-xs);
+  line-height: var(--nf-line-xs);
+  color: var(--nf-color-text-secondary);
+}
+
+/* ---- forms (native controls styled with tokens; L4 has no text field) ----------------- */
+.nf-wallet__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+}
+
+.nf-wallet__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-8);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.nf-wallet__field:disabled {
+  opacity: 0.5;
+}
+
+.nf-wallet__label {
+  padding: 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-text);
+}
+
+.nf-wallet__chips,
+.nf-wallet__presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nf-space-8);
+}
+
+.nf-wallet__input {
+  width: 100%;
+  padding: var(--nf-space-8) var(--nf-space-12);
+  border: 1px solid var(--nf-color-border-strong);
+  border-radius: var(--nf-radius-md);
+  font: inherit;
+  font-size: var(--nf-text-md);
+  line-height: var(--nf-line-md);
+  color: var(--nf-color-text);
+  background: var(--nf-color-bg);
+}
+
+.nf-wallet__input:focus-visible {
+  outline: none;
+  border-color: var(--nf-color-focus);
+  box-shadow: 0 0 0 1px var(--nf-color-focus);
+}
+
+.nf-wallet__input:disabled {
+  opacity: 0.6;
+}
+
+.nf-wallet__input--invalid {
+  border-color: var(--nf-color-danger);
+}
+
+/* Amount field: the input and its "sats" unit share one bordered box. */
+.nf-wallet__amount {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-8);
+  height: 40px;
+  padding: 0 var(--nf-space-12);
+  border: 1px solid var(--nf-color-border-strong);
+  border-radius: var(--nf-radius-md);
+  background: var(--nf-color-bg);
+}
+
+.nf-wallet__amount:focus-within {
+  border-color: var(--nf-color-focus);
+  box-shadow: 0 0 0 1px var(--nf-color-focus);
+}
+
+.nf-wallet__amount--invalid {
+  border-color: var(--nf-color-danger);
+}
+
+.nf-wallet__amount .nf-wallet__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-variant-numeric: tabular-nums;
+}
+
+.nf-wallet__amount .nf-wallet__input:focus-visible {
+  box-shadow: none;
+}
+
+.nf-wallet__unit {
+  font-size: var(--nf-text-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-wallet__invoice-text {
+  resize: none;
+  font-family: var(--nf-font-mono);
+  font-size: var(--nf-text-xs);
+  line-height: var(--nf-line-xs);
+  word-break: break-all;
+}
+
+.nf-wallet__check {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-8);
+  font-size: var(--nf-text-sm);
+  font-weight: var(--nf-weight-medium);
+  cursor: pointer;
+}
+
+.nf-wallet__check input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--nf-color-accent);
+}
+
+.nf-wallet__hint {
+  margin: 0;
+  font-size: var(--nf-text-xs);
+  line-height: var(--nf-line-xs);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-wallet__hint--error {
+  color: var(--nf-color-danger);
+}
+
+.nf-wallet__link {
+  padding: 0;
+  border: 0;
+  font: inherit;
+  color: var(--nf-color-text-link);
+  background: none;
+  cursor: pointer;
+}
+
+.nf-wallet__link:hover {
+  text-decoration: underline;
+}
+
+.nf-wallet__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nf-space-8);
+}
+
+/* The "Open in wallet" anchor wears L4's button classes; keep it link-free. */
+.nf-wallet__row a.nf-button {
+  text-decoration: none;
+}
+
+.nf-wallet__notice {
+  margin: 0;
+  padding: var(--nf-space-8) var(--nf-space-12);
+  border-radius: var(--nf-radius-md);
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+}
+
+.nf-wallet__notice--danger {
+  color: var(--nf-color-danger);
+  background: var(--nf-color-danger-bg);
+}
+
+.nf-wallet__notice--warning {
+  color: var(--nf-color-warning);
+  background: var(--nf-color-warning-bg);
+}
+
+.nf-wallet__mono {
+  font-family: var(--nf-font-mono);
+  font-size: var(--nf-text-xs);
+}
+
+/* ---- sheets: invoice + confirm -------------------------------------------------------- */
+.nf-wallet__invoice,
+.nf-wallet__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+}
+
+.nf-wallet__lead {
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  line-height: 32px;
+}
+
+.nf-wallet__lead .nf-mint,
+.nf-wallet__lead .nf-sats {
+  vertical-align: middle;
+}
+
+/*
+ * The QR: dark modules on a light backing in BOTH themes (scanners need contrast; many cannot
+ * read an inverted code). `overlay-fg` / `overlay-strong` are the theme-independent white /
+ * near-black tokens; the SVG carries its own 4-module quiet zone.
+ */
+.nf-wallet__qr {
+  display: flex;
+  align-self: center;
+  justify-content: center;
+  padding: var(--nf-space-8);
+  border: 1px solid var(--nf-color-border);
+  border-radius: var(--nf-radius-lg);
+  background: var(--nf-color-overlay-fg);
+}
+
+.nf-wallet__qr--pending {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.nf-wallet__qr-svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.nf-wallet__qr-light {
+  fill: var(--nf-color-overlay-fg);
+}
+
+.nf-wallet__qr-dark {
+  fill: var(--nf-color-overlay-strong);
+}
+
+.nf-wallet__status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nf-space-8);
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text);
+}
+
+/* Static status dot (no looping animation — motion stays ≤ 200 ms). */
+.nf-wallet__pulse {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--nf-radius-full);
+  background: var(--nf-color-warning);
+}
+
+.nf-wallet__pulse--paid {
+  background: var(--nf-color-success);
+}
+
+.nf-wallet__countdown {
+  color: var(--nf-color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.nf-wallet__summary {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  border: 1px solid var(--nf-color-border);
+  border-radius: var(--nf-radius-md);
+}
+
+.nf-wallet__summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nf-space-12);
+  padding: var(--nf-space-8) var(--nf-space-12);
+  border-top: 1px solid var(--nf-color-border);
+}
+
+.nf-wallet__summary-row:first-child {
+  border-top: 0;
+}
+
+.nf-wallet__summary-row dt {
+  font-size: var(--nf-text-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-wallet__summary-row dd {
+  margin: 0;
+}
+
+.nf-wallet__summary-row--total dt {
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-text);
+}
+
+.nf-wallet__summary-total.nf-sats {
+  height: 28px;
+  font-size: var(--nf-text-sm);
+}
+
+.nf-wallet__done .nf-state__icon {
+  color: var(--nf-color-success);
+  background: var(--nf-color-success-bg);
+}
+
+/* Outcome summary under a success state (sent / added). */
+.nf-wallet__summary--outcome {
+  width: 100%;
+  max-width: 320px;
+  margin-top: var(--nf-space-8);
+  text-align: left;
+}
+
+/* Mini-player slot: floats bottom-right, same as Home. */
+.nf-wallet__mini {
+  position: fixed;
+  right: var(--nf-space-16);
+  bottom: var(--nf-space-16);
+  z-index: var(--nf-z-mini-player);
+  box-shadow: var(--nf-shadow-md);
+  border-radius: var(--nf-radius-lg);
+  overflow: hidden;
+}
+
+/* ---- WalletChip (shell header) -------------------------------------------------------- */
+.nf-walletchip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nf-space-8);
+  height: var(--nf-size-control);
+  padding: 0 var(--nf-space-12) 0 var(--nf-space-8);
+  border: 1px solid var(--nf-color-border);
+  border-radius: var(--nf-radius-full);
+  font: inherit;
+  font-size: var(--nf-text-sm);
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--nf-color-text);
+  background: var(--nf-color-bg);
+}
+
+.nf-walletchip--button {
+  cursor: pointer;
+  transition: background-color var(--nf-motion-fast) var(--nf-ease);
+}
+
+.nf-walletchip--button:hover {
+  background: var(--nf-color-bg-hover);
+}
+
+.nf-walletchip__icon {
+  flex: none;
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-walletchip__balance.nf-sats {
+  height: auto;
+  padding: 0;
+  font-size: var(--nf-text-sm);
+}
+
+.nf-walletchip__skeleton {
+  height: 14px;
+}
