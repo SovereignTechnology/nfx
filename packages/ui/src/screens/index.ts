@@ -13,3 +13,5 @@ export { Library } from './Library/index.js';
 export type { LibraryProps, LibraryTab } from './Library/index.js';
 export { Watch } from './Watch/index.js';
 export type { WatchProps, WatchHandoff, WatchPlaylist } from './Watch/index.js';
+export { Shorts } from './Shorts/index.js';
+export type { ShortsProps } from './Shorts/index.js';
