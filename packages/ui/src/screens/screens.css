@@ -2,3 +2,4 @@
    order, after components.css. One @import per merged screen. */
 @import './Home/Home.css';
 @import './Channel/Channel.css';
+@import './Settings/Settings.css';
