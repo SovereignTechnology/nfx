@@ -17,3 +17,5 @@ export { Shorts } from './Shorts/index.js';
 export type { ShortsProps } from './Shorts/index.js';
 export { Search } from './Search/index.js';
 export type { SearchProps, SearchFilterState } from './Search/index.js';
+export { Wallet, WalletChip } from './Wallet/index.js';
+export type { WalletChipProps, WalletIntent, WalletProps } from './Wallet/index.js';
