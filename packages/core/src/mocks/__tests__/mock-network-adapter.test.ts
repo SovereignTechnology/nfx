@@ -57,6 +57,36 @@ describe('MockNetworkAdapter', () => {
     expect((await a.stats(v.id)).seedersOnline).toBeGreaterThan(0);
   });
 
+  it('reactions (v4): like/dislike counts, newest reaction wins, unreact returns to neutral', async () => {
+    const a = new MockNetworkAdapter();
+    const v = VIDEOS[0]!;
+    const base = await a.stats(v.id);
+    expect(base.myReaction).toBeUndefined();
+    expect(base.reactions).toBe(base.likes + base.dislikes);
+
+    await a.react(v.id, '+');
+    const liked = await a.stats(v.id);
+    expect(liked).toMatchObject({
+      myReaction: 'like',
+      likes: base.likes + 1,
+      dislikes: base.dislikes,
+    });
+
+    await a.react(v.id, '-'); // replaces the like, never stacks
+    const disliked = await a.stats(v.id);
+    expect(disliked).toMatchObject({
+      myReaction: 'dislike',
+      likes: base.likes,
+      dislikes: base.dislikes + 1,
+    });
+
+    await a.unreact(v.id); // neutral — un-like/un-dislike is NOT a `-` reaction
+    const neutral = await a.stats(v.id);
+    expect(neutral.myReaction).toBeUndefined();
+    expect(neutral).toMatchObject({ likes: base.likes, dislikes: base.dislikes });
+    expect((await a.library.liked()).some((x) => x.id === v.id)).toBe(false);
+  });
+
   it('comments: sort, page, and post', async () => {
     const a = new MockNetworkAdapter();
     const v = VIDEOS[1]!;

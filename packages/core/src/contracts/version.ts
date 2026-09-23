@@ -20,5 +20,10 @@
  *       Stage 2 bump; `recordUpload(peer, blocks, core?)` alongside. (d) L2 flag 2
  *       ACCEPTED: `PaymentEngineSeeder.rebind(from, to)` replaces the replay-on-HELLO
  *       workaround for pre-HELLO accounting under the Noise-key hex.
+ *   4 — 2026-09-23 Post-L5 (ADR 0007). Additive. (a) `VideoStats.likes`, `.dislikes`
+ *       (required — dislikes are always shown) and `.myReaction?`. (b) `NetworkAdapter
+ *       .unreact(videoId)` — NIP-09 deletion; un-like must never be sent as a `-` dislike.
+ *       (c) `PricePolicy.split` doc points at ADR 0007 (min PAY size + creator carry,
+ *       implemented in Stage 2). The Stage 2 bump planned as "v4" in docs/status.md is v5.
  */
-export const CONTRACTS_VERSION = 3 as const;
+export const CONTRACTS_VERSION = 4 as const;

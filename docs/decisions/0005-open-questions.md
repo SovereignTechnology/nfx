@@ -101,6 +101,9 @@ toggle. Recorded alongside the design brief in `docs/design/README.md`.
 
 ## Erratum (2026-09-23) — Q1's stated consequence is wrong; the rule itself is unchanged
 
+**Superseded in part by ADR 0007** (sovtech, 2026-09-23): minimum PAY size + the creator's
+fractional remainder carried across PAYs, implemented in Stage 2.
+
 Found by lane L5-Studio, verified by the orchestrator. Q1 says "when `amount ≥ 2` and both
 `s, c > 0`, both shares are ≥ 1 sat". That is false. The rule above is untouched; only the
 consequence was misstated. Correctly:
