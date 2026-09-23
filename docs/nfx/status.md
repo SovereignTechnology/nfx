@@ -3,11 +3,13 @@
 **This file, not the demo's `docs/status.md` or the session handoffs (not published), is where work here
 resumes.** Those describe the Pear demo, a read-only mirror in this repository.
 
-Updated 2026-09-23 · branch `a0/setup` · plan: ADR 0008 + `spec/`
+Updated 2026-09-23 · branch `a1/s1-iroh` · plan: ADR 0008 + `spec/`
 
 ## Where things stand
 
-- **Phase A0 is done locally, and the `a0/setup` branch is not yet pushed.**
+- **Phase A0 is done and pushed:** `main` = `a645e73` on the private GitLab project, pushed
+  2026-09-23 with sovtech's OK (a fast-forward of `a0/setup`). A1 has started with
+  spike S1 (iroh) on `a1/s1-iroh`.
 - The private GitLab project exists, created 2026-09-23. `main` = `468fe1e`
   is pushed: the demo history, the spec commit `8f3b9bd` and a merge of demo `main`
   `0e35347`.
@@ -69,24 +71,22 @@ Updated 2026-09-23 · branch `a0/setup` · plan: ADR 0008 + `spec/`
 
 ## Next
 
-1. **Push `a0/setup`** and fast-forward `main`, after the pre-push audit (report in
-   `docs/nfx/reviews/`) and sovtech's OK.
-2. **A1 spikes, one at a time (RAM):** S1 iroh → S2 Tauri playback → S3 web mesh → S4
+1. **A1 spikes, one at a time (RAM):** S1 iroh → S2 Tauri playback → S3 web mesh → S4
    CMAF packaging. Pass criteria are in the plan
    (`a local plan file`). Write one page each
    in `docs/nfx/spikes/`. Dev servers go on `http://100.64.0.1:<port>`.
    - S1 also pins the iroh ticket encodings, which replace the placeholder tickets in
      `beacon.json`.
-3. **`nfx-proto` WASM bindings.** A thin `wasm-bindgen` crate for the web client
+2. **`nfx-proto` WASM bindings.** A thin `wasm-bindgen` crate for the web client
    (verify manifest / hash list / beacon from JS). Not needed until the web work in A2.
-4. **Open spec issues** (NFX-07 §7, NFX-08 §7, NFX-09 §6). These gate the M2/M3
+3. **Open spec issues** (NFX-07 §7, NFX-08 §7, NFX-09 §6). These gate the M2/M3
    freezes, so they need sovtech's decisions:
    - mint state is keyed by a bare `root` (escrow squatting);
    - the voucher path of `license` is unauthenticated;
    - `accepts_mints` absent means "any";
    - fee handling;
    - `redeem` mints seeder proofs with secrets the mint chose.
-5. Optional: add the schema check (`jsonschema`) to `check.sh`.
+4. Optional: add the schema check (`jsonschema`) to `check.sh`.
 
 ## Not verified / known gaps
 
