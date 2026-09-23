@@ -8,8 +8,10 @@ Updated 2026-09-23 · branch `a1/s1-iroh` · plan: ADR 0008 + `spec/`
 ## Where things stand
 
 - **Phase A0 is done and pushed:** `main` = `a645e73` on the private GitLab project, pushed
-  2026-09-23 with sovtech's OK (a fast-forward of `a0/setup`). A1 has started with
-  spike S1 (iroh) on `a1/s1-iroh`.
+  2026-09-23 with sovtech's OK (a fast-forward of `a0/setup`).
+- **A1 spike S1 (iroh) PASSED:** 7/7 criteria on 4 runs, including a relay-down
+  negative control. See [`spikes/s1-iroh.md`](spikes/s1-iroh.md). Branch `a1/s1-iroh`,
+  not yet pushed.
 - The private GitLab project exists, created 2026-09-23. `main` = `468fe1e`
   is pushed: the demo history, the spec commit `8f3b9bd` and a merge of demo `main`
   `0e35347`.
@@ -71,12 +73,16 @@ Updated 2026-09-23 · branch `a1/s1-iroh` · plan: ADR 0008 + `spec/`
 
 ## Next
 
-1. **A1 spikes, one at a time (RAM):** S1 iroh → S2 Tauri playback → S3 web mesh → S4
-   CMAF packaging. Pass criteria are in the plan
+1. **A1 spikes, one at a time (RAM):** ~~S1 iroh~~ (done) → S2 Tauri playback → S3 web
+   mesh → S4 CMAF packaging. Pass criteria are in the plan
    (`a local plan file`). Write one page each
    in `docs/nfx/spikes/`. Dev servers go on `http://100.64.0.1:<port>`.
-   - S1 also pins the iroh ticket encodings, which replace the placeholder tickets in
-     `beacon.json`.
+   - S1's spec findings still need sovtech's call before they go into NFX-06/NFX-11:
+     - paid delivery fetches one HashSeq member per request, and seeders may refuse
+       bulk collection requests from paying peers;
+     - the ticket string form is iroh-blobs 0.103 `BlobTicket`.
+   - Risk carried forward: the iroh-blobs 0.103 README still says "not production
+     quality". The containment plan is in the S1 page.
 2. **`nfx-proto` WASM bindings.** A thin `wasm-bindgen` crate for the web client
    (verify manifest / hash list / beacon from JS). Not needed until the web work in A2.
 3. **Open spec issues** (NFX-07 §7, NFX-08 §7, NFX-09 §6). These gate the M2/M3
