@@ -1,0 +1,16 @@
+{
+  "name": "@nfx/spike-s3-mesh",
+  "private": true,
+  "type": "module",
+  "description": "Spike S3 (ADR 0008 A1): p2p-media-loader v4 + hls.js on NFX hash-named playlists with our own tracker",
+  "license": "AGPL-3.0-or-later",
+  "devDependencies": {
+    "bittorrent-tracker": "11.2.3",
+    "esbuild": "0.25.10",
+    "hls.js": "1.7.3",
+    "p2p-media-loader-core": "4.0.0",
+    "p2p-media-loader-hlsjs": "4.0.0",
+    "playwright": "1.63.0",
+    "tsx": "4.23.15"
+  }
+}

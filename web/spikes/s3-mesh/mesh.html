@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFX mesh spike</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #111; color: #eee; }
+  video { width: 100%; max-width: 960px; background: #000; }
+  pre { white-space: pre-wrap; font-size: 12px; }
+</style>
+<h1>NFX mesh spike</h1>
+<p>hls.js + p2p-media-loader v4, one swarm per NFX rendition, sha256-validated segments.
+Query: <code>root</code>, <code>tracker</code>, <code>validate=0|1</code>, <code>httpWindow</code> (s),
+<code>swarm=nfx|default</code>.</p>
+<video id="v" controls muted playsinline></video>
+<pre id="stats"></pre>
+<script src="/s/hls.min.js"></script>
+<script src="/s/p2pml-hlsjs.iife.min.js"></script>
+<script type="module">
+  const q = new URLSearchParams(location.search);
+  const root = q.get('root');
+  const tracker = q.get('tracker');
+  const validate = q.get('validate') !== '0';
+  const nfxSwarm = q.get('swarm') !== 'default';
+  const httpWindow = Number(q.get('httpWindow') ?? 4);
+  // State for automation (Playwright reads window.__nfx).
+  const st = (window.__nfx = {
+    ready: false, bytes: { http: 0, p2p: 0 }, up: 0, peers: 0, validations: [],
+    segErrors: [], errors: [], swarms: [], loaded: [],
+  });
+  const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const sha256 = async (buf) => hex(await crypto.subtle.digest('SHA-256', buf));
+
+  // 1. The hash list, verified against root before any use (NFX-05 §2).
+  const listBytes = await (await fetch(`/${root}`)).arrayBuffer();
+  if ((await sha256(listBytes)) !== root) throw new Error('hash list does not match root');
+  const list = JSON.parse(new TextDecoder().decode(listBytes));
+  const listed = new Set(list.files.map((f) => f.sha256));
+
+  // 2. One swarm per rendition: map hls.js stream properties to the NFX rendition id.
+  const renditionOf = (p) =>
+    list.renditions.find((r) => r.bandwidth === p.bitrate && r.resolution === `${p.width}x${p.height}`);
+  const streamSwarmIdBuilder = ({ streamType, properties }) => {
+    const r = renditionOf(properties);
+    const id = r ? `nfx/1/web/${list.video}/${r.id}` : undefined;
+    st.swarms.push({ streamType, height: properties.height, id });
+    return id;
+  };
+
+  // 3. The Blossom rule in the browser (NFX-05 §4): a content name IS its sha256.
+  const check = (source) => async (url, _range, data) => {
+    const want = (new URL(url, location.href).pathname.split('/').pop() ?? '').split('.')[0];
+    const ok = (await sha256(data)) === want && listed.has(want);
+    st.validations.push({ source, file: want.slice(0, 12), ok });
+    return ok;
+  };
+
+  const HlsWithP2P = p2pml.hlsjs.HlsJsP2PEngine.injectMixin(Hls);
+  const hls = (window.__hls = new HlsWithP2P({
+    maxBufferLength: 90,
+    maxMaxBufferLength: 90,
+    p2p: {
+      core: {
+        announceTrackers: [tracker],
+        swarmId: list.video,
+        ...(nfxSwarm ? { streamSwarmIdBuilder } : {}),
+        rtcConfig: { iceServers: [] },
+        highDemandTimeWindow: httpWindow,
+        httpDownloadTimeWindow: httpWindow,
+        p2pDownloadTimeWindow: 120,
+        simultaneousHttpDownloads: 1,
+        ...(validate ? { validateP2PSegment: check('p2p'), validateHTTPSegment: check('http') } : {}),
+      },
+      onHlsJsCreated(h) {
+        const e = h.p2pEngine;
+        e.addEventListener('onChunkDownloaded', (n, src) => { st.bytes[src] = (st.bytes[src] ?? 0) + n; });
+        e.addEventListener('onChunkUploaded', (n) => { st.up += n; });
+        e.addEventListener('onPeerConnect', () => { st.peers += 1; });
+        e.addEventListener('onSegmentError', (d) => { st.segErrors.push(`${d.downloadSource}:${d.error?.type ?? d.error}`); });
+        e.addEventListener('onSegmentLoaded', (d) => { st.loaded.push({ src: d.downloadSource, id: d.segment?.externalId }); });
+      },
+    },
+  }));
+  hls.on(Hls.Events.MANIFEST_PARSED, () => { hls.currentLevel = 0; st.ready = true; });
+  hls.on(Hls.Events.ERROR, (_, d) => { st.errors.push(`${d.details}:${d.fatal}`); });
+  hls.loadSource(`/${root}/master.m3u8`);
+  hls.attachMedia(document.getElementById('v'));
+  setInterval(() => { document.getElementById('stats').textContent = JSON.stringify({ bytes: st.bytes, up: st.up, peers: st.peers, bad: st.validations.filter((v) => !v.ok) }, null, 1); }, 1000);
+</script>
+</html>

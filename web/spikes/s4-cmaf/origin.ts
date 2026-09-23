@@ -11,6 +11,9 @@
  * `no-store` (NFX-05 §6.1). CORS `*` on everything hash-addressed.
  *
  * Usage: npx tsx origin.ts <store-dir> <root>[,<root>…] [port=8791] [host=0.0.0.0]
+ * Spike-only env: NFX_STATIC=<dir> serves that directory under /s/ (S3's mesh page);
+ * NFX_TAMPER=<sha256> flips the last byte of that file whenever it is served (a lying
+ * origin, used to seed a malicious peer in S3).
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -55,6 +58,9 @@ for (const root of rootsArg.split(',')) {
 }
 
 const player = readFileSync(join(here, 'player.html'));
+const staticDir = process.env.NFX_STATIC ? resolve(process.env.NFX_STATIC) : undefined;
+const tamper = process.env.NFX_TAMPER;
+const STATIC_TYPES: Record<string, string> = { html: 'text/html; charset=utf-8', js: 'text/javascript', json: 'application/json' };
 const hlsJs = readFileSync(join(here, 'node_modules/hls.js/dist/hls.min.js'));
 
 const server = createServer((req, res) => {
@@ -68,7 +74,9 @@ const server = createServer((req, res) => {
   const hit = (sha: string, contentType: string): void => {
     const path = join(store, sha);
     if (!existsSync(path)) return miss(404, 'not in store');
-    send(200, readFileSync(path), {
+    const bytes = readFileSync(path);
+    if (sha === tamper) bytes[bytes.length - 1] = (bytes[bytes.length - 1] ?? 0) ^ 0xff;
+    send(200, bytes, {
       'Content-Type': contentType,
       'Cache-Control': 'public, max-age=31536000, immutable',
       'Access-Control-Allow-Origin': '*',
@@ -80,6 +88,14 @@ const server = createServer((req, res) => {
   if (path === '/player/' || path === '/player/index.html') return send(200, player, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
   if (path === '/player/hls.min.js') return send(200, hlsJs, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
 
+  if (staticDir && path.startsWith('/s/')) {
+    const name = path.slice(3);
+    if (!/^[a-z0-9._-]+$/.test(name) || !existsSync(join(staticDir, name))) return miss(404, 'no such static file');
+    return send(200, readFileSync(join(staticDir, name)), {
+      'Content-Type': STATIC_TYPES[name.split('.').pop() ?? ''] ?? 'application/octet-stream',
+      'Cache-Control': 'no-store',
+    });
+  }
   const parts = path.split('/').filter(Boolean);
   if (parts.length === 1) {
     const [sha] = (parts[0] ?? '').split('.');

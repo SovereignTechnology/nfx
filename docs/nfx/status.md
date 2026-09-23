@@ -15,8 +15,15 @@ Updated 2026-09-23 · branch `a1/s1-iroh` · plan: ADR 0008 + `spec/`
   ladder/argv, with only the container tail swapped, produces NFX-05 output. It passes
   the schema and `nfx-proto`, and plays, seeks and switches renditions in hls.js on
   Chromium and Firefox. See [`spikes/s4-cmaf.md`](spikes/s4-cmaf.md).
+- **A1 spike S3 (web mesh) PASSED:** 4/4 criteria on 3 runs.
+  - p2p-media-loader 4.0.0 + hls.js played NFX content with P2P bytes > 0 through our
+    own allowlisting tracker.
+  - A tampered P2P segment was rejected by sha256, and the lying peer was dropped.
+  - **Spec break found:** NFX-10 §2's single per-video sha256 infohash cannot work with
+    p2p-media-loader v4, which uses per-rendition swarms and derives the infohash. A
+    replacement is proposed in [`spikes/s3-web-mesh.md`](spikes/s3-web-mesh.md).
 - **S2 (Tauri) is blocked on system packages** that need sudo (see Next).
-- Branch `a1/s1-iroh` carries S1 + S4 and is not yet pushed.
+- Branch `a1/s1-iroh` carries S1 + S3 + S4 and is not yet pushed.
 - The private GitLab project exists, created 2026-09-23. `main` = `468fe1e`
   is pushed: the demo history, the spec commit `8f3b9bd` and a merge of demo `main`
   `0e35347`.
@@ -78,7 +85,7 @@ Updated 2026-09-23 · branch `a1/s1-iroh` · plan: ADR 0008 + `spec/`
 
 ## Next
 
-1. **A1 spikes, one at a time (RAM):** ~~S1 iroh~~ → ~~S4 CMAF~~ → S3 web mesh → S2
+1. **A1 spikes, one at a time (RAM):** ~~S1 iroh~~ → ~~S4 CMAF~~ → ~~S3 web mesh~~ → S2
    Tauri playback. S2 is blocked until sovtech runs `sudo apt install
    libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
    librsvg2-dev libxdo-dev libayatana-appindicator3-dev libavif16`. `libavif16` also
@@ -91,6 +98,10 @@ Updated 2026-09-23 · branch `a1/s1-iroh` · plan: ADR 0008 + `spec/`
      - the ticket string form is iroh-blobs 0.103 `BlobTicket`.
    - Risk carried forward: the iroh-blobs 0.103 README still says "not production
      quality". The containment plan is in the S1 page.
+   - S3's spec finding also needs sovtech's call. Replace NFX-10 §2's infohash with a
+     per-rendition stream swarm ID `nfx/1/web/<ns>:<video-id>/<rendition-id>`, announced
+     as p2p-media-loader v4's `computeInfoHash`. The beacon `webrtc` endpoint and the
+     `nfx-proto` beacon check then change to match.
 2. **`nfx-proto` WASM bindings.** A thin `wasm-bindgen` crate for the web client
    (verify manifest / hash list / beacon from JS). Not needed until the web work in A2.
 3. **Open spec issues** (NFX-07 §7, NFX-08 §7, NFX-09 §6). These gate the M2/M3

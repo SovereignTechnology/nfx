@@ -7,7 +7,7 @@
  * change is the container tail: L8 writes progressive MP4 (`-movflags +faststart -f mp4`),
  * NFX-05 wants CMAF, so the argv is cut at `-movflags` and given HLS/fMP4 output options.
  *
- * Usage: npx tsx package.ts [outDir=out]   → out/store/<sha256> + out/nfx.json
+ * Usage: [NFX_DURATION=12] npx tsx package.ts [outDir=out]   → out/store/<sha256> + out/nfx.json
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -19,8 +19,8 @@ import { ffprobeArgv, parseFfprobeJson } from '../../../packages/core/src/media/
 import { GOP_SECONDS, planLadder } from '../../../packages/core/src/media/ladder.ts';
 
 const NAMESPACE = 'nfx:testnet:1';
-const VIDEO_ID = 's4-cmaf-testsrc';
-const DURATION_S = 12;
+const DURATION_S = Number(process.env.NFX_DURATION ?? 12);
+const VIDEO_ID = DURATION_S === 12 ? 's4-cmaf-testsrc' : `s4-cmaf-testsrc-${DURATION_S}s`;
 
 interface FileEntry {
   name: string;
