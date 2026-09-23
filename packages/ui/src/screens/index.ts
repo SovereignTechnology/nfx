@@ -19,3 +19,11 @@ export { Search } from './Search/index.js';
 export type { SearchProps, SearchFilterState } from './Search/index.js';
 export { Wallet, WalletChip } from './Wallet/index.js';
 export type { WalletChipProps, WalletIntent, WalletProps } from './Wallet/index.js';
+export { Studio } from './Studio/index.js';
+export type {
+  FfmpegStatus,
+  ResolveUploadFile,
+  StudioFile,
+  StudioProps,
+  StudioTab,
+} from './Studio/index.js';
