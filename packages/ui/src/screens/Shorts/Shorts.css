@@ -1,0 +1,592 @@
+/*
+ * Shorts screen (L5). Screen-scoped, `nf-shorts` namespace, L4 tokens only. Loaded by the
+ * shells as a file after tokens.css + components.css (never injected — CSP `style-src 'self'`).
+ *
+ * The screen fills the height its shell gives it (viewport minus header). One short per
+ * "slide"; slides are exactly the feed's height and snap one at a time.
+ */
+.nf-shorts {
+  position: relative;
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  color: var(--nf-color-text);
+  background: var(--nf-color-bg);
+  container-type: inline-size;
+  container-name: nf-shorts;
+}
+
+.nf-shorts__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The scroller: vertical, mandatory snap, one short per gesture, no visible scrollbar. */
+.nf-shorts__feed {
+  position: relative;
+  flex: 1 1 auto;
+  height: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-snap-type: y mandatory;
+  scrollbar-width: none;
+  outline: none;
+}
+
+.nf-shorts__feed::-webkit-scrollbar {
+  display: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .nf-shorts__feed {
+    scroll-behavior: smooth;
+  }
+}
+
+.nf-shorts__slide {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: var(--nf-space-16) var(--nf-space-16);
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+}
+
+.nf-shorts__slide--state {
+  padding: var(--nf-space-24);
+}
+
+/* Frame + side rail, bottom-aligned (YouTube desktop). */
+.nf-shorts__short {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--nf-space-16);
+  height: 100%;
+  min-height: 0;
+}
+
+.nf-shorts__frame {
+  position: relative;
+  box-sizing: border-box;
+  height: 100%;
+  aspect-ratio: 9 / 16;
+  max-width: calc(100cqw - 260px);
+  border-radius: var(--nf-radius-xl);
+  overflow: hidden;
+  isolation: isolate;
+  color: var(--nf-color-overlay-fg);
+  background: var(--nf-color-overlay-strong);
+}
+
+.nf-shorts__poster,
+.nf-shorts__video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.nf-shorts__poster {
+  object-fit: cover;
+}
+
+.nf-shorts__video {
+  object-fit: contain;
+  background: var(--nf-color-overlay-strong);
+}
+
+.nf-shorts .nf-shorts__poster-skeleton {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+}
+
+/* Bottom scrim so the title/channel stay readable on any poster. Decorative. */
+.nf-shorts__scrim {
+  position: absolute;
+  inset: 45% 0 0;
+  background: linear-gradient(to bottom, transparent, var(--nf-color-overlay));
+  pointer-events: none;
+}
+
+/* Top bar while a session is bound: price + live rate / paused state, then controls. */
+.nf-shorts__top {
+  position: absolute;
+  top: var(--nf-space-12);
+  right: var(--nf-space-12);
+  left: var(--nf-space-12);
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--nf-space-8);
+}
+
+.nf-shorts__status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nf-space-4);
+  min-width: 0;
+}
+
+.nf-shorts__paystate {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nf-space-4);
+  height: 20px;
+  padding: 0 var(--nf-space-8);
+  border-radius: var(--nf-radius-sm);
+  font-size: var(--nf-text-xs);
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-overlay-fg);
+  background: var(--nf-color-overlay-strong);
+}
+
+.nf-shorts__controls {
+  display: flex;
+  gap: var(--nf-space-4);
+  border-radius: var(--nf-radius-md);
+  background: var(--nf-color-overlay);
+}
+
+/* Centre stack: price FIRST (DOM + visual), then the play affordance or the gate card. */
+.nf-shorts__center {
+  position: absolute;
+  inset: 0 0 34% 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--nf-space-12);
+  padding: var(--nf-space-16);
+  pointer-events: none;
+}
+
+.nf-shorts__center > * {
+  pointer-events: auto;
+}
+
+.nf-shorts__price.nf-sats {
+  height: 28px;
+  padding: 0 var(--nf-space-12) 0 var(--nf-space-8);
+  border-radius: var(--nf-radius-full);
+  font-size: var(--nf-text-sm);
+}
+
+.nf-shorts .nf-shorts__play {
+  width: 72px;
+  height: 72px;
+  border-radius: var(--nf-radius-full);
+  background: var(--nf-color-overlay);
+}
+
+.nf-shorts .nf-shorts__play:hover {
+  background: var(--nf-color-overlay-strong);
+}
+
+.nf-shorts .nf-shorts__play .nf-icon {
+  width: 40px;
+  height: 40px;
+}
+
+.nf-shorts__hint {
+  margin: 0;
+  padding: var(--nf-space-4) var(--nf-space-8);
+  border-radius: var(--nf-radius-sm);
+  font-size: var(--nf-text-xs);
+  line-height: var(--nf-line-xs);
+  color: var(--nf-color-overlay-fg);
+  background: var(--nf-color-overlay);
+}
+
+.nf-shorts__note {
+  max-width: 32ch;
+  margin: 0;
+  padding: var(--nf-space-8) var(--nf-space-12);
+  border-radius: var(--nf-radius-md);
+  font-size: var(--nf-text-xs);
+  line-height: var(--nf-line-xs);
+  text-align: center;
+  color: var(--nf-color-warning);
+  background: var(--nf-color-warning-bg);
+}
+
+/* Gate / error card: a themed surface inside the always-dark frame. */
+.nf-shorts__card {
+  width: 100%;
+  max-width: 320px;
+  border-radius: var(--nf-radius-lg);
+  color: var(--nf-color-text);
+  background: var(--nf-color-bg-elevated);
+  box-shadow: var(--nf-shadow-md);
+}
+
+/* Title, channel, description over the bottom of the frame. */
+.nf-shorts__info {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-8);
+  padding: var(--nf-space-16) var(--nf-space-16) var(--nf-space-24);
+  color: var(--nf-color-overlay-fg);
+}
+
+.nf-shorts__channel {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-8);
+  min-width: 0;
+}
+
+.nf-shorts__channel-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nf-space-8);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  background: none;
+  cursor: pointer;
+}
+
+.nf-shorts__channel-link:focus-visible {
+  outline-color: var(--nf-color-overlay-fg);
+}
+
+.nf-shorts__channel-name {
+  overflow: hidden;
+  font-size: var(--nf-text-sm);
+  font-weight: var(--nf-weight-medium);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.nf-shorts__channel-link:hover .nf-shorts__channel-name {
+  text-decoration: underline;
+}
+
+/* Subscribe in the overlay: white pill (YouTube Shorts), translucent once subscribed. */
+.nf-shorts .nf-shorts__subscribe {
+  flex: none;
+  color: var(--nf-color-overlay-strong);
+  background: var(--nf-color-overlay-fg);
+}
+
+.nf-shorts .nf-shorts__subscribe--on {
+  color: var(--nf-color-overlay-fg);
+  background: var(--nf-color-overlay);
+}
+
+.nf-shorts__title .nf-md {
+  font-size: var(--nf-text-md);
+  line-height: var(--nf-line-md);
+  font-weight: var(--nf-weight-medium);
+  color: inherit;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+.nf-shorts__about {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--nf-space-4);
+  min-width: 0;
+}
+
+.nf-shorts__desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: var(--nf-line-sm);
+  overflow: hidden;
+}
+
+.nf-shorts__desc .nf-md {
+  color: var(--nf-color-overlay-fg-muted);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  overflow: hidden;
+}
+
+.nf-shorts__desc--open {
+  max-height: 30vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.nf-shorts__desc--open .nf-md {
+  display: block;
+  overflow: visible;
+}
+
+.nf-shorts__info .nf-md__link {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.nf-shorts .nf-shorts__more {
+  flex: none;
+  color: var(--nf-color-overlay-fg);
+}
+
+.nf-shorts .nf-shorts__more:hover {
+  background: var(--nf-color-overlay);
+}
+
+/* Thin progress line along the bottom edge while a session is bound. */
+.nf-shorts__progress {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 2;
+  width: 100%;
+  height: 3px;
+  border: 0;
+  appearance: none;
+  color: var(--nf-color-accent);
+  background: var(--nf-color-buffered);
+}
+
+.nf-shorts__progress::-webkit-progress-bar {
+  background: var(--nf-color-buffered);
+}
+
+.nf-shorts__progress::-webkit-progress-value {
+  background: var(--nf-color-accent);
+}
+
+.nf-shorts__progress::-moz-progress-bar {
+  background: var(--nf-color-accent);
+}
+
+/* Side rail: stacked pill actions next to the frame's bottom edge. */
+.nf-shorts__rail {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--nf-space-12);
+  width: 148px;
+  padding-bottom: var(--nf-space-8);
+}
+
+.nf-shorts .nf-shorts__rail-skeleton {
+  height: var(--nf-size-control);
+  border-radius: var(--nf-radius-full);
+}
+
+/* Loading / "more" skeleton frame. */
+.nf-shorts .nf-shorts__frame-skeleton {
+  width: auto;
+  height: 100%;
+  aspect-ratio: 9 / 16;
+  border-radius: var(--nf-radius-xl);
+}
+
+/* Up / down, vertically centred at the right edge (YouTube desktop). Chevrons rotate. */
+.nf-shorts__nav {
+  position: absolute;
+  top: 50%;
+  right: var(--nf-space-24);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+  transform: translateY(-50%);
+}
+
+.nf-shorts .nf-shorts__nav-btn {
+  width: 56px;
+  height: 56px;
+  background: var(--nf-color-bg-subtle);
+}
+
+.nf-shorts .nf-shorts__nav-btn:hover {
+  background: var(--nf-color-bg-active);
+}
+
+.nf-shorts__nav-btn .nf-icon {
+  transform: rotate(90deg);
+}
+
+/* "That short is not available" notice, top centre. */
+.nf-shorts__notice {
+  position: absolute;
+  top: var(--nf-space-16);
+  left: 50%;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-8);
+  max-width: calc(100% - 2 * var(--nf-space-16));
+  padding: var(--nf-space-4) var(--nf-space-4) var(--nf-space-4) var(--nf-space-12);
+  border-radius: var(--nf-radius-md);
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text-inverse);
+  background: var(--nf-color-bg-inverse);
+  box-shadow: var(--nf-shadow-md);
+  transform: translateX(-50%);
+}
+
+.nf-shorts__notice .nf-icon-button {
+  color: inherit;
+}
+
+/* Nutzap sheet. */
+.nf-shorts__zap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+}
+
+.nf-shorts__zap-lead {
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-shorts__zap-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-8);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.nf-shorts__zap-legend {
+  padding: 0;
+  font-size: var(--nf-text-sm);
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-shorts__zap-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nf-space-8);
+}
+
+.nf-shorts__zap-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-8);
+}
+
+.nf-shorts__zap-input {
+  height: var(--nf-size-control);
+  padding: 0 var(--nf-space-12);
+  border: 1px solid var(--nf-color-border-strong);
+  border-radius: var(--nf-radius-md);
+  font: inherit;
+  font-size: var(--nf-text-sm);
+  color: var(--nf-color-text);
+  background: var(--nf-color-bg);
+}
+
+.nf-shorts__zap-warn {
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  color: var(--nf-color-warning);
+}
+
+.nf-shorts__zap-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nf-space-12);
+}
+
+/* Mini-player slot (shell-provided). */
+.nf-shorts__mini {
+  position: fixed;
+  right: var(--nf-space-16);
+  bottom: var(--nf-space-16);
+  z-index: var(--nf-z-mini-player);
+  box-shadow: var(--nf-shadow-md);
+  border-radius: var(--nf-radius-lg);
+  overflow: hidden;
+}
+
+/*
+ * Phone-width container (YouTube mobile): the frame fills the slide edge to edge, the
+ * rail floats over its right side above the title, swipe replaces the up/down buttons.
+ */
+@container nf-shorts (max-width: 640px) {
+  .nf-shorts__slide {
+    padding: 0;
+  }
+
+  .nf-shorts__short {
+    width: 100%;
+  }
+
+  .nf-shorts__frame {
+    width: 100%;
+    max-width: none;
+    aspect-ratio: auto;
+    border-radius: 0;
+  }
+
+  .nf-shorts .nf-shorts__frame-skeleton {
+    width: 100%;
+    aspect-ratio: auto;
+    border-radius: 0;
+  }
+
+  .nf-shorts__rail {
+    position: absolute;
+    right: var(--nf-space-8);
+    bottom: 132px;
+    z-index: 2;
+    width: auto;
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .nf-shorts__rail .nf-button {
+    box-shadow: var(--nf-shadow-md);
+  }
+
+  .nf-shorts__info {
+    padding-right: var(--nf-space-16);
+  }
+
+  .nf-shorts__center {
+    inset: 0 0 40% 0;
+  }
+
+  .nf-shorts__nav {
+    display: none;
+  }
+}
