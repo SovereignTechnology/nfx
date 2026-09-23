@@ -113,8 +113,8 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 close
   add-only, fmt, clippy, test and deny all passed on the shared runner. The WASM tests
   crashed Node: Debian bookworm's `nodejs` 18.20.4 aborts in V8 on the wasm32 test
   binary. This was reproduced locally with official Node 18.20.4, while 22.22.0 passes.
-  The fix pins the official Node 22.22.0 build (sha256 from nodejs.org `SHASUMS256.txt`)
-  and awaits its first run.
+  The fix pins the official Node 22.22.0 build (sha256 from nodejs.org `SHASUMS256.txt`).
+  **Pipeline then passed every step in 95 s.** CI is green on the shared runner.
   The job also does a read-only fetch of the private demo repository `main` for the
   add-only check. `wasm-pack test` downloads its matching `wasm-bindgen` runner at run
   time, unpinned.
