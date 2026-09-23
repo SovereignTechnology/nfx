@@ -20,9 +20,18 @@ Per file in the hash list:
 
 ```
 K        = 32 random bytes (per video, generated at publish)
-stored   = nonce[24] || XChaCha20-Poly1305(key=K, nonce, plaintext_semantics)
+nonce    = 24 random bytes (per file)
+aad      = utf8( video + "/" + name )      # hash list `video` and this file's `files[].name`
+stored   = nonce || XChaCha20-Poly1305-Encrypt(key = K, nonce, plaintext, aad)
+                                           # ciphertext || 16-byte tag (IETF AEAD construction)
 ```
 
+- **Associated data binds each file to its video and its place in the hash list.** A
+  file moved to another name or another video fails to decrypt (tag mismatch) instead of
+  relying only on the sha256 anchor. A player MUST decrypt with the `aad` of the entry it
+  is playing. Names are unique within a hash list (NFX-05 §2), so a name is a position.
+  `test-vectors/licensed.json` pins the construction; it is reproduced byte for byte by
+  libsodium and by RustCrypto.
 - Encryption applies to `init` and `segment` files (a keyless blob is unplayable);
   playlists, master, thumbs, subtitles stay cleartext (no confidentiality value).
 - **The hash list hashes *stored* (ciphertext) bytes** — NFX-05 §4 verification is
@@ -161,12 +170,6 @@ relays don't, and they expire.
 P2PK-locked payouts, per video address `a`. Batch/never is the operator's choice; the mint API is the only
 coupling. See NFX-09 for the full mint contract.
 
-## 7. Open issues (must close before the M3 freeze)
-
-- **No AEAD associated data.** Ciphertext is not bound to its position (§2). The
-  per-file sha256 anchor covers this today; revisit if files are ever reused across
-  hash lists.
-
 ## Changelog
 
 - Draft 2026-09-16 — initial.
@@ -183,3 +186,6 @@ coupling. See NFX-09 for the full mint contract.
   accrues net of the NUT-02 input fee (fees come off the top). The voucher path requires
   NIP-98 by the voucher's `seeder`. The seeder share is signed onto the seeder's own
   blank outputs. The escrow, voucher and fee open issues are closed.
+- Draft 2026-09-23 (sovtech's decision, ADR 0008 addendum): each encrypted file carries
+  associated data `video + "/" + name`, so a file decrypts only in its own place. The
+  last open issue is closed and §7 is removed. New vector `licensed.json`.

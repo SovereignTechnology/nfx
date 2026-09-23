@@ -111,6 +111,7 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | Invalid-manifest vectors (signed; every one MUST be rejected) | `test-vectors/manifest-invalid.json` |
 | Canonical-JSON vectors | `test-vectors/canon.json` |
 | Voucher vector | `test-vectors/voucher.json` |
+| Licensed-mode encryption vector (XChaCha20-Poly1305 with associated data) | `test-vectors/licensed.json` |
 | Gossip envelope vector | `test-vectors/gossip.json` |
 | Derived identifiers (namespaces, topics, infohash) | `test-vectors/derived.json` |
 | Generator (source of truth) | `test-vectors/generate.py` |
@@ -189,3 +190,4 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
 - 2026-09-23 — decisions after A1 (ADR 0008 addendum): the web stream swarm ID and
   tracker infohash replace the per-video web infohash; the ticket string form is pinned;
   `unknown-root` → `unknown-video`; new code `below-fee`; NUT-08 listed (blank outputs).
+- 2026-09-23 — licensed-mode encryption vector added (NFX-08 §2 associated data).

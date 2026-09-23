@@ -422,3 +422,60 @@ fn beacon_content_round_trips_through_its_own_parser() {
         parsed
     );
 }
+
+#[test]
+fn licensed_encryption_is_reproduced_by_rustcrypto() {
+    use chacha20poly1305::XChaCha20Poly1305;
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+
+    // libsodium generated this vector; RustCrypto must produce the same bytes (NFX-08 §2).
+    let v = vector!("licensed.json");
+    let key = secret(&v, "video_key");
+    let mut nonce = [0u8; 24];
+    hex::decode_to_slice(str_of(&v, "nonce"), &mut nonce).unwrap();
+    let plaintext = B64.decode(str_of(&v, "plaintext_b64")).unwrap();
+    let stored = B64.decode(str_of(&v, "stored_b64")).unwrap();
+    let aad = str_of(&v, "aad");
+    assert_eq!(
+        aad,
+        format!("{}/{}", str_of(&v, "video"), str_of(&v, "name"))
+    );
+
+    let cipher = XChaCha20Poly1305::new(&key.into());
+    let ciphertext = cipher
+        .encrypt(
+            &nonce.into(),
+            Payload {
+                msg: &plaintext,
+                aad: aad.as_bytes(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        [nonce.as_slice(), &ciphertext].concat(),
+        stored,
+        "byte for byte"
+    );
+    assert_eq!(hex::encode(sha256(&stored)), str_of(&v, "stored_sha256"));
+
+    let (n, ct) = stored.split_at(24);
+    let nonce_in: [u8; 24] = n.try_into().unwrap();
+    let opened = cipher
+        .decrypt(
+            &nonce_in.into(),
+            Payload {
+                msg: ct,
+                aad: aad.as_bytes(),
+            },
+        )
+        .unwrap();
+    assert_eq!(opened, plaintext);
+    let moved = cipher.decrypt(
+        &nonce_in.into(),
+        Payload {
+            msg: ct,
+            aad: str_of(&v, "wrong_aad").as_bytes(),
+        },
+    );
+    assert!(moved.is_err(), "a file in the wrong place must not decrypt");
+}

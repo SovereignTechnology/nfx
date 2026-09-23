@@ -155,4 +155,10 @@ Draft, so no `specver` changes.
 | 3.4 | **Fees come off the top:** only NUT-02 input fees. On `redeem` they are deducted before the split; on `license`, from the creator's accrual (the watcher pays exactly `key_price`). New code `below-fee`. | NFX-08 §4, NFX-09 §2 |
 | 3.5 | **The seeder supplies blank outputs** (the NUT-08 mechanism) to `redeem`, so the mint never learns the seeder's secrets. | NFX-09 §§1–2 |
 
-The only open issue left before the M3 freeze is AEAD associated data (NFX-08 §7).
+The only open issue left before the M3 freeze was AEAD associated data (NFX-08 §7).
+
+**Closed the same day (sovtech):** each encrypted file is bound to its video and file
+name by XChaCha20-Poly1305 associated data, `aad = video + "/" + name`, and file names
+are unique within a hash list (NFX-08 §2, NFX-05 §2). A libsodium-generated vector
+(`licensed.json`) is reproduced byte for byte by RustCrypto. **No open spec issues
+remain.**

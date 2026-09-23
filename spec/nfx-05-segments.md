@@ -49,6 +49,8 @@ rules are needed — `root` commits to the exact bytes.
 Rules:
 
 - `v` = 1. `video` MUST equal the manifest's `<namespace>:<video-id>`.
+- `files[].name` values are unique within a hash list: a name identifies one position,
+  and licensed mode binds ciphertext to it (NFX-08 §2).
 - `files` covers **everything**: master playlist, per-rendition playlists, inits,
   segments, optional `thumb`/`subtitle` roles. `role` ∈
   {`playlist-master`,`playlist`,`init`,`segment`,`thumb`,`subtitle`}.
@@ -184,3 +186,5 @@ server generalizes to an origin when its admin pins NFX-05 content.
   must name a playlist file (implied before, now stated; `hashlist-invalid.json`).
 - Draft 2026-09-23: renditions name distinct playlists with distinct sha256, because
   the web mesh maps streams to renditions by playlist content name (NFX-10 §2).
+- Draft 2026-09-23: file names are unique within a hash list (licensed-mode associated
+  data binds ciphertext to the name, NFX-08 §2).

@@ -85,9 +85,14 @@ impl HashList {
         if u64::try_from(self.files.len()).ok() != Some(segs) {
             return Err(bad("manifest `segs` does not equal len(files)"));
         }
+        let mut names = BTreeSet::new();
         for f in &self.files {
             if f.name.is_empty() {
                 return Err(bad("file with an empty name"));
+            }
+            // NFX-05 §2: a name is a position (licensed mode binds ciphertext to it).
+            if !names.insert(f.name.as_str()) {
+                return Err(bad("file names must be unique"));
             }
             if !is_lower_hex(&f.sha256, 64) {
                 return Err(bad("file sha256 is not 64 lowercase hex"));

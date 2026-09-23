@@ -1,0 +1,14 @@
+{
+  "description": "NFX-08 §2 licensed-mode encryption of one file: stored = nonce || XChaCha20-Poly1305-Encrypt(K, nonce, plaintext, aad) (IETF construction, ciphertext || 16-byte tag), aad = utf8(video + '/' + name). Generated with libsodium. Decrypting with 'wrong_aad' MUST fail. Standalone: the manifest vector's hash list is not re-encrypted.",
+  "secret_keys_DO_NOT_USE": {
+    "video_key": "114db50e85ae88162a8556b78aa0156460649c0a759c14065fddd3a352664b6d"
+  },
+  "video": "nfx:mainnet:1:salt-flats-dusk",
+  "name": "init-720.mp4",
+  "aad": "nfx:mainnet:1:salt-flats-dusk/init-720.mp4",
+  "nonce": "9aa0e61500c494dde392672c64fd4fc815a2b5cdad39d940",
+  "plaintext_b64": "TkZYLVZFQ1RPUiBpbml0IHNlZ21lbnQgYnl0ZXMgKG5vdCBhIHJlYWwgZk1QNCBpbml0KQo=",
+  "stored_b64": "mqDmFQDElN3jkmcsZP1PyBWitc2tOdlAEsMyHY4DMhxW4a4t/MOY4Kbvug7WkzkCIbnjyOhL89jy0s3j8yE6T2C8m+CgACKu7WlxyM4EUBLhoo3+Pah3sEihjWRY",
+  "stored_sha256": "cb04696979fc0ce4c1703d914c38693141d796afaebb3a0cb61e543cb842c1cb",
+  "wrong_aad": "nfx:mainnet:1:salt-flats-dusk/seg0.m4s"
+}
