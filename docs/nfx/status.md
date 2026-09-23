@@ -3,7 +3,7 @@
 **This file, not the demo's `docs/status.md` or the session handoffs (not published), is where work here
 resumes.** Those describe the Pear demo, a read-only mirror in this repository.
 
-Updated 2026-09-23 · branch `a1/s1-iroh` · plan: ADR 0008 + `spec/`
+Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/`
 
 ## Where things stand
 
@@ -23,7 +23,9 @@ Updated 2026-09-23 · branch `a1/s1-iroh` · plan: ADR 0008 + `spec/`
     p2p-media-loader v4, which uses per-rendition swarms and derives the infohash. A
     replacement is proposed in [`spikes/s3-web-mesh.md`](spikes/s3-web-mesh.md).
 - **S2 (Tauri) is blocked on system packages** that need sudo (see Next).
-- Branch `a1/s1-iroh` carries S1 + S3 + S4 and is not yet pushed.
+- S1 + S3 + S4 were pushed to `main` on 2026-09-23 with sovtech's OK (a fast-forward of
+  `a1/s1-iroh`). The spike spec findings stay **proposals**, by sovtech's choice, until sovtech
+  reviews the spike pages.
 - The private GitLab project exists, created 2026-09-23. `main` = `468fe1e`
   is pushed: the demo history, the spec commit `8f3b9bd` and a merge of demo `main`
   `0e35347`.
