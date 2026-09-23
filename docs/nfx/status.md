@@ -3,38 +3,37 @@
 **This file, not the demo's `docs/status.md` or the session handoffs (not published), is where work here
 resumes.** Those describe the Pear demo, a read-only mirror in this repository.
 
-Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/`
+Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 closed
 
 ## Where things stand
 
-- **Phase A0 is done and pushed:** `main` = `a645e73` on the private GitLab project, pushed
-  2026-09-23 with sovtech's OK (a fast-forward of `a0/setup`).
-- **A1 spike S1 (iroh) PASSED:** 7/7 criteria on 4 runs, including a relay-down
-  negative control. See [`spikes/s1-iroh.md`](spikes/s1-iroh.md).
-- **A1 spike S4 (CMAF) PASSED; mpv and Safari are unverified on this host.** L8's
-  ladder/argv, with only the container tail swapped, produces NFX-05 output. It passes
-  the schema and `nfx-proto`, and plays, seeks and switches renditions in hls.js on
-  Chromium and Firefox. See [`spikes/s4-cmaf.md`](spikes/s4-cmaf.md).
-- **A1 spike S3 (web mesh) PASSED:** 4/4 criteria on 3 runs.
-  - p2p-media-loader 4.0.0 + hls.js played NFX content with P2P bytes > 0 through our
-    own allowlisting tracker.
-  - A tampered P2P segment was rejected by sha256, and the lying peer was dropped.
-  - **Spec break found:** NFX-10 §2's single per-video sha256 infohash cannot work with
-    p2p-media-loader v4, which uses per-rendition swarms and derives the infohash. A
-    replacement is proposed in [`spikes/s3-web-mesh.md`](spikes/s3-web-mesh.md).
-- **S2 (Tauri) is blocked on system packages** that need sudo (see Next).
-- S1 + S3 + S4 were pushed to `main` on 2026-09-23 with sovtech's OK (a fast-forward of
-  `a1/s1-iroh`).
-- **Decisions applied (branch `spec/decisions-2026-09-23`):** sovtech accepted every
-  recommendation, covering the spike findings (2a web swarms, 2b paid iroh delivery) and
-  payment issues 3.1–3.5. They are recorded in the ADR 0008 addendum, and the spec,
-  vectors, schema and `nfx-proto` are updated. The only open issue before the M3 freeze
-  is AEAD associated data.
-- The private GitLab project exists, created 2026-09-23. `main` = `468fe1e`
-  is pushed: the demo history, the spec commit `8f3b9bd` and a merge of demo `main`
-  `0e35347`.
-- ADR numbering is coordinated with the demo session. 0008 is this repository's; the
-  demo recorded the reservation in its own `docs/status.md`, and its next ADR is 0009.
+**Phases A0 and A1 are complete.** The next phase is **A2, the Rust M1 data plane**
+(ADR 0008 §5): `nfx-media`, `nfx-node`, `nfxd`, the scoped relay and a test player page.
+
+- **Repository:** the private GitLab project. Every push
+  was a fast-forward of `main` with sovtech's OK. The demo history, the spec commit
+  `8f3b9bd` and a merge of demo `main` `0e35347` are all in `main`.
+- **ADR numbering** is coordinated with the demo session. 0006 and 0008 are this
+  repository's; the demo recorded both in its own `docs/status.md` and uses 0009 onward.
+- **A1 spikes: all four PASS.** One page each in [`spikes/`](spikes/):
+  - **S1 iroh:** 7/7 on 4 runs, including a relay-down control.
+  - **S2 Tauri:** plays, seeks and switches renditions over `nfx://` on WebKitGTK,
+    3/3 runs. Linux needs gst-libav (or plugins-bad's `openh264dec`) for H.264.
+  - **S3 web mesh:** 4/4 on 3 runs. P2P bytes flow through our own tracker, and a
+    tampered segment is rejected.
+  - **S4 CMAF:** the demo's L8 ladder works with only the container tail swapped. It
+    plays in Chromium, Firefox and WebKit, and it was re-run on the demo's pinned
+    ffmpeg n8.1.2.
+- **Spec decisions:** sovtech accepted every recommendation after A1: 2a/2b and
+  3.1–3.5, then the encryption binding. They are recorded in the ADR 0008 addendum.
+  **No open spec issues remain.**
+- **Housekeeping (2026-09-23):**
+  - the S4 preview server is stopped;
+  - the merged branches `a0/setup`, `a1/s1-iroh` and `spec/decisions-2026-09-23` are
+    deleted;
+  - GitLab CI is enabled with config path `crates/ci/gitlab-ci.yml`. It runs on the
+    instance's shared runner, with prebuilt, sha256-pinned `cargo-deny`
+    and `wasm-pack` so nothing is compiled on the runner (sovtech's choice).
 
 ## Done in A0
 
@@ -91,28 +90,33 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/`
 
 ## Next
 
-1. **A1 spikes, one at a time (RAM):** ~~S1 iroh~~ → ~~S4 CMAF~~ → ~~S3 web mesh~~ → S2
-   Tauri playback. S2 is blocked until sovtech runs `sudo apt install
-   libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
-   librsvg2-dev libxdo-dev libayatana-appindicator3-dev libavif16`. `libavif16` also
-   unblocks Playwright WebKit for S4's Safari-proxy check; `mpv` is optional for S4. Pass criteria are in the plan
-   (`a local plan file`). Write one page each
-   in `docs/nfx/spikes/`. Dev servers go on `http://100.64.0.1:<port>`.
-   - Risk carried forward: the iroh-blobs 0.103 README still says "not production
-     quality". The containment plan is in the S1 page.
-2. **`nfx-proto` WASM bindings.** A thin `wasm-bindgen` crate for the web client
-   (verify manifest / hash list / beacon from JS). Not needed until the web work in A2.
-3. ~~Open spec issues~~: decided 2026-09-23 (ADR 0008 addendum). Only AEAD associated
-   data (NFX-08 §7) remains, and it is due before M3.
-4. Optional: add the schema check (`jsonschema`) to `check.sh`.
+1. **A2 — the Rust M1 data plane**, per ADR 0008 §5:
+   - `nfx-media`: port L8's ladder and codec argv, add an HLS/fMP4 tail, and parse
+     `avcC` for CODECS (S4);
+   - `nfx-node`: iroh-blobs behind a swappable store trait (S1), gossip, beacons via
+     nostr-sdk, the pull-through origin, and the per-member window gate (S1);
+   - `nfxd`;
+   - a scoped relay;
+   - a test player page, which can grow out of the S3/S4 spike pages.
+2. **`nfx-proto` WASM bindings** for the web client: verify manifest, hash list and
+   beacon from JS, and do the sha256 validation without WebCrypto's secure-context
+   rule (S3).
+3. Watch the first real pipeline on the shared runner and fix anything specific to the
+   image.
+4. Carried risk: the iroh-blobs 0.103 README still says "not production quality". The
+   containment plan is in the S1 page.
+5. Optional: add the schema check (`jsonschema`) to `check.sh`.
 
 ## Not verified / known gaps
 
-- **GitLab CI has never run.** CI/CD is disabled and no runner exists.
-  Enabling it means setting the CI config path to `crates/ci/gitlab-ci.yml`, which is
-  outward-facing, so ask first. The `rust:1.98-bookworm` image tag, and the pinned
-  `cargo-deny 0.20.2` / `wasm-pack 0.13.1` installs, are untested in that image.
-  Everything was verified locally only.
+- **GitLab CI's first real run is the next push.** The `rust:1.98-bookworm` image and
+  the in-image installs are untested there; every result above was verified locally.
+  The job also does a read-only fetch of the private demo repository `main` for the
+  add-only check. `wasm-pack test` downloads its matching `wasm-bindgen` runner at run
+  time, unpinned.
+- **Not tested on this host:** mpv (not installed), Safari (needs macOS/iOS; WebKit
+  passed as the closest proxy), macOS WKWebView and Windows WebView2 (S2 covered
+  Linux only).
 - **The canon rule was cross-checked Python ↔ Rust only.** The JavaScript note (sort by
   code point, not UTF-16) is untested until the web client exists. The WASM build is
   the intended single implementation for browsers.
@@ -121,8 +125,8 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/`
 - **NFX-12's Hypercore stack pin** (hypercore 11, hyperdrive 13, hyperswarm 4,
   protomux 3) comes from the demo seeder's `package.json`, plus hyperdrive 13 inferred
   as the matching series. It is unverified until spike S5.
-- **p2p-media-loader v4 fork points** (NFX-10 §3.2) are asserted from the plan's
-  research. S3 maps them.
+- **p2p-media-loader v4 fork points** (NFX-10 §3.2) are mapped from the 4.0.0 source
+  (S3) but not yet built.
 - **k256's deterministic signing** (`PrehashSigner`, zero `aux_rand`) is used for
   vectors and tests. User keys belong in a proper signer (nostr-sdk / NIP-46) in
   `nfx-node`.
