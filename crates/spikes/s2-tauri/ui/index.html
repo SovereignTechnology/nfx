@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>NFX S2 spike</title>
+<style>body { margin: 0; background: #000; } video { width: 100%; }</style>
+<video id="v" muted playsinline></video>
+<script src="hls.min.js"></script>
+<script>
+  // Plays NFX-05 CMAF from the Rust store over nfx://, then seeks and switches renditions,
+  // reporting each step to Rust (printed as JSON lines). Ends with `done`.
+  const { invoke } = window.__TAURI__.core;
+  const report = (o) => invoke('report', { line: JSON.stringify(o) });
+  const v = document.getElementById('v');
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function until(what, cond, ms = 20000) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (cond()) return;
+      await sleep(200);
+    }
+    throw new Error(`timeout: ${what} (t=${v.currentTime.toFixed(2)})`);
+  }
+  (async () => {
+    let ok = false;
+    const errors = [];
+    try {
+      const root = await invoke('nfx_root');
+      // Tauri custom schemes: nfx://localhost on Linux/macOS, http://nfx.localhost on Windows/Android.
+      const base = /Windows|Android/.test(navigator.userAgent) ? 'http://nfx.localhost' : 'nfx://localhost';
+      const codecs = ['avc1.640028,mp4a.40.2', 'avc1.64001f,mp4a.40.2', 'avc1.64001e,mp4a.40.2'];
+      await report({
+        step: 'env', ua: navigator.userAgent, mse: !!window.MediaSource, hlsjs: Hls.version,
+        hlsSupported: Hls.isSupported(), nativeHls: v.canPlayType('application/vnd.apple.mpegurl'),
+        types: Object.fromEntries(codecs.map((c) => [c, window.MediaSource ? MediaSource.isTypeSupported(`video/mp4; codecs="${c}"`) : null])),
+      });
+      const hls = new Hls();
+      const switched = [];
+      hls.on(Hls.Events.ERROR, (_, d) => errors.push(`${d.details}:${d.fatal}`));
+      hls.on(Hls.Events.LEVEL_SWITCHED, (_, d) => switched.push(d.level));
+      const parsed = new Promise((res) => hls.on(Hls.Events.MANIFEST_PARSED, (_, d) => res(d.levels)));
+      hls.loadSource(`${base}/${root}/master.m3u8`);
+      hls.attachMedia(v);
+      const levels = await Promise.race([parsed, sleep(15000).then(() => { throw new Error(`no manifest; errors ${errors}`); })]);
+      await report({ step: 'manifest', levels: levels.map((l) => l.height) });
+      await v.play();
+      await until('playback past 2.5 s', () => v.currentTime > 2.5);
+      await report({ step: 'played', t: v.currentTime });
+      v.currentTime = 7;
+      await until('playback after seek', () => v.currentTime > 7.6);
+      await report({ step: 'seeked', t: v.currentTime });
+      const lowest = levels.reduce((b, l, i, all) => (l.height < all[b].height ? i : b), 0);
+      const before = v.currentTime;
+      hls.currentLevel = lowest;
+      await until('switch to the lowest rendition', () => switched.includes(lowest));
+      await until('playback after the switch', () => v.currentTime > Math.min(before + 1, 11.5) || v.ended);
+      await report({ step: 'switched', to: levels[lowest].height, t: v.currentTime });
+      ok = !errors.some((e) => e.endsWith(':true'));
+    } catch (e) {
+      await report({ step: 'error', error: String(e) });
+    }
+    await report({ step: 'errors', errors });
+    await invoke('done', { ok });
+  })();
+</script>
+</html>

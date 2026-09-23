@@ -1,0 +1,20 @@
+[package]
+name = "s2-tauri"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Spike S2: hls.js in the Tauri 2 webview plays NFX-05 CMAF served from Rust through nfx://"
+license = "AGPL-3.0-or-later"
+
+# Its own workspace: Tauri's dependency tree stays out of the main crates/ graph and CI.
+[workspace]
+
+[build-dependencies]
+tauri-build = "2.6.3"
+
+[dependencies]
+anyhow = "1"
+hex = "0.4.3"
+nfx-proto = { path = "../../nfx-proto" }
+serde_json = "1"
+tauri = "2.11.6"

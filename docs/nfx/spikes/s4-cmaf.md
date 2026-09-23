@@ -1,4 +1,4 @@
-# Spike S4 — CMAF packaging for NFX-05: **PASS**, 2 criteria unverified on this host (2026-09-23)
+# Spike S4 — CMAF packaging for NFX-05: **PASS** (2026-09-23; re-run on the pinned ffmpeg the same day)
 
 **Question:** does ffmpeg produce valid NFX-05 output when it is driven by the demo's L8
 ladder and argv planning (2 s aligned GOP, `-sc_threshold 0`) and every file is renamed
@@ -48,7 +48,23 @@ to its sha256?
 | NFX-05 §1 media profile | **PASS.** All 18 segments start with an IDR (init + segment probed). Segments are exactly 2.000 s and identical across all three renditions, so switches are aligned. Dimensions match L8's `renditionDimensions`. |
 | Plays in hls.js | **PASS** in Playwright Chromium 1243 and Firefox 1543 (fresh headless contexts). Each played past 2.5 s, seeked to 7 s and kept playing, switched to 360p mid-play, and raised no fatal errors. MSE reports H.264 High support in both. |
 | Plays in mpv | **Proxy PASS; mpv itself unverified** (not installed; `sudo apt install mpv`). ffmpeg's native HLS demuxer fetched `http://…/<root>/master.m3u8` from the origin and decoded **every stream of every rendition** without error. |
-| Plays in Safari native HLS | **Unverified.** There is no Safari on Linux. Playwright WebKit (the closest engine, via GStreamer) would not launch: the host lacks `libavif16`, which needs sudo. |
+| Plays in Safari native HLS | **Safari itself unverified** (no Safari on Linux). **Closest proxy PASS:** after `libavif16` was installed, Playwright WebKit (WebKit with its GStreamer media stack) played, seeked and switched renditions with hls.js, and MSE reports H.264 High support. |
+
+## Re-run on the demo's pinned ffmpeg
+
+The demo pins BtbN `n8.1.2-50-g1a748fe2cd` (`FFMPEG-PIN.md`, month-end tag
+`autobuild-2026-08-31-13-27`). It was downloaded into a private scratch directory and
+verified three ways: the release's `checksums.sha256`, the pinned tarball sha256
+`c733b4b2…`, and the pinned `bin/ffmpeg` and `bin/ffprobe` sha256s. All matched.
+
+With it on `PATH`, the unchanged packager produced root `a39d4ee3…` (26 files):
+- every structural check passed (IDRs, 2 s alignment, dimensions);
+- `nfx-verify-store` passed (hash list, all 26 files, all 4 playlists) and so did the
+  schema;
+- hls.js played, seeked and switched renditions in **Chromium, Firefox and WebKit**.
+
+The bytes differ from the system-ffmpeg run, as expected across encoder versions; only
+the root commits to exact bytes.
 
 ## Output (root `3b37b0c9…`, 26 files)
 
@@ -84,5 +100,4 @@ The hash list itself is 5.6 KB.
   forced keyframes should hold regardless.
 - VP9/AV1 and Opus renditions. They are optional in NFX-05.
 - Licensed-mode encryption (M3).
-- The BtbN-pinned ffmpeg.
-- mpv and Safari themselves.
+- mpv (not installed) and Safari itself (needs macOS/iOS).
