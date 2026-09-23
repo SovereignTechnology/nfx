@@ -1,0 +1,317 @@
+{
+  "description": "Correctly signed kind-20464 events that MUST be rejected, checked at 'now'. 'unknown_endpoint_only' MUST parse (unknown endpoint types are skipped, NFX-03 §4) but leaves no usable endpoint.",
+  "secret_keys_DO_NOT_USE": {
+    "seeder": "115ac24798fa94a35206459d31583a3ad9c57955a9e9784f749cb38327714683"
+  },
+  "now": 1790000030,
+  "cases": [
+    {
+      "name": "ttl-too-long",
+      "reason": "expiration - created_at in [60,120]",
+      "event": {
+        "id": "6c0494506552072411dfb93ababbe37a2f9f6f325732aed02d3dee2502cb6665",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000121"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"f09091cd8afcb7f4be82e0f8229e867811d32f08dc9bc1efd031831198d2b096\",\"relay\":\"https://iroh-relay.example\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"PLACEHOLDER-ticket-format-pinned-at-M1\",\"meta\":\"PLACEHOLDER-meta-collection-ticket-pinned-at-M1\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"infohash\":\"ec95dedc1a20122c0423aac70da2e2ef5172a937\"},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "7c57b8a163477449fbabd5af7d9b85bda407b9b123a7ac45f867347271e3f36ff8ba468c88a67734ab2d6846ac64cc83d118fe6f8cdaedd2465ab5cc9ff21589"
+      }
+    },
+    {
+      "name": "ttl-too-short",
+      "reason": "expiration - created_at in [60,120]",
+      "event": {
+        "id": "a08416815e054e1e319cf6deaf5c28af370bf76c4e8cfc7de1a8d0f536659213",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000059"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"f09091cd8afcb7f4be82e0f8229e867811d32f08dc9bc1efd031831198d2b096\",\"relay\":\"https://iroh-relay.example\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"PLACEHOLDER-ticket-format-pinned-at-M1\",\"meta\":\"PLACEHOLDER-meta-collection-ticket-pinned-at-M1\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"infohash\":\"ec95dedc1a20122c0423aac70da2e2ef5172a937\"},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "6a1f06050be7e47a912e9c470a800d97923264772b22d7bcd5324c25faf8fd1665318ceef394fb6e71c1451860ea5252ce2b520cece8d24548308509d16e79d6"
+      }
+    },
+    {
+      "name": "missing-expiration",
+      "reason": "expiration required",
+      "event": {
+        "id": "2a9b3a540498075c005c1426b0ac38a9ee88f8cf8b7dde509bba3d4f5e30ab4a",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"f09091cd8afcb7f4be82e0f8229e867811d32f08dc9bc1efd031831198d2b096\",\"relay\":\"https://iroh-relay.example\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"PLACEHOLDER-ticket-format-pinned-at-M1\",\"meta\":\"PLACEHOLDER-meta-collection-ticket-pinned-at-M1\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"infohash\":\"ec95dedc1a20122c0423aac70da2e2ef5172a937\"},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "2dadc285add62035171753f14c6a5ad5b56f1ad4f48ee34ec5401bfa7b33b7e2807d60172e61358d8ed29cb3f3d9ae1861978117a0ad0be9eed81530043474b5"
+      }
+    },
+    {
+      "name": "two-n-tags",
+      "reason": "exactly one n tag",
+      "event": {
+        "id": "e238e4c1a71120156c1dee06bdb504fc74df3afe619830b92732fa5561675432",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "n",
+            "nfx:testnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"f09091cd8afcb7f4be82e0f8229e867811d32f08dc9bc1efd031831198d2b096\",\"relay\":\"https://iroh-relay.example\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"PLACEHOLDER-ticket-format-pinned-at-M1\",\"meta\":\"PLACEHOLDER-meta-collection-ticket-pinned-at-M1\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"infohash\":\"ec95dedc1a20122c0423aac70da2e2ef5172a937\"},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "36d6c4c9f7dd3afb86e399e3fe3d89e5d9d51ecda0b69e95298091fff2706f1066a6397d5a9cc67b10f3fa08f264ba6285daa96040277558d5980f597dc7c64a"
+      }
+    },
+    {
+      "name": "a-namespace-mismatch",
+      "reason": "a names a different network than n",
+      "event": {
+        "id": "8921e891174ebddffa139374bc3540de404b70f2c05bfe85987335fcee659f0b",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:testnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"f09091cd8afcb7f4be82e0f8229e867811d32f08dc9bc1efd031831198d2b096\",\"relay\":\"https://iroh-relay.example\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"PLACEHOLDER-ticket-format-pinned-at-M1\",\"meta\":\"PLACEHOLDER-meta-collection-ticket-pinned-at-M1\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"infohash\":\"ec95dedc1a20122c0423aac70da2e2ef5172a937\"},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "4f34469fd4e3004ea2fa0fd819482f95244ae83692bb415906ff69525e244e9aaee644c71f1ed3b438b0323c5ab7757a703882559314fdcd8589a6beaad6bd4f"
+      }
+    },
+    {
+      "name": "a-wrong-kind",
+      "reason": "a must address a kind-38504 manifest",
+      "event": {
+        "id": "244010a2a03b495cb99f44da9af2e4625bc642d91bafaa6e80cae39277e57bf7",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "30023:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"f09091cd8afcb7f4be82e0f8229e867811d32f08dc9bc1efd031831198d2b096\",\"relay\":\"https://iroh-relay.example\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"PLACEHOLDER-ticket-format-pinned-at-M1\",\"meta\":\"PLACEHOLDER-meta-collection-ticket-pinned-at-M1\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"infohash\":\"ec95dedc1a20122c0423aac70da2e2ef5172a937\"},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "1f3a6b471ddea048853c4e8c7e42afbac2c25213c9ca95eacb6f07bb992a86e07cb22d105e6232455319187f7d735706d3a3d0ecf172ee625372bffdcde233de"
+      }
+    },
+    {
+      "name": "video-mismatch",
+      "reason": "content.video must equal the a tag's d",
+      "event": {
+        "id": "51e5c15a3055be084f76aba5d83042f7a601a23586ded5f7099e6a5f6554514e",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:another-video\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"f09091cd8afcb7f4be82e0f8229e867811d32f08dc9bc1efd031831198d2b096\",\"relay\":\"https://iroh-relay.example\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"PLACEHOLDER-ticket-format-pinned-at-M1\",\"meta\":\"PLACEHOLDER-meta-collection-ticket-pinned-at-M1\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"infohash\":\"f3cb46fa79e5e98ad270b9f3f8437df7e4ccfdbf\"},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "4a879b1bef5f30fe2203a0efbb565395e1417274fbd3d262066d9236d023c02976b57529d40c48b95b8758275756be8527f3cf5656c111e41171d414116f4348"
+      }
+    },
+    {
+      "name": "no-endpoints",
+      "reason": "at least one endpoint",
+      "event": {
+        "id": "f0b9b82b09eae05f8bfe11ed378a136f09b6b3b9deb84bb33b188db48537d8cd",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "9c7d66bed08f92bf5918c0995a47573d590b413932574433e40fe16c48644e9e6a98ec814cd560f2bc33225cc037cbb413c0ca941479c78dca987a11cd8f38a1"
+      }
+    },
+    {
+      "name": "chunks-missing",
+      "reason": "chunks is required",
+      "event": {
+        "id": "d597e49ecc994d45b506950464d42fe5c3a626773307c1dedb78e5542a363d16",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"f09091cd8afcb7f4be82e0f8229e867811d32f08dc9bc1efd031831198d2b096\",\"relay\":\"https://iroh-relay.example\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"PLACEHOLDER-ticket-format-pinned-at-M1\",\"meta\":\"PLACEHOLDER-meta-collection-ticket-pinned-at-M1\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"infohash\":\"ec95dedc1a20122c0423aac70da2e2ef5172a937\"},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "4c8155a84146fa3566aca419767aeb6bbeff0fbb624b92ac1027d8f862cc1f6b22132eeb52b3d48a196cc18381328f1363fd8c11f0dea9646389cd1c6f9b8375"
+      }
+    },
+    {
+      "name": "content-not-json",
+      "reason": "content is JSON",
+      "event": {
+        "id": "637db3e6453eaef6c144524eb1698f91aaad01f4627ba302e5a751d6b06148fb",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "not json",
+        "sig": "2592ba4f6cc1b42c39561475ebd3634b019773d761e3418f28ec264879c5b921b3535e0ae680f0a8c82a84422cd3bc1c42c00cb2b2b65853eadfb587456c1b6d"
+      }
+    },
+    {
+      "name": "created-at-skew",
+      "reason": "created_at within ±15 min of now",
+      "event": {
+        "id": "dece9517d51badb06a13196687fb0e0b73d6d9fa313a54b60cef58211540028e",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1789999070,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1789999190"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"f09091cd8afcb7f4be82e0f8229e867811d32f08dc9bc1efd031831198d2b096\",\"relay\":\"https://iroh-relay.example\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"PLACEHOLDER-ticket-format-pinned-at-M1\",\"meta\":\"PLACEHOLDER-meta-collection-ticket-pinned-at-M1\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"infohash\":\"ec95dedc1a20122c0423aac70da2e2ef5172a937\"},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "fe5a6bf2a009d1dc5a948c31c412fec17cf83907f517f0a6c1abda0386e6985981f51e887ecb3026a4759c9baa1f9ee5d2adef29da62a9cfb78dafa5bf0e948a"
+      }
+    }
+  ],
+  "unknown_endpoint_only": {
+    "id": "8db8bd910283e8877af69619c28bc70b58742dbe25db2a05f4740813c5d077f5",
+    "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+    "created_at": 1790000000,
+    "kind": 20464,
+    "tags": [
+      [
+        "n",
+        "nfx:mainnet:1"
+      ],
+      [
+        "a",
+        "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+      ],
+      [
+        "expiration",
+        "1790000120"
+      ]
+    ],
+    "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"carrier-pigeon\",\"loft\":\"north\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+    "sig": "d508cb4a5f97d3d51ebdb0e9b4b8d99c85c08b3a987b204ecf4649b611c8e7bcbb06a9ef5148fd526a4d1f86b12c2754a837c430e222c6b57b8172f6ee901a38"
+  }
+}

@@ -1,0 +1,2614 @@
+{
+  "description": "Correctly signed kind-38504 events (except where the case says otherwise) that every L1 reader MUST reject (NFX-02 §4). 'reason' is informative, not a required error code.",
+  "secret_keys_DO_NOT_USE": {
+    "creator": "bdabb76590ff1cd7f14b86be0747913d9efaf04473f3c06a3d4736063f72ad92"
+  },
+  "cases": [
+    {
+      "name": "n-d-mismatch",
+      "reason": "n names testnet, d names mainnet",
+      "event": {
+        "id": "be437a9fb12166498d3c5b8c9dd8ac706f3f7a691f5d7d00262c8ed847e4d584",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:testnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "fddaa164c3eacb9bcedb6ce7313c3339e96c2987456c3807ebed806153fb0fbb7f9291986390be50737f45d72389b709d7905957055e789b6bddfcf769999a0e"
+      }
+    },
+    {
+      "name": "two-n-tags",
+      "reason": "exactly one n tag (NFX-01 §3)",
+      "event": {
+        "id": "aa0addda55ca83471cec363036bfb55b686f7eb7aa263b1a7dbbfff3c5dc9153",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ],
+          [
+            "n",
+            "nfx:testnet:1"
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "563279d6d4170e223584b83dad6ec0ad991c20989232386658840f6c8b4660ff072add22455bd460b11d45604194395615d9dd0d8fb5f50b13f5b4c676bba593"
+      }
+    },
+    {
+      "name": "no-n-tag",
+      "reason": "n tag required",
+      "event": {
+        "id": "790fd6fe8cacaf06fe38797d15363ebbb9984354cebfc7ab3040c2a3031c3727",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "bc62661a1d9c76a7851d750df9e0932fbc368211320383fcac354c39c99a77aefa911964d5225de56691a3973e935e1a8aff857e89a0be15eea1da1464953a54"
+      }
+    },
+    {
+      "name": "void-token-nutflix",
+      "reason": "nutflix:* namespaces are void (NFX-01 §2)",
+      "event": {
+        "id": "b12e0d95c877beb54512835ceda04dbde0a640f6082d2e691702e6112c4a644a",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nutflix:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nutflix:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "eca9be254c0a7d709bc32f0b71da1c5b65bad0d7581edfadd6b2080141193b80349aeef043d59238586641628e55dd51eb47dfe6ae6c5bf506f8c5a113b4d07c"
+      }
+    },
+    {
+      "name": "specver-leading-zero",
+      "reason": "specver has no leading zeros",
+      "event": {
+        "id": "e4fd10caaa763631680921b12e1bcd1233a2ae04773c3ff58b560a69b7904667",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:01:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:01"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "8b1bc25e5fadb63950cb45a2d22e58b7652fb163cf46e8cac91d1d0a5b8735ce4519c4dea1bdb30f2fd001b989cc71e3aee0c13c3462e8dc6a31fd674d45a86f"
+      }
+    },
+    {
+      "name": "video-id-too-short",
+      "reason": "video-id is 7..63 chars",
+      "event": {
+        "id": "a11f4c13373b3345dddd52769a6e896b5107b354256f6630fb19a9b5eb10538f",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:abcdef"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "22112fe4d5d700c1df6b08d86f417925e67f067c5d06417282cc457e6dff40015df5c6598c0404273cbd2b29b6bd54257f266d8e51abb1411bda052bfdfef57c"
+      }
+    },
+    {
+      "name": "video-id-uppercase",
+      "reason": "video-id is lowercase",
+      "event": {
+        "id": "70658df38d7ab6917bd31d6d1be3ddb07cbab1cd11194577d53b71a6167f22bb",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:Salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "e4834a52eb5cd16698ea30523d41f6e736a49ac6ee6aeeddc9d8694938da6c8f1624382db38289274b028c149a194b70b9e118e718fe0e2ddcf8afc40e3a63d6"
+      }
+    },
+    {
+      "name": "duplicate-root",
+      "reason": "single-valued tags at most once (NFX-02 §3)",
+      "event": {
+        "id": "7d36a06d73ae6d3ccd7e964e4111222ecb39c5420bd329df9be2405dd14e9d64",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ],
+          [
+            "root",
+            "0000000000000000000000000000000000000000000000000000000000000000"
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "ba7f11c6ceb6d923eec3e9a5ef2787917056480da66e87e7352f41e45e504812a5d76c52db2cbed18622df26fa6357604781dcfb84faad115d9f51a16ccaedc2"
+      }
+    },
+    {
+      "name": "duplicate-title",
+      "reason": "single-valued tags at most once (NFX-02 §3)",
+      "event": {
+        "id": "d9d3aa9e548712dc351dd1beae51ebd056a51ecab3b79aab4353c8348d3a6b27",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ],
+          [
+            "title",
+            "Another title"
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "df262478a6db4d0e8d5e215b950c51baa245c460e990040e134b6f6c83f3eced2552aac66040e20cc85d51517ba4325478f0e1eaf22c2f43bf16336177a75420"
+      }
+    },
+    {
+      "name": "missing-root",
+      "reason": "root required",
+      "event": {
+        "id": "89439e475aa74f79f88ab8db5a59e927d4d810636cdb11d8bf774edd86205a1e",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "bc8f0f81455ba15d0c5ec6842d8191239e30fe4275ac98850f528fc5e6c7436005392b380300f1af11395546a14ca302d965f76c07ae67010abba0650fcde870"
+      }
+    },
+    {
+      "name": "missing-title",
+      "reason": "title required",
+      "event": {
+        "id": "995deb3f438960d5b1cb3cca0e1f46443215cc1e0437af2b607903c8cedd09b1",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "6800e20b079d07ee76e7b69c382272c30981b276dd36a53ba4206344d45ae3e44fc3269bd34a23bc8f111bf89758f2f7fe1190f73c7a0425bfe2eb7860f2ebcd"
+      }
+    },
+    {
+      "name": "root-uppercase-hex",
+      "reason": "root is 64 lowercase hex",
+      "event": {
+        "id": "45cf72bb17a65eff32a72f1d52656b555874747a479fcd0749be09a8528b9de6",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "F1100437515B27707BAC1AC04219281227C459F405A4794EB8A917238D0298F3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "6bd32ff4d5778224317f0953b4731e567d7aee87bd8c4d8cfbfaf6ce2bb19e89ddff785bda05dbb1ea83596ca23d9ba1c970e1ea741953e4aeafec636e34c27b"
+      }
+    },
+    {
+      "name": "segs-zero",
+      "reason": "segs >= 1",
+      "event": {
+        "id": "0c960738767cb88877910e7f603e96d09487b8c44cf236355ae93feab0d89c28",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "0"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "f7c32d3a3f6aa356605df9fd000a1b7108842735982c9ac92b92c47b3f45894cc59545b68ce938b94bb5157786633367f1af38029a21bcbb8da38d7a31514918"
+      }
+    },
+    {
+      "name": "integer-leading-zero",
+      "reason": "integer grammar (NFX-02 §3)",
+      "event": {
+        "id": "003aadf5c693467c179a4ebcf88e4656d346568d40d8b65c7201bff99d3821cd",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "05000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "88435ac2350747d010d66a55c4e3197029ddaaace8310fcd9728eff733f365d2d5253284f83865b6aeac71e8d83dc372c25d974c43d152461ab02b9b8269c15a"
+      }
+    },
+    {
+      "name": "integer-plus-sign",
+      "reason": "integer grammar (NFX-02 §3)",
+      "event": {
+        "id": "ba9474d88a77b93337c9313a4dec1cc59be95f44a352e07be10769be1f1fa9c6",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "+200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "0b11c76bc4305e4115326afd980950abf76f9a02ac51c7cb6859061be3af5b0ae09056d3c2af0a0223a0f2bf237fe803d4b834bc90318d6ba3ce0405fd677a72"
+      }
+    },
+    {
+      "name": "integer-overflow",
+      "reason": "integer <= 2^64-1",
+      "event": {
+        "id": "e8f8f4218ae7b209f9f10d5500ea43bf820e86bb7217e608884748413b562e8b",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "18446744073709551616"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "ca5d0f6df66a276cece7b65c8949f2b5bc8dfb4c144b4b168990889b8a0f117a14198e3e5fc7f5c01f09d3175dc0a45a209d01434075b86b5df271a010374261"
+      }
+    },
+    {
+      "name": "split-out-of-range",
+      "reason": "split in [0,10000]",
+      "event": {
+        "id": "4e7fbe220a6bfe153fd1231de6d9d9b72b24d194a9116b712863d4f0cea43f85",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "10001"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "89a0648e465015c677b37ca1095ab0164f3677e7f8caf4eb35fd92f732628a9e6763af28a8363c5f45dfc4f95fb2308f33c3faea31265afb42ddbe8055f302bb"
+      }
+    },
+    {
+      "name": "license-unknown-value",
+      "reason": "license is open|licensed",
+      "event": {
+        "id": "d28a1e88cdf8398c5ac86053e4eab64d70ddad74128c913c2dd9043e5b6d8f4b",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "free"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "1d0349c27b2da51d91f571ad64572173bcec0fe654846c86c1992b5d6c599ab51ae2792bf8dbcac9781ae926a22f6c02dbcc50f470f5622167bcdd8c276c2943"
+      }
+    },
+    {
+      "name": "licensed-missing-mint",
+      "reason": "licensed requires exactly one mint",
+      "event": {
+        "id": "76f8bd414dd2fc1c18f144e046e2f7934df9041463844bfbcebb1b3d6b2bf42f",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "3592358e6c7dae7960b1aa5543e9a4bae03d4f6ebf712a473fce6b50edf78c32ca33cebaaea8913fb8f7f94980312e21b66748075b3acea2a5400d8fd7b61bcf"
+      }
+    },
+    {
+      "name": "licensed-two-mints",
+      "reason": "licensed requires exactly one mint",
+      "event": {
+        "id": "0066b1962449a499c220ceddfef8974cca0e83169e4d7ab9a286438ff1209563",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ],
+          [
+            "mint",
+            "https://mint2.example"
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "540e22a8a068d87fe593fff8ff55e47bcb9e8dad7d0e14882e87e23c2a9625d9b35553df8828c03c1d3a3f8fb6a325f5dd151e260e05ff355ca331dec9e86bd0"
+      }
+    },
+    {
+      "name": "mint-not-https",
+      "reason": "mint is an https URL",
+      "event": {
+        "id": "3358e7c0d338ff7d002f21b45c429cd626fb0b9680b015298f87778455c146ce",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "http://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "279feb383553b4a57b59e63c3cccc5914daf2f6a41c6d8214782c5bcc17d41490f00f598a00ef98a4a9bb830baeabbd696f6977c1fcdd3786aad1c7df76ac378"
+      }
+    },
+    {
+      "name": "mint-userinfo",
+      "reason": "mint URL has no userinfo",
+      "event": {
+        "id": "861679b82749b880f82e84b7c997db98b981e9fde39cb616cce12b5e3444b498",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example@evil.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "5636127b3cffbe8d39327c36ce4412640be1730a74c64f8f2656a98dcb09b6df0299af8981437ef7b487ca0cb55524021ff66e6074381eb734506f55c55f4038"
+      }
+    },
+    {
+      "name": "licensed-missing-cashu-key",
+      "reason": "cashu_key required when licensed",
+      "event": {
+        "id": "58449ea38b06fe2867da6b8248bfd5a8a036bbb86778c790280c41e73268c7f1",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "0f48e4a4246c77276794f632929ca89ecc8319247f98e92d11f652909327c7a142ab72b8a64058e36daf7c2e1da35a29b59673d8f3eb69d206a3273f812ae682"
+      }
+    },
+    {
+      "name": "cashu-key-not-on-curve",
+      "reason": "cashu_key is a valid compressed point",
+      "event": {
+        "id": "330f71eec94f911e40c905fea8699d3ba1262dbe05b668f28ade2cd25d2698b7",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "020000000000000000000000000000000000000000000000000000000000000000"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "226286af33aa6e3f7099bcdae9df8352fb7cb199f001bf0ed6a6c209bb0392d54d66146d52e9e691852cf70fc1190b080f6ca42e0f3e816bd3c88a4d2f388417"
+      }
+    },
+    {
+      "name": "cashu-key-bad-prefix",
+      "reason": "cashu_key is a valid compressed point",
+      "event": {
+        "id": "e91df18bf653bfcb4c0d79b7e71a946a9f569388b0a87895bd031ec5e3acaaa3",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "044a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "9c2240b99e5d8542c6a752810af577e7645ea34a370eda5840627dc76efd32501d38a53a50eea92cf25b24381f46a78065475acaf47c275a47dd325f57202784"
+      }
+    },
+    {
+      "name": "licensed-with-price-hint",
+      "reason": "price_hint prohibited when licensed",
+      "event": {
+        "id": "c944b7f214fcc8628fc5dac2b8514468c8686d5146af67d711c256983c9add74",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ],
+          [
+            "price_hint",
+            "1"
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "cbd313e4ce259f58906d7cdfc6625d8de9a42bdad76fbfab95f72585ca5db6d013692164662681c06b0365d0356865d549e75539b1a849c3f51f33df0bb75d47"
+      }
+    },
+    {
+      "name": "open-with-key-price",
+      "reason": "licensed-only tags prohibited when open",
+      "event": {
+        "id": "be191cdd1d08832dd57e42d36e38dfbea5dc03da331f146474259355b122c852",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "open"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "8e14459f355c38da91dde3d9f158e7ae147602a81bdbe359d830311f0ee526b34b2119e6716c28e4bec35ea10a68ae4cf3f0e2cef429295362fcbce558dc62b0"
+      }
+    },
+    {
+      "name": "thumb-bad-hash",
+      "reason": "thumb is 64 lowercase hex + mime",
+      "event": {
+        "id": "e6218aabcf1295781b2f0c9450dd1d6a3df21eb71c33901df2e0e86120c5023c",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "abc",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "51e24a50715974f7dd85ace606d87e58fc80916b849164bce9763fbcbfd367d18c10038a1bab0b37e1a2531c384c329bbd1af942d2538d5e72cdeaeb11674d94"
+      }
+    },
+    {
+      "name": "thumb-missing-mime",
+      "reason": "thumb is 64 lowercase hex + mime",
+      "event": {
+        "id": "26da473425ebce23ddf7642cb54d41adb49ebb7d3d1c5108aea2bfc1ce814c61",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "cdbaa1cc9cb62ac571d4f6bdbc08b7cbe15e0f1a3deb1375c01649491e24ab700e0d1406bc1b5a5eea1b0fa91f6e0337284f76a93eabee6ae3ea1db1c1071706"
+      }
+    },
+    {
+      "name": "free-seeder-bad-hex",
+      "reason": "free_seeder is 64 lowercase hex",
+      "event": {
+        "id": "be284c4ca36e6ad83017098a071c06f9a94ba4ba590760a398d9036aa402a64a",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "npub1notallowed"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "2fd63d94299f9ec7f9b1eacfa165900dc7ee179496d96595e983d2946ba5e2f244e0ed7f85f4fb7eb51ebab6a90fdc6d031a6e85441e88e963710f21b2a3ddf7"
+      }
+    },
+    {
+      "name": "wrong-kind",
+      "reason": "kind must be 38504",
+      "event": {
+        "id": "17e7836a5da3c58a7ee3dce827234b7904741eddc730831e9fada7e439db5224",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38505,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "48260c2e38faf800900b1f6fcf4c29bee98e59d5ebfd5035e69df00bdb981a2194b0f6f057c1289f557a59ad51cb1d83f7d445d388d40dcf7f7010381dd6611e"
+      }
+    },
+    {
+      "name": "bad-signature",
+      "reason": "sig must verify (BIP-340)",
+      "event": {
+        "id": "8e82e846295006d5406715f4d1ad53675926b74b6c10ea45e0ee8516ff351b49",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk.",
+        "sig": "2ae191bd2e638e832bf96e595752ee776af5a7181a9d01fe7c632325f1e2caf76ec37ce04a5368c9af82ccdc1509cf1944b9c196272ff71f620141adb1949fa0"
+      }
+    },
+    {
+      "name": "id-mismatch",
+      "reason": "id must equal the NIP-01 serialization hash",
+      "event": {
+        "id": "8e82e846295006d5406715f4d1ad53675926b74b6c10ea45e0ee8516ff351b49",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000000,
+        "kind": 38504,
+        "tags": [
+          [
+            "d",
+            "nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "title",
+            "Salt Flats at Dusk"
+          ],
+          [
+            "published_at",
+            "1790000000"
+          ],
+          [
+            "license",
+            "licensed"
+          ],
+          [
+            "root",
+            "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+          ],
+          [
+            "segs",
+            "7"
+          ],
+          [
+            "duration",
+            "6"
+          ],
+          [
+            "thumb",
+            "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+            "image/jpeg"
+          ],
+          [
+            "key_price",
+            "200"
+          ],
+          [
+            "split",
+            "5000"
+          ],
+          [
+            "mint",
+            "https://mint.example"
+          ],
+          [
+            "cashu_key",
+            "034a5f9f0298fdb05b7d2e3c1a9dd7e5bd8bcf4fa90505f9c272b753d30e4ac2ca"
+          ],
+          [
+            "free_seeder",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "t",
+            "travel"
+          ],
+          [
+            "alt",
+            "Drone footage over salt flats at sunset, 6 seconds."
+          ]
+        ],
+        "content": "A walk through the salt flats at dusk. (edited after signing)",
+        "sig": "2ae191bd2e638e832bf96e595752ee776af5a7181a9d01fe7c632325f1e2caf76ec37ce04a5368c9af82ccdc1509cf1944b9c196272ff71f620141adb1949fa7"
+      }
+    }
+  ]
+}

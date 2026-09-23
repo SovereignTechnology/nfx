@@ -38,8 +38,8 @@ The relay's NIP-11 document MUST list `"supported_nips"` including `11` and `40`
 (plus `42` when auth is on), and MUST carry:
 
 ```json
-"nutflix": {
-  "networks": ["nutflix:mainnet:1"],
+"nfx": {
+  "networks": ["nfx:mainnet:1"],
   "kinds": [38504, 20464],
   "roles": ["catalog", "availability"]
 }
@@ -72,7 +72,23 @@ To join the set a network recognizes:
 
 A seed list MAY ship with clients purely for bootstrapping step 2's discovery.
 
-## 7. Non-goals
+## 7. Embedded scoped relay
+
+A seeder node MAY embed a scoped relay in the same process (the reference headless
+node `nfxd` does; ADR 0008), so that a network can bootstrap with no outside relay at
+all:
+
+- An embedded relay is a scoped relay in every respect. It MUST satisfy §§1–3
+  (admission, NIP-40, rate limits, NIP-11) and MUST NOT exempt its host's own events
+  from any of them. Beacons stay ephemeral; only kind 38504 is ever persisted.
+- It MAY listen privately (loopback, a LAN or a tailnet) and then SHOULD NOT announce
+  itself. When it is publicly reachable it announces per §6 like any other operator.
+- Its host still publishes beacons to the network's other scoped relays (NFX-03 §3):
+  an embedded relay adds a relay, it never becomes the only place a seeder speaks.
+- Nothing about embedding is visible on the wire; clients cannot and need not tell an
+  embedded relay from a standalone one.
+
+## 8. Non-goals
 
 Content moderation policy (operators choose independently), persistence guarantees
 (ephemerals are volatile by design), inter-relay sync (scoped relays don't replicate;
@@ -84,3 +100,5 @@ redundancy comes from many operators).
   announcements" with NIP-66 so existing relay monitors see the set for free.
 - Draft 2026-09-16 (review fix): beacon publish floor 30 s → 20 s so TTL-60 republish
   (30 s) has slack.
+- Draft 2026-09-23 — wire token `nfx` (NIP-11 key `"nfx"`, ADR 0008 §2). New §7:
+  a seeder node MAY embed a scoped relay (plan amendment 8); former §7 is §8.

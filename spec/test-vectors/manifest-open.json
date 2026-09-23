@@ -1,0 +1,60 @@
+{
+  "description": "NFX-02 manifest, open mode: the §6 delisting update of the licensed vector (same d, newer created_at, licensed-only tags removed). Carries one unknown tag, which readers MUST ignore. MUST parse.",
+  "secret_keys_DO_NOT_USE": {
+    "creator": "bdabb76590ff1cd7f14b86be0747913d9efaf04473f3c06a3d4736063f72ad92"
+  },
+  "event": {
+    "id": "44f5004de84a82a46e58d22671ce7bfbfa805935460864add78598f5d2954305",
+    "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+    "created_at": 1790003600,
+    "kind": 38504,
+    "tags": [
+      [
+        "d",
+        "nfx:mainnet:1:salt-flats-dusk"
+      ],
+      [
+        "n",
+        "nfx:mainnet:1"
+      ],
+      [
+        "title",
+        "Salt Flats at Dusk"
+      ],
+      [
+        "published_at",
+        "1790000000"
+      ],
+      [
+        "license",
+        "open"
+      ],
+      [
+        "root",
+        "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+      ],
+      [
+        "segs",
+        "7"
+      ],
+      [
+        "duration",
+        "6"
+      ],
+      [
+        "price_hint",
+        "0"
+      ],
+      [
+        "t",
+        "travel"
+      ],
+      [
+        "x-future-tag",
+        "readers ignore tags they do not know (NFX-01 §4)"
+      ]
+    ],
+    "content": "A walk through the salt flats at dusk.",
+    "sig": "bd7979d3813ab6400320339118b5314eb3fc16e3863201314a8186d75b03564a34dd3b3b6d42b000e9bd54d3fad71ce09376bfe8b1ec03ea2828a449bd7bf9fa"
+  }
+}

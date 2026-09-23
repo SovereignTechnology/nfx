@@ -1,0 +1,75 @@
+{
+  "description": "Derived identifiers and namespace/video-id grammar cases.",
+  "videos": [
+    {
+      "namespace": "nfx:mainnet:1",
+      "video_id": "salt-flats-dusk",
+      "d": "nfx:mainnet:1:salt-flats-dusk",
+      "swarm_topic": "bd93cc44e42c2b616659d265ea24adfe09d69e4ec57d17e0502fc617df242e59",
+      "web_infohash": "ec95dedc1a20122c0423aac70da2e2ef5172a937",
+      "hyper_topic": "075db40db5dddea4e3b1a1af85d123e3888b37b30a4285e1242b2028102fb38b"
+    },
+    {
+      "namespace": "nfx:testnet:1",
+      "video_id": "salt-flats-dusk",
+      "d": "nfx:testnet:1:salt-flats-dusk",
+      "swarm_topic": "e8a37b7a082e6c2dc2ca3f286aa1848e3f45c191f2cb94b6b75237ad9ddca8a7",
+      "web_infohash": "b277e90c4988227d2378ebc0e5c8f7096f3e29bf",
+      "hyper_topic": "64a30d9027a4115570f7dec7f3a0e9509e4a91b06deba0d753dba18eee33e628"
+    },
+    {
+      "namespace": "nfx:acme-cdn:7",
+      "video_id": "a1b2c3d",
+      "d": "nfx:acme-cdn:7:a1b2c3d",
+      "swarm_topic": "2c43a55135b6ccfef5f04c6d8405644616d9eb86efba3ae06eda0ff1f75de5df",
+      "web_infohash": "7fd0ca454577fcef5acba4d4cd3107b9475de5b2",
+      "hyper_topic": "03dfdf3b5fbbb66a7e594edcc6119107cbcd923eef6d0c9a569e2c87080a070d"
+    }
+  ],
+  "a_tag": {
+    "creator": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+    "d": "nfx:mainnet:1:salt-flats-dusk",
+    "a": "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+  },
+  "namespaces_valid": [
+    "nfx:mainnet:1",
+    "nfx:testnet:1",
+    "nfx:regtest:1",
+    "nfx:mainnet:0",
+    "nfx:mainnet:12",
+    "nfx:acme-cdn:1",
+    "nfx:ab:7",
+    "nfx:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1"
+  ],
+  "namespaces_invalid": [
+    "nutflix:mainnet:1",
+    "NFX:mainnet:1",
+    "nfx:Mainnet:1",
+    "nfx:mainnet:01",
+    "nfx:mainnet:-1",
+    "nfx:mainnet",
+    "nfx::1",
+    "nfx:a:1",
+    "nfx:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1",
+    "nfx:mainnet:1 ",
+    "nfx:acme_cdn:1",
+    "",
+    "nfx:mainnet:1:salt-flats-dusk"
+  ],
+  "video_ids_valid": [
+    "salt-flats-dusk",
+    "abcdefg",
+    "0123456",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "a-------"
+  ],
+  "video_ids_invalid": [
+    "abcdef",
+    "-abcdefg",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "Salt-flats",
+    "salt_flats",
+    "salt flats",
+    ""
+  ]
+}

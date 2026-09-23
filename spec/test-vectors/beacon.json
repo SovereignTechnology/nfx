@@ -1,28 +1,29 @@
 {
-  "description": "NFX-03 beacon (kind 20464, TTL 120). The iroh ticket is a placeholder; ticket encodings pin at the M1 freeze (NFX-11 §4).",
+  "description": "NFX-03 beacon (kind 20464, TTL 120) with one endpoint of every registered type (NFX-11 §3). The iroh tickets are placeholders; ticket encodings pin at the M1 freeze (NFX-11 §4).",
   "secret_keys_DO_NOT_USE": {
     "seeder": "115ac24798fa94a35206459d31583a3ad9c57955a9e9784f749cb38327714683"
   },
+  "now": 1790000030,
   "event": {
-    "id": "ff20ce02a0fb3241c962d059be4fe903a306ef8bd50372490cb8542f4476cf52",
+    "id": "8d30767bfcd5fbf7f2c7c29e38a3befa2caf85984dc04630ddf6cf9e69b7bfdd",
     "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
     "created_at": 1790000000,
     "kind": 20464,
     "tags": [
       [
         "n",
-        "nutflix:mainnet:1"
+        "nfx:mainnet:1"
       ],
       [
         "a",
-        "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nutflix:mainnet:1:salt-flats-dusk"
+        "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
       ],
       [
         "expiration",
         "1790000120"
       ]
     ],
-    "content": "{\"v\":1,\"video\":\"nutflix:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"f09091cd8afcb7f4be82e0f8229e867811d32f08dc9bc1efd031831198d2b096\",\"relay\":\"https://iroh-relay.example\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"PLACEHOLDER-ticket-format-pinned-at-M1\",\"meta\":\"PLACEHOLDER-meta-collection-ticket-pinned-at-M1\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
-    "sig": "189d1f30d520e346c9a172dc040ae7dd437fba7d84a0f5a73454a2b2a34a6d477973d936bfd66daed93bc96ea31a19bc37e0db3facb737d785b2f09ec4bfff86"
+    "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"f09091cd8afcb7f4be82e0f8229e867811d32f08dc9bc1efd031831198d2b096\",\"relay\":\"https://iroh-relay.example\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"PLACEHOLDER-ticket-format-pinned-at-M1\",\"meta\":\"PLACEHOLDER-meta-collection-ticket-pinned-at-M1\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"infohash\":\"ec95dedc1a20122c0423aac70da2e2ef5172a937\"},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+    "sig": "ac5c1b24b8511309c41fe2b9c8ab96693507d6aedd6d16c35df64e38cbb6fa4f121f74115cf492da4230486aac236d4864bc4177b0272f71614b76ce9ce93791"
   }
 }

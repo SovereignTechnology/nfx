@@ -1,0 +1,28 @@
+{
+  "description": "NFX-08 §5 free-seeder voucher for the manifest vector's free_seeder. sig = BIP-340(creator, sha256(canon(voucher))), aux_rand = 32 zero bytes. 'wire' is a sender layout; verifiers MUST re-canonicalize. 'tampered' MUST fail against the same sig.",
+  "secret_keys_DO_NOT_USE": {
+    "creator": "bdabb76590ff1cd7f14b86be0747913d9efaf04473f3c06a3d4736063f72ad92"
+  },
+  "creator_pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+  "manifest_a": "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk",
+  "voucher": {
+    "v": 1,
+    "type": "nfx-voucher",
+    "network": "nfx:mainnet:1",
+    "video": "nfx:mainnet:1:salt-flats-dusk",
+    "seeder": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+    "not_after": 1792592000
+  },
+  "wire": "{\n \"v\": 1,\n \"type\": \"nfx-voucher\",\n \"network\": \"nfx:mainnet:1\",\n \"video\": \"nfx:mainnet:1:salt-flats-dusk\",\n \"seeder\": \"84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb\",\n \"not_after\": 1792592000\n}",
+  "canon": "{\"network\":\"nfx:mainnet:1\",\"not_after\":1792592000,\"seeder\":\"84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb\",\"type\":\"nfx-voucher\",\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\"}",
+  "digest": "fca7710dcc84b8af252626431031024277e218de1d1e7ab40cc24033b37fecc8",
+  "sig": "08dc273eef794082a85582d80d9cba02983c01774da5494fd2f9fc4515d81e8453170b93a9e4f384a54d36add8076c8409a0a4a967ff2ff4318f20f73580c1ac",
+  "tampered": {
+    "v": 1,
+    "type": "nfx-voucher",
+    "network": "nfx:mainnet:1",
+    "video": "nfx:mainnet:1:salt-flats-dusk",
+    "seeder": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+    "not_after": 1792592001
+  }
+}

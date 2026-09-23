@@ -1,0 +1,75 @@
+{
+  "description": "NFX-11 §9 canonical JSON. 'input' is received JSON text; 'canon' is the exact canonical text, or null when the input is non-canonicalizable and MUST be rejected.",
+  "cases": [
+    {
+      "name": "key-order",
+      "input": "{\"b\":1,\"a\":2,\"aa\":3,\"A\":4,\"é\":5,\"z\":6}",
+      "canon": "{\"A\":4,\"a\":2,\"aa\":3,\"b\":1,\"z\":6,\"é\":5}"
+    },
+    {
+      "name": "code-point-not-utf16",
+      "input": "{\"😀\":1,\"｡\":2}",
+      "canon": "{\"｡\":2,\"😀\":1}"
+    },
+    {
+      "name": "nested-and-whitespace",
+      "input": "{ \"z\" : [ 3 , { \"y\" : true , \"x\" : null } ] , \"a\" : false }",
+      "canon": "{\"a\":false,\"z\":[3,{\"x\":null,\"y\":true}]}"
+    },
+    {
+      "name": "string-escapes",
+      "input": "{\"s\":\"q\\\"b\\\\s/\\b\\f\\n\\r\\t\\u0001\\u001F\\u007f\\u00e9\\u2028 😀\"}",
+      "canon": "{\"s\":\"q\\\"b\\\\s/\\b\\f\\n\\r\\t\\u0001\\u001fé  😀\"}"
+    },
+    {
+      "name": "escaped-non-ascii-input",
+      "input": "{\"s\":\"\\u00f1\\ud83d\\ude00\"}",
+      "canon": "{\"s\":\"ñ😀\"}"
+    },
+    {
+      "name": "integers",
+      "input": "{\"a\":0,\"b\":-1,\"c\":9007199254740991,\"d\":-9007199254740991}",
+      "canon": "{\"a\":0,\"b\":-1,\"c\":9007199254740991,\"d\":-9007199254740991}"
+    },
+    {
+      "name": "empty",
+      "input": "{\"a\":{},\"b\":[],\"c\":\"\"}",
+      "canon": "{\"a\":{},\"b\":[],\"c\":\"\"}"
+    },
+    {
+      "name": "reject-duplicate-key",
+      "input": "{\"a\":1,\"a\":2}",
+      "canon": null
+    },
+    {
+      "name": "reject-fraction",
+      "input": "{\"a\":1.0}",
+      "canon": null
+    },
+    {
+      "name": "reject-exponent",
+      "input": "{\"a\":1e2}",
+      "canon": null
+    },
+    {
+      "name": "reject-negative-zero",
+      "input": "{\"a\":-0}",
+      "canon": null
+    },
+    {
+      "name": "reject-out-of-range",
+      "input": "{\"a\":9007199254740992}",
+      "canon": null
+    },
+    {
+      "name": "reject-lone-surrogate",
+      "input": "{\"a\":\"\\ud800\"}",
+      "canon": null
+    },
+    {
+      "name": "reject-nan",
+      "input": "{\"a\":NaN}",
+      "canon": null
+    }
+  ]
+}

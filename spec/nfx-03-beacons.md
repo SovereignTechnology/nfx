@@ -15,7 +15,7 @@ NFX-06; WebRTC trackers, NFX-10) are faster and preferred when available.
 | `content` | JSON per §4 (schema: `schemas/beacon-content.schema.json`) |
 | `created_at` | emission time; MUST be within ±15 min of now or clients discard |
 
-Required tags:
+Required tags (each exactly once):
 
 ```
 ["n", "<namespace>"]                                   # NFX-01 §3
@@ -23,7 +23,7 @@ Required tags:
 ["expiration", "<created_at + TTL>"]                   # NIP-40; TTL ∈ [60, 120] s
 ```
 
-Optional tags: `["t", "nutflix"]` (cosmetic), nothing else. No payments, no media.
+Optional tags: `["t", "nfx"]` (cosmetic), nothing else. No payments, no media.
 
 ## 2. Semantics
 
@@ -68,7 +68,11 @@ Optional tags: `["t", "nutflix"]` (cosmetic), nothing else. No payments, no medi
 - `video` MUST equal the `a` tag's d component (redundant on purpose: content is
   self-describing when mirrored off-relay).
 - `endpoints[].t`: `iroh` (NFX-06), `https` (origin-style, NFX-05 §6 serves
-  `GET <base>/<sha256>`). Both may be present; at least one MUST be.
+  `GET <base>/<sha256>`), `webrtc` (bridge, NFX-10 §2), `hyper` (optional Hypercore
+  profile, NFX-12). Several may be present; at least one MUST be. New endpoint types
+  are non-breaking additions (NFX-01 §4): a client MUST skip endpoints whose `t` it
+  does not implement, and MUST NOT reject the beacon because of them. The registry of
+  `t` values is NFX-11 §3.
 - `chunks`: `"all"` or an integer count of hash-list entries currently held. Partial
   seeders are legal; clients prefer `"all"` but MAY fetch from partials.
 - `tickets` key **`meta` is reserved** (the metadata collection, NFX-06 §2) and MUST
@@ -112,3 +116,7 @@ edit in this spec is ever required to grow the relay set.
 - Draft 2026-09-16 (review fixes): steady-state double-beacon is expected, not an
   error; `accepts_mints` gain the licensed-mode escrow-mint restriction; xref and
   default-value nits.
+- Draft 2026-09-23 — wire token `nfx` (ADR 0008 §2); `webrtc` and `hyper` endpoint
+  types listed, and unknown endpoint types are skipped rather than rejected (the schema
+  used to enumerate `t`, which would have made every new transport breaking). Required
+  tags appear exactly once.

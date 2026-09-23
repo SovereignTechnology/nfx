@@ -54,8 +54,13 @@ identically = idempotent `200`; same `root`, different `key` = `409`.
 - Success: `200 { "key": "<hex>" }`. The key travels over TLS only; clients SHOULD
   keep it in process memory and SHOULD NOT persist beyond the session.
 - Free path: §5 voucher instead of payment.
+- **Where `key_price` goes.** The mint accrues the whole `key_price` of every paid
+  license to the creator, the same way it accrues the creator's share of a redemption:
+  as proofs P2PK-locked (NUT-11) to the manifest `cashu_key`, indexed under
+  `(root, creator)`, and paid out by `claim` (§6, NFX-09 §2). A voucher license accrues
+  nothing. Whether a mint may deduct fees, and whose, is an open issue (§7).
 
-After licensing, chunk payments follow NFX-07 with two differences:
+After licensing, chunk payments follow NFX-07 with three differences:
 
 1. seeders redeem through the split endpoint (NFX-09 `redeem`), which forwards the
    creator's share, P2PK-locked (NUT-11) to the manifest `cashu_key` and held for
@@ -64,7 +69,48 @@ After licensing, chunk payments follow NFX-07 with two differences:
    mint can apply the split, and NUT-03 swaps are intra-mint. Consequently the
    seeder's `quote.mints` / beacon `accepts_mints` reduce to exactly that one mint
    for licensed videos (NFX-03 §4). There is no cross-mint settlement in this
-   version.
+   version;
+3. **chunk proofs are locked to the split endpoint.** Every proof in a licensed-mode
+   payment (the `pay` token on `nfx/pay/1`, or `X-NFX-Pay` on HTTPS) MUST be a NUT-11
+   P2PK proof whose secret has:
+   - `data` = the escrow mint's `redeem_pubkey` (NFX-09 §1);
+   - no `pubkeys` tag, and `n_sigs` absent or `1`: the mint's key is the only signer;
+   - `sigflag` absent or `SIG_INPUTS`;
+   - optionally `locktime` plus `refund` keys of the watcher's choosing, so that proofs
+     the watcher locked but never spent come back to it. If present, `locktime` MUST be
+     at least 3600 s after the `pay` is sent.
+
+   Only the mint holds `redeem_pubkey`'s secret, so such proofs can be spent only
+   through `POST /v1/nfx/redeem`, which applies the split. A seeder's ordinary NUT-03
+   swap fails for lack of a witness. Before this rule, licensed chunk payments were
+   plain bearer tokens of the escrow mint: a seeder could swap them directly, skip
+   `redeem`, and keep 100%. A watcher MUST NOT send unlocked proofs for a licensed
+   video, and a seeder that asks for them is non-conformant. The lock protects the
+   creator from a seeder acting alone. A watcher and a seeder colluding out of band can
+   always bypass it, just as they can share the key (§1).
+
+   The watcher makes locked proofs with an ordinary NUT-03 swap at the escrow mint whose
+   outputs carry P2PK secrets. It MAY lock a budget ahead, e.g. right after buying the
+   license, and reclaim what it did not spend through `refund` after `locktime`.
+
+### 4.1 Seeder verification (licensed)
+
+For licensed videos this replaces NFX-07 §3 step 3. A seeder cannot swap locked proofs
+to test them, so it verifies offline, in order:
+
+1. the amount exactly covers the new chunks (`underpaid`) and every proof is from the
+   escrow mint (`bad-mint`);
+2. every proof's secret is a P2PK secret satisfying difference 3 above, and any
+   `locktime` is at least 3600 s in the future (`bad-lock`);
+3. every proof carries a valid NUT-12 DLEQ proof for the escrow mint's keyset
+   (`bad-lock`; a proof that cannot be checked offline is refused, not trusted);
+4. it SHOULD then check NUT-07 proof state (a read that spends nothing) and treat
+   `SPENT` or `PENDING` as `spent`.
+
+It `ack`s after steps 1–3 and redeems through NFX-09 `redeem` before the earliest
+`locktime` among the proofs it holds. Batching redemptions is allowed and does not
+change what the creator receives (NFX-09 §2 carry rule). Loss on a bad payment stays
+bounded by `window`.
 
 ## 5. Free-seeder vouchers
 
@@ -77,11 +123,11 @@ voucher = { "v":1, "type":"nfx-voucher", "network":"<namespace>",
 sig     = schnorr_sign(creator_seckey, sha256(utf8(canon(voucher))))
 ```
 
-`canon(obj)` is the suite's one canonical-JSON rule (also used by NFX-06 §4):
-**UTF-8, object keys sorted lexicographically (code-point order), no insignificant
-whitespace, numbers in shortest JSON form.** Every implementation MUST serialize the
-*received* object with `canon` before verifying — never trust the sender's wire
-layout — so Python insertion order and Rust `serde_json` key order cannot diverge.
+`sig` is a BIP-340 signature over that 32-byte digest. `canon(obj)` is the suite's one
+canonical-JSON rule, defined normatively in NFX-11 §9 (also used by NFX-06 §4). Every
+implementation MUST serialize the *received* object with `canon` before verifying —
+never trust the sender's wire layout — so Python insertion order and Rust `serde_json`
+key order cannot diverge. `network` MUST equal the namespace prefix of `video`.
 
 Presented in `license`'s `voucher`+`sig` fields. The mint MUST verify: signature
 against the manifest author's key; `seeder` ∈ manifest `free_seeder`; `not_after` in
@@ -97,9 +143,33 @@ relays don't, and they expire.
 P2PK-locked payouts. Batch/never is the operator's choice; the mint API is the only
 coupling. See NFX-09 for the full mint contract.
 
+## 7. Open issues (must close before the M3 freeze)
+
+Raised by the 2026-09-23 pre-push review (`docs/nfx/reviews/`); not yet decided.
+
+- **Escrow is keyed by a bare `root`.** Roots are public. Anyone can publish their own
+  manifest naming a victim's root and the same mint, escrow first, and so squat the
+  root: the victim's escrow then gets `409`. And when two manifests name one root,
+  "the manifest's `split`/`cashu_key`" is ambiguous at `redeem`. Candidate fix: key
+  escrow, license and redeem by the manifest address `38504:<pubkey>:<d>`, or by
+  `(author, root)`.
+- **The voucher path of `license` is unauthenticated.** Nothing binds the voucher's
+  `seeder` field to whoever presents it, so a leaked voucher is a bearer credential for
+  the key. Candidate fix: require NIP-98 by the voucher's `seeder` key.
+- **Fees.** Whether a mint may deduct NUT-02 input fees (or its own fee) from a
+  license payment or a redemption, and whether before or after the split.
+- **No AEAD associated data.** Ciphertext is not bound to its position (§2). The
+  per-file sha256 anchor covers this today; revisit if files are ever reused across
+  hash lists.
+
 ## Changelog
 
 - Draft 2026-09-16 — initial.
 - Draft 2026-09-16 (review fixes): licensed-mode chunk proofs MUST come from the
   escrow mint (the split endpoint is intra-mint); voucher signatures now use a
   defined canonical-JSON serialization; license payment is exact-amount.
+- Draft 2026-09-23 — wire token `nfx` (ADR 0008 §2). Plan amendment 3: licensed
+  chunk proofs are P2PK-locked to the mint's `redeem_pubkey` (§4 difference 3), and
+  seeders verify offline (§4.1, new code `bad-lock`), closing the split bypass by
+  direct NUT-03 swap. Plan amendment 4: `key_price` accrues to the creator's
+  `cashu_key`. `canon` moved to NFX-11 §9. Open issues listed (§7).

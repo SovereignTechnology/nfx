@@ -1,11 +1,11 @@
 {
   "description": "NFX-05 hash list for the 2026-09 test vector video. Its exact byte content hashed with sha256 gives the manifest root.",
-  "video": "nutflix:mainnet:1:salt-flats-dusk",
-  "rendered_bytes_sha256": "1a7143aaef6a79a0d757ee24613c9aad6a7cddbbf6816b1a1014170c3d922ec0",
+  "video": "nfx:mainnet:1:salt-flats-dusk",
+  "rendered_bytes_sha256": "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3",
   "note": "Vectors for fabricated bytes: 'fabricated' maps name -> base64 content.",
   "hashlist": {
     "v": 1,
-    "video": "nutflix:mainnet:1:salt-flats-dusk",
+    "video": "nfx:mainnet:1:salt-flats-dusk",
     "files": [
       {
         "name": "master.m3u8",

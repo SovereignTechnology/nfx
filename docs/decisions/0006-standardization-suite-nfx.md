@@ -6,6 +6,11 @@ Date: 2026-09-16
 
 Accepted (decision by sovtech, 2026-09-16, after surfacing the divergence)
 
+Amended 2026-09-23 by [ADR 0008](0008-multi-network-master-plan.md). The v0 prototype
+is described in the present tense: it is **still being built** as the Pear-runtime-only
+demo. The wire token is `nfx`, not `nutflix` (NFX-01 re-freeze). The text below is
+otherwise the 2026-09-16 record.
+
 ## Context
 
 Two designs for nutflix existed in parallel:
@@ -33,13 +38,15 @@ beacons, open + licensed payment modes. The document set, status model
 (`Draft → Frozen@M<n> → Stable → Final`), freeze gates and conformance levels are
 defined in `spec/README.md`.
 
-(b) **The existing TypeScript implementation is the v0 prototype, and it is a
-  Pear-runtime-only app.** What was actually built is a desktop application (Electron
-  shell + Bare worker; the web shell lane never shipped). It remains the source of
+(b) **The TypeScript implementation is the v0 prototype, and it is a Pear-runtime-only
+  app that is still being built.** It is a desktop application (Electron shell + Bare
+  worker) under its own plan. As of 2026-09-23 its L5 screens are merged and the
+  L4/L5 fix lanes come next; L6 (the Electron + pear-runtime desktop shell) and L7 have
+  not started, and the Stage 2 money path and Stage 3 lie ahead. It is the source of
   hard-won lessons (threat model in `SECURITY.md`, split-rounding rule in ADR 0005,
   idempotency and cheat-mode thinking in `core/src/payment`) that the NFX specs cite.
-  Its contracts remain frozen at v3; it is not evolved toward NFX conformance
-  piecemeal — any production implementation of NFX is a new codebase. The suite it is
+  Its contracts evolve under its own plan (v3 at this decision, v4 by 2026-09-23); it
+  is not evolved toward NFX conformance piecemeal — any production implementation of NFX is a new codebase. The suite it is
   contrasted with is deliberately much larger than one runtime: NFX spans native
   (iroh), browser (WebRTC mesh), origin servers, scoped relays and mints, and no
   conformant implementation requires Pear or any specific runtime.
@@ -55,7 +62,8 @@ settles.
 (d) **Network isolation needs an indexed tag, not a namespaced `d` alone.** Nostr REQ
 filters cannot prefix-match `#d`, so the redesign note's "isolation at the query layer"
 does not work as described. NFX-01 therefore defines an indexed `n` tag
-(`["n","nutflix:mainnet:1"]`) on every nutflix event; the namespaced `d` stays as
+(`["n","nutflix:mainnet:1"]` in the 2026-09-16 text; `["n","nfx:mainnet:1"]` since
+the ADR 0008 re-freeze) on every NFX event; the namespaced `d` stays as
 defense in depth. Clients MUST verify the two agree.
 
 (e) **Segment integrity is sha256-only at the signed layer.** iroh addresses blobs by

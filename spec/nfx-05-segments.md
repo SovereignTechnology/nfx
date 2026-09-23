@@ -32,7 +32,7 @@ rules are needed — `root` commits to the exact bytes.
 ```json
 {
   "v": 1,
-  "video": "nutflix:mainnet:1:salt-flats-dusk",
+  "video": "nfx:mainnet:1:salt-flats-dusk",
   "files": [
     { "name": "master.m3u8", "role": "playlist-master", "sha256": "…", "size": 412 },
     { "name": "r720.m3u8",   "role": "playlist",       "sha256": "…", "size": 631 },
@@ -55,6 +55,9 @@ Rules:
 - Segment entries SHOULD carry `dur_ms`; playlist entries are generated content
   (§3), not fetched names — their *bytes* still ride the same hash-addressed plane.
 - `segs` in the manifest MUST equal `len(files)`.
+- `renditions[].id` values are unique, and `meta` is reserved (NFX-03 §4).
+  `renditions[].playlist` MUST equal the `name` of a `files` entry whose role is
+  `playlist`.
 - Licensed mode: hashes are of **stored (ciphertext)** bytes per NFX-08 §2 — so §4
   verification always runs on stored bytes, identically in both modes. (Decryption
   later contributes its own AEAD authentication on open; the sha256 anchor is
@@ -97,16 +100,71 @@ serve a subset; the hash list is always served whole.
 An **origin** is an HTTPS host serving hash-addressed bytes; every network needs ≥1
 (manifest mirroring, browser genesis, censored-shutdown backstop):
 
-- `GET /<sha256-hex>` → file bytes; `Content-Type` per role (playlists
+- `GET /<sha256-hex>[.<ext>]` → file bytes. The extension is optional and ignored for
+  lookup (as in BUD-01), so the content names of §3 (`<hex>.m4s`, `<hex>.mp4`,
+  `<hex>.m3u8`) resolve directly. `Content-Type` per role (playlists
   `application/vnd.apple.mpegurl`, segments `video/iso.segment`, inits `video/mp4`);
   MUST support `HEAD`. Range support OPTIONAL (files are small).
 - `GET /<root-hex>` → the hash list itself.
 - `GET /<root-hex>/master.m3u8` → the master playlist (same bytes as its sha256
   address; convenience so players can be pointed at one URL).
+- `GET /<root-hex>/<sha256-hex>.<ext>` → the same bytes as `GET /<sha256-hex>`, for
+  any file listed in that root's hash list. This is what a player pointed at the
+  convenience URL actually requests, because playlist URIs are relative (§3). Origins
+  MAY answer `404` for hashes that the named hash list does not contain.
 - CORS: origins MUST send `Access-Control-Allow-Origin: *` on hash-addressed GETs
   (the browser mesh depends on it).
 
-An origin is Blossom-*shaped* (hash in path) but is a nutflix role; a BUD-01 Blossom
+### 6.1 Caching: content addresses are immutable
+
+The bytes behind a content address never change, so every successful response to a
+hash-addressed GET above MUST carry
+
+```
+Cache-Control: public, max-age=31536000, immutable
+```
+
+and MUST NOT vary on request headers. A CDN or any shared cache in front of an origin
+is therefore always correct, and origins SHOULD use one. The rule has three limits:
+
+- **Errors are not content.** `404`, `5xx` and any response that is not the file
+  itself MUST carry `Cache-Control: no-store` (or `max-age` ≤ 60). A pull-through
+  origin (§6.2) that lacks a file now will usually have it seconds later.
+- **Paid bytes are not cacheable.** A response to a request that carries payment
+  (NFX-07 §4 `X-NFX-Pay`), and every `402`, MUST carry `Cache-Control: private,
+  no-store`. Paid serving and shared caching are mutually exclusive on a path: an
+  origin behind a CDN serves those paths at price 0 (the ad mode of NFX-10 §4), or it
+  serves licensed ciphertext (§6.3).
+- **Verification still runs.** A cache changes where bytes come from, never whether
+  they are checked. Clients verify §4 on bytes from a CDN exactly as on bytes from a
+  peer.
+
+### 6.2 Pull-through origin
+
+An origin MAY be backed by the swarm instead of its own storage. On a miss, a
+**pull-through origin** fetches the file as a normal watcher over any transport
+(NFX-06, NFX-10, NFX-12). From M2 on, that includes paying seeders per NFX-07 out of
+the operator's funds. It then serves the file over HTTPS and lets the CDN cache it.
+
+- It MUST verify every file against §4, using a hash list it fetched by `root` from a
+  manifest it verified (NFX-02 §4), **before** serving or storing it. It MUST NOT
+  stream unverified bytes to a client. Behind a CDN, one poisoned response would
+  otherwise be cached for a year under an `immutable` header.
+- It serves only hashes that appear in hash lists it holds. It is not an open proxy
+  for arbitrary sha256 values.
+- It is an ordinary swarm peer (a seeder too, if its operator chooses). It holds no
+  protocol privilege.
+
+### 6.3 Licensed ciphertext is publicly cacheable
+
+In licensed mode the stored bytes are ciphertext (NFX-08 §2) and the hash list
+anchors ciphertext. An origin and any CDN MAY therefore cache and serve licensed
+`init` and `segment` files publicly, at price 0 and without a license check: they are
+useless without the key, and only the escrow mint releases the key (NFX-08 §4).
+Playlists, the hash list and thumbs are cleartext in both modes. Selling access is the
+mint's job, not the origin's.
+
+An origin is Blossom-*shaped* (hash in path) but is an NFX role; a BUD-01 Blossom
 server generalizes to an origin when its admin pins NFX-05 content.
 
 ## Changelog
@@ -115,3 +173,10 @@ server generalizes to an origin when its admin pins NFX-05 content.
 - Draft 2026-09-16 (review fixes): ciphertext-hash wording; "Recommendations" →
   "Playlists". Test-vector master playlist now sets `EXT-X-INDEPENDENT-SEGMENTS`
   (matches §1's SHOULD).
+- Draft 2026-09-23 — wire token `nfx` (ADR 0008 §2). §6 (plan amendment 7): origins
+  accept an optional extension and serve `/<root>/<sha256>.<ext>`, the path a player
+  pointed at `/<root>/master.m3u8` actually requests (previously undefined, so
+  playback from the convenience URL would 404); `immutable` caching with its limits
+  (§6.1); the pull-through origin role (§6.2); public caching of licensed ciphertext
+  (§6.3). §2: rendition ids unique with `meta` reserved, and a rendition's `playlist`
+  must name a playlist file (implied before, now stated; `hashlist-invalid.json`).

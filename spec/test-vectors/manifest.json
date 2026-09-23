@@ -6,18 +6,18 @@
     "cashu": "131c142b85851c3ca357b6c859664a92dcbfcd838cddc58a4694d41cf35d0991"
   },
   "event": {
-    "id": "a3cbf2664524918da4a27dbdc16bd54607e50f46a190f77a7fa03deb45a66013",
+    "id": "8e82e846295006d5406715f4d1ad53675926b74b6c10ea45e0ee8516ff351b49",
     "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
     "created_at": 1790000000,
     "kind": 38504,
     "tags": [
       [
         "d",
-        "nutflix:mainnet:1:salt-flats-dusk"
+        "nfx:mainnet:1:salt-flats-dusk"
       ],
       [
         "n",
-        "nutflix:mainnet:1"
+        "nfx:mainnet:1"
       ],
       [
         "title",
@@ -33,7 +33,7 @@
       ],
       [
         "root",
-        "1a7143aaef6a79a0d757ee24613c9aad6a7cddbbf6816b1a1014170c3d922ec0"
+        "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
       ],
       [
         "segs",
@@ -78,6 +78,6 @@
       ]
     ],
     "content": "A walk through the salt flats at dusk.",
-    "sig": "a4c78c570b8c38e8c03b07925bc5bfcc3ff903ae8d918cf04a00eb606aea2dd97027de923ac85e233c91e4117818e3163d759149eab59a12bd5ba724fe551737"
+    "sig": "2ae191bd2e638e832bf96e595752ee776af5a7181a9d01fe7c632325f1e2caf76ec37ce04a5368c9af82ccdc1509cf1944b9c196272ff71f620141adb1949fa7"
   }
 }

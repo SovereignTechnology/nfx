@@ -17,34 +17,67 @@ chosen unclaimed as of 2026-09-16.
 
 ## 2. Namespaces (NFX-01 §2)
 
-`nutflix:mainnet:1` (production) · `nutflix:testnet:1` (interop testing) ·
-`nutflix:regtest:1` (local). Custom = `nutflix:<name>:<int>`.
+`nfx:mainnet:1` (production) · `nfx:testnet:1` (interop testing) ·
+`nfx:regtest:1` (local). Custom = `nfx:<name>:<int>`. The token is `nfx` and nothing
+else; `nutflix:*` namespaces are void (NFX-01 §2).
 
 ## 3. ALPNs & topic grammar
 
 | Wire | Value |
 |---|---|
 | blob transfer | iroh-blobs standard ALPN of the pinned series (§4) |
-| payment channel | `nutflix/pay/1` |
-| gossip | `nutflix/gossip/1` |
+| payment channel | `nfx/pay/1` |
+| gossip | `nfx/gossip/1` |
 | swarm topic | `sha256("nfx/1/swarm/" + namespace + "/" + video-id)` (hex) — NFX-06 §4 |
 | web infohash | `hex(sha256(namespace + ":" + video-id)[0..20])` — NFX-10 §2 |
+| Hyperswarm topic | `sha256("nfx/1/hyper/" + namespace + "/" + video-id)` — NFX-12 §3 |
+| Protomux payment protocol | `nfx/pay/1`, channel id `utf8(<namespace>:<video-id>)` — NFX-12 §5 |
+
+Beacon endpoint types (`endpoints[].t`, NFX-03 §4). Readers skip types they do not
+implement:
+
+| `t` | Document |
+|---|---|
+| `iroh` | NFX-06 |
+| `https` | NFX-05 §6 |
+| `webrtc` | NFX-10 §2 |
+| `hyper` | NFX-12 (optional) |
+
+Capability keys:
+
+| Where | Key | Document |
+|---|---|---|
+| relay NIP-11 document | `"nfx"` | NFX-04 §3 |
+| mint NUT-06 info | `"nfx"` (incl. `redeem_pubkey`) | NFX-09 §1 |
 
 ## 4. Pinned dependency series
 
 | Component | Pin | Notes |
 |---|---|---|
-| iroh / iroh-blobs / iroh-gossip | **TBD before M1 freeze** | one series; version bump = NFX-11 edit only |
-| Cashu protocol | NUT-00/03/06/11 | via CDK or cashu-ts |
+| iroh / iroh-relay | **1.x** (1.2.0 at pinning, 2026-09-23) | the iroh 1.x wire; nothing pre-1.0 is conformant |
+| iroh-blobs | **0.103.x** (depends on iroh ^1) | its standard ALPN is the NFX blob wire (NFX-06 §2) |
+| iroh-gossip | **0.101.x** (depends on iroh ^1) | carries `nfx/gossip/1` (NFX-06 §4) |
+| p2p-media-loader | **v4** (upstream for the free mesh; maintained v4 fork for the paid mesh) | NFX-10 §§1, 3.2 |
+| Hypercore stack | hypercore 11, hyperdrive 13, hyperswarm 4, protomux 3 | NFX-12 (optional) |
+| Cashu protocol | NUT-00/02/03/06/07/11/12 | via CDK or cashu-ts |
 | Media profile | NFX-05 §1 | no external pin |
+
+The three iroh crates are one series: a bump of any of them is an NFX-11 edit only,
+made together.
+
+**Every network runs its own `iroh-relay`** from the pinned series (NFX-06 §1). The
+public relays run by iroh's developers stop serving pre-1.0 clients on 2026-09-30.
+They are a convenience whose policy is not ours, and no NFX network may depend on
+them.
 
 ## 5. HTTP surfaces
 
 | Surface | Spec |
 |---|---|
-| `GET /<sha256>` (+ HEAD) | NFX-05 §6 |
-| `GET /<root>`, `GET /<root>/master.m3u8` | NFX-05 §6 |
-| `X-Nutflix-Pay` / `X-Nutflix-Accepted` / `X-Nutflix-Price` / `X-Nutflix-Mints` / `X-Nutflix-Session` / 402 | NFX-07 §4 |
+| `GET /<sha256>[.<ext>]` (+ HEAD) | NFX-05 §6 |
+| `GET /<root>`, `GET /<root>/master.m3u8`, `GET /<root>/<sha256>.<ext>` | NFX-05 §6 |
+| `Cache-Control: public, max-age=31536000, immutable` (and its limits) | NFX-05 §6.1 |
+| `X-NFX-Pay` / `X-NFX-Accepted` / `X-NFX-Price` / `X-NFX-Mints` / `X-NFX-Session` / 402 | NFX-07 §4 |
 | `POST /v1/nfx/{escrow,license,redeem,claim}` | NFX-09 §2 |
 
 ## 6. Error codes (payment)
@@ -55,6 +88,7 @@ chosen unclaimed as of 2026-09-16.
 | `overpaid` | license payment exceeds `key_price` (exact-amount rule) | NFX-09 §2 |
 | `bad-mint` | proofs from an unaccepted mint | NFX-07 §3 |
 | `spent` | proofs already spent (mint swap failed) | NFX-07 §3 |
+| `bad-lock` | licensed chunk proof not P2PK-locked to the mint's `redeem_pubkey`, locktime too near, or no valid DLEQ | NFX-08 §4.1, NFX-09 §2 |
 | `stale` | `pay.upto_chunk` ≤ last acked watermark | NFX-07 §2 |
 | `payment-required` | license requested without payment/voucher | NFX-09 §2 |
 | `bad-voucher` | voucher signature/whitelist/expiry failed | NFX-08 §5, NFX-09 §2 |
@@ -72,6 +106,11 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | Manifest event vector | `test-vectors/manifest.json` |
 | Beacon event vector | `test-vectors/beacon.json` |
 | Hash-list blob vector | `test-vectors/hashlist.json` |
+| Invalid-manifest vectors (signed; every one MUST be rejected) | `test-vectors/manifest-invalid.json` |
+| Canonical-JSON vectors | `test-vectors/canon.json` |
+| Voucher vector | `test-vectors/voucher.json` |
+| Gossip envelope vector | `test-vectors/gossip.json` |
+| Derived identifiers (namespaces, topics, infohash) | `test-vectors/derived.json` |
 | Generator (source of truth) | `test-vectors/generate.py` |
 
 Vectors use throwaway keys whose *secret is published in the file* — never use them
@@ -97,8 +136,51 @@ python3 test-vectors/generate.py --verify   # byte-exact re-check
 
 A README badge that doesn't name a level is non-claim.
 
+## 9. Canonical JSON (`canon`)
+
+The suite's one canonicalization, used wherever an NFX-defined JSON object is signed
+(NFX-06 §4 gossip envelopes, NFX-08 §5 vouchers). Freezes with its first user (M1).
+Nostr event ids are **not** `canon`; they use NIP-01's own serialization.
+
+`canon(value)` is the UTF-8 encoding of:
+
+- **object** — `{`, then members sorted by key, compared as sequences of Unicode code
+  points (identical to comparing their UTF-8 bytes), each as `canon(key):canon(value)`,
+  separated by `,`, then `}`. Duplicate keys make the value non-canonicalizable.
+- **array** — `[`, elements in their given order separated by `,`, `]`.
+- **string** — `"`, the characters, `"`. Escape exactly these: `"` → `\"`, `\` → `\\`,
+  U+0008 → `\b`, U+0009 → `\t`, U+000A → `\n`, U+000C → `\f`, U+000D → `\r`, and
+  every other code point below U+0020 → `\u00xx` with lowercase hex. Every other
+  code point, U+007F and all non-ASCII included, is written as itself (no `\/`, no
+  `\uXXXX` for non-ASCII).
+- **number** — integers only, in `[-(2^53 − 1), 2^53 − 1]`, written in shortest
+  decimal form (no `+`, no leading zeros, no fraction, no exponent). A received
+  object whose JSON text contains a number with a fraction or exponent part, the
+  token `-0`, or an integer outside that range, is non-canonicalizable. (Parsers
+  disagree about `-0`: `serde_json` reads it as a float, Python as the integer 0.
+  Rejecting it removes the disagreement.)
+- **text** — the received JSON text MUST be valid UTF-8 without lone surrogates,
+  including in `\u` escapes.
+- **true**, **false**, **null** — as written.
+
+No whitespace appears anywhere outside strings. A verifier that meets a
+non-canonicalizable value MUST reject the signed object; it MUST NOT round or
+normalize it. This rule equals Python's
+`json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False)` and Rust
+`serde_json::to_string` of a `serde_json::Value` (without the `preserve_order`
+feature), both restricted to the integer domain above. JavaScript implementations
+must sort keys by code point explicitly, because `Array.prototype.sort` compares
+UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
+
 ## Changelog
 
 - 2026-09-16 — initial (M0).
 - 2026-09-16 — review pass: error-code table now enumerates every code with its home
   section; infohash registered; verify command shown.
+- 2026-09-23 — ADR 0008: wire token `nfx` everywhere (namespaces, ALPNs, headers,
+  capability keys). iroh series pinned (iroh/iroh-relay 1.x, iroh-blobs 0.103,
+  iroh-gossip 0.101) with self-hosted `iroh-relay` (plan amendment 9). p2p-media-loader
+  v4 and the NFX-12 Hypercore stack pinned. Endpoint-type and capability-key registries
+  added, along with the `bad-lock` code, the new NFX-05 §6 paths and `canon` (§9, moved
+  here from NFX-08 §5 and made exact). New vectors: invalid manifests, canon, voucher,
+  gossip envelope, derived identifiers.

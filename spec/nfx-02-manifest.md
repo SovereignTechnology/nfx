@@ -22,7 +22,7 @@ referenced by the `root` tag (NFX-05). Never inline segment hashes here.
 
 ```
 ["d", "<namespace>:<video-id>"]
-namespace = per NFX-01 §2, e.g. "nutflix:mainnet:1"
+namespace = per NFX-01 §2, e.g. "nfx:mainnet:1"
 video-id  = [a-z0-9][a-z0-9-]{6,62}
 ```
 
@@ -55,16 +55,31 @@ video-id MUST NOT be reused for different content or migrated across namespaces.
 
 Unknown tags MUST be ignored (NFX-01 §4 non-breaking rule).
 
+**Multiplicity.** `t` and `free_seeder` are repeatable. Every other tag in the table
+MUST appear at most once; a manifest carrying a duplicate of any of them (two `root`,
+two `n`, two `split`, …) fails §4. Otherwise "the" anchor or price would be whichever
+one a parser happened to read.
+
+**Integers.** Every integer-valued tag (`published_at`, `segs`, `duration`,
+`price_hint`, `key_price`, `split`) is ASCII decimal: no sign, no leading zeros
+(`"0"` itself is allowed), at most 20 digits and ≤ 2^64 − 1. Anything else fails §4.
+
 ## 4. Parse/verify algorithm
 
 A manifest object exists only after all of:
 
-1. signature verifies (NIP-01), `kind` = 38504;
-2. `d` parses per §2 and its namespace prefix equals the `n` tag (reject otherwise);
-3. `license` is `open` or `licensed` and the tag table above is satisfied;
-4. `root` is 64 lowercase hex; `segs` parses ≥ 1;
-5. if `licensed`: exactly one `mint` (https URL), `split` ∈ [0,10000],
-   `key_price` ≥ 0, `cashu_key` is a valid compressed point.
+1. `kind` = 38504, `id` equals the NIP-01 serialization hash, and `sig` verifies
+   (BIP-340) against `pubkey`;
+2. exactly one `n` tag (NFX-01 §3) whose value parses as a namespace; `d` parses per
+   §2 and its namespace prefix equals the `n` value (reject otherwise);
+3. `license` is `open` or `licensed`, the tag table above is satisfied (required tags
+   present, prohibited tags absent) and the multiplicity and integer rules hold;
+4. `root` is 64 lowercase hex; `segs` parses ≥ 1; `thumb`, if present, is 64
+   lowercase hex plus a non-empty MIME type;
+5. if `licensed`: exactly one `mint` (an https URL without userinfo, so
+   `https://mint.example@other.example` is rejected), `split` ∈ [0,10000],
+   `key_price` ≥ 0, `cashu_key` is a valid compressed secp256k1 point, and every
+   `free_seeder` is 64 lowercase hex.
 
 Any failure: discard the event entirely (do not partially render).
 
@@ -78,8 +93,8 @@ See `test-vectors/manifest.json` — a complete, real-signature event (regenerab
   "kind": 38504,
   "content": "A walk through the salt flats at dusk.",
   "tags": [
-    ["d", "nutflix:mainnet:1:salt-flats-dusk"],
-    ["n", "nutflix:mainnet:1"],
+    ["d", "nfx:mainnet:1:salt-flats-dusk"],
+    ["n", "nfx:mainnet:1"],
     ["title", "Salt Flats at Dusk"],
     ["published_at", "1790000000"],
     ["license", "licensed"],
@@ -124,3 +139,7 @@ see a playable video; NFX consumers ignore the mirror.
   parse gate would otherwise reject its own renunciation event); `price_hint` note
   points at the `quote` message as the binding price; `thumb` arity and `alt` legend
   corrected.
+- Draft 2026-09-23 — wire token `nfx` (ADR 0008 §2). Implementation-driven
+  clarifications from `nfx-proto`: single-valued tags may appear at most once; integer
+  grammar pinned; §4 now names the `id` check, the single-`n` rule, the `thumb` shape,
+  the `free_seeder` shape and a `mint` without userinfo. The worked example and vector moved to `nfx:mainnet:1`.
