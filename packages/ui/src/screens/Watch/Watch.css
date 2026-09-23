@@ -1,0 +1,1175 @@
+/*
+ * Watch screen (L5). Screen-scoped `nf-watch` namespace, L4 tokens only. Loaded by the shells
+ * as a file after tokens.css + components.css (never injected — CSP `style-src 'self'`).
+ *
+ * Layout (YouTube): stage + main column on the left, the "Up next" rail on the right; theater
+ * puts the stage full width on a black band above both; one column below 1000 px.
+ */
+.nf-watch {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding-bottom: var(--nf-space-48);
+  color: var(--nf-color-text);
+}
+
+/* Visually hidden (landmark names, labels). */
+.nf-watch__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.nf-watch__layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 402px;
+  grid-template-areas:
+    'stage related'
+    'main related';
+  grid-template-rows: auto 1fr;
+  gap: var(--nf-space-12) var(--nf-space-24);
+  align-items: start;
+}
+
+.nf-watch__stage-cell {
+  grid-area: stage;
+  min-width: 0;
+}
+
+.nf-watch__main {
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-12);
+  min-width: 0;
+}
+
+.nf-watch__related {
+  grid-area: related;
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-12);
+  min-width: 0;
+}
+
+/* Theater: the stage spans both columns on a black band, capped to the viewport height. */
+.nf-watch--theater .nf-watch__layout {
+  grid-template-areas:
+    'stage stage'
+    'main related';
+}
+
+.nf-watch--theater .nf-watch__stage-cell {
+  display: flex;
+  justify-content: center;
+  background: #000;
+}
+
+.nf-watch--theater .nf-watch__stage {
+  width: min(100%, calc((100vh - 160px) * 16 / 9));
+  border-radius: 0;
+}
+
+@media (max-width: 1000px) {
+  .nf-watch__layout,
+  .nf-watch--theater .nf-watch__layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      'stage'
+      'main'
+      'related';
+    grid-template-rows: auto;
+  }
+}
+
+.nf-watch__page-state {
+  display: flex;
+  justify-content: center;
+  padding: var(--nf-space-64) var(--nf-space-16);
+}
+
+/* ---- the stage ------------------------------------------------------------------------ */
+
+.nf-watch__stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: var(--nf-radius-lg);
+  color: var(--nf-color-overlay-fg);
+  background: #000;
+}
+
+.nf-watch__stage > .nf-player {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.nf-watch__stage:fullscreen {
+  border-radius: 0;
+  aspect-ratio: auto;
+}
+
+/* Gates (signer / seeders / balance / play error) follow the theme: readable in both. */
+.nf-watch__stage--gate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--nf-space-48) var(--nf-space-24) var(--nf-space-24);
+  color: var(--nf-color-text);
+  background: var(--nf-color-bg-subtle);
+}
+
+.nf-watch__stage--gate > .nf-state {
+  max-width: 460px;
+}
+
+.nf-watch__stage-skeleton {
+  width: 100%;
+  border-radius: var(--nf-radius-lg);
+}
+
+.nf-watch__poster,
+.nf-watch__video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.nf-watch__video {
+  object-fit: contain;
+  background: #000;
+}
+
+.nf-watch__poster--blur {
+  filter: blur(12px);
+  transform: scale(1.05);
+}
+
+.nf-watch__poster-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--nf-space-12);
+  background: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.35),
+    rgba(0, 0, 0, 0.15) 40%,
+    rgba(0, 0, 0, 0.45)
+  );
+}
+
+/* YouTube's big play: a wide rounded tile, dark until hovered, accent on hover/focus. */
+.nf-watch__bigplay.nf-icon-button {
+  width: 76px;
+  height: 54px;
+  border-radius: var(--nf-radius-xl);
+  color: var(--nf-color-overlay-fg);
+  background: var(--nf-color-overlay-strong);
+  transition: background-color var(--nf-motion-fast) var(--nf-ease);
+}
+
+.nf-watch__bigplay.nf-icon-button:hover,
+.nf-watch__bigplay.nf-icon-button:focus-visible {
+  background: var(--nf-color-accent);
+}
+
+.nf-watch__bigplay .nf-icon {
+  width: 36px;
+  height: 36px;
+}
+
+.nf-watch__resume {
+  padding: var(--nf-space-4) var(--nf-space-12);
+  border-radius: var(--nf-radius-full);
+  font-size: var(--nf-text-xs);
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-overlay-fg);
+  background: var(--nf-color-overlay-strong);
+}
+
+/* Watched-so-far bar along the bottom of the poster (YouTube's red line, in accent). */
+.nf-watch__resume-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.nf-watch__resume-fill {
+  display: block;
+  height: 100%;
+  background: var(--nf-color-accent);
+}
+
+/* The price row: always first in the stage's DOM, top-left over the video. */
+.nf-watch__stage-price {
+  position: absolute;
+  top: var(--nf-space-12);
+  left: var(--nf-space-12);
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nf-space-8);
+  max-width: calc(100% - var(--nf-space-24));
+}
+
+.nf-watch__stage-price .nf-sats {
+  height: 28px;
+  padding: 0 var(--nf-space-12) 0 var(--nf-space-8);
+  border-radius: var(--nf-radius-full);
+  font-size: var(--nf-text-sm);
+}
+
+.nf-watch__stage--gate .nf-watch__stage-price .nf-sats,
+.nf-watch__stage--note .nf-watch__stage-price .nf-sats {
+  box-shadow: var(--nf-shadow-sm);
+}
+
+.nf-watch__quality-label,
+.nf-watch__quality-button,
+.nf-watch__rate-hint {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 var(--nf-space-12);
+  border-radius: var(--nf-radius-full);
+  font-size: var(--nf-text-xs);
+  font-weight: var(--nf-weight-medium);
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--nf-color-overlay-fg);
+  background: var(--nf-color-overlay-strong);
+}
+
+.nf-watch__rate-hint {
+  font-weight: var(--nf-weight-regular);
+  color: var(--nf-color-overlay-fg-muted);
+}
+
+.nf-watch__stage-mints {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--nf-space-4);
+}
+
+/* Pre-play quality picker. */
+.nf-watch__quality {
+  position: relative;
+}
+
+.nf-watch__quality-button {
+  gap: var(--nf-space-4);
+  padding-right: var(--nf-space-8);
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.nf-watch__quality-button:hover {
+  background: var(--nf-color-overlay);
+}
+
+.nf-watch__quality-caret {
+  transform: rotate(90deg);
+}
+
+.nf-watch__quality-button[aria-expanded='true'] .nf-watch__quality-caret {
+  transform: rotate(-90deg);
+}
+
+.nf-watch__quality-menu {
+  position: absolute;
+  top: calc(100% + var(--nf-space-4));
+  left: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  min-width: 330px;
+  padding: var(--nf-space-8) 0;
+  border-radius: var(--nf-radius-md);
+  color: var(--nf-color-overlay-fg);
+  background: var(--nf-color-overlay-strong);
+  backdrop-filter: blur(8px);
+  box-shadow: var(--nf-shadow-md);
+}
+
+.nf-watch__quality-item {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-8);
+  padding: var(--nf-space-8) var(--nf-space-16) var(--nf-space-8) var(--nf-space-8);
+  border: 0;
+  font: inherit;
+  font-size: var(--nf-text-sm);
+  text-align: left;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.nf-watch__quality-item:hover,
+.nf-watch__quality-item:focus-visible {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.nf-watch__quality-check {
+  display: inline-flex;
+  width: 20px;
+  flex: none;
+}
+
+.nf-watch__quality-name {
+  display: flex;
+  align-items: baseline;
+  gap: var(--nf-space-8);
+  flex: 1 1 auto;
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-watch__quality-sub {
+  font-size: var(--nf-text-xs);
+  font-weight: var(--nf-weight-regular);
+  color: var(--nf-color-overlay-fg-muted);
+}
+
+.nf-watch__quality-price {
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--nf-space-8);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Same always-dark-overlay delta colours as L4's player quality menu (Player.css). */
+.nf-watch__quality-delta {
+  padding: 1px 5px;
+  border-radius: var(--nf-radius-sm);
+  font-size: var(--nf-text-xs);
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-watch__quality-delta--up {
+  color: #ffb454;
+  background: rgba(255, 180, 84, 0.18);
+}
+
+.nf-watch__quality-delta--down {
+  color: #6fdc8c;
+  background: rgba(111, 220, 140, 0.18);
+}
+
+/* Dim layer over the poster behind a stage note. */
+.nf-watch__stage-dim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+/* Calm centred note ("Playing in the mini-player"). */
+.nf-watch__stage-note {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--nf-space-8);
+  padding: var(--nf-space-24);
+  text-align: center;
+  color: var(--nf-color-overlay-fg-muted);
+}
+
+.nf-watch__stage-note-title {
+  margin: 0;
+  font-size: var(--nf-text-lg);
+  line-height: var(--nf-line-lg);
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-overlay-fg);
+}
+
+.nf-watch__stage-note-sub {
+  margin: 0;
+  font-size: var(--nf-text-sm);
+}
+
+/* Peer panel overlay (top-right, above the chrome). */
+.nf-watch__peers {
+  position: absolute;
+  top: var(--nf-space-12);
+  right: var(--nf-space-12);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  width: min(380px, calc(100% - var(--nf-space-24)));
+  max-height: calc(100% - 96px);
+  overflow: auto;
+  border-radius: var(--nf-radius-lg);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+}
+
+.nf-watch__peers-meter.nf-peers {
+  max-width: none;
+  border-radius: var(--nf-radius-lg) var(--nf-radius-lg) 0 0;
+}
+
+/* Resolved seeder names read as names, not as a debug column of keys. */
+.nf-watch__peers .nf-peers__name {
+  font-family: var(--nf-font-sans);
+  font-size: var(--nf-text-sm);
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-watch__peers-foot {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--nf-space-8);
+  margin: 0;
+  padding: var(--nf-space-8) var(--nf-space-16) var(--nf-space-12);
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0 0 var(--nf-radius-lg) var(--nf-radius-lg);
+  font-size: var(--nf-text-xs);
+  line-height: var(--nf-line-xs);
+  color: var(--nf-color-overlay-fg-muted);
+  background: var(--nf-color-overlay-strong);
+  backdrop-filter: blur(8px);
+}
+
+.nf-watch__peers-foot .nf-icon {
+  color: var(--nf-color-paid);
+  margin-top: 1px;
+}
+
+/* Autoplay-next countdown. */
+.nf-watch__upnext {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--nf-space-16);
+  background: rgba(0, 0, 0, 0.78);
+}
+
+.nf-watch__upnext-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-12);
+  width: min(440px, 100%);
+  color: var(--nf-color-overlay-fg);
+}
+
+.nf-watch__upnext-kicker {
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  color: var(--nf-color-overlay-fg-muted);
+}
+
+.nf-watch__upnext-count {
+  font-weight: var(--nf-weight-bold);
+  font-variant-numeric: tabular-nums;
+  color: var(--nf-color-overlay-fg);
+}
+
+.nf-watch__upnext-video {
+  display: flex;
+  gap: var(--nf-space-12);
+  align-items: flex-start;
+}
+
+.nf-watch__upnext-thumb {
+  position: relative;
+  flex: none;
+  width: 168px;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: var(--nf-radius-md);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.nf-watch__upnext-thumb img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.nf-watch__upnext-meta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-4);
+  min-width: 0;
+}
+
+.nf-watch__upnext-title {
+  font-size: var(--nf-text-md);
+  line-height: var(--nf-line-md);
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-watch__upnext-channel {
+  font-size: var(--nf-text-sm);
+  color: var(--nf-color-overlay-fg-muted);
+}
+
+.nf-watch__upnext-price {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nf-space-8);
+}
+
+.nf-watch__upnext-price .nf-sats {
+  height: 28px;
+  padding: 0 var(--nf-space-12) 0 var(--nf-space-8);
+  border-radius: var(--nf-radius-full);
+  font-size: var(--nf-text-sm);
+}
+
+.nf-watch__upnext-bar {
+  height: 3px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.nf-watch__upnext-fill {
+  display: block;
+  height: 100%;
+  background: var(--nf-color-accent);
+  transition: width 1s linear;
+}
+
+.nf-watch__upnext-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--nf-space-8);
+}
+
+/* In-place mini-player (no shell hand-off) and the shell's own mini-player slot. */
+.nf-watch__mini {
+  position: fixed;
+  right: var(--nf-space-24);
+  bottom: var(--nf-space-24);
+  z-index: var(--nf-z-mini-player);
+  width: 400px;
+  max-width: calc(100vw - var(--nf-space-32));
+}
+
+.nf-watch__mini .nf-player {
+  width: 100%;
+}
+
+/* ---- title, channel, actions ---------------------------------------------------------- */
+
+.nf-watch__title {
+  margin: var(--nf-space-4) 0 0;
+  font-size: var(--nf-text-xl);
+  line-height: var(--nf-line-xl);
+  font-weight: var(--nf-weight-bold);
+  overflow-wrap: anywhere;
+}
+
+.nf-watch__channelbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nf-space-12) var(--nf-space-16);
+}
+
+.nf-watch__channel {
+  flex: 1 1 340px;
+}
+
+.nf-watch__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nf-space-8);
+}
+
+.nf-watch__spend.nf-sats {
+  height: 36px;
+  padding: 0 var(--nf-space-12) 0 var(--nf-space-8);
+  border-radius: var(--nf-radius-full);
+  font-size: var(--nf-text-sm);
+}
+
+.nf-watch__paystate {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--nf-space-4);
+  height: 36px;
+  padding: 0 var(--nf-space-12);
+  border-radius: var(--nf-radius-full);
+  font-size: var(--nf-text-sm);
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-warning);
+  background: var(--nf-color-warning-bg);
+}
+
+.nf-watch__overflow {
+  position: relative;
+}
+
+.nf-watch__overflow > .nf-icon-button {
+  background: var(--nf-color-bg-subtle);
+}
+
+.nf-watch__overflow > .nf-icon-button:hover {
+  background: var(--nf-color-bg-active);
+}
+
+.nf-watch__menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + var(--nf-space-4));
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  padding: var(--nf-space-8) 0;
+  border-radius: var(--nf-radius-md);
+  background: var(--nf-color-bg-elevated);
+  box-shadow: var(--nf-shadow-md);
+}
+
+.nf-watch__menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-12);
+  width: 100%;
+  padding: var(--nf-space-8) var(--nf-space-16);
+  border: 0;
+  font: inherit;
+  font-size: var(--nf-text-sm);
+  text-align: left;
+  color: var(--nf-color-text);
+  background: transparent;
+  cursor: pointer;
+}
+
+.nf-watch__menu-item:hover,
+.nf-watch__menu-item:focus-visible {
+  background: var(--nf-color-bg-hover);
+}
+
+/* ---- description ---------------------------------------------------------------------- */
+
+.nf-watch__desc {
+  position: relative;
+  padding: var(--nf-space-12);
+  border-radius: var(--nf-radius-md);
+  background: var(--nf-color-bg-subtle);
+}
+
+.nf-watch__desc-skeleton {
+  border-radius: var(--nf-radius-md);
+}
+
+.nf-watch__desc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--nf-space-4) var(--nf-space-8);
+  margin: 0 0 var(--nf-space-4);
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  font-weight: var(--nf-weight-medium);
+}
+
+.nf-watch__desc-stat + .nf-watch__desc-stat::before {
+  content: '·';
+  margin-right: var(--nf-space-8);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-watch__tag {
+  padding: 0;
+  border: 0;
+  font: inherit;
+  color: var(--nf-color-text-link);
+  background: none;
+  cursor: pointer;
+}
+
+.nf-watch__tag:hover {
+  text-decoration: underline;
+}
+
+/* Collapsed: three lines of description, like YouTube. */
+.nf-watch__desc-body {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
+.nf-watch__desc--open .nf-watch__desc-body {
+  display: block;
+  -webkit-line-clamp: unset;
+}
+
+.nf-watch__desc-toggle {
+  margin-top: var(--nf-space-4);
+  padding: 0;
+  border: 0;
+  font: inherit;
+  font-size: var(--nf-text-sm);
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-text);
+  background: none;
+  cursor: pointer;
+}
+
+/* ---- comments ------------------------------------------------------------------------- */
+
+.nf-watch__comments {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+  margin-top: var(--nf-space-12);
+}
+
+.nf-watch__comments-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nf-space-12) var(--nf-space-24);
+}
+
+.nf-watch__comments-title {
+  margin: 0;
+  font-size: var(--nf-text-xl);
+  line-height: var(--nf-line-xl);
+  font-weight: var(--nf-weight-bold);
+}
+
+.nf-watch__comments-sort {
+  display: flex;
+  gap: var(--nf-space-8);
+}
+
+.nf-watch__signin {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nf-space-12);
+  padding: var(--nf-space-12) var(--nf-space-16);
+  border: 1px solid var(--nf-color-border);
+  border-radius: var(--nf-radius-md);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-watch__signin-text {
+  flex: 1 1 240px;
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+}
+
+.nf-watch__composer {
+  display: flex;
+  gap: var(--nf-space-16);
+  align-items: flex-start;
+}
+
+.nf-watch__composer-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-8);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.nf-watch__composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--nf-space-8);
+}
+
+.nf-watch__composer--reply {
+  margin-top: var(--nf-space-8);
+}
+
+/* YouTube's underline field; `--boxed` for the sheets. */
+.nf-watch__input {
+  width: 100%;
+  min-height: 32px;
+  padding: var(--nf-space-4) 0;
+  border: 0;
+  border-bottom: 1px solid var(--nf-color-border-strong);
+  border-radius: 0;
+  resize: vertical;
+  font: inherit;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text);
+  background: transparent;
+}
+
+.nf-watch__input:focus {
+  outline: none;
+  border-bottom: 2px solid var(--nf-color-text);
+}
+
+.nf-watch__input:focus-visible {
+  outline: none;
+}
+
+.nf-watch__input--boxed {
+  padding: var(--nf-space-8) var(--nf-space-12);
+  border: 1px solid var(--nf-color-border-strong);
+  border-radius: var(--nf-radius-md);
+}
+
+.nf-watch__input--boxed:focus {
+  border: 1px solid var(--nf-color-focus);
+  box-shadow: 0 0 0 1px var(--nf-color-focus);
+}
+
+.nf-watch__comments-loading,
+.nf-watch__comment-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-watch__thread {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-8);
+}
+
+.nf-watch__replies {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-12);
+  margin: 0;
+  padding: 0 0 0 56px;
+  list-style: none;
+}
+
+.nf-watch__comment {
+  display: flex;
+  gap: var(--nf-space-16);
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.nf-watch__comment--reply {
+  gap: var(--nf-space-12);
+}
+
+.nf-watch__comment-avatar {
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: var(--nf-radius-full);
+  background: none;
+  cursor: pointer;
+}
+
+.nf-watch__comment-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.nf-watch__comment-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nf-space-4);
+  font-size: var(--nf-text-xs);
+  line-height: var(--nf-line-xs);
+}
+
+.nf-watch__comment-author {
+  padding: 0;
+  border: 0;
+  font: inherit;
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-text);
+  background: none;
+  cursor: pointer;
+}
+
+.nf-watch__comment-head .nf-icon {
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-watch__comment-time {
+  margin-left: var(--nf-space-4);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-watch__comment-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-8);
+  min-height: 28px;
+  font-size: var(--nf-text-xs);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-watch__comment-meta .nf-button--ghost {
+  margin-left: calc(-1 * var(--nf-space-8));
+}
+
+.nf-watch__comment-reactions + .nf-button--ghost {
+  margin-left: 0;
+}
+
+.nf-watch__comments-more {
+  display: flex;
+  justify-content: center;
+}
+
+/* ---- rail: playlist, up next, shorts -------------------------------------------------- */
+
+.nf-watch__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-watch__item {
+  min-width: 0;
+}
+
+/* Same L4 workaround as Home (docs/lanes/L5-Home.md), one level up for the list layout: the
+   card body AND its text column must grow, or `VideoCardSkeleton`'s percentage lines
+   collapse to 0 px beside the thumbnail. */
+.nf-watch__item .nf-card--list .nf-card__body,
+.nf-watch__item .nf-card__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* A short in a list row (playlist / related): crop to the row's 16:9 instead of a 9:16 tower. */
+.nf-watch__list .nf-card--list.nf-card--short .nf-card__thumb {
+  aspect-ratio: 16 / 9;
+}
+
+.nf-watch__playlist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-8);
+  padding: var(--nf-space-12);
+  border: 1px solid var(--nf-color-border);
+  border-radius: var(--nf-radius-lg);
+}
+
+.nf-watch__playlist-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--nf-space-8);
+}
+
+.nf-watch__playlist-title {
+  margin: 0;
+  font-size: var(--nf-text-lg);
+  line-height: var(--nf-line-lg);
+  font-weight: var(--nf-weight-bold);
+}
+
+.nf-watch__playlist-pos {
+  font-size: var(--nf-text-xs);
+  color: var(--nf-color-text-secondary);
+  white-space: nowrap;
+}
+
+.nf-watch__playlist-list {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.nf-watch__playlist-item {
+  padding: var(--nf-space-4);
+  border-radius: var(--nf-radius-md);
+}
+
+.nf-watch__playlist-item[aria-current='true'] {
+  background: var(--nf-color-bg-active);
+}
+
+.nf-watch__muted {
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-watch__related-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nf-space-8);
+}
+
+.nf-watch__related-title {
+  margin: 0;
+  font-size: var(--nf-text-md);
+  line-height: var(--nf-line-md);
+  font-weight: var(--nf-weight-bold);
+}
+
+.nf-watch__shorts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-8);
+  margin-top: var(--nf-space-8);
+}
+
+.nf-watch__shorts-title {
+  margin: 0;
+  font-size: var(--nf-text-md);
+  line-height: var(--nf-line-md);
+  font-weight: var(--nf-weight-bold);
+}
+
+.nf-watch__shorts-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--nf-space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-watch__short {
+  min-width: 0;
+}
+
+/* ---- sheets --------------------------------------------------------------------------- */
+
+.nf-watch__sheet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-16);
+}
+
+.nf-watch__sheet-note {
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  line-height: var(--nf-line-sm);
+  color: var(--nf-color-text-secondary);
+}
+
+.nf-watch__fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-8);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.nf-watch__legend {
+  margin-bottom: var(--nf-space-8);
+  padding: 0;
+  font-size: var(--nf-text-sm);
+  font-weight: var(--nf-weight-medium);
+  color: var(--nf-color-text);
+}
+
+.nf-watch__zap-amounts,
+.nf-watch__zap-mints {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--nf-space-8);
+}
+
+.nf-watch__zap-custom {
+  flex: 1 1 96px;
+  max-width: 140px;
+}
+
+.nf-watch__zap-custom .nf-watch__input--boxed {
+  height: var(--nf-size-control-sm);
+  min-height: 0;
+  padding: 0 var(--nf-space-12);
+  border-radius: var(--nf-radius-full);
+}
+
+.nf-watch__zap-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nf-space-12);
+  width: 100%;
+}
+
+.nf-watch__report-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nf-space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nf-watch__report-reason.nf-button {
+  justify-content: flex-start;
+  width: 100%;
+  border-radius: var(--nf-radius-md);
+}
+
+.nf-watch__keys {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+
+.nf-watch__keys-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nf-space-16);
+  padding: var(--nf-space-8) 0;
+  border-bottom: 1px solid var(--nf-color-border);
+}
+
+.nf-watch__keys-key {
+  font-family: var(--nf-font-mono);
+  font-size: var(--nf-text-xs);
+  padding: 2px var(--nf-space-8);
+  border-radius: var(--nf-radius-sm);
+  background: var(--nf-color-bg-subtle);
+}
+
+.nf-watch__keys-action {
+  margin: 0;
+  font-size: var(--nf-text-sm);
+  text-align: right;
+}
