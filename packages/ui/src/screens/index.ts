@@ -11,3 +11,5 @@ export { SETTINGS_SECTIONS, Settings } from './Settings/index.js';
 export type { SettingsProps, SettingsSectionId } from './Settings/index.js';
 export { Library } from './Library/index.js';
 export type { LibraryProps, LibraryTab } from './Library/index.js';
+export { Watch } from './Watch/index.js';
+export type { WatchProps, WatchHandoff, WatchPlaylist } from './Watch/index.js';
