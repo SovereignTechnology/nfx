@@ -15,3 +15,5 @@ export { Watch } from './Watch/index.js';
 export type { WatchProps, WatchHandoff, WatchPlaylist } from './Watch/index.js';
 export { Shorts } from './Shorts/index.js';
 export type { ShortsProps } from './Shorts/index.js';
+export { Search } from './Search/index.js';
+export type { SearchProps, SearchFilterState } from './Search/index.js';
