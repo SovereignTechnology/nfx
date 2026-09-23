@@ -109,8 +109,12 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 close
 
 ## Not verified / known gaps
 
-- **GitLab CI's first real run is the next push.** The `rust:1.98-bookworm` image and
-  the in-image installs are untested there; every result above was verified locally.
+- **GitLab CI's first real run failed only its last step.** Vectors,
+  add-only, fmt, clippy, test and deny all passed on the shared runner. The WASM tests
+  crashed Node: Debian bookworm's `nodejs` 18.20.4 aborts in V8 on the wasm32 test
+  binary. This was reproduced locally with official Node 18.20.4, while 22.22.0 passes.
+  The fix pins the official Node 22.22.0 build (sha256 from nodejs.org `SHASUMS256.txt`)
+  and awaits its first run.
   The job also does a read-only fetch of the private demo repository `main` for the
   add-only check. `wasm-pack test` downloads its matching `wasm-bindgen` runner at run
   time, unpinned.

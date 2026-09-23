@@ -17,12 +17,19 @@ variables:
   # No upstream digest; pinned 2026-09-23 from the release tarball, whose binary is
   # byte-identical to the wasm-pack the local checks ran on.
   WASM_PACK_SHA256: "c539d91ccab2591a7e975bcf82c82e1911b03335c80aa83d67ad25ed2ad06539"
+  # Official Node build. Debian bookworm's nodejs 18 crashes (V8 abort) running the
+  # wasm32 test binary; 22.22.0 is what the local checks use. Hash from nodejs.org SHASUMS256.txt.
+  NODE_VERSION: "22.22.0"
+  NODE_SHA256: "9aa8e9d2298ab68c600bd6fb86a6c13bce11a4eca1ba9b39d79fa021755d7c37"
 
 check:
   stage: check
   image: rust:1.98-bookworm
   before_script:
-    - apt-get update && apt-get install -y --no-install-recommends python3 python3-venv nodejs
+    - apt-get update && apt-get install -y --no-install-recommends python3 python3-venv xz-utils
+    - curl -sSfLo /tmp/node.txz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
+    - echo "${NODE_SHA256}  /tmp/node.txz" | sha256sum -c -
+    - mkdir -p /opt/node && tar -xJf /tmp/node.txz -C /opt/node --strip-components=1 && export PATH="/opt/node/bin:$PATH" && node --version
     - python3 -m venv /opt/venv && /opt/venv/bin/pip install coincurve==21.0.0 pynacl==1.6.2
     - rustup component add clippy rustfmt && rustup target add wasm32-unknown-unknown
     - curl -sSfLo /tmp/deny.tgz "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"

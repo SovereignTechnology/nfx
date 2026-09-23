@@ -30,6 +30,7 @@ Method: `differential-review` and `sharp-edges`.
 | F2 | `crates/ci/gitlab-ci.yml` | CI turned out to run on a **shared runner**. My earlier claim that nothing would run without a registered runner was wrong. | **sovtech re-decided** (run it, kept light). The job now downloads `cargo-deny` 0.20.2 and `wasm-pack` 0.13.1 prebuilt and **sha256-checks them before install** (`sha256sum -c`, failing closed), so nothing is compiled on the runner. |
 | F3 | same | `wasm-pack test` fetches its matching `wasm-bindgen` runner at run time, unpinned. | Recorded in the status file; a later pin can install `wasm-bindgen-cli` the same way. |
 | F4 | same | The job does a read-only `git fetch` of the private demo repository `main`, using no credentials. | Accepted as part of sovtech's choice; documented in the job and the status file. |
+| F5 | same, found by the first real pipeline | Debian bookworm's `nodejs` 18.20.4 crashes (V8 abort) running the wasm32 test binary. Every earlier step passed on the runner. Reproduced locally with official Node 18.20.4; 22.22.0 passes. | **Fixed after the push:** the CI installs official Node 22.22.0, sha256-checked against nodejs.org's `SHASUMS256.txt`. |
 
 ## Sharp edges in the encryption rule (NFX-08 §2)
 
