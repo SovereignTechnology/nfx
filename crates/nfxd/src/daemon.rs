@@ -29,11 +29,13 @@ use nfx_node::nostr::{BEACON_TTL, ManifestQuery, Relays};
 use nfx_node::origin::{Origin, SwarmPull, serve};
 use nfx_node::relay::ScopedRelay;
 use nfx_node::seed::Seeded;
-use nfx_node::store::FsStore;
+use nfx_node::store::{ContentStore as _, FsStore};
+use nfx_node::tracker::Tracker;
 use nfx_node::unix_now;
 use nfx_proto::Verified;
 use nfx_proto::beacon::{BeaconContent, Chunks, Endpoint, parse_a_tag};
 use nfx_proto::gossip::{Envelope, MAX_ENVELOPE_BYTES, Op};
+use nfx_proto::hashlist::HashList;
 use nfx_proto::manifest::Manifest;
 use nfx_proto::namespace::Namespace;
 use nostr_sdk::prelude::Keys;
@@ -72,6 +74,9 @@ pub struct Config {
     pub https_url: Option<String>,
     /// Embed a scoped relay listening here (NFX-04 §7).
     pub embed_relay: Option<SocketAddr>,
+    /// Embed a WebTorrent tracker for the browser mesh (NFX-10 §2) listening here. It
+    /// admits exactly the per-rendition swarms of the videos this node seeds or holds.
+    pub embed_tracker: Option<SocketAddr>,
     /// Namespaces the embedded relay serves; by default those of the videos above.
     pub namespaces: Vec<Namespace>,
     /// When non-empty, the embedded relay admits only these creators (x-only pubkey, 64
@@ -116,6 +121,8 @@ pub struct Daemon {
     embedded: Option<Arc<ScopedRelay>>,
     /// The embedded relay's URL, as this host reaches it.
     pub relay_url: Option<String>,
+    /// The embedded tracker's URL, as this host reaches it.
+    pub tracker_url: Option<String>,
     pub origin_addr: Option<SocketAddr>,
     state: Arc<Mutex<BTreeMap<String, VideoState>>>,
     shared: Arc<Shared>,
@@ -139,6 +146,7 @@ struct Shared {
     deletion_check_every: Duration,
     gossip: bool,
     gossip_peers: Vec<iroh::EndpointAddr>,
+    tracker: Option<Arc<Tracker>>,
     /// This node's own pubkey: its own beacons and envelopes are never learned.
     own: Option<String>,
     state: Arc<Mutex<BTreeMap<String, VideoState>>>,
@@ -203,6 +211,27 @@ async fn gossip_send(
 }
 
 impl Shared {
+    /// Open `manifest`'s browser-mesh swarms on the embedded tracker, from its hash list in
+    /// the store (verified against the manifest again here).
+    fn admit_swarms(&self, manifest: &Verified<Manifest>) {
+        if let Some(tracker) = &self.tracker
+            && let Ok(bytes) = self.store.get(&manifest.root_hex())
+            && let Ok(list) = HashList::verify_for(&bytes, manifest)
+        {
+            let _ = tracker.admit(&list);
+        }
+    }
+
+    /// Close them again (the creator deleted the video, NFX-02 §6).
+    fn forget_swarms(&self, manifest: &Verified<Manifest>) {
+        if let Some(tracker) = &self.tracker
+            && let Ok(bytes) = self.store.get(&manifest.root_hex())
+            && let Ok(list) = HashList::verify_for(&bytes, manifest)
+        {
+            let _ = tracker.forget(&list);
+        }
+    }
+
     /// The bootstrap for a video's swarm: configured peers plus known seeders' endpoints.
     fn swarm_peers(&self, a: &str) -> Vec<iroh::EndpointAddr> {
         let mut peers = self.gossip_peers.clone();
@@ -301,6 +330,7 @@ impl Shared {
         if let Some(origin) = &self.origin {
             origin.hold(manifest).await?;
         }
+        self.admit_swarms(manifest);
         self.set(a, VideoState::Seeding);
         // The video's gossip swarm, when on: announce into it, and learn from it.
         let secret = keys.secret_key().to_secret_bytes();
@@ -342,6 +372,7 @@ impl Shared {
                             let content = self.beacon(&seeded, manifest);
                             gossip_send(announcer, Op::Bye, &pubkey, content, &secret).await;
                         }
+                        self.forget_swarms(manifest);
                         self.set(a, VideoState::Deleted);
                         return Ok(());
                     }
@@ -396,6 +427,7 @@ impl Shared {
         while origin.hold(&manifest).await.is_err() {
             tokio::time::sleep(RETRY).await;
         }
+        self.admit_swarms(&manifest);
         self.set(&a, VideoState::Serving);
         Ok(())
     }
@@ -476,6 +508,19 @@ impl Daemon {
         }
 
         let mut tasks = Vec::new();
+        let (tracker, tracker_url) = match cfg.embed_tracker {
+            None => (None, None),
+            Some(addr) => {
+                let listener = tokio::net::TcpListener::bind(addr).await?;
+                let mut local = listener.local_addr()?;
+                if local.ip().is_unspecified() {
+                    local.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+                }
+                let tracker = Arc::new(Tracker::new());
+                tasks.push(tokio::spawn(tracker.clone().serve(listener)));
+                (Some(tracker), Some(format!("ws://{local}")))
+            }
+        };
         let mut relays = cfg.relays.clone();
         let (embedded, relay_url) = match cfg.embed_relay {
             None => (None, None),
@@ -558,6 +603,7 @@ impl Daemon {
                 .max(Duration::from_millis(100)),
             gossip: cfg.gossip,
             gossip_peers: cfg.gossip_peers.clone(),
+            tracker,
             own: cfg.keys.as_ref().map(|k| k.public_key().to_hex()),
             state: state.clone(),
         });
@@ -609,6 +655,7 @@ impl Daemon {
             relays,
             embedded,
             relay_url,
+            tracker_url,
             origin_addr,
             state,
             shared,
@@ -697,6 +744,7 @@ impl Daemon {
             while origin.hold(&manifest).await.is_err() {
                 tokio::time::sleep(RETRY).await;
             }
+            shared.admit_swarms(&manifest);
             Ok::<_, Error>(manifest)
         };
         let manifest = tokio::time::timeout(timeout, hold)
@@ -731,6 +779,12 @@ impl Daemon {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The embedded tracker, when there is one.
+    #[must_use]
+    pub fn tracker(&self) -> Option<&Arc<Tracker>> {
+        self.shared.tracker.as_ref()
     }
 
     #[must_use]

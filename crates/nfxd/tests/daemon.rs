@@ -280,6 +280,7 @@ async fn fetch_serve_and_reseed_through_an_embedded_relay() {
         fetch: vec![a.clone()],
         origin: Some("127.0.0.1:0".parse().unwrap()),
         embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        embed_tracker: Some("127.0.0.1:0".parse().unwrap()),
         deletion_check_every: Some(Duration::from_millis(500)),
         ..Config::default()
     })
@@ -322,8 +323,19 @@ async fn fetch_serve_and_reseed_through_an_embedded_relay() {
     .unwrap();
     until_state(&seeder, &a, &VideoState::Seeding).await;
 
-    // B fetches from A over iroh, verified, and starts seeding it too.
+    // B fetches from A over iroh, verified, and starts seeding it too. Its tracker opens
+    // the video's browser-mesh swarms, one per rendition (NFX-10 §2), and nothing else.
+    let tracker = b.tracker().expect("embedded tracker");
+    let swarm = manifest.addr.web_tracker_infohash("720p");
     until_state(&b, &a, &VideoState::Seeding).await;
+    assert!(
+        b.tracker_url
+            .as_deref()
+            .unwrap()
+            .starts_with("ws://127.0.0.1:")
+    );
+    assert!(tracker.admits(&swarm));
+    assert!(!tracker.admits(&manifest.addr.web_tracker_infohash("1080p")));
     let b_store = FsStore::open(&b_store_dir).unwrap();
     for f in &list.files {
         assert!(b_store.has(&f.sha256), "{} fetched", f.name);
@@ -373,6 +385,7 @@ async fn fetch_serve_and_reseed_through_an_embedded_relay() {
     assert_eq!(client.publish(&del).await.unwrap(), 1);
     until_state(&seeder, &a, &VideoState::Deleted).await;
     until_state(&b, &a, &VideoState::Deleted).await;
+    assert!(!tracker.admits(&swarm), "a deleted video's swarms close");
     assert!(client.manifests(&query, WAIT).await.unwrap().is_empty());
 
     client.shutdown().await;

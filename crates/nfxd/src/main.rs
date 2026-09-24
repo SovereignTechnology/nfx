@@ -8,7 +8,7 @@
 //! nfxd delete --key <file> --relay <url>… --a <a>…   withdraw your own videos (NFX-02 §6)
 //! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--relay-only]
 //!          [--seed <a>]… [--fetch <a>]… [--pull <a>]… [--origin <addr:port>]
-//!          [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]…
+//!          [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port>] [--namespace <ns>]…
 //!          [--allow-creator <hex>]… [--gossip [--gossip-peer <id>@<ip:port|relay-url>]…]
 //! ```
 //!
@@ -38,7 +38,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...]";
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port>] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...]";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -197,6 +197,7 @@ async fn run(args: &[String]) -> Result<()> {
             "origin",
             "https-url",
             "embed-relay",
+            "embed-tracker",
             "namespace",
             "allow-creator",
             "gossip-peer",
@@ -231,6 +232,7 @@ async fn run(args: &[String]) -> Result<()> {
         origin: addr("origin")?,
         https_url: one(&f, "https-url")?,
         embed_relay: addr("embed-relay")?,
+        embed_tracker: addr("embed-tracker")?,
         namespaces: all(&f, "namespace")
             .iter()
             .map(|n| Namespace::parse(n).map_err(Error::from))
@@ -247,6 +249,9 @@ async fn run(args: &[String]) -> Result<()> {
     }
     if let Some(addr) = daemon.origin_addr {
         eprintln!("origin: http://{addr}/");
+    }
+    if let Some(url) = &daemon.tracker_url {
+        eprintln!("embedded tracker: {url}");
     }
     if gossip {
         let me = daemon.node().addr();
