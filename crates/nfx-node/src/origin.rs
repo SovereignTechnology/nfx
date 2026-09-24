@@ -22,6 +22,7 @@ use http_body_util::Full;
 use hyper::header::{self, HeaderValue};
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
+use iroh_blobs::ticket::BlobTicket;
 use nfx_proto::beacon::{Beacon, Endpoint};
 use nfx_proto::hashlist::{HashList, Role};
 use nfx_proto::manifest::Manifest;
@@ -484,6 +485,56 @@ impl SwarmPull {
             }
         }
         Err(NodeError::Collection(format!("{sha} is in no rendition")))
+    }
+}
+
+impl SwarmPull {
+    /// Fetch `manifest`'s whole video (the meta collection and every rendition) into
+    /// `store` from the first live source that has all of it. A lying source is forgotten
+    /// and the next one tried. Returns the verified hash list.
+    pub async fn fetch_video(
+        &self,
+        manifest: &Manifest,
+        store: &dyn ContentStore,
+    ) -> Result<HashList> {
+        let a = manifest.a_tag();
+        let root = manifest.root_hex();
+        let anchor = Anchor {
+            root: &root,
+            video: &manifest.addr,
+            segs: manifest.segs,
+        };
+        let mut last = NodeError::Collection(format!("no live source for {a}"));
+        for source in self.live(&a, unix_now()) {
+            let attempt = async {
+                let ticket = |id: &str| -> Result<BlobTicket> {
+                    source
+                        .tickets
+                        .get(id)
+                        .ok_or_else(|| NodeError::Collection(format!("no {id} ticket")))?
+                        .parse()
+                        .map_err(NodeError::transport)
+                };
+                let meta = ticket("meta")?;
+                let list = self.node.fetch(&anchor, &meta, &[], store).await?;
+                let renditions = list
+                    .renditions
+                    .iter()
+                    .map(|r| Ok((r.id.clone(), ticket(&r.id)?)))
+                    .collect::<Result<Vec<_>>>()?;
+                self.node.fetch(&anchor, &meta, &renditions, store).await
+            };
+            match attempt.await {
+                Ok(list) => return Ok(list),
+                Err(e) => {
+                    if matches!(e, NodeError::Poisoned { .. }) {
+                        self.forget(&a, &source.seeder);
+                    }
+                    last = e;
+                }
+            }
+        }
+        Err(last)
     }
 }
 

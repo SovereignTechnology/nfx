@@ -1,0 +1,30 @@
+[package]
+name = "nfxd"
+version = "0.1.0"
+description = "The headless NFX node: seed, fetch, pull-through origin and an embedded scoped relay"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+hex.workspace = true
+iroh.workspace = true
+nfx-node.workspace = true
+nfx-proto.workspace = true
+nostr-sdk.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+
+[dev-dependencies]
+base64.workspace = true
+bytes.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client"] }
+hyper-util.workspace = true
+iroh-relay = { workspace = true, features = ["server"] }
+
+[lints]
+workspace = true

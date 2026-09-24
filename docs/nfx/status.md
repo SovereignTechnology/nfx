@@ -8,9 +8,9 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 close
 ## Where things stand
 
 **Phases A0 and A1 are complete. A2, the Rust M1 data plane, is in progress**
-(ADR 0008 §5): `nfx-media` is done. `nfx-node` has its iroh and Nostr layers, the
-pull-through origin and an embeddable scoped relay. Still to come are `nfxd` and a test
-player page.
+(ADR 0008 §5): `nfx-media`, `nfx-node` (iroh, Nostr, the pull-through origin, the
+scoped relay) and `nfxd` are done. Still to come are the test player page and the
+Phase A exit run across hosts.
 
 - **`nfx-media` (A2, 2026-09-23):**
   - the demo's L8 planning (probe, ladder, argv, storyboard) ported to Rust, with
@@ -89,6 +89,22 @@ player page.
       and 16 KiB size caps.
     - Beacons are forwarded, never stored; stored events are capped at 20,000.
   - The test checks each refusal's reason prefix, not just that it failed.
+- **`nfxd`, the headless node (A2, 2026-09-23):**
+  - `nfxd key new|show` writes a 0600 key file (never overwrites; refuses a key readable
+    by group or others) and prints only public keys.
+  - `nfxd publish` turns an `nfx-package` output into an open, free manifest: duration
+    summed from the playlist, and the thumb with its MIME.
+  - `nfxd run`:
+    - `--seed`, `--fetch` and `--pull` take manifest `a` tags;
+    - `--origin` serves the pull-through origin, with `--https-url` announcing it as an
+      `https` endpoint;
+    - `--embed-relay` runs the scoped relay, which the host uses through the same door.
+  - A fetched video is seeded afterwards, since a free M1 peer gives back what it
+    watched.
+  - End-to-end test (3/3 runs, ~9 s): a fetcher with an origin and an embedded relay,
+    and a seeder that knows only that relay. The fetcher learns the seeder from a
+    verified beacon, fetches over iroh, serves the video over HTTP and becomes a
+    second seeder.
 
 - **Repository:** the private GitLab project. Every push
   was a fast-forward of `main` with sovtech's OK. The demo history, the spec commit
@@ -175,7 +191,7 @@ player page.
    - `nfx-node`: ~~store trait, iroh seed/fetch, gossip, Nostr manifests and
      beacons, the pull-through origin~~ done; the per-member window gate comes with
      M2;
-   - `nfxd`;
+   - ~~`nfxd`~~ done (gossip is not wired into it yet: Nostr beacons carry discovery);
    - ~~a scoped relay~~ done (`nfx-node::relay`, for `nfxd` to embed or run alone);
    - a test player page, which can grow out of the S3/S4 spike pages.
 2. **`nfx-proto` WASM bindings** for the web client: verify manifest, hash list and
