@@ -1,0 +1,18 @@
+[package]
+name = "nfx-media"
+version = "0.1.0"
+description = "NFX-05 packaging: the demo's L8 ladder/argv planning ported to Rust, an HLS/fMP4 tail, content addressing and hash-list assembly"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+hex.workspace = true
+nfx-proto.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -3,12 +3,27 @@
 **This file, not the demo's `docs/status.md` or the session handoffs (not published), is where work here
 resumes.** Those describe the Pear demo, a read-only mirror in this repository.
 
-Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 closed
+Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 closed · A2 in progress
 
 ## Where things stand
 
-**Phases A0 and A1 are complete.** The next phase is **A2, the Rust M1 data plane**
-(ADR 0008 §5): `nfx-media`, `nfx-node`, `nfxd`, the scoped relay and a test player page.
+**Phases A0 and A1 are complete. A2, the Rust M1 data plane, is in progress**
+(ADR 0008 §5): `nfx-media` is done; still to come are `nfx-node`, `nfxd`, the scoped
+relay and a test player page.
+
+- **`nfx-media` (A2, 2026-09-23):**
+  - the demo's L8 planning (probe, ladder, argv, storyboard) ported to Rust, with
+    L8's own unit expectations ported alongside (20 cases);
+  - an ISO-BMFF reader that takes CODECS from `avcC`/`esds` (5 cases, including every
+    truncation of a valid init);
+  - a packager and the `nfx-package` CLI: CMAF tail, content addressing, and a
+    self-check with `nfx-proto` before returning. The input is pinned to ffmpeg's
+    `file:` protocol, and segment names from ffmpeg's playlist are validated.
+  - Its output verifies with `nfx-verify-store` and plays, seeks and switches in
+    Chromium, Firefox and WebKit. The real-ffmpeg test passes on both the system
+    ffmpeg 6.1.1 and the pinned n8.1.2.
+  - Finding: x264's fastest presets signal Constrained Baseline even when High is
+    requested. NFX-05 §1 now says "High or a subset", with CODECS read from the stream.
 
 - **Repository:** the private GitLab project. Every push
   was a fast-forward of `main` with sovtech's OK. The demo history, the spec commit
@@ -91,8 +106,7 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 close
 ## Next
 
 1. **A2 — the Rust M1 data plane**, per ADR 0008 §5:
-   - `nfx-media`: port L8's ladder and codec argv, add an HLS/fMP4 tail, and parse
-     `avcC` for CODECS (S4);
+   - ~~`nfx-media`~~ done;
    - `nfx-node`: iroh-blobs behind a swappable store trait (S1), gossip, beacons via
      nostr-sdk, the pull-through origin, and the per-member window gate (S1);
    - `nfxd`;
@@ -101,11 +115,9 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 close
 2. **`nfx-proto` WASM bindings** for the web client: verify manifest, hash list and
    beacon from JS, and do the sha256 validation without WebCrypto's secure-context
    rule (S3).
-3. Watch the first real pipeline on the shared runner and fix anything specific to the
-   image.
-4. Carried risk: the iroh-blobs 0.103 README still says "not production quality". The
+3. Carried risk: the iroh-blobs 0.103 README still says "not production quality". The
    containment plan is in the S1 page.
-5. Optional: add the schema check (`jsonschema`) to `check.sh`.
+4. Optional: add the schema check (`jsonschema`) to `check.sh`.
 
 ## Not verified / known gaps
 

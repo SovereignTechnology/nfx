@@ -9,7 +9,10 @@ swarm economy and no implementation ever re-encodes between products.
 ## 1. Media profile
 
 - Container: **fMP4/CMAF**. One **init segment** per rendition, then media segments.
-- Baseline codecs (every publisher MUST offer): H.264 High (`avc1`) + AAC-LC (`mp4a`).
+- Baseline codecs (every publisher MUST offer): H.264 (`avc1`) at High profile or a subset
+  of it (Main, Constrained Baseline), plus AAC-LC (`mp4a`). Encoders signal the lowest
+  profile a stream fits (x264's fastest presets emit Constrained Baseline even when High
+  is requested), so `CODECS` MUST be read from the stream, never assumed.
 - Optional renditions: AV1 (`av01`) or VP9 (`vp09`) video, Opus (`opus`) audio —
   labelled in the hash list; players pick.
 - Segment duration: target 2 s, allowed 1–6 s; every media segment starts at an IDR
@@ -188,3 +191,5 @@ server generalizes to an origin when its admin pins NFX-05 content.
   the web mesh maps streams to renditions by playlist content name (NFX-10 §2).
 - Draft 2026-09-23: file names are unique within a hash list (licensed-mode associated
   data binds ciphertext to the name, NFX-08 §2).
+- Draft 2026-09-23 (A2 `nfx-media`): the baseline codec is H.264 at High *or a subset*;
+  `CODECS` comes from the stream, never from the requested profile.

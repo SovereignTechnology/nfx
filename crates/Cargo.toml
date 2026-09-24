@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["nfx-proto"]
+members = ["nfx-media", "nfx-proto"]
 
 [workspace.package]
 edition = "2024"
@@ -12,6 +12,7 @@ repository = "https://gitworkshop.dev/npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrz
 base64 = "0.23.1"
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
 hex = "0.4.3"
+nfx-proto = { path = "nfx-proto", version = "0.1.0" }
 k256 = { version = "0.14.0", default-features = false, features = ["schnorr", "arithmetic"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.151"

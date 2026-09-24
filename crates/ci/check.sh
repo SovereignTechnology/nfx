@@ -32,6 +32,12 @@ step "cargo clippy -D warnings"
 cargo clippy --workspace --all-targets --locked -- -D warnings
 step "cargo test"
 cargo test --workspace --locked
+if command -v "${NFX_FFMPEG:-ffmpeg}" >/dev/null 2>&1; then
+  step "nfx-media: package a real clip with ffmpeg"
+  cargo test -p nfx-media --locked --test package_ffmpeg -- --ignored
+else
+  step "nfx-media ffmpeg test: SKIPPED (no ffmpeg on PATH; set NFX_FFMPEG/NFX_FFPROBE)"
+fi
 step "cargo deny check"
 cargo deny check
 if [ "${NFX_SKIP_WASM:-0}" != 1 ]; then

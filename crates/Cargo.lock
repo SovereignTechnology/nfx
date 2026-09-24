@@ -365,6 +365,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nfx-media"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "nfx-proto",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "nfx-proto"
 version = "0.1.0"
 dependencies = [
