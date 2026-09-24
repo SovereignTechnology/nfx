@@ -26,6 +26,8 @@ pub enum Error {
     Gossip(String),
     #[error("invalid deletion: {0}")]
     Deletion(String),
+    #[error("invalid pay/1 message: {0}")]
+    Pay(String),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;

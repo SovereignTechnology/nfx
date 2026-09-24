@@ -1,0 +1,18 @@
+[package]
+name = "nfx-pay"
+version = "0.1.0"
+description = "NFX-07 open-mode payments: the session contracts, a mock engine and the adversary suite; the real engine, wallet and protocol are locked until the M2 security stage"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+nfx-proto.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

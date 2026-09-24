@@ -583,3 +583,29 @@ fn deletions_withdraw_their_own_addresses_only() {
         );
     }
 }
+
+#[test]
+fn pay1_messages_parse_as_the_vectors_say() {
+    use nfx_proto::pay::Message;
+    let v = vector!("pay1.json");
+    assert_eq!(v["max_line_bytes"], nfx_proto::pay::MAX_LINE_BYTES);
+    for case in v["valid"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        let m = Message::parse(str_of(case, "wire")).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let back: Value = serde_json::from_str(&m.to_line()).unwrap();
+        assert_eq!(back, case["message"], "{name}");
+        assert_eq!(
+            Message::parse(&m.to_line()).unwrap(),
+            m,
+            "{name} round-trips"
+        );
+    }
+    for case in v["invalid"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        assert!(
+            Message::parse(str_of(case, "wire")).is_err(),
+            "{name} must be refused ({})",
+            str_of(case, "why")
+        );
+    }
+}

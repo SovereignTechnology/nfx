@@ -86,7 +86,7 @@ them.
 | Code | Meaning | Defined in |
 |---|---|---|
 | `underpaid` | pay short of chunks claimed; also license payment short | NFX-07 §3, NFX-09 §2 |
-| `overpaid` | license payment exceeds `key_price` (exact-amount rule) | NFX-09 §2 |
+| `overpaid` | payment exceeds the exact amount: license payment above `key_price`, or a `pay` above chunks × price | NFX-09 §2, NFX-07 §3 |
 | `bad-mint` | proofs from an unaccepted mint | NFX-07 §3 |
 | `spent` | proofs already spent (mint swap failed) | NFX-07 §3 |
 | `bad-lock` | licensed chunk proof not P2PK-locked to the mint's `redeem_pubkey`, locktime too near, or no valid DLEQ | NFX-08 §4.1, NFX-09 §2 |
@@ -112,6 +112,7 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | Canonical-JSON vectors | `test-vectors/canon.json` |
 | Voucher vector | `test-vectors/voucher.json` |
 | Licensed-mode encryption vector (XChaCha20-Poly1305 with associated data) | `test-vectors/licensed.json` |
+| pay/1 messages, valid and invalid (NFX-07 §2) | `test-vectors/pay1.json` |
 | Gossip envelope vector | `test-vectors/gossip.json` |
 | Derived identifiers (namespaces, topics, infohash) | `test-vectors/derived.json` |
 | Generator (source of truth) | `test-vectors/generate.py` |
@@ -198,3 +199,5 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   on are the iroh 1.x series with iroh-blobs 0.103.x (the `BlobTicket` layout in NFX-06 §2)
   and iroh-gossip 0.101.x (§4), plus the vectors as of this date, including `tickets.json`
   and `deletion.json`.
+- 2026-09-24 (M2.0) — `overpaid` also covers a pay/1 `pay` above chunks × price (NFX-07
+  §3). New vector file `pay1.json` (NFX-07 §2 message rules).

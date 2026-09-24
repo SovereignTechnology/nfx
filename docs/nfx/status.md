@@ -359,6 +359,12 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 9. **Next: M2, paid delivery (open mode) on every transport** (ADR 0008 §5). This is
    money code: `nfx-wallet`, pay/1 (NFX-07), the mint extension (NFX-09) and the web
    wallet. It gets the locked-directory rule and its own security stage (ADR 0008 §4).
+   Plan and decisions: [`m2-plan.md`](m2-plan.md). sovtech chose the demo's staging, and a
+   persistent testnet mint.
+   - **M2.0 is built:** the pay/1 wire and vectors, the session contracts, the mock, and
+     the adversary suite (14 scenarios, each of 9 planted defects caught). The locked
+     paths are pinned and checked in CI.
+   - **Next:** the testnet mint, then M2.1, the serial security session.
 
 ## Not verified / known gaps
 

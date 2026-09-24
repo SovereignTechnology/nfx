@@ -17,6 +17,24 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
   subagents), against adversary tests written beforehand;
 - sovtech reads every diff in the locked paths.
 
+## Progress
+
+**M2.0 built (2026-09-24, branch `m2/contracts`):**
+- **Spec:** NFX-07 §2 message rules, and `overpaid` for pay/1 (NFX-11 §6). The
+  vectors `pay1.json` hold 9 valid and 22 invalid messages.
+- **Wire:** `nfx_proto::pay` parses and writes pay/1 messages. It is pure, so the web
+  wallet can use it through WASM.
+- **Contracts:** `nfx_pay::session` defines `Seeder`, `Viewer` and `Harness`.
+- **Mock:** `nfx_pay::mock` has a mock mint network plus honest seeder and viewer
+  engines, with plantable flaws.
+- **Suite:** `nfx_pay::adversary` has 14 scenarios covering every NFX-07 §3 duty, every
+  pay/1 `rej` code, isolation, the window, and the viewer's own duties.
+  - They pass against the honest mock.
+  - **Each of 9 planted defects fails its scenario** (`tests/mutants.rs`), so the suite
+    has teeth.
+- **Locked paths:** `crates/ci/check-locked.sh` pins five stub files and fails on any
+  edit, addition or removal. It is in `check.sh` and tested all three ways.
+
 ## Proposed stages
 
 **M2.0: contracts, mock and adversary tests (unlocked work, any session).**

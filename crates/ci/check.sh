@@ -27,6 +27,9 @@ else
   echo "skipped: no demo/main ref (no demo-base tag)"
 fi
 
+step "locked paths: money code only as reviewed (docs/nfx/m2-plan.md)"
+crates/ci/check-locked.sh
+
 cd crates
 step "cargo fmt --check"
 cargo fmt --all --check

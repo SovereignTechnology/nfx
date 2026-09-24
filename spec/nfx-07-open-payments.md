@@ -23,6 +23,23 @@ payment-enforced after release, so no mechanism pretends otherwise.
 { "t": "rej",   "code": "underpaid|bad-mint|spent|stale", "detail": "…" }
 ```
 
+**Message rules.**
+- One JSON object per line, UTF-8, at most 32 KiB including the newline.
+- `t` selects the message. An unknown `t` is an error; unknown fields are ignored.
+- Integers are non-negative and at most 2^53−1, so JavaScript peers read them exactly.
+- `session` is exactly 32 lowercase hex characters (128 bits).
+- `video` is an NFX video address (NFX-01).
+- `price_per_chunk` and `window` are at least 1. A seeder that serves for free does not
+  quote; it serves without pay/1.
+- `mints` holds 1 to 16 URLs. Each is `https://`, or `http://` on a loopback host (tests
+  only).
+- `upto_chunk` is at least 1: chunks are counted from 1 in delivery order.
+- `token` is a NUT-00 token string (`cashuA…` or `cashuB…`); its contents are the
+  engine's to check (§3).
+- A `rej` carries `code` and may carry `detail` (at most 1 KiB). Unknown codes MUST be
+  tolerated (NFX-11 §6).
+- Vectors: `test-vectors/pay1.json`.
+
 - `hello` (watcher→seeder) opens accounting for a video; `quote` (seeder→watcher)
   replies with the *binding* price (the beacon `price_hint` was advisory). `quote.mints`
   MUST be non-empty, and the seeder accepts proofs only from mints it quoted
@@ -35,8 +52,8 @@ payment-enforced after release, so no mechanism pretends otherwise.
 
 ## 3. Seeder duties (verification, in order)
 
-1. amount exactly covers the new chunks (reject `underpaid`, never extend credit on
-   miscount);
+1. amount exactly covers the new chunks: short is `underpaid`, over is `overpaid`,
+   and a product that overflows is `underpaid`; never extend credit on miscount;
 2. proofs well-formed per NUT-00, from a mint in its accepted set (`bad-mint`);
 3. offline DLEQ check when present; then **async NUT-03 swap** at the mint; a spent
    or failed proof → `rej` `spent`, stop serving, ban the session identity;
@@ -83,3 +100,7 @@ local policy; never global claims (no "bad payer list" events exist).
 - Draft 2026-09-23 (sovtech's decision, ADR 0008 addendum): `quote.mints` and
   `X-NFX-Mints` are non-empty and binding. The `accepts_mints` open issue is closed and
   §7 removed.
+- Draft 2026-09-24 (M2.0). §2 message rules: size, `t`, integer range, `session`,
+  `mints`, `price_per_chunk`/`window` ≥ 1 (free seeders do not quote), `upto_chunk` ≥ 1,
+  `token` prefix, `rej.detail`. §3: over-payment is `overpaid` (the exact-amount rule).
+  New vectors `pay1.json`.

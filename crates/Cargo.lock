@@ -3069,6 +3069,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nfx-pay"
+version = "0.1.0"
+dependencies = [
+ "nfx-proto",
+ "tokio",
+]
+
+[[package]]
 name = "nfx-proto"
 version = "0.1.0"
 dependencies = [

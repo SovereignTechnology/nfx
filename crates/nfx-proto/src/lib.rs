@@ -17,6 +17,7 @@ pub mod hashlist;
 mod hex32;
 pub mod manifest;
 pub mod namespace;
+pub mod pay;
 mod verified;
 pub mod voucher;
 

@@ -190,6 +190,57 @@ def render_hashlist(hashlist: dict) -> bytes:
     return json.dumps(hashlist, indent=2, ensure_ascii=False).encode() + b"\n"
 
 
+def pay1_vectors() -> dict:
+    """NFX-07 §2: pay/1 wire messages. Each `wire` is one NDJSON line without its newline."""
+    line = lambda obj: json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
+    video = "nfx:mainnet:1:salt-flats-dusk"
+    session = "0123456789abcdef0123456789abcdef"
+    valid = [
+        ("hello", {"t": "hello", "video": video, "session": session}),
+        ("quote", {"t": "quote", "price_per_chunk": 1, "mints": ["https://mint.example"], "window": 8}),
+        ("quote-loopback-mint", {"t": "quote", "price_per_chunk": 2, "mints": ["http://127.0.0.1:3338"], "window": 1}),
+        ("pay", {"t": "pay", "upto_chunk": 17, "token": "cashuBexampletoken"}),
+        ("ack", {"t": "ack", "accepted_upto": 17, "spent_total": 17}),
+        ("rej", {"t": "rej", "code": "underpaid", "detail": "short by 2 sat"}),
+        ("rej-unknown-code-no-detail", {"t": "rej", "code": "some-future-code"}),
+        ("hello-unknown-field", {"t": "hello", "video": video, "session": session, "x-future": 1}),
+        ("max-safe-integer", {"t": "ack", "accepted_upto": 9007199254740991, "spent_total": 0}),
+    ]
+    raw_invalid = [
+        ("not-json", "hello", "not JSON"),
+        ("not-an-object", line([1, 2]), "not an object"),
+        ("no-t", line({"video": video, "session": session}), "missing t"),
+        ("unknown-t", line({"t": "tip", "amount": 1}), "unknown t"),
+        ("session-short", line({"t": "hello", "video": video, "session": session[:-1]}), "session is 32 lowercase hex"),
+        ("session-uppercase", line({"t": "hello", "video": video, "session": session.upper()}), "session is 32 lowercase hex"),
+        ("bad-video", line({"t": "hello", "video": "mainnet:salt", "session": session}), "video is an NFX address"),
+        ("quote-no-mints", line({"t": "quote", "price_per_chunk": 1, "mints": [], "window": 8}), "mints is 1 to 16 URLs"),
+        ("quote-17-mints", line({"t": "quote", "price_per_chunk": 1, "mints": [f"https://m{i}.example" for i in range(17)], "window": 8}), "mints is 1 to 16 URLs"),
+        ("quote-http-mint", line({"t": "quote", "price_per_chunk": 1, "mints": ["http://mint.example"], "window": 8}), "mint must be https (or loopback http)"),
+        ("quote-price-zero", line({"t": "quote", "price_per_chunk": 0, "mints": ["https://mint.example"], "window": 8}), "price_per_chunk >= 1"),
+        ("quote-window-zero", line({"t": "quote", "price_per_chunk": 1, "mints": ["https://mint.example"], "window": 0}), "window >= 1"),
+        ("quote-float", '{"t":"quote","price_per_chunk":1.5,"mints":["https://mint.example"],"window":8}', "integers only"),
+        ("quote-negative", line({"t": "quote", "price_per_chunk": -1, "mints": ["https://mint.example"], "window": 8}), "non-negative"),
+        ("pay-upto-zero", line({"t": "pay", "upto_chunk": 0, "token": "cashuBx"}), "upto_chunk >= 1"),
+        ("pay-no-token", line({"t": "pay", "upto_chunk": 3}), "missing token"),
+        ("pay-not-cashu", line({"t": "pay", "upto_chunk": 3, "token": "lnbc1..."}), "token is a NUT-00 token"),
+        ("ack-missing", line({"t": "ack", "accepted_upto": 3}), "missing spent_total"),
+        ("rej-no-code", line({"t": "rej", "detail": "x"}), "missing code"),
+        ("rej-long-detail", line({"t": "rej", "code": "stale", "detail": "d" * 1025}), "detail at most 1 KiB"),
+        ("beyond-2^53", '{"t":"ack","accepted_upto":9007199254740992,"spent_total":0}', "integers at most 2^53-1"),
+        ("over-32-KiB", line({"t": "pay", "upto_chunk": 1, "token": "cashuB" + "a" * 32768}), "a line is at most 32 KiB"),
+    ]
+    return {
+        "description": "NFX-07 §2 pay/1 messages: one JSON object per line (NDJSON), at most "
+                       "32 KiB with its newline. Every 'valid' wire parses to its 'message' "
+                       "(unknown fields dropped); every 'invalid' wire MUST be refused.",
+        "max_line_bytes": 32768,
+        "valid": [{"name": n, "wire": line(m), "message": {k: v for k, v in m.items() if k != "x-future"}}
+                  for n, m in valid],
+        "invalid": [{"name": n, "wire": w, "why": why} for n, w, why in raw_invalid],
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--verify", action="store_true")
@@ -753,6 +804,7 @@ def main() -> int:
             "tickets": tickets,
         },
         "derived.json": derived,
+        "pay1.json": pay1_vectors(),
         "licensed.json": {
             "description": "NFX-08 §2 licensed-mode encryption of one file: stored = nonce || "
                            "XChaCha20-Poly1305-Encrypt(K, nonce, plaintext, aad) (IETF construction, "
