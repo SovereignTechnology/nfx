@@ -142,6 +142,18 @@ async fn a_bad_https_url_is_refused_at_start_not_silently_every_minute() {
     .expect("refused");
     assert!(err.to_string().contains("--https-url"), "{err}");
 
+    // Relay-only without a relay could never reach anyone: refused at start.
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("relay-only"),
+        relay_only: true,
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(err.to_string().contains("--relay-only"), "{err}");
+
     let ok = Daemon::start(Config {
         keys: Some(Keys::generate()),
         store: tmp("good-url"),

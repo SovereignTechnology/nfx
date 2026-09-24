@@ -8,9 +8,11 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 close
 ## Where things stand
 
 **Phases A0 and A1 are complete. A2, the Rust M1 data plane, is in progress**
-(ADR 0008 §5): every A2 piece is built and tested on this machine: `nfx-media`, `nfx-node`
-(iroh, Nostr, the pull-through origin, the scoped relay), `nfxd` and the test player.
-Still to come is the Phase A exit run across hosts, which needs sovtech's OK.
+(ADR 0008 §5): every A2 piece is built and tested: `nfx-media`, `nfx-node` (iroh, Nostr,
+the pull-through origin, the scoped relay), `nfxd` and the test player. **The Phase A exit
+run passed on 2026-09-24** between host-b and laptop, over a real iroh relay and over a
+direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
+**Phase A is complete.**
 
 - **`nfx-media` (A2, 2026-09-23):**
   - the demo's L8 planning (probe, ladder, argv, storyboard) ported to Rust, with
@@ -241,8 +243,8 @@ Still to come is the Phase A exit run across hosts, which needs sovtech's OK.
    - ~~`nfxd`~~ done (gossip is not wired into it yet: Nostr beacons carry discovery);
    - ~~a scoped relay~~ done (`nfx-node::relay`, for `nfxd` to embed or run alone);
    - ~~a test player page~~ done (`web/player/`);
-   - **the Phase A exit run: multi-host** (seeder, fetcher and origin on different
-     machines over a real iroh relay). It needs sovtech's OK for which hosts.
+   - ~~**the Phase A exit run: multi-host**~~ PASS 2026-09-24, host-b ↔ laptop
+     ([`phase-a-exit.md`](phase-a-exit.md)).
 2. ~~**`nfx-proto` WASM bindings**~~ done (`crates/nfx-wasm`; the test player uses
    them). Still open: resolving a manifest by `a` tag over Nostr in the browser.
 3. Carried risk: the iroh-blobs 0.103 README still says "not production quality". The

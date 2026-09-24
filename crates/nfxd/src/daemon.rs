@@ -47,6 +47,9 @@ pub struct Config {
     pub relays: Vec<String>,
     /// iroh relays this network runs (NFX-06 §1). Empty: direct connections only.
     pub iroh_relays: Vec<RelayUrl>,
+    /// No direct IP transports: every iroh byte crosses a relay. For proving the relay
+    /// path, and for hosts that must not expose UDP.
+    pub relay_only: bool,
     pub seed: Vec<String>,
     pub fetch: Vec<String>,
     pub pull: Vec<String>,
@@ -229,6 +232,9 @@ impl Daemon {
         if cfg.keys.is_none() && !(cfg.seed.is_empty() && cfg.fetch.is_empty()) {
             return Err(Error::Config("--seed and --fetch need --key".into()));
         }
+        if cfg.relay_only && cfg.iroh_relays.is_empty() {
+            return Err(Error::Config("--relay-only needs --iroh-relay".into()));
+        }
         if !cfg.pull.is_empty() && cfg.origin.is_none() {
             return Err(Error::Config("--pull needs --origin".into()));
         }
@@ -290,6 +296,7 @@ impl Daemon {
         let node = Arc::new(
             Node::spawn(NodeConfig {
                 relays: cfg.iroh_relays.clone(),
+                relay_only: cfg.relay_only,
                 blobs_dir: Some(state.join("iroh-blobs")),
                 ..NodeConfig::default()
             })

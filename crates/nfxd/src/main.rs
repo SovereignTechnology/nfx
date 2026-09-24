@@ -5,7 +5,7 @@
 //! nfxd key show <file>                     print a key file's public key
 //! nfxd publish --key <file> --relay <url>… --package <dir> --title <text>
 //!              [--description <md>] [--alt <text>] [--tag <t>]…
-//! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]…
+//! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--relay-only]
 //!          [--seed <a>]… [--fetch <a>]… [--pull <a>]… [--origin <addr:port>]
 //!          [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]…
 //! ```
@@ -29,7 +29,7 @@ const USAGE: &str = "usage:
   nfxd key new <file>
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]...";
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]...";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -147,6 +147,14 @@ async fn publish(args: &[String]) -> Result<()> {
 }
 
 async fn run(args: &[String]) -> Result<()> {
+    // The one flag without a value.
+    let relay_only = args.iter().any(|a| a == "--relay-only");
+    let args: Vec<String> = args
+        .iter()
+        .filter(|a| *a != "--relay-only")
+        .cloned()
+        .collect();
+    let args = args.as_slice();
     let f = flags(
         args,
         &[
@@ -186,6 +194,7 @@ async fn run(args: &[String]) -> Result<()> {
                     .map_err(|_| Error::Config(format!("--iroh-relay {u}: not a URL")))
             })
             .collect::<Result<_>>()?,
+        relay_only,
         seed: all(&f, "seed"),
         fetch: all(&f, "fetch"),
         pull: all(&f, "pull"),
