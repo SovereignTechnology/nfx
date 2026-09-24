@@ -4,12 +4,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::net::Ipv4Addr;
-use std::path::PathBuf;
+mod common;
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use base64::Engine as _;
-use iroh::RelayUrl;
+use common::{relay, tmp, vector_store};
 use iroh::address_lookup::MemoryLookup;
 use iroh_blobs::api::blobs::AddBytesOptions;
 use iroh_blobs::hashseq::HashSeq;
@@ -22,74 +21,8 @@ use nfx_node::node::{Node, NodeConfig};
 use nfx_node::store::{ContentStore, FsStore};
 use nfx_node::video::rendition_members;
 use nfx_proto::beacon::{BeaconContent, Chunks};
-use nfx_proto::event::{Event, public_key_hex};
+use nfx_proto::event::public_key_hex;
 use nfx_proto::gossip::{Envelope, Op};
-use nfx_proto::hashlist::HashList;
-use nfx_proto::manifest::Manifest;
-use serde_json::Value;
-
-struct Vector {
-    manifest: Manifest,
-    list: HashList,
-    seeder_secret: [u8; 32],
-}
-
-/// The test-vector video, written into a fresh store.
-fn vector_store(dir: &PathBuf) -> (FsStore, Vector) {
-    let m: Value =
-        serde_json::from_str(include_str!("../../../spec/test-vectors/manifest.json")).unwrap();
-    let manifest =
-        Manifest::from_event(&serde_json::from_value::<Event>(m["event"].clone()).unwrap())
-            .unwrap();
-    let hl: Value =
-        serde_json::from_str(include_str!("../../../spec/test-vectors/hashlist.json")).unwrap();
-    let list: HashList = serde_json::from_value(hl["hashlist"].clone()).unwrap();
-    let store = FsStore::open(dir).unwrap();
-    assert_eq!(store.put(&list.render()).unwrap(), manifest.root_hex());
-    for b64 in hl["fabricated"].as_object().unwrap().values() {
-        store
-            .put(
-                &base64::engine::general_purpose::STANDARD
-                    .decode(b64.as_str().unwrap())
-                    .unwrap(),
-            )
-            .unwrap();
-    }
-    for text in hl["playlists"].as_object().unwrap().values() {
-        store.put(text.as_str().unwrap().as_bytes()).unwrap();
-    }
-    let mut seeder_secret = [0u8; 32];
-    hex::decode_to_slice(
-        m["secret_keys_DO_NOT_USE"]["seeder"].as_str().unwrap(),
-        &mut seeder_secret,
-    )
-    .unwrap();
-    (
-        store,
-        Vector {
-            manifest,
-            list,
-            seeder_secret,
-        },
-    )
-}
-
-async fn relay() -> (iroh_relay::server::Server, RelayUrl) {
-    use iroh_relay::server::{RelayConfig, Server, ServerConfig};
-    let mut config = ServerConfig::default();
-    config.relay = Some(RelayConfig::new((Ipv4Addr::LOCALHOST, 0)));
-    let server = Server::spawn(config).await.unwrap();
-    let url = format!("http://{}", server.http_addr().unwrap())
-        .parse()
-        .unwrap();
-    (server, url)
-}
-
-fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("nfx-node-it-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    d
-}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn seed_fetch_tamper_and_gossip_over_a_self_hosted_relay() {

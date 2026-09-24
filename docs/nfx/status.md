@@ -8,8 +8,8 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 close
 ## Where things stand
 
 **Phases A0 and A1 are complete. A2, the Rust M1 data plane, is in progress**
-(ADR 0008 §5): `nfx-media` is done, and `nfx-node` has its iroh and Nostr layers. Still
-to come are the pull-through origin, `nfxd`, the scoped relay and a test player page.
+(ADR 0008 §5): `nfx-media` is done, and `nfx-node` has its iroh and Nostr layers and the
+pull-through origin. Still to come are `nfxd`, the scoped relay and a test player page.
 
 - **`nfx-media` (A2, 2026-09-23):**
   - the demo's L8 planning (probe, ladder, argv, storyboard) ported to Rust, with
@@ -56,6 +56,27 @@ to come are the pull-through origin, `nfxd`, the scoped relay and a test player 
     revision replaces its predecessor, a creator-signed manifest with no `root` is
     dropped, an older beacon is skipped, and a newer one is delivered.
   - `cargo deny`: CC0-1.0 is allowed (rust-bitcoin via nostr, and CDK later).
+- **`nfx-node` layer 3, the NFX-05 §6 origin (A2, 2026-09-23):**
+  - `Origin` serves the §6 routes over the content store on hyper (HTTP/1.1; TLS
+    belongs to the CDN or proxy in front):
+    - hits carry `immutable`, and every error carries `no-store`;
+    - every response carries CORS `*`, `nosniff`, and a sandboxing CSP;
+    - thumb MIME types come from an allow-list, so a creator cannot make the origin
+      serve HTML.
+  - It serves only files listed in hash lists it verified against a manifest's `root`
+    (not an open proxy), and every body is re-verified on read.
+  - Pull-through (§6.2):
+    - `SwarmPull` fetches misses over iroh from tickets in verified beacons, which
+      lapse when their beacon expires;
+    - a seeder caught lying is forgotten;
+    - concurrent misses on one video share one pull;
+    - a failed pull is a generic 502 `no-store`.
+  - Tests (3/3 runs, ~7 s):
+    - routes, headers and refusals, including a store file that rotted on disk
+      (500, never served) and a `text/html` thumb (served as octet-stream);
+    - pull-through over a relay-only node: the lying seeder is tried first, caught
+      and forgotten, and four concurrent misses are served verified bytes over real
+      HTTP.
 
 - **Repository:** the private GitLab project. Every push
   was a fast-forward of `main` with sovtech's OK. The demo history, the spec commit
@@ -140,8 +161,8 @@ to come are the pull-through origin, `nfxd`, the scoped relay and a test player 
 1. **A2 — the Rust M1 data plane**, per ADR 0008 §5:
    - ~~`nfx-media`~~ done;
    - `nfx-node`: ~~store trait, iroh seed/fetch, gossip, Nostr manifests and
-     beacons~~ done; next comes the pull-through origin, then the per-member window
-     gate (M2);
+     beacons, the pull-through origin~~ done; the per-member window gate comes with
+     M2;
    - `nfxd`;
    - a scoped relay;
    - a test player page, which can grow out of the S3/S4 spike pages.

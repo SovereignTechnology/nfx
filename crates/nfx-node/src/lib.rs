@@ -12,6 +12,7 @@ pub mod fetch;
 pub mod gossip;
 pub mod node;
 pub mod nostr;
+pub mod origin;
 pub mod seed;
 pub mod store;
 pub mod video;
