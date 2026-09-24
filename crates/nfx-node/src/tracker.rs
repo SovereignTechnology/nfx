@@ -46,8 +46,8 @@ pub const ANNOUNCE_INTERVAL_SECS: u64 = 120;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// Offers accepted in one announce (p2p-media-loader sends 5).
 pub const MAX_OFFERS: usize = 10;
-/// Largest SDP in an offer or answer.
-pub const MAX_SDP_BYTES: usize = 16 * 1024;
+/// Largest SDP in an offer or answer (a browser's, with its candidates, is 1–3 KiB).
+pub const MAX_SDP_BYTES: usize = 8 * 1024;
 /// Peers in one swarm.
 pub const MAX_PEERS_PER_SWARM: usize = 1000;
 /// Swarms one socket may be in (one per rendition and stream type it plays).
@@ -57,7 +57,7 @@ pub const MAX_ADMITTED: usize = 65_536;
 
 /// Messages queued for one socket; beyond this, relayed offers to it are dropped (the
 /// offerer times them out, as it would for a peer that never answers).
-const OUTBOX: usize = 64;
+const OUTBOX: usize = 32;
 /// A socket that sends nothing, pong included, for this long is closed.
 const SILENCE_LIMIT: Duration = Duration::from_secs(75);
 const PING_EVERY: Duration = Duration::from_secs(30);

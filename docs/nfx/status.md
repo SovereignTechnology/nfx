@@ -333,8 +333,15 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 5. ~~Add the schema check (`jsonschema`) to `check.sh`~~ done (`spec/schemas/check.py`).
 6. ~~M1 hardening carry-forwards~~ done 2026-09-24: gossip in `nfxd`, the creator
    allow-list and `Verified<T>`. NIP-42 is blocked upstream (see above).
-7. **Left for M1: the WebRTC browser mesh (NFX-10, freezes at M4).** Browsers still
-   fetch from origins only.
+7. ~~The WebRTC browser mesh (NFX-10)~~ **built 2026-09-24 on `nfx10/mesh`**, awaiting
+   an independent audit and sovtech's OK to push
+   ([`nfx-10-m1-plan.md`](nfx-10-m1-plan.md)).
+   - The player joins with `&tracker=`, and every segment from a peer or HTTP is
+     verified by WASM.
+   - `nfxd --embed-tracker` admits only the swarms of videos it holds.
+   - `nfxd --bridge` is a Rust WebRTC peer (str0m) that serves browsers from the
+     verified store.
+   - `e2e-mesh.ts` passes 3/3. NFX-10 stays Draft (freeze at M4).
 
 ## Not verified / known gaps
 

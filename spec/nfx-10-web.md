@@ -15,6 +15,19 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   2. **scoped-relay signaling** (NFX-04) — censorship-resistant fallback: SDP offers/
      answers relayed as short-lived nostr ephemerals (profile TBD before freeze;
      never carry blob bytes).
+- **Every segment is verified before use, whatever its source.** A player MUST check
+  each segment, from a peer or over HTTPS, against the verified hash list (NFX-05 §4)
+  before handing it to the media stack. With p2p-media-loader that means both
+  `validateP2PSegment` and `validateHTTPSegment`: the library completes a segment only
+  after its validator accepts it, and it drops a peer that sent a bad one. Playlists and
+  init segments never travel over the mesh.
+- **Finding trackers.** A page is configured with its network's tracker URLs, the same
+  way it is configured with relays (NFX-04). A bridge's beacon `webrtc` endpoint (§2)
+  names the trackers through which it can be reached.
+- **Trackers admit only NFX swarms they can name.** A tracker SHOULD refuse any
+  `info_hash` that is not the §2 infohash of a rendition it holds a verified hash list
+  for, so it cannot be used as a general signalling service. It relays SDP only, never
+  segment bytes.
 
 ## 2. Swarms and bridges
 
@@ -53,6 +66,17 @@ with an extra endpoint:
 rendition in the hash list. Swarm IDs and infohashes are always derived and never
 carried. Native↔web chunk accounting happens on the bridge's own books: it acts as a
 normal seeder upstream and a normal p2p-media-loader peer downstream.
+
+- **Segment identity on the wire.** p2p-media-loader names a segment by a number: for
+  VOD (`#EXT-X-ENDLIST`) it is the segment's 0-based position in its rendition playlist,
+  not the media sequence number. A bridge maps that position to the playlist's content
+  name and serves the file with that sha256. Init segments are never requested.
+- **A bridge serves only verified bytes**: files it holds, checked against the hash
+  list. It has no need to take bytes from browsers. If it does, they are verified like
+  any peer's.
+- **Protocol versions.** The stream swarm ID does not carry p2p-media-loader's peer
+  protocol version. An incompatible future peer protocol therefore needs a new NFX swarm
+  ID version (`nfx/2/web/…`), not a change to this one.
 
 ## 3. Payments in the browser
 
@@ -131,3 +155,9 @@ NFX-05 byte formats.
   mapped to renditions by playlist content name. The `webrtc` endpoint drops `infohash`
   and gains an optional `renditions`. The old per-video `hex(sha256(…)[0..20])` could not
   be announced by any p2p-media-loader v4 peer.
+- Draft 2026-09-24 (M1 mesh built). §1: every segment is verified whatever its source;
+  pages are configured with trackers like relays; trackers admit only swarms they can
+  name. §2: the external segment id is the VOD playlist position; bridges serve only
+  verified bytes; the swarm ID carries no p2p-media-loader protocol version. Evidence:
+  `web/player/e2e-mesh.ts` (a real player, the embedded tracker and the Rust bridge, PASS
+  3/3).

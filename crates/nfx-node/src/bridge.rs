@@ -43,6 +43,11 @@ pub const OPEN_TIMEOUT: Duration = Duration::from_secs(20);
 const CHUNK: usize = 16 * 1024;
 /// Segments one announcement may list (p2p-media-loader caps groups at 255 blocks of 256).
 const MAX_ANNOUNCED: usize = 255 * 256;
+/// Requests per peer: a burst, then a steady rate. Each one reads and re-hashes a whole
+/// segment, and a player needs a few per segment duration at most; a peer beyond this is
+/// dropped.
+const REQUEST_BURST: f64 = 60.0;
+const REQUESTS_PER_SEC: f64 = 20.0;
 
 /// One rendition's swarm: its infohash and its segments by external id (the 0-based
 /// position in the VOD playlist, as p2p-media-loader-hlsjs numbers them).
@@ -184,6 +189,8 @@ struct Peer {
     /// Messages to send, each tagged with the upload (request id) it belongs to.
     out: VecDeque<(Option<u64>, Vec<u8>)>,
     upload: Option<u64>,
+    tokens: f64,
+    refilled: Instant,
     wake: Instant,
     born: Instant,
     dead: bool,
@@ -336,6 +343,8 @@ impl State {
             reassembler: Reassembler::default(),
             out: VecDeque::new(),
             upload: None,
+            tokens: REQUEST_BURST,
+            refilled: now,
             wake: now,
             born: now,
             dead: false,
@@ -483,6 +492,15 @@ fn event(p: &mut Peer, e: Event, segments: Option<&Vec<String>>, store: &dyn Con
 fn command(p: &mut Peer, cmd: Command, segments: Option<&Vec<String>>, store: &dyn ContentStore) {
     match cmd {
         Command::Request { id, request, from } => {
+            let now = Instant::now();
+            p.tokens = (p.tokens + now.duration_since(p.refilled).as_secs_f64() * REQUESTS_PER_SEC)
+                .min(REQUEST_BURST);
+            p.refilled = now;
+            if p.tokens < 1.0 {
+                p.dead = true;
+                return;
+            }
+            p.tokens -= 1.0;
             // One upload per peer: a new request cancels the one in progress first.
             if let Some(old) = p.upload.take() {
                 p.out.retain(|(tag, _)| *tag != Some(old));

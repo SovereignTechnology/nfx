@@ -1,5 +1,11 @@
 # NFX-10 at M1: the free browser mesh — plan (2026-09-24)
 
+**Status (2026-09-24): built on branch `nfx10/mesh`. Every item below is done, with
+the bridge in M1 as decided.** Review: [`reviews/2026-09-24-nfx10-m1.md`](reviews/2026-09-24-nfx10-m1.md).
+The e2e (`web/player/e2e-mesh.ts`) passes 3/3:
+- a real player gets segments over WebRTC and rejects a tampered one;
+- with its origin cut off, it plays on from the Rust bridge.
+
 NFX-10 is Draft (freeze at M4). M1 is the *free* end-to-end slice (ADR 0008 §5). Spike S3
 showed the free mesh runs on **upstream p2p-media-loader 4.0.0 unmodified**, with
 validators rejecting a tampered peer ([`spikes/s3-web-mesh.md`](spikes/s3-web-mesh.md)).
