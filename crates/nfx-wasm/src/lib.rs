@@ -185,7 +185,7 @@ impl VerifiedHashList {
     /// one rendition. `None` when it maps to no rendition; such a stream joins no swarm.
     #[must_use]
     pub fn stream_swarm_id(&self, path: &str) -> Option<String> {
-        let last = path.split('/').filter(|p| !p.is_empty()).next_back()?;
+        let last = path.split('/').rfind(|p| !p.is_empty())?;
         let rendition = self.list.rendition_for_playlist(last)?;
         let video = VideoAddr::parse(&self.list.video).ok()?;
         Some(video.web_stream_swarm_id(&rendition.id))
