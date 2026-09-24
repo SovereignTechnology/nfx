@@ -1,10 +1,11 @@
 //! iroh-gossip presence envelopes (NFX-06 §4): signed by the seeder's nostr key over
 //! `sha256(canon(body))`, where `body` is the message without `sig`.
 
-use crate::beacon::{Beacon, BeaconContent, parse_a_tag};
+use crate::beacon::{Beacon, BeaconContent};
 use crate::canon;
 use crate::event::{sign_digest, verify_digest};
 use crate::hex32::is_lower_hex;
+use crate::manifest::Manifest;
 use crate::namespace::VideoAddr;
 use crate::{Error, MAX_CLOCK_SKEW, Result, Verified, sha256};
 
@@ -125,24 +126,40 @@ fn bad(reason: &str) -> Error {
     Error::Gossip(reason.to_owned())
 }
 
+/// A seeder heard over a video's gossip swarm, as a pull source for one manifest of that
+/// video. It is a distinct type from a relay beacon, so code can rank the two differently
+/// and a presence can never pass for a beacon: only [`Verified::<Envelope>::presence_for`]
+/// makes a verified one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Presence {
+    /// `creator` comes from the manifest it was bound to, not from the envelope.
+    pub beacon: Beacon,
+}
+
 impl Verified<Envelope> {
-    /// A `here` envelope as a pull source for the manifest at `manifest_a` (a
-    /// [`Manifest::a_tag`](crate::manifest::Manifest::a_tag)) of the same video. It lapses
-    /// [`EVICT_AFTER`] after `created_at` (NFX-06 §4). `None` for `bye`, or when `manifest_a`
-    /// names another video. The envelope does not name the creator, so this presence
-    /// claims only the video: the bytes are checked against that manifest when fetched.
+    /// A `here` envelope as a pull source for `manifest` (same video). `created_at` is
+    /// capped at `now`, the time it was heard, so a presence dated into the future does not
+    /// outlive [`EVICT_AFTER`] (NFX-06 §4). `None` for `bye`, or for another video. The
+    /// envelope does not name the creator: this presence claims only the video, and its
+    /// bytes are checked against `manifest`'s hash list when fetched.
     #[must_use]
-    pub fn presence_for(&self, manifest_a: &str) -> Option<Verified<Beacon>> {
-        let (creator, video) = parse_a_tag(manifest_a).ok()?;
-        if self.op != Op::Here || video != self.beacon.video {
+    pub fn presence_for(
+        &self,
+        manifest: &Verified<Manifest>,
+        now: u64,
+    ) -> Option<Verified<Presence>> {
+        if self.op != Op::Here || manifest.addr != self.beacon.video {
             return None;
         }
-        Some(Verified::new(Beacon {
-            seeder: self.pubkey.clone(),
-            created_at: self.created_at,
-            expiration: self.created_at.saturating_add(EVICT_AFTER),
-            creator,
-            content: self.beacon.clone(),
+        let created_at = self.created_at.min(now);
+        Some(Verified::new(Presence {
+            beacon: Beacon {
+                seeder: self.pubkey.clone(),
+                created_at,
+                expiration: created_at.saturating_add(EVICT_AFTER),
+                creator: manifest.author.clone(),
+                content: self.beacon.clone(),
+            },
         }))
     }
 }

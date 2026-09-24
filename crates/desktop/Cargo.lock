@@ -3622,6 +3622,7 @@ dependencies = [
  "bytes",
  "http-body-util",
  "hyper",
+ "iroh",
  "nfx-proto",
  "nfxd",
  "serde",

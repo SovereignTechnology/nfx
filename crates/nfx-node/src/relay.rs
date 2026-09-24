@@ -308,11 +308,31 @@ impl ScopedRelay {
         Self::build(namespaces, None)
     }
 
-    /// A scoped relay admitting only `creators` (x-only pubkey hex): their manifests and
-    /// deletions, and beacons for their videos.
-    #[must_use]
-    pub fn with_creators(namespaces: &[Namespace], creators: &[String]) -> Self {
-        Self::build(namespaces, Some(creators.iter().cloned().collect()))
+    /// A scoped relay admitting only `creators` (x-only pubkey, 64 lowercase hex): their
+    /// manifests and deletions, and beacons for their videos. It limits *which videos* the
+    /// relay carries. It does not limit who may seed them: beacons from any seeder key for
+    /// a listed creator's video are admitted (under the §2 per-key limits).
+    ///
+    /// An empty list, or a key in any other form, is an error: either would silently
+    /// admit no one.
+    pub fn with_creators(namespaces: &[Namespace], creators: &[String]) -> crate::Result<Self> {
+        if creators.is_empty() {
+            return Err(crate::NodeError::Relay("empty creator allow-list".into()));
+        }
+        if let Some(bad) = creators.iter().find(|c| {
+            c.len() != 64
+                || !c
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }) {
+            return Err(crate::NodeError::Relay(format!(
+                "allow-list entry is not 64 lowercase hex: {bad}"
+            )));
+        }
+        Ok(Self::build(
+            namespaces,
+            Some(creators.iter().cloned().collect()),
+        ))
     }
 
     fn build(namespaces: &[Namespace], creators: Option<BTreeSet<String>>) -> Self {

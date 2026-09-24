@@ -36,10 +36,13 @@ impl Node {
     /// Join `video`'s swarm topic, bootstrapping from `peers`: each is dialled only at the
     /// addresses [`Node::trusted`] keeps, and a peer with none left is skipped.
     ///
-    /// Refused on a relay-only node. iroh-gossip passes the addresses peers advertise in
-    /// the swarm straight to the endpoint, and iroh dials any relay URL it is given, so a
-    /// swarm member could make the node contact a relay host of its choosing and learn
-    /// the IP address that relay-only mode exists to hide.
+    /// **Joining exposes the whole endpoint to the swarm's members.** iroh-gossip passes
+    /// the addresses members advertise, for any endpoint id, straight to the endpoint's
+    /// address lookup. iroh then dials any relay URL it is given, even on connections
+    /// that [`Node::dial`] filtered. So a member can make the node contact a host of its
+    /// choosing: a blind SSRF, and on a relay-only node the IP address that mode hides.
+    /// iroh-gossip also keeps the peer data members send, unpruned. Callers should
+    /// gossip only when asked to; `nfxd` makes it opt-in. Refused on a relay-only node.
     pub async fn join_swarm(&self, video: &VideoAddr, peers: Vec<EndpointAddr>) -> Result<Swarm> {
         if self.relay_only() {
             return Err(NodeError::Transport(

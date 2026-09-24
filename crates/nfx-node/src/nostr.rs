@@ -372,7 +372,7 @@ impl Relays {
         })
     }
 
-    pub async fn shutdown(self) {
+    pub async fn shutdown(&self) {
         self.client.shutdown().await;
     }
 }

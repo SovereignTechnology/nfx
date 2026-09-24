@@ -412,6 +412,32 @@ fn gossip_envelope_is_reproduced_and_verified() {
         Envelope::verify(&fits, &addr, now).is_ok(),
         "exactly 4 KiB is fine"
     );
+
+    // A `here` binds only to a manifest of its own video, takes the creator from it, and is
+    // dated no later than when it was heard.
+    let manifest = Manifest::from_event(&event(&vector!("manifest.json")["event"])).unwrap();
+    assert_eq!(manifest.addr, addr);
+    let p = env.presence_for(&manifest, now).unwrap();
+    assert_eq!(p.beacon.creator, manifest.author);
+    assert_eq!(p.beacon.seeder, env.pubkey);
+    assert_eq!(p.beacon.created_at, env.created_at.min(now));
+    let earlier = env.created_at - 60;
+    let p = env.presence_for(&manifest, earlier).unwrap();
+    assert_eq!(p.beacon.created_at, earlier, "a future date is capped");
+    assert_eq!(p.beacon.expiration, earlier + 240);
+    let mv = vector!("manifest.json");
+    let mut other = manifest.clone().into_inner();
+    other.addr = VideoAddr::parse("nfx:mainnet:1:another-video").unwrap();
+    let other = Event::sign(
+        &secret(&mv, "creator"),
+        manifest.created_at,
+        KIND_MANIFEST,
+        other.tags(),
+        other.description.clone(),
+    )
+    .unwrap();
+    let other = Manifest::from_event(&other).unwrap();
+    assert!(env.presence_for(&other, now).is_none(), "another video");
 }
 
 #[test]

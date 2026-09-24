@@ -70,3 +70,20 @@ named creators. Revisit when nostr-sdk lets the relay URL be configured.
     compositor never appears.
 
 Verdict: **no blocker.**
+
+## Correction (2026-09-24, after the independent audit)
+
+An independent audit of these commits found what this self-review missed. Its record,
+with resolutions, is [`2026-09-24-independent-audit.md`](2026-09-24-independent-audit.md).
+Three claims above were wrong or only half true:
+- **G1 was only partly fixed.** Keeping relay-only nodes out of gossip did not stop the
+  problem on normal nodes. A swarm member can attach any relay URL to *any* endpoint id,
+  an honest seeder's included, so even a filtered `Node::dial` contacts it: a blind SSRF
+  (audit M1). **Gossip is now opt-in** (`--gossip`).
+- **G5b fixed eviction only.** Gossip sources were still tried before a relay source on
+  cooldown, and future-dated presences outlived `EVICT_AFTER` (audit M2).
+- **`Verified<T>` did not stop `learn()` from taking a gossip presence** (audit L1).
+  Presences are now their own type.
+
+The audit also found a High this review missed entirely: a stuck gossip broadcast
+silently stopped relay beacons (H1).

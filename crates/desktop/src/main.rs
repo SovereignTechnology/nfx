@@ -17,6 +17,7 @@
 //! each step on stdout as JSON lines and exits with `RESULT PASS|FAIL`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use http_body_util::BodyExt as _;
@@ -49,7 +50,8 @@ struct TestConfig {
 struct AppState {
     dir: PathBuf,
     pubkey: String,
-    daemon: RwLock<Option<Daemon>>,
+    /// Held as `Arc` so a call (a watch can take 150 s) never holds the lock while it waits.
+    daemon: RwLock<Option<Arc<Daemon>>>,
     settings: RwLock<Settings>,
     test: Option<TestConfig>,
 }
@@ -59,13 +61,9 @@ impl AppState {
         self.dir.join("settings.json")
     }
 
-    async fn start(&self, settings: &Settings) -> Result<Daemon, String> {
+    async fn start(&self, settings: &Settings) -> Result<Arc<Daemon>, String> {
         let keys = key::load(&self.dir.join("node.key")).map_err(|e| e.to_string())?;
-        let iroh_relays = settings
-            .iroh_relays
-            .iter()
-            .map(|u| u.parse().map_err(|_| format!("not an iroh relay URL: {u}")))
-            .collect::<Result<_, _>>()?;
+        let iroh_relays = parse_iroh_relays(settings)?;
         Daemon::start(Config {
             keys: Some(keys),
             store: self.dir.join("store"),
@@ -75,12 +73,18 @@ impl AppState {
             ..Config::default()
         })
         .await
+        .map(Arc::new)
         .map_err(|e| e.to_string())
+    }
+
+    /// The running daemon, without holding the lock.
+    async fn daemon(&self) -> Option<Arc<Daemon>> {
+        self.daemon.read().await.clone()
     }
 
     /// NFX-05 §6 through the daemon's origin: verified bytes, misses pulled from the swarm.
     async fn serve(&self, method: &Method, path: &str) -> Response<Vec<u8>> {
-        let origin = self.daemon.read().await.as_ref().and_then(Daemon::origin);
+        let origin = self.daemon().await.and_then(|d| d.origin());
         let Some(origin) = origin else {
             return plain(StatusCode::SERVICE_UNAVAILABLE, "no node running");
         };
@@ -102,6 +106,22 @@ fn plain(status: StatusCode, text: &str) -> Response<Vec<u8>> {
 
 fn relay_ok(u: &str) -> bool {
     u.starts_with("wss://") || u.starts_with("ws://")
+}
+
+fn parse_iroh_relays(settings: &Settings) -> Result<Vec<iroh::RelayUrl>, String> {
+    settings
+        .iroh_relays
+        .iter()
+        .map(|u| u.parse().map_err(|_| format!("not an iroh relay URL: {u}")))
+        .collect()
+}
+
+/// The app's own pages: `tauri://localhost` (Linux, macOS) or `http://tauri.localhost`
+/// (Windows). `nfx://` serves media to them and is never a page to navigate to: a document
+/// there would be a local origin with IPC.
+fn app_page(url: &tauri::Url) -> bool {
+    url.scheme() == "tauri"
+        || (matches!(url.scheme(), "http" | "https") && url.host_str() == Some("tauri.localhost"))
 }
 
 #[derive(Serialize)]
@@ -137,15 +157,26 @@ async fn save_settings(
         relays: trim(relays),
         iroh_relays: trim(iroh_relays),
     };
+    // Checked before anything stops: a bad setting leaves the running node alone.
     if let Some(bad) = new.relays.iter().find(|u| !relay_ok(u)) {
         return Err(format!("a relay must be ws:// or wss://: {bad}"));
     }
-    // Start the new node before stopping the old one would bind twice; stop first.
+    parse_iroh_relays(&new)?;
+    // Both nodes would open one store; stop the old one first. `shutdown` releases the
+    // store even while a pending watch still holds the old daemon.
     let mut daemon = state.daemon.write().await;
     if let Some(old) = daemon.take() {
         old.shutdown().await;
     }
-    *daemon = Some(state.start(&new).await?);
+    match state.start(&new).await {
+        Ok(d) => *daemon = Some(d),
+        Err(e) => {
+            // Back to the old settings rather than no node at all.
+            let old = state.settings.read().await.clone();
+            *daemon = state.start(&old).await.ok();
+            return Err(e);
+        }
+    }
     let json = serde_json::to_vec_pretty(&new).map_err(|e| e.to_string())?;
     std::fs::write(state.settings_path(), json).map_err(|e| e.to_string())?;
     *state.settings.write().await = new;
@@ -162,8 +193,10 @@ struct Watched {
 
 #[tauri::command]
 async fn watch(state: State<'_, AppState>, a: String) -> Result<Watched, String> {
-    let daemon = state.daemon.read().await;
-    let daemon = daemon.as_ref().ok_or("no node running; set relays first")?;
+    let daemon = state
+        .daemon()
+        .await
+        .ok_or("no node running; set relays first")?;
     let m = daemon
         .watch(a.trim(), WATCH_TIMEOUT)
         .await
@@ -178,9 +211,9 @@ async fn watch(state: State<'_, AppState>, a: String) -> Result<Watched, String>
 
 #[tauri::command]
 async fn status(state: State<'_, AppState>) -> Result<Vec<(String, String)>, String> {
-    let daemon = state.daemon.read().await;
-    Ok(daemon
-        .as_ref()
+    Ok(state
+        .daemon()
+        .await
         .map(|d| {
             d.state()
                 .into_iter()
@@ -202,15 +235,25 @@ fn test_config(state: State<'_, AppState>) -> Option<TestConfig> {
     state.test.clone()
 }
 
+/// Test mode only: a line of the e2e's report.
 #[tauri::command]
-fn report(line: String) {
+fn report(state: State<'_, AppState>, line: String) -> Result<(), String> {
+    if state.test.is_none() {
+        return Err("not in test mode".into());
+    }
     println!("{line}");
+    Ok(())
 }
 
+/// Test mode only: the e2e's verdict, then exit.
 #[tauri::command]
-fn done(app: tauri::AppHandle, ok: bool) {
+fn done(app: tauri::AppHandle, state: State<'_, AppState>, ok: bool) -> Result<(), String> {
+    if state.test.is_none() {
+        return Err("not in test mode".into());
+    }
     println!("RESULT {}", if ok { "PASS" } else { "FAIL" });
     app.exit(if ok { 0 } else { 1 });
+    Ok(())
 }
 
 fn load_settings(path: &Path) -> Settings {
@@ -232,6 +275,11 @@ fn main() {
         });
     }
     tauri::Builder::default()
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("nav-guard")
+                .on_navigation(|_, url| app_page(url))
+                .build(),
+        )
         .setup(move |app| {
             let dir = match std::env::var_os("NFX_DESKTOP_DATA") {
                 Some(d) => PathBuf::from(d),

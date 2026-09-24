@@ -35,7 +35,8 @@ pub struct NodeConfig {
     /// Directory for iroh-blobs' own index. `None` keeps it in memory, which also means
     /// seeded files are copied into RAM: long-running nodes should set it.
     pub blobs_dir: Option<PathBuf>,
-    /// Extra address lookup (e.g. peers known out of band).
+    /// Extra address lookup, trusted as given: the operator's peers known out of band. It
+    /// bypasses [`Node::trusted`], so never fill it from the network.
     pub lookup: Option<MemoryLookup>,
 }
 
@@ -78,8 +79,11 @@ impl Node {
         if cfg.relay_only {
             builder = builder.clear_ip_transports();
         }
-        // The configured lookup doubles as the node's address book (clones share state).
-        let book = cfg.lookup.clone().unwrap_or_default();
+        if let Some(lookup) = cfg.lookup {
+            builder = builder.address_lookup(lookup);
+        }
+        // The node's own book, filled only through `learn_addr` (filtered).
+        let book = MemoryLookup::new();
         builder = builder.address_lookup(book.clone());
         let endpoint = builder.bind().await.map_err(NodeError::transport)?;
         let gc = || GcConfig {
@@ -192,6 +196,17 @@ impl Node {
     }
 
     pub async fn shutdown(self) -> Result<()> {
-        self.router.shutdown().await.map_err(NodeError::transport)
+        self.close().await
+    }
+
+    /// Stop accepting, close the endpoint and release the blobs store, even while other
+    /// holders of this node remain (their calls then fail). A node reopened on the same
+    /// `blobs_dir` afterwards finds its database free.
+    pub async fn close(&self) -> Result<()> {
+        let routed = self.router.shutdown().await.map_err(NodeError::transport);
+        // The router's shutdown normally stops the store already (then this reports that
+        // the store is gone); calling it anyway makes the release independent of that.
+        let _ = self.blobs.shutdown().await;
+        routed
     }
 }

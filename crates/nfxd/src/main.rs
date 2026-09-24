@@ -9,15 +9,17 @@
 //! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--relay-only]
 //!          [--seed <a>]… [--fetch <a>]… [--pull <a>]… [--origin <addr:port>]
 //!          [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]…
-//!          [--allow-creator <hex>]… [--gossip-peer <id>@<ip:port|relay-url>]…
+//!          [--allow-creator <hex>]… [--gossip [--gossip-peer <id>@<ip:port|relay-url>]…]
 //! ```
 //!
 //! `<a>` is a manifest address, `38504:<creator-hex>:<namespace>:<video-id>`, as
 //! `publish` prints it. Secrets never reach the terminal: only public keys are printed.
 //!
-//! `run` joins each video's gossip swarm (NFX-06 §4) through the seeders its beacons name
-//! and any `--gossip-peer`, and prints its own `gossip peer:` lines for others to use. A
-//! `--relay-only` node does not gossip.
+//! With `--gossip`, `run` joins each video's gossip swarm (NFX-06 §4) through the seeders
+//! relay beacons name and any `--gossip-peer`, and prints its own `gossip peer:` lines for
+//! others to use. Gossip is off by default: iroh-gossip hands the addresses swarm members
+//! advertise to the node's endpoint unfiltered, so any member can make the node contact
+//! hosts of its choosing. A `--relay-only` node never gossips.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -36,7 +38,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip-peer <id>@<ip:port|relay-url>]...";
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...]";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -172,11 +174,12 @@ async fn delete(args: &[String]) -> Result<()> {
 }
 
 async fn run(args: &[String]) -> Result<()> {
-    // The one flag without a value.
+    // The flags without a value.
     let relay_only = args.iter().any(|a| a == "--relay-only");
+    let gossip = args.iter().any(|a| a == "--gossip");
     let args: Vec<String> = args
         .iter()
-        .filter(|a| *a != "--relay-only")
+        .filter(|a| *a != "--relay-only" && *a != "--gossip")
         .cloned()
         .collect();
     let args = args.as_slice();
@@ -234,6 +237,7 @@ async fn run(args: &[String]) -> Result<()> {
             .collect::<Result<_>>()?,
         deletion_check_every: None,
         allow_creators: all(&f, "allow-creator"),
+        gossip,
         gossip_peers: gossip_peers(&all(&f, "gossip-peer"))?,
         internal_origin: false,
     };
@@ -244,7 +248,7 @@ async fn run(args: &[String]) -> Result<()> {
     if let Some(addr) = daemon.origin_addr {
         eprintln!("origin: http://{addr}/");
     }
-    if !daemon.node().relay_only() {
+    if gossip {
         let me = daemon.node().addr();
         for t in &me.addrs {
             match t {

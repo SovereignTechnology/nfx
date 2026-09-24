@@ -176,14 +176,34 @@ async fn a_bad_https_url_is_refused_at_start_not_silently_every_minute() {
         )
     };
     let ours: iroh::RelayUrl = "https://relay.ours.example/".parse().unwrap();
-    for (name, relay_only, relay) in [
-        ("gossip-relay-only", true, "https://relay.ours.example/"),
-        ("gossip-foreign", false, "https://relay.attacker.example/"),
+    for (name, relay_only, gossip, relay, why) in [
+        (
+            "gossip-relay-only",
+            true,
+            true,
+            "https://relay.ours.example/",
+            "relay-only",
+        ),
+        (
+            "gossip-off",
+            false,
+            false,
+            "https://relay.ours.example/",
+            "needs --gossip",
+        ),
+        (
+            "gossip-foreign",
+            false,
+            true,
+            "https://relay.attacker.example/",
+            "no direct address",
+        ),
     ] {
         let err = Daemon::start(Config {
             keys: Some(Keys::generate()),
             store: tmp(name),
             relay_only,
+            gossip,
             iroh_relays: vec![ours.clone()],
             gossip_peers: vec![peer(relay)],
             ..Config::default()
@@ -191,7 +211,7 @@ async fn a_bad_https_url_is_refused_at_start_not_silently_every_minute() {
         .await
         .err()
         .expect("refused");
-        assert!(err.to_string().contains("--gossip-peer"), "{name}: {err}");
+        assert!(err.to_string().contains(why), "{name}: {err}");
     }
 
     let ok = Daemon::start(Config {
@@ -464,6 +484,7 @@ async fn a_viewer_learns_a_seeder_it_can_only_hear_through_gossip() {
                 iroh_relays: vec![iroh_url],
                 seed: vec![a],
                 embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+                gossip: true,
                 gossip_peers: peers,
                 ..Config::default()
             })
@@ -483,6 +504,7 @@ async fn a_viewer_learns_a_seeder_it_can_only_hear_through_gossip() {
             relays: vec![relay_a.clone()],
             iroh_relays: vec![iroh_url.clone()],
             internal_origin: true,
+            gossip: true,
             ..Config::default()
         })
         .await
@@ -534,4 +556,94 @@ async fn a_viewer_learns_a_seeder_it_can_only_hear_through_gossip() {
         .await;
     seeder_b.shutdown().await;
     seeder_a.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_watch_that_timed_out_does_not_stop_a_later_one_from_seeding() {
+    let (_iroh, iroh_url) = iroh_relay().await;
+    let seed_dir = tmp("rewatch-seed");
+    let (event, manifest, _) = vector_package(&seed_dir);
+    let a = manifest.a_tag();
+    let seeder = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: seed_dir.join("store"),
+        iroh_relays: vec![iroh_url.clone()],
+        seed: vec![a.clone()],
+        embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        deletion_check_every: Some(Duration::from_millis(500)),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let relay_url = seeder.relay_url.clone().unwrap();
+    let viewer = std::sync::Arc::new(
+        Daemon::start(Config {
+            keys: Some(Keys::generate()),
+            store: tmp("rewatch-viewer"),
+            relays: vec![relay_url.clone()],
+            iroh_relays: vec![iroh_url.clone()],
+            internal_origin: true,
+            ..Config::default()
+        })
+        .await
+        .unwrap(),
+    );
+    // Nothing is published yet: the first watch times out.
+    assert!(viewer.watch(&a, Duration::from_secs(1)).await.is_err());
+
+    // Published now; a second watch plays, and the viewer goes on to fetch and seed.
+    let watching = {
+        let (viewer, a) = (viewer.clone(), a.clone());
+        tokio::spawn(async move { viewer.watch(&a, WAIT).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let client = Relays::connect(std::slice::from_ref(&relay_url), Duration::from_secs(10))
+        .await
+        .unwrap();
+    client.publish(&event).await.unwrap();
+    assert_eq!(watching.await.unwrap().unwrap().root, manifest.root);
+    until_state(&viewer, &a, &VideoState::Seeding).await;
+
+    client.shutdown().await;
+    viewer.shutdown().await;
+    seeder.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_frees_the_store_while_a_watch_is_still_pending() {
+    let (_iroh, iroh_url) = iroh_relay().await;
+    let dir = tmp("restart");
+    let (_, manifest, _) = vector_package(&dir);
+    let relay = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("restart-relay"),
+        embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        namespaces: vec![manifest.addr.namespace().clone()],
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let cfg = || Config {
+        keys: Some(Keys::generate()),
+        store: dir.join("store"),
+        relays: vec![relay.relay_url.clone().unwrap()],
+        iroh_relays: vec![iroh_url.clone()],
+        internal_origin: true,
+        ..Config::default()
+    };
+    let old = std::sync::Arc::new(Daemon::start(cfg()).await.unwrap());
+    // A watch for a video nobody published holds the daemon (the desktop app's case).
+    let pending = {
+        let (old, a) = (old.clone(), manifest.a_tag());
+        tokio::spawn(async move { old.watch(&a, Duration::from_secs(300)).await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    old.shutdown().await;
+    // The same store and blobs database open at once.
+    let new = Daemon::start(cfg())
+        .await
+        .expect("the old daemon released its store");
+    pending.abort();
+    new.shutdown().await;
+    relay.shutdown().await;
 }

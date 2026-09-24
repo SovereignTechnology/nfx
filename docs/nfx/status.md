@@ -164,11 +164,23 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
       seeding the video.
 - **M1 hardening (2026-09-24,
   [`reviews/2026-09-24-hardening.md`](reviews/2026-09-24-hardening.md)):**
-  - **Gossip in `nfxd` (NFX-06 §4).** Every seeded or watched video joins its swarm.
+  - **Independent audit, then fixes (2026-09-24,
+    [`reviews/2026-09-24-independent-audit.md`](reviews/2026-09-24-independent-audit.md)).**
+    A fresh agent found 1 High, 4 Medium and 4 Low findings in the desktop and hardening
+    commits. All are fixed except L4 below; the fixes and their tests are in the audit
+    record. **Gossip is now opt-in (`--gossip`)**, because iroh-gossip lets any swarm
+    member steer the endpoint (a blind SSRF).
+    - **Open decision (L4, desktop privacy), sovtech's call.** The viewer announces every
+      video it watches publicly, signed with its persistent key and with every local IP,
+      and iroh's portmapper asks the router to open ports. Options: make seeding opt-in,
+      leave private addresses out of beacons, turn the portmapper off for viewers.
+  - **Gossip in `nfxd` (NFX-06 §4), opt-in.** With `--gossip`, every seeded or watched
+    video joins its swarm.
     Seeders announce a signed `here` every 60 s and a `bye` on deletion, and every node
     learns seeders from verified `here`s.
-    - Bootstrap uses full endpoint addresses, from beacon tickets and
-      `--gossip-peer ID@ADDR` (printed by `nfxd run`), filtered like `Node::dial`.
+    - Bootstrap uses full endpoint addresses, from relay-heard beacon tickets and
+      `--gossip-peer ID@ADDR` (printed by `nfxd run --gossip`), filtered like
+      `Node::dial`.
     - **A relay-only node never gossips.** iroh-gossip feeds members' advertised
       addresses to the endpoint unfiltered, and iroh dials any relay URL, so a member
       could otherwise learn the node's IP.

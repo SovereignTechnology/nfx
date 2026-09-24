@@ -27,6 +27,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use iroh_blobs::ticket::BlobTicket;
 use nfx_proto::Verified;
 use nfx_proto::beacon::{Beacon, Endpoint};
+use nfx_proto::gossip::Presence;
 use nfx_proto::hashlist::{HashList, Role};
 use nfx_proto::manifest::Manifest;
 use tokio::net::TcpListener;
@@ -50,6 +51,9 @@ pub const CONNECTION_LIFETIME: Duration = Duration::from_secs(300);
 pub const PULL_DEADLINE: Duration = Duration::from_secs(60);
 /// Most seeders remembered per video.
 pub const MAX_SOURCES_PER_VIDEO: usize = 16;
+/// Of those, at most this many heard only over gossip: announcing costs a swarm member
+/// nothing, so gossip never fills the table.
+pub const MAX_GOSSIP_SOURCES_PER_VIDEO: usize = 8;
 /// A source that failed, or whose attempt was cut short, is tried last for this long.
 pub const SOURCE_COOLDOWN_SECS: u64 = 300;
 
@@ -449,13 +453,21 @@ impl SwarmPull {
     }
 
     /// Record a seeder heard over the video's gossip swarm (a `here` envelope's
-    /// [`presence_for`](nfx_proto::gossip::Envelope)). Ranked below relay beacons: see
-    /// [`SwarmPull`].
-    pub fn learn_gossip(&self, presence: &Verified<Beacon>) {
-        self.learn_as(presence, true);
+    /// `presence_for`). Ranked below relay beacons: see [`SwarmPull`].
+    pub fn learn_gossip(&self, presence: &Verified<Presence>) {
+        self.learn_as(&presence.beacon, true);
     }
 
-    fn learn_as(&self, beacon: &Verified<Beacon>, gossip: bool) {
+    /// A seeder said `bye` on the swarm: forget it, unless a relay's beacon vouches for it
+    /// (that source lapses with its beacon).
+    pub fn forget_gossip(&self, manifest_a: &str, seeder: &str) {
+        let mut sources = self.sources.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(list) = sources.get_mut(manifest_a) {
+            list.retain(|s| !(s.gossip && s.seeder == seeder));
+        }
+    }
+
+    fn learn_as(&self, beacon: &Beacon, gossip: bool) {
         let a = format!(
             "{}:{}:{}",
             nfx_proto::KIND_MANIFEST,
@@ -490,7 +502,9 @@ impl SwarmPull {
             }
             return;
         }
-        if list.len() >= MAX_SOURCES_PER_VIDEO {
+        let gossip_full =
+            gossip && list.iter().filter(|s| s.gossip).count() >= MAX_GOSSIP_SOURCES_PER_VIDEO;
+        if list.len() >= MAX_SOURCES_PER_VIDEO || gossip_full {
             // Make room: one heard only over gossip first, then one on cooldown, then the
             // one announced longest ago. Gossip never displaces a relay's source.
             let evict = list
@@ -537,12 +551,14 @@ impl SwarmPull {
                     .collect()
             })
             .unwrap_or_default();
+        // Cooldown first; within a bucket, a relay's source before a gossip one.
         live.sort_by_key(|s| {
-            if s.cooldown_until > now {
+            let cooling = if s.cooldown_until > now {
                 s.cooldown_until
             } else {
                 0
-            }
+            };
+            (cooling, s.gossip)
         });
         live
     }
@@ -585,13 +601,18 @@ impl SwarmPull {
         Err(last)
     }
 
-    /// The iroh endpoints of the live sources for a manifest (`a` tag), with the addresses
-    /// their tickets carry: who to bootstrap the video's gossip swarm from (NFX-06 §4).
-    /// One entry per endpoint.
+    /// The iroh endpoints of the live sources heard from relays for a manifest (`a` tag),
+    /// with the addresses their tickets carry: who to bootstrap the video's gossip swarm
+    /// from (NFX-06 §4). Gossip-heard sources never bootstrap, so a swarm member cannot
+    /// steer who the node joins through. One entry per endpoint.
     #[must_use]
     pub fn peers(&self, manifest_a: &str) -> Vec<iroh::EndpointAddr> {
         let mut out: Vec<iroh::EndpointAddr> = Vec::new();
-        for source in self.live(manifest_a, unix_now()) {
+        for source in self
+            .live(manifest_a, unix_now())
+            .into_iter()
+            .filter(|s| !s.gossip)
+        {
             for ticket in source.tickets.values() {
                 if let Ok(t) = ticket.parse::<BlobTicket>()
                     && !out.iter().any(|p| p.id == t.addr().id)

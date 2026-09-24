@@ -271,10 +271,14 @@ async fn a_scoped_relay_admits_limits_and_forwards_only_nfx() {
 async fn an_allow_list_admits_only_listed_creators_and_their_beacons() {
     let (manifest, creator, seeder) = vector();
     let ns = manifest.addr.namespace().clone();
-    let relay = Arc::new(ScopedRelay::with_creators(
-        std::slice::from_ref(&ns),
-        &[creator.public_key().to_hex()],
-    ));
+    // Malformed or empty lists are refused rather than admitting no one.
+    assert!(ScopedRelay::with_creators(std::slice::from_ref(&ns), &[]).is_err());
+    let upper = creator.public_key().to_hex().to_uppercase();
+    assert!(ScopedRelay::with_creators(std::slice::from_ref(&ns), &[upper]).is_err());
+    let relay = Arc::new(
+        ScopedRelay::with_creators(std::slice::from_ref(&ns), &[creator.public_key().to_hex()])
+            .unwrap(),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(relay.clone().serve(listener));
@@ -312,6 +316,15 @@ async fn an_allow_list_admits_only_listed_creators_and_their_beacons() {
             .unwrap();
     assert!(
         refusal(&client, &beacon)
+            .await
+            .starts_with("blocked: creator not allowed here")
+    );
+    // A deletion by an unlisted creator is refused too, even of its own manifest.
+    let del = sign_deletion(&stranger, &[theirs.a_tag()], unix_now())
+        .await
+        .unwrap();
+    assert!(
+        refusal(&client, &del)
             .await
             .starts_with("blocked: creator not allowed here")
     );

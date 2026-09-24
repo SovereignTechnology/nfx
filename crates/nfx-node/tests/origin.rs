@@ -29,7 +29,7 @@ use nfx_node::video::rendition_members;
 use nfx_proto::Verified;
 use nfx_proto::beacon::{Beacon, BeaconContent, Chunks, Endpoint};
 use nfx_proto::event::public_key_hex;
-use nfx_proto::gossip::{Envelope, Op};
+use nfx_proto::gossip::{Envelope, Op, Presence};
 use nfx_proto::hashlist::Role;
 use nfx_proto::manifest::{Manifest, Thumb};
 
@@ -491,7 +491,21 @@ fn idle_endpoint(seed: u8) -> Endpoint {
 }
 
 /// A `here` from the swarm, signed with `secret`, as a pull source for `manifest`.
-fn presence(manifest: &Manifest, secret: [u8; 32], endpoint: Endpoint) -> Verified<Beacon> {
+fn presence(
+    manifest: &Verified<Manifest>,
+    secret: [u8; 32],
+    endpoint: Endpoint,
+) -> Verified<Presence> {
+    presence_dated(manifest, secret, endpoint, nfx_node::unix_now())
+}
+
+/// The same, dated `created_at` by its sender.
+fn presence_dated(
+    manifest: &Verified<Manifest>,
+    secret: [u8; 32],
+    endpoint: Endpoint,
+    created_at: u64,
+) -> Verified<Presence> {
     let now = nfx_node::unix_now();
     let env = Envelope {
         op: Op::Here,
@@ -506,12 +520,12 @@ fn presence(manifest: &Manifest, secret: [u8; 32], endpoint: Endpoint) -> Verifi
             accepts_mints: vec![],
             free: true,
         },
-        created_at: now,
+        created_at,
     };
     let wire = envelope_wire(&env, &secret).unwrap();
     Envelope::verify(&wire, &manifest.addr, now)
         .unwrap()
-        .presence_for(&manifest.a_tag())
+        .presence_for(manifest, now)
         .unwrap()
 }
 
@@ -523,17 +537,51 @@ async fn gossip_never_displaces_a_source_heard_from_a_relay() {
     let node = Arc::new(Node::spawn(NodeConfig::default()).await.unwrap());
     let pull = SwarmPull::new(node.clone());
 
-    // One seeder heard from a relay, then a flood of fresh gossip identities.
+    // A few gossip identities first, then one seeder heard from a relay, then a flood.
     let relayed = nostr_sdk::prelude::Keys::generate();
+    for i in 0..3u8 {
+        pull.learn_gossip(&presence(&manifest, [i + 70; 32], idle_endpoint(i + 70)));
+    }
     pull.learn(&beacon(&manifest, &relayed, idle_endpoint(1)).await);
     for i in 0..20u8 {
         pull.learn_gossip(&presence(&manifest, [i + 10; 32], idle_endpoint(i + 10)));
     }
     let known = pull.sources(&a);
-    assert_eq!(known.len(), nfx_node::origin::MAX_SOURCES_PER_VIDEO);
+    assert_eq!(
+        known.len(),
+        1 + nfx_node::origin::MAX_GOSSIP_SOURCES_PER_VIDEO,
+        "gossip never fills the table"
+    );
+    assert_eq!(
+        known[0],
+        relayed.public_key().to_hex(),
+        "the relay's seeder stays, and is tried first"
+    );
+
+    // A presence dated into the future lapses as if heard now.
+    let ahead = presence_dated(
+        &manifest,
+        [99; 32],
+        idle_endpoint(99),
+        nfx_node::unix_now() + 600,
+    );
+    assert!(ahead.beacon.expiration <= nfx_node::unix_now() + nfx_proto::gossip::EVICT_AFTER);
+
+    // `bye` forgets a gossip-heard seeder.
+    let gone = public_key_hex(&[10; 32]).unwrap();
     assert!(
-        known.contains(&relayed.public_key().to_hex()),
-        "the relay's seeder stays"
+        !pull.sources(&a).contains(&gone) || {
+            pull.forget_gossip(&a, &gone);
+            !pull.sources(&a).contains(&gone)
+        }
+    );
+    let last = pull.sources(&a).last().unwrap().clone();
+    pull.forget_gossip(&a, &last);
+    assert!(!pull.sources(&a).contains(&last));
+    pull.forget_gossip(&a, &relayed.public_key().to_hex());
+    assert!(
+        pull.sources(&a).contains(&relayed.public_key().to_hex()),
+        "a relay-vouched source lapses with its beacon, not on bye"
     );
 
     // A table full of relay sources admits no gossip at all.

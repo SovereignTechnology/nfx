@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use iroh::RelayUrl;
-use nfx_node::gossip::envelope_wire;
+use nfx_node::gossip::{Announcer, Listener, envelope_wire};
 use nfx_node::node::{Node, NodeConfig};
 use nfx_node::nostr::{BEACON_TTL, ManifestQuery, Relays};
 use nfx_node::origin::{Origin, SwarmPull, serve};
@@ -33,7 +33,7 @@ use nfx_node::store::FsStore;
 use nfx_node::unix_now;
 use nfx_proto::Verified;
 use nfx_proto::beacon::{BeaconContent, Chunks, Endpoint, parse_a_tag};
-use nfx_proto::gossip::{Envelope, Op};
+use nfx_proto::gossip::{Envelope, MAX_ENVELOPE_BYTES, Op};
 use nfx_proto::manifest::Manifest;
 use nfx_proto::namespace::Namespace;
 use nostr_sdk::prelude::Keys;
@@ -74,13 +74,18 @@ pub struct Config {
     pub embed_relay: Option<SocketAddr>,
     /// Namespaces the embedded relay serves; by default those of the videos above.
     pub namespaces: Vec<Namespace>,
-    /// When non-empty, the embedded relay admits only these creators (x-only pubkey hex):
-    /// their manifests and deletions, and beacons for their videos.
+    /// When non-empty, the embedded relay admits only these creators (x-only pubkey, 64
+    /// lowercase hex): their manifests and deletions, and beacons for their videos. It
+    /// limits which videos the relay carries, not who may seed them.
     pub allow_creators: Vec<String>,
+    /// Join each video's gossip swarm (NFX-06 §4). Off by default: joining lets any swarm
+    /// member point this node's endpoint at hosts of its choosing, because iroh-gossip
+    /// feeds members' advertised addresses to it unfiltered (independent audit M1, M3).
+    /// Nostr beacons carry discovery without it. Refused with `relay_only`.
+    pub gossip: bool,
     /// iroh endpoints to bootstrap every video's gossip swarm from, besides the seeders
-    /// learned from beacons (NFX-06 §4). Each needs an address this node may use (a
-    /// direct one, or one of `iroh_relays`). Ignored with `relay_only`, which never
-    /// gossips.
+    /// learned from relay beacons. Each needs an address this node may use (a direct one,
+    /// or one of `iroh_relays`). Requires `gossip`.
     pub gossip_peers: Vec<iroh::EndpointAddr>,
     /// How often a seeded video is checked for its creator's deletion (NFX-02 §6).
     /// Default: every beacon republish (60 s).
@@ -117,6 +122,10 @@ pub struct Daemon {
     /// This node's own beacons are never learned as sources.
     own: Option<String>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// Addresses whose beacon watch and swarm learner run.
+    watching: Mutex<std::collections::BTreeSet<String>>,
+    /// Addresses being fetched, seeded or served.
+    handled: Mutex<std::collections::BTreeSet<String>>,
 }
 
 struct Shared {
@@ -128,6 +137,7 @@ struct Shared {
     origin: Option<Arc<Origin>>,
     https_url: Option<String>,
     deletion_check_every: Duration,
+    gossip: bool,
     gossip_peers: Vec<iroh::EndpointAddr>,
     /// This node's own pubkey: its own beacons and envelopes are never learned.
     own: Option<String>,
@@ -143,13 +153,52 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Learn a swarm member's `here` (NFX-06 §4) as a pull source for the manifest at `a`;
-/// never this node's own.
-fn learn_presence(pull: &SwarmPull, own: Option<&str>, env: &Verified<Envelope>, a: &str) {
-    if Some(env.pubkey.as_str()) != own
-        && let Some(presence) = env.presence_for(a)
+/// Largest envelope this node broadcasts. iroh-gossip refuses frames of 4096 bytes or
+/// more, and a refused frame stalls that neighbour's send queue for good (independent
+/// audit H1), so an envelope near NFX's 4 KiB limit is not sent at all.
+const MAX_SENT_ENVELOPE: usize = MAX_ENVELOPE_BYTES - 64;
+/// A gossip send not done by then is dropped: gossip never holds up a relay beacon.
+const GOSSIP_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// A swarm member's envelope (NFX-06 §4): a `here` becomes a gossip-ranked pull source
+/// for `manifest`, and a `bye` withdraws it. This node's own envelopes are ignored.
+fn hear(
+    pull: &SwarmPull,
+    own: Option<&str>,
+    env: &Verified<Envelope>,
+    manifest: &Verified<Manifest>,
+) {
+    if Some(env.pubkey.as_str()) == own {
+        return;
+    }
+    match env.op {
+        Op::Here => {
+            if let Some(presence) = env.presence_for(manifest, unix_now()) {
+                pull.learn_gossip(&presence);
+            }
+        }
+        Op::Bye => pull.forget_gossip(&manifest.a_tag(), &env.pubkey),
+    }
+}
+
+/// Broadcast one envelope, bounded in size and time.
+async fn gossip_send(
+    announcer: &Announcer,
+    op: Op,
+    pubkey: &str,
+    beacon: BeaconContent,
+    secret: &[u8; 32],
+) {
+    let env = Envelope {
+        op,
+        pubkey: pubkey.to_owned(),
+        beacon,
+        created_at: unix_now(),
+    };
+    if let Ok(wire) = envelope_wire(&env, secret)
+        && wire.len() <= MAX_SENT_ENVELOPE
     {
-        pull.learn_gossip(&presence);
+        let _ = tokio::time::timeout(GOSSIP_SEND_TIMEOUT, announcer.announce(&wire)).await;
     }
 }
 
@@ -168,12 +217,12 @@ impl Shared {
     /// Learn seeders of `a` from its gossip swarm (NFX-06 §4) until the swarm closes. It
     /// joins once a first peer is known, from configuration or a beacon.
     async fn learn_from_swarm(self: Arc<Self>, a: String) {
-        let Ok((_, video)) = parse_a_tag(&a) else {
-            return;
-        };
-        if self.node.relay_only() {
+        if !self.gossip || self.node.relay_only() {
             return;
         }
+        let Ok(manifest) = self.resolve(&a).await else {
+            return;
+        };
         let peers = loop {
             let p = self.swarm_peers(&a);
             if !p.is_empty() {
@@ -181,13 +230,32 @@ impl Shared {
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         };
-        let Ok(swarm) = self.node.join_swarm(&video, peers).await else {
+        let Ok(swarm) = self.node.join_swarm(&manifest.addr, peers).await else {
             return;
         };
         let (_announcer, mut listener) = swarm.split();
         while let Some(env) = listener.next_envelope().await {
-            learn_presence(&self.pull, self.own.as_deref(), &env, &a);
+            hear(&self.pull, self.own.as_deref(), &env, &manifest);
         }
+    }
+
+    /// Join `manifest`'s swarm to announce into it, when gossip is on.
+    async fn join_gossip(&self, manifest: &Verified<Manifest>) -> Option<(Announcer, Listener)> {
+        if !self.gossip || self.node.relay_only() {
+            return None;
+        }
+        let peers = self.swarm_peers(&manifest.a_tag());
+        let mut swarm = self
+            .node
+            .join_swarm(&manifest.addr, peers.clone())
+            .await
+            .ok()?;
+        // With peers to join through, wait (briefly) to be connected, or the first envelope
+        // reaches nobody.
+        if !peers.is_empty() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), swarm.joined()).await;
+        }
+        Some(swarm.split())
     }
 
     fn set(&self, a: &str, s: VideoState) {
@@ -234,27 +302,15 @@ impl Shared {
             origin.hold(manifest).await?;
         }
         self.set(a, VideoState::Seeding);
-        // The video's gossip swarm: announce into it, and learn from it (NFX-06 §4).
+        // The video's gossip swarm, when on: announce into it, and learn from it.
         let secret = keys.secret_key().to_secret_bytes();
         let pubkey = keys.public_key().to_hex();
-        let peers = self.swarm_peers(a);
-        let swarm = match self.node.join_swarm(&manifest.addr, peers.clone()).await {
-            Ok(mut swarm) => {
-                // With peers to join through, wait (briefly) to be connected, or the first
-                // envelope reaches nobody.
-                if !peers.is_empty() {
-                    let _ = tokio::time::timeout(Duration::from_secs(5), swarm.joined()).await;
-                }
-                Some(swarm.split())
-            }
-            Err(_) => None,
-        };
-        let (announcer, _learning) = match swarm {
+        let (announcer, _learning) = match self.join_gossip(manifest).await {
             Some((announcer, mut listener)) => {
-                let (pull, own, a) = (self.pull.clone(), self.own.clone(), a.to_owned());
+                let (pull, own, manifest) = (self.pull.clone(), self.own.clone(), manifest.clone());
                 let learning = AbortOnDrop(tokio::spawn(async move {
                     while let Some(env) = listener.next_envelope().await {
-                        learn_presence(&pull, own.as_deref(), &env, &a);
+                        hear(&pull, own.as_deref(), &env, &manifest);
                     }
                 }));
                 (Some(announcer), Some(learning))
@@ -267,22 +323,15 @@ impl Shared {
             tokio::select! {
                 _ = announce.tick() => {
                     let content = self.beacon(&seeded, manifest);
-                    if let Some(announcer) = &announcer {
-                        let env = Envelope {
-                            op: Op::Here,
-                            pubkey: pubkey.clone(),
-                            beacon: content.clone(),
-                            created_at: unix_now(),
-                        };
-                        if let Ok(wire) = envelope_wire(&env, &secret) {
-                            let _ = announcer.announce(&wire).await;
-                        }
-                    }
-                    // A refused or unreachable relay is retried at the next tick (beacons are
+                    // The relay beacon first: gossip is optional and never holds it up. A
+                    // refused or unreachable relay is retried at the next tick (beacons are
                     // hints), but it shows: a node that cannot announce is invisible.
                     match self.relays.announce(&keys, manifest, &content).await {
                         Ok(_) => self.set(a, VideoState::Seeding),
                         Err(e) => self.set(a, VideoState::Unannounced(e.to_string())),
+                    }
+                    if let Some(announcer) = &announcer {
+                        gossip_send(announcer, Op::Here, &pubkey, content, &secret).await;
                     }
                 }
                 _ = check.tick() => {
@@ -290,15 +339,8 @@ impl Shared {
                     // manifest (a restart) is not one.
                     if matches!(self.relays.deleted(manifest, CONNECT_TIMEOUT).await, Ok(true)) {
                         if let Some(announcer) = &announcer {
-                            let env = Envelope {
-                                op: Op::Bye,
-                                pubkey: pubkey.clone(),
-                                beacon: self.beacon(&seeded, manifest),
-                                created_at: unix_now(),
-                            };
-                            if let Ok(wire) = envelope_wire(&env, &secret) {
-                                let _ = announcer.announce(&wire).await;
-                            }
+                            let content = self.beacon(&seeded, manifest);
+                            gossip_send(announcer, Op::Bye, &pubkey, content, &secret).await;
                         }
                         self.set(a, VideoState::Deleted);
                         return Ok(());
@@ -385,10 +427,13 @@ impl Daemon {
         if !cfg.allow_creators.is_empty() && cfg.embed_relay.is_none() {
             return Err(Error::Config("--allow-creator needs --embed-relay".into()));
         }
-        if cfg.relay_only && !cfg.gossip_peers.is_empty() {
+        if cfg.relay_only && (cfg.gossip || !cfg.gossip_peers.is_empty()) {
             return Err(Error::Config(
-                "--gossip-peer: a relay-only node does not gossip".into(),
+                "--gossip, --gossip-peer: a relay-only node does not gossip".into(),
             ));
+        }
+        if !cfg.gossip && !cfg.gossip_peers.is_empty() {
+            return Err(Error::Config("--gossip-peer needs --gossip".into()));
         }
         // A peer with no address this node may dial would be dropped silently at every join.
         if let Some(p) = cfg.gossip_peers.iter().find(|p| {
@@ -450,20 +495,11 @@ impl Daemon {
                 if local.ip().is_unspecified() {
                     local.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
                 }
-                if let Some(bad) = cfg.allow_creators.iter().find(|c| {
-                    c.len() != 64
-                        || !c
-                            .bytes()
-                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                }) {
-                    return Err(Error::Config(format!(
-                        "--allow-creator {bad}: not 64 lowercase hex"
-                    )));
-                }
                 let relay = Arc::new(if cfg.allow_creators.is_empty() {
                     ScopedRelay::new(&namespaces)
                 } else {
                     ScopedRelay::with_creators(&namespaces, &cfg.allow_creators)
+                        .map_err(|e| Error::Config(format!("--allow-creator: {e}")))?
                 });
                 tasks.push(tokio::spawn(relay.clone().serve(listener)));
                 let url = format!("ws://{local}");
@@ -520,6 +556,7 @@ impl Daemon {
                 .deletion_check_every
                 .unwrap_or(Duration::from_secs(BEACON_TTL / 2))
                 .max(Duration::from_millis(100)),
+            gossip: cfg.gossip,
             gossip_peers: cfg.gossip_peers.clone(),
             own: cfg.keys.as_ref().map(|k| k.public_key().to_hex()),
             state: state.clone(),
@@ -577,6 +614,15 @@ impl Daemon {
             shared,
             own,
             tasks: Mutex::new(tasks),
+            watching: Mutex::new(cfg.fetch.iter().chain(&cfg.pull).cloned().collect()),
+            handled: Mutex::new(
+                cfg.seed
+                    .iter()
+                    .chain(&cfg.fetch)
+                    .chain(&cfg.pull)
+                    .cloned()
+                    .collect(),
+            ),
         })
     }
 
@@ -610,29 +656,40 @@ impl Daemon {
             .clone()
             .ok_or_else(|| Error::Config("watching needs an origin".into()))?;
         let (_, video) = parse_a_tag(a)?;
-        let fresh = {
-            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            if state.contains_key(a) {
-                false
-            } else {
-                state.insert(a.to_owned(), VideoState::Resolving);
-                true
-            }
+        let watching = |a: &str| {
+            self.watching
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(a)
         };
-        if fresh {
+        if !watching(a) {
+            // Recorded only once the beacon watch runs: a relay that is down now leaves
+            // nothing behind, and the next watch tries again.
             let mut beacons = self
                 .relays
                 .watch_beacons(video.namespace(), &[a.to_owned()])
                 .await?;
-            let (pull, own) = (self.shared.pull.clone(), self.own.clone());
-            self.spawn(async move {
-                while let Some(beacon) = beacons.next().await {
-                    if Some(&beacon.seeder) != own.as_ref() {
-                        pull.learn(&beacon);
+            let first = self
+                .watching
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(a.to_owned());
+            if first {
+                self.state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .entry(a.to_owned())
+                    .or_insert(VideoState::Resolving);
+                let (pull, own) = (self.shared.pull.clone(), self.own.clone());
+                self.spawn(async move {
+                    while let Some(beacon) = beacons.next().await {
+                        if Some(&beacon.seeder) != own.as_ref() {
+                            pull.learn(&beacon);
+                        }
                     }
-                }
-            });
-            self.spawn(self.shared.clone().learn_from_swarm(a.to_owned()));
+                });
+                self.spawn(self.shared.clone().learn_from_swarm(a.to_owned()));
+            }
         }
         let shared = self.shared.clone();
         let hold = async {
@@ -645,7 +702,14 @@ impl Daemon {
         let manifest = tokio::time::timeout(timeout, hold)
             .await
             .map_err(|_| Error::Config(format!("no seeder served {a} in time")))??;
-        if fresh {
+        // The first watch that plays starts the full fetch (or marks it served), whichever
+        // watch that is.
+        let first = self
+            .handled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(a.to_owned());
+        if first {
             if shared.keys.is_some() {
                 let (shared, a) = (shared.clone(), a.to_owned());
                 self.spawn(async move {
@@ -674,7 +738,10 @@ impl Daemon {
         &self.node
     }
 
-    pub async fn shutdown(self) {
+    /// Stop everything: tasks, the embedded relay, the relay clients and the node, whose
+    /// blobs store is released even while a pending call still holds this daemon, so a
+    /// new daemon can open the same store at once.
+    pub async fn shutdown(&self) {
         let tasks = std::mem::take(&mut *self.tasks.lock().unwrap_or_else(PoisonError::into_inner));
         for task in &tasks {
             task.abort();
@@ -682,15 +749,10 @@ impl Daemon {
         for task in tasks {
             let _ = task.await;
         }
-        drop(self.shared);
         if let Some(relay) = &self.embedded {
             relay.shutdown();
         }
-        if let Ok(relays) = Arc::try_unwrap(self.relays) {
-            relays.shutdown().await;
-        }
-        if let Ok(node) = Arc::try_unwrap(self.node) {
-            let _ = node.shutdown().await;
-        }
+        self.relays.shutdown().await;
+        let _ = self.node.close().await;
     }
 }
