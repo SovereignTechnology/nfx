@@ -57,6 +57,9 @@ pub struct Node {
     blobs: Store,
     gossip: Gossip,
     relays: Vec<RelayUrl>,
+    relay_only: bool,
+    /// Addresses learned out of band (gossip bootstrap peers), filtered by [`Node::trusted`].
+    book: MemoryLookup,
 }
 
 impl Node {
@@ -75,9 +78,9 @@ impl Node {
         if cfg.relay_only {
             builder = builder.clear_ip_transports();
         }
-        if let Some(lookup) = cfg.lookup {
-            builder = builder.address_lookup(lookup);
-        }
+        // The configured lookup doubles as the node's address book (clones share state).
+        let book = cfg.lookup.clone().unwrap_or_default();
+        builder = builder.address_lookup(book.clone());
         let endpoint = builder.bind().await.map_err(NodeError::transport)?;
         let gc = || GcConfig {
             interval: GC_INTERVAL,
@@ -100,15 +103,19 @@ impl Node {
             }
         };
         let gossip = Gossip::builder().alpn(GOSSIP_ALPN).spawn(endpoint.clone());
-        let router = Router::builder(endpoint)
-            .accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, None))
-            .accept(GOSSIP_ALPN, gossip.clone())
-            .spawn();
+        let mut router =
+            Router::builder(endpoint).accept(iroh_blobs::ALPN, BlobsProtocol::new(&blobs, None));
+        // A relay-only node never gossips (see `join_swarm`), so it does not accept it either.
+        if !cfg.relay_only {
+            router = router.accept(GOSSIP_ALPN, gossip.clone());
+        }
         Ok(Self {
-            router,
+            router: router.spawn(),
             blobs,
             gossip,
             relays: cfg.relays,
+            relay_only: cfg.relay_only,
+            book,
         })
     }
 
@@ -116,16 +123,39 @@ impl Node {
     /// this network's own relays are used: a ticket from an untrusted beacon cannot make
     /// the node contact a relay host of the sender's choosing.
     pub async fn dial(&self, addr: &EndpointAddr, alpn: &[u8]) -> Result<Connection> {
-        let addrs = addr.addrs.iter().filter(|a| match a {
-            TransportAddr::Ip(_) => true,
-            TransportAddr::Relay(url) => self.relays.contains(url),
-            _ => false,
-        });
-        let addr = EndpointAddr::from_parts(addr.id, addrs.cloned());
+        let addr = self.trusted(addr);
         tokio::time::timeout(CONNECT_TIMEOUT, self.endpoint().connect(addr, alpn))
             .await
             .map_err(|_| NodeError::Transport("connect timed out".into()))?
             .map_err(NodeError::transport)
+    }
+
+    /// `addr` with only the transports this node may use for it: direct IP addresses
+    /// (none on a relay-only node) and this network's own relays.
+    #[must_use]
+    pub fn trusted(&self, addr: &EndpointAddr) -> EndpointAddr {
+        let addrs = addr.addrs.iter().filter(|a| match a {
+            TransportAddr::Ip(_) => !self.relay_only,
+            TransportAddr::Relay(url) => self.relays.contains(url),
+            _ => false,
+        });
+        EndpointAddr::from_parts(addr.id, addrs.cloned())
+    }
+
+    /// Remember how to reach a peer (filtered by [`Node::trusted`]), so that it can be
+    /// dialled by id alone, as gossip does. Returns false when nothing usable was left.
+    pub fn learn_addr(&self, addr: &EndpointAddr) -> bool {
+        let addr = self.trusted(addr);
+        if addr.addrs.is_empty() {
+            return false;
+        }
+        self.book.add_endpoint_info(addr);
+        true
+    }
+
+    #[must_use]
+    pub fn relay_only(&self) -> bool {
+        self.relay_only
     }
 
     #[must_use]
@@ -150,7 +180,7 @@ impl Node {
     }
 
     #[must_use]
-    pub fn gossip(&self) -> &Gossip {
+    pub(crate) fn gossip(&self) -> &Gossip {
         &self.gossip
     }
 

@@ -3,12 +3,12 @@
 **This file, not the demo's `docs/status.md` or the session handoffs (not published), is where work here
 resumes.** Those describe the Pear demo, a read-only mirror in this repository.
 
-Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 closed · A2 in progress
+Updated 2026-09-24 · branch `desktop/app` (local; `main` = `d9801d0` pushed) · plan: ADR 0008 + `spec/` · Phase A complete · NFX-02..06 Frozen (M1)
 
 ## Where things stand
 
-**Phases A0 and A1 are complete. A2, the Rust M1 data plane, is in progress**
-(ADR 0008 §5): every A2 piece is built and tested: `nfx-media`, `nfx-node` (iroh, Nostr,
+**Phases A0, A1 and A2 are complete** (ADR 0008 §5). Every A2 piece, the Rust M1 data
+plane, is built and tested: `nfx-media`, `nfx-node` (iroh, Nostr,
 the pull-through origin, the scoped relay), `nfxd` and the test player. **The Phase A exit
 run passed on 2026-09-24** between host-b and laptop, over a real iroh relay and over a
 direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
@@ -162,6 +162,29 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
     - the app watches before the manifest exists;
     - once the manifest is published, the app plays 360p and 720p past 3 s and ends up
       seeding the video.
+- **M1 hardening (2026-09-24,
+  [`reviews/2026-09-24-hardening.md`](reviews/2026-09-24-hardening.md)):**
+  - **Gossip in `nfxd` (NFX-06 §4).** Every seeded or watched video joins its swarm.
+    Seeders announce a signed `here` every 60 s and a `bye` on deletion, and every node
+    learns seeders from verified `here`s.
+    - Bootstrap uses full endpoint addresses, from beacon tickets and
+      `--gossip-peer ID@ADDR` (printed by `nfxd run`), filtered like `Node::dial`.
+    - **A relay-only node never gossips.** iroh-gossip feeds members' advertised
+      addresses to the endpoint unfiltered, and iroh dials any relay URL, so a member
+      could otherwise learn the node's IP.
+    - Gossip-heard sources rank below relay beacons: evicted first, never displacing
+      one. A swarm member can announce under unlimited fresh keys.
+    - Test: a viewer learns a seeder that speaks only to a relay the viewer never
+      sees.
+  - **Creator allow-list** for scoped relays (`--allow-creator`, needs
+    `--embed-relay`). Only the listed creators' manifests and deletions, and beacons
+    for their videos, are admitted.
+  - **`Verified<T>`** (closes S4 of the A2 audit). Every `nfx-proto` verifier returns
+    it, and `Origin::hold` and `SwarmPull::learn` require it. The tests now sign real
+    events.
+  - **NIP-42 is blocked** on nostr-sdk. Its `LocalRelay` matches AUTH against
+    `ws://<bind address>`, which never matches behind our front or a TLS proxy. It
+    stays a conformant SHOULD omission; the allow-list covers the practical need.
 - **The browser resolves videos by manifest address (2026-09-24):**
   - `?a=<address>&relay=<ws(s)>` makes the player query the relays for the manifest
     (NFX-04 §5 filter).
@@ -277,7 +300,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    - `nfx-node`: ~~store trait, iroh seed/fetch, gossip, Nostr manifests and
      beacons, the pull-through origin~~ done; the per-member window gate comes with
      M2;
-   - ~~`nfxd`~~ done (gossip is not wired into it yet: Nostr beacons carry discovery);
+   - ~~`nfxd`~~ done, with gossip since 2026-09-24;
    - ~~a scoped relay~~ done (`nfx-node::relay`, for `nfxd` to embed or run alone);
    - ~~a test player page~~ done (`web/player/`);
    - ~~the desktop viewer~~ done (`crates/desktop/`, Tauri 2, `./e2e.sh`);
@@ -296,6 +319,10 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 4. Carried risk: the iroh-blobs 0.103 README still says "not production quality". The
    containment plan is in the S1 page.
 5. ~~Add the schema check (`jsonschema`) to `check.sh`~~ done (`spec/schemas/check.py`).
+6. ~~M1 hardening carry-forwards~~ done 2026-09-24: gossip in `nfxd`, the creator
+   allow-list and `Verified<T>`. NIP-42 is blocked upstream (see above).
+7. **Left for M1: the WebRTC browser mesh (NFX-10, freezes at M4).** Browsers still
+   fetch from origins only.
 
 ## Not verified / known gaps
 

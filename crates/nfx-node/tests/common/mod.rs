@@ -9,13 +9,14 @@ use std::path::PathBuf;
 use base64::Engine as _;
 use iroh::RelayUrl;
 use nfx_node::store::{ContentStore, FsStore};
+use nfx_proto::Verified;
 use nfx_proto::event::Event;
 use nfx_proto::hashlist::HashList;
 use nfx_proto::manifest::Manifest;
 use serde_json::Value;
 
 pub struct Vector {
-    pub manifest: Manifest,
+    pub manifest: Verified<Manifest>,
     pub list: HashList,
     pub seeder_secret: [u8; 32],
 }

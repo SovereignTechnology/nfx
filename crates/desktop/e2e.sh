@@ -11,11 +11,16 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 crates=$(cd "$here/.." && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/nfx-desktop-e2e-XXXXXX")
+# A display name of this run's own: a fixed one would find the socket a killed compositor
+# left behind, and the app would dial a dead display.
+display="nfx-desktop-e2e-${work##*-}"
+runtime=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 chmod 700 "$work"
 pids=()
 cleanup() {
   for p in "${pids[@]}"; do kill -TERM -- "-$p" 2>/dev/null || true; done
   rm -rf "$work"
+  rm -f "$runtime/$display" "$runtime/$display.lock"
 }
 trap cleanup EXIT
 
@@ -48,12 +53,13 @@ relay=$(grep -oE 'ws://[0-9.:]+' "$work/seeder.log" | head -1)
 test_json=$(printf '{"a":"%s","relays":["%s"]}' "$a" "$relay")
 setsid dbus-run-session -- bash -c '
   gnome-shell --wayland --no-x11 --headless --virtual-monitor 1280x720 \
-    --wayland-display nfx-desktop-e2e >/dev/null 2>&1 &
-  for _ in $(seq 1 100); do [ -S "$XDG_RUNTIME_DIR/nfx-desktop-e2e" ] && break; sleep 0.2; done
-  WAYLAND_DISPLAY=nfx-desktop-e2e GDK_BACKEND=wayland NFX_DESKTOP_TEST="$1" \
+    --wayland-display "$4" >/dev/null 2>&1 &
+  for _ in $(seq 1 100); do [ -S "$XDG_RUNTIME_DIR/$4" ] && break; sleep 0.2; done
+  [ -S "$XDG_RUNTIME_DIR/$4" ] || { echo "the headless compositor never started"; exit 1; }
+  WAYLAND_DISPLAY="$4" GDK_BACKEND=wayland NFX_DESKTOP_TEST="$1" \
     NFX_DESKTOP_DATA="$2" "$3"
   echo "EXIT $?"
-' _ "$test_json" "$work/app" "$here/target/release/nfx-desktop" > "$work/app.log" 2>&1 &
+' _ "$test_json" "$work/app" "$here/target/release/nfx-desktop" "$display" > "$work/app.log" 2>&1 &
 pids+=($!)
 
 # Publish once the app is watching, so it sees the seeder's first beacon.

@@ -11,7 +11,7 @@ use crate::event::Event;
 use crate::hex32::{is_https_url, is_lower_hex, parse_u64_strict};
 use crate::manifest::Manifest;
 use crate::namespace::{Namespace, VideoAddr};
-use crate::{Error, KIND_BEACON, KIND_MANIFEST, MAX_CLOCK_SKEW, Result};
+use crate::{Error, KIND_BEACON, KIND_MANIFEST, MAX_CLOCK_SKEW, Result, Verified};
 
 /// Allowed `expiration - created_at`, in seconds (NFX-03 §1).
 pub const TTL_RANGE: core::ops::RangeInclusive<u64> = 60..=120;
@@ -246,7 +246,7 @@ pub struct Beacon {
 
 impl Beacon {
     /// Verify a kind-20464 event at time `now` (unix seconds).
-    pub fn from_event(event: &Event, now: u64) -> Result<Self> {
+    pub fn from_event(event: &Event, now: u64) -> Result<Verified<Self>> {
         if event.kind != KIND_BEACON {
             return Err(bad("wrong kind"));
         }
@@ -276,13 +276,13 @@ impl Beacon {
         if content.video != addr {
             return Err(bad("content `video` does not equal the `a` tag's d"));
         }
-        Ok(Self {
+        Ok(Verified::new(Self {
             seeder: event.pubkey.clone(),
             created_at: event.created_at,
             expiration,
             creator,
             content,
-        })
+        }))
     }
 }
 

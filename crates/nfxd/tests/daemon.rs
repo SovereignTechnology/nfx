@@ -19,6 +19,7 @@ use iroh::RelayUrl;
 use nfx_node::nostr::{ManifestQuery, Relays, sign_manifest};
 use nfx_node::store::{ContentStore, FsStore};
 use nfx_node::unix_now;
+use nfx_proto::Verified;
 use nfx_proto::event::Event;
 use nfx_proto::hashlist::{HashList, Role};
 use nfx_proto::manifest::{License, Manifest};
@@ -38,7 +39,7 @@ fn tmp(name: &str) -> PathBuf {
 }
 
 /// The test-vector video as an `nfx-package` output directory.
-fn vector_package(dir: &Path) -> (Event, Manifest, HashList) {
+fn vector_package(dir: &Path) -> (Event, Verified<Manifest>, HashList) {
     let m: Value =
         serde_json::from_str(include_str!("../../../spec/test-vectors/manifest.json")).unwrap();
     let event: Event = serde_json::from_value(m["event"].clone()).unwrap();
@@ -154,6 +155,45 @@ async fn a_bad_https_url_is_refused_at_start_not_silently_every_minute() {
     .expect("refused");
     assert!(err.to_string().contains("--relay-only"), "{err}");
 
+    // An allow-list with no embedded relay would restrict nothing.
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("allow-no-relay"),
+        allow_creators: vec!["ab".repeat(32)],
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(err.to_string().contains("--allow-creator"), "{err}");
+
+    // Gossip peers: a relay-only node does not gossip, and a peer reachable only through a
+    // relay this network does not run would be dropped at every join.
+    let peer = |relay: &str| {
+        iroh::EndpointAddr::from_parts(
+            iroh::SecretKey::from([7u8; 32]).public(),
+            [iroh::TransportAddr::Relay(relay.parse().unwrap())],
+        )
+    };
+    let ours: iroh::RelayUrl = "https://relay.ours.example/".parse().unwrap();
+    for (name, relay_only, relay) in [
+        ("gossip-relay-only", true, "https://relay.ours.example/"),
+        ("gossip-foreign", false, "https://relay.attacker.example/"),
+    ] {
+        let err = Daemon::start(Config {
+            keys: Some(Keys::generate()),
+            store: tmp(name),
+            relay_only,
+            iroh_relays: vec![ours.clone()],
+            gossip_peers: vec![peer(relay)],
+            ..Config::default()
+        })
+        .await
+        .err()
+        .expect("refused");
+        assert!(err.to_string().contains("--gossip-peer"), "{name}: {err}");
+    }
+
     let ok = Daemon::start(Config {
         keys: Some(Keys::generate()),
         store: tmp("good-url"),
@@ -191,7 +231,7 @@ async fn a_package_becomes_a_verified_open_manifest() {
         "summed from the playlist's segments"
     );
     let thumb = list.files.iter().find(|f| f.role == Role::Thumb).unwrap();
-    assert_eq!(parsed.thumb.unwrap().sha256, thumb.sha256);
+    assert_eq!(parsed.thumb.as_ref().unwrap().sha256, thumb.sha256);
 
     // A store that does not match nfx.json is refused.
     std::fs::write(
@@ -296,7 +336,7 @@ async fn fetch_serve_and_reseed_through_an_embedded_relay() {
         while seen != want {
             let beacon = watch.next().await.unwrap();
             assert!(beacon.serves(&manifest));
-            seen.insert(beacon.seeder);
+            seen.insert(beacon.seeder.clone());
         }
     })
     .await
@@ -404,4 +444,94 @@ async fn a_viewer_watches_plays_through_its_origin_and_then_seeds() {
         .shutdown()
         .await;
     seeder.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_learns_a_seeder_it_can_only_hear_through_gossip() {
+    let (_iroh, iroh_url) = iroh_relay().await;
+    let dir_a = tmp("gossip-a");
+    let (event, manifest, _) = vector_package(&dir_a);
+    let dir_b = tmp("gossip-b");
+    vector_package(&dir_b);
+    let a = manifest.a_tag();
+    let start = |store: PathBuf, relays: Vec<String>, peers: Vec<iroh::EndpointAddr>| {
+        let (iroh_url, a) = (iroh_url.clone(), a.clone());
+        async move {
+            Daemon::start(Config {
+                keys: Some(Keys::generate()),
+                store,
+                relays,
+                iroh_relays: vec![iroh_url],
+                seed: vec![a],
+                embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+                gossip_peers: peers,
+                ..Config::default()
+            })
+            .await
+            .unwrap()
+        }
+    };
+
+    // Seeder A, whose relay the viewer uses; the viewer watches before the manifest is
+    // published so it catches A's first beacon.
+    let seeder_a = start(dir_a.join("store"), vec![], vec![]).await;
+    let relay_a = seeder_a.relay_url.clone().unwrap();
+    let viewer = std::sync::Arc::new(
+        Daemon::start(Config {
+            keys: Some(Keys::generate()),
+            store: tmp("gossip-viewer"),
+            relays: vec![relay_a.clone()],
+            iroh_relays: vec![iroh_url.clone()],
+            internal_origin: true,
+            ..Config::default()
+        })
+        .await
+        .unwrap(),
+    );
+    let watching = {
+        let (viewer, a) = (viewer.clone(), a.clone());
+        tokio::spawn(async move { viewer.watch(&a, WAIT).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let client_a = Relays::connect(std::slice::from_ref(&relay_a), Duration::from_secs(10))
+        .await
+        .unwrap();
+    client_a.publish(&event).await.unwrap();
+    watching.await.unwrap().unwrap();
+    let a_seeder = seeder_a.state(); // A is seeding; the viewer knows it from its beacon
+    assert_eq!(a_seeder[&a], VideoState::Seeding);
+    tokio::time::sleep(Duration::from_secs(3)).await; // the viewer's learner joins via A
+
+    // Seeder B speaks only to its own relay, which the viewer never sees, and joins the
+    // video's swarm through A. The viewer can learn B only through gossip.
+    let seeder_b = start(dir_b.join("store"), vec![], vec![seeder_a.node().addr()]).await;
+    let relay_b = seeder_b.relay_url.clone().unwrap();
+    let client_b = Relays::connect(std::slice::from_ref(&relay_b), Duration::from_secs(10))
+        .await
+        .unwrap();
+    client_b.publish(&event).await.unwrap();
+    until_state(&seeder_b, &a, &VideoState::Seeding).await;
+
+    let seeders_known = tokio::time::timeout(WAIT, async {
+        loop {
+            let known = viewer.sources(&a);
+            if known.len() >= 2 {
+                break known;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the viewer never heard B: {:?}", viewer.sources(&a)));
+    assert_eq!(seeders_known.len(), 2, "A from its beacon, B from gossip");
+
+    client_a.shutdown().await;
+    client_b.shutdown().await;
+    std::sync::Arc::try_unwrap(viewer)
+        .ok()
+        .expect("sole owner")
+        .shutdown()
+        .await;
+    seeder_b.shutdown().await;
+    seeder_a.shutdown().await;
 }

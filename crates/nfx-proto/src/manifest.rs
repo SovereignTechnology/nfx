@@ -3,7 +3,7 @@
 use crate::event::Event;
 use crate::hex32::{decode, is_https_url, is_lower_hex, parse_u64_strict};
 use crate::namespace::{Namespace, VideoAddr};
-use crate::{Error, KIND_MANIFEST, Result};
+use crate::{Error, KIND_MANIFEST, Result, Verified};
 
 /// Tags that may appear at most once (NFX-02 §3 multiplicity rule).
 const SINGLE_VALUED: &[&str] = &[
@@ -80,7 +80,7 @@ pub struct Manifest {
 
 impl Manifest {
     /// Run NFX-02 §4. Any failure rejects the whole event.
-    pub fn from_event(event: &Event) -> Result<Self> {
+    pub fn from_event(event: &Event) -> Result<Verified<Self>> {
         if event.kind != KIND_MANIFEST {
             return Err(bad(format!("kind {} is not {KIND_MANIFEST}", event.kind)));
         }
@@ -147,7 +147,7 @@ impl Manifest {
             other => return Err(bad(format!("unknown license {other:?}"))),
         };
 
-        Ok(Self {
+        Ok(Verified::new(Self {
             author: event.pubkey.clone(),
             created_at: event.created_at,
             addr,
@@ -165,7 +165,7 @@ impl Manifest {
                 .collect(),
             alt: one(event, "alt")?.map(str::to_owned),
             description: event.content.clone(),
-        })
+        }))
     }
 
     /// `root` as lowercase hex.

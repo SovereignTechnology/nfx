@@ -25,6 +25,7 @@ use hyper::header::{self, HeaderValue};
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use iroh_blobs::ticket::BlobTicket;
+use nfx_proto::Verified;
 use nfx_proto::beacon::{Beacon, Endpoint};
 use nfx_proto::hashlist::{HashList, Role};
 use nfx_proto::manifest::Manifest;
@@ -104,9 +105,9 @@ impl Origin {
         }
     }
 
-    /// Serve `manifest`'s video. The manifest must already be verified (NFX-02 §4). Its
-    /// hash list is taken from the store, or pulled, and verified against `root`.
-    pub async fn hold(&self, manifest: &Manifest) -> Result<()> {
+    /// Serve `manifest`'s video; the type proves it passed NFX-02 §4. Its hash list is
+    /// taken from the store, or pulled, and verified against `root`.
+    pub async fn hold(&self, manifest: &Verified<Manifest>) -> Result<()> {
         let root = manifest.root_hex();
         if !self.store.has(&root) {
             self.pull_into_store(manifest, &root).await?;
@@ -132,7 +133,7 @@ impl Origin {
         index.videos.insert(
             root,
             Video {
-                manifest: manifest.clone(),
+                manifest: Manifest::clone(manifest),
                 types,
                 master,
             },
@@ -408,6 +409,8 @@ struct Source {
     tickets: BTreeMap<String, String>,
     /// Tried last until this time (unix seconds); 0 when the last attempt succeeded.
     cooldown_until: u64,
+    /// Heard only over gossip, never in a relay's beacon.
+    gossip: bool,
 }
 
 /// A [`Pull`] over iroh: the tickets come from verified beacons ([`SwarmPull::learn`]).
@@ -420,6 +423,9 @@ struct Source {
 ///   costs one attempt, not one per request.
 /// - A source that serves bytes the hash list does not name is forgotten
 ///   ([`NodeError::Poisoned`]).
+/// - A source heard only over gossip ([`SwarmPull::learn_gossip`]) is evicted first and
+///   never displaces one from a relay's beacon. A swarm member can announce under any
+///   number of fresh keys at no cost, while relays budget beacons (NFX-04 §2).
 pub struct SwarmPull {
     node: Arc<Node>,
     /// manifest a-tag → sources, in the order learned.
@@ -435,9 +441,21 @@ impl SwarmPull {
         }
     }
 
-    /// Record the iroh tickets of a verified beacon ([`Beacon::from_event`]). A newer
-    /// beacon from the same seeder replaces its entry in place; an older one is ignored.
-    pub fn learn(&self, beacon: &Beacon) {
+    /// Record the iroh tickets of a verified beacon from a relay ([`Beacon::from_event`]).
+    /// A newer beacon from the same seeder replaces its entry in place; an older one is
+    /// ignored.
+    pub fn learn(&self, beacon: &Verified<Beacon>) {
+        self.learn_as(beacon, false);
+    }
+
+    /// Record a seeder heard over the video's gossip swarm (a `here` envelope's
+    /// [`presence_for`](nfx_proto::gossip::Envelope)). Ranked below relay beacons: see
+    /// [`SwarmPull`].
+    pub fn learn_gossip(&self, presence: &Verified<Beacon>) {
+        self.learn_as(presence, true);
+    }
+
+    fn learn_as(&self, beacon: &Verified<Beacon>, gossip: bool) {
         let a = format!(
             "{}:{}:{}",
             nfx_proto::KIND_MANIFEST,
@@ -464,6 +482,7 @@ impl SwarmPull {
         let list = sources.entry(a).or_default();
         list.retain(|s| now < s.expiration);
         if let Some(held) = list.iter_mut().find(|s| s.seeder == beacon.seeder) {
+            held.gossip &= gossip; // a relay's beacon vouches for it from now on
             if held.created_at < beacon.created_at {
                 held.created_at = beacon.created_at;
                 held.expiration = beacon.expiration;
@@ -472,14 +491,25 @@ impl SwarmPull {
             return;
         }
         if list.len() >= MAX_SOURCES_PER_VIDEO {
-            // Make room: a source on cooldown first, else the one announced longest ago.
+            // Make room: one heard only over gossip first, then one on cooldown, then the
+            // one announced longest ago. Gossip never displaces a relay's source.
             let evict = list
                 .iter()
                 .enumerate()
-                .max_by_key(|(_, s)| (s.cooldown_until > now, std::cmp::Reverse(s.created_at)))
+                .filter(|(_, s)| !gossip || s.gossip)
+                .max_by_key(|(_, s)| {
+                    (
+                        s.gossip,
+                        s.cooldown_until > now,
+                        std::cmp::Reverse(s.created_at),
+                    )
+                })
                 .map(|(i, _)| i);
-            if let Some(i) = evict {
-                list.remove(i);
+            match evict {
+                Some(i) => {
+                    list.remove(i);
+                }
+                None => return,
             }
         }
         list.push(Source {
@@ -488,6 +518,7 @@ impl SwarmPull {
             expiration: beacon.expiration,
             tickets,
             cooldown_until: 0,
+            gossip,
         });
     }
 
@@ -552,6 +583,24 @@ impl SwarmPull {
             }
         }
         Err(last)
+    }
+
+    /// The iroh endpoints of the live sources for a manifest (`a` tag), with the addresses
+    /// their tickets carry: who to bootstrap the video's gossip swarm from (NFX-06 §4).
+    /// One entry per endpoint.
+    #[must_use]
+    pub fn peers(&self, manifest_a: &str) -> Vec<iroh::EndpointAddr> {
+        let mut out: Vec<iroh::EndpointAddr> = Vec::new();
+        for source in self.live(manifest_a, unix_now()) {
+            for ticket in source.tickets.values() {
+                if let Ok(t) = ticket.parse::<BlobTicket>()
+                    && !out.iter().any(|p| p.id == t.addr().id)
+                {
+                    out.push(t.addr().clone());
+                }
+            }
+        }
+        out
     }
 
     /// The seeders currently usable for a manifest (`a` tag), in the order they are tried.

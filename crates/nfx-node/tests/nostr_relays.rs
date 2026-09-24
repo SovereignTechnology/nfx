@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use nfx_node::nostr::{ManifestQuery, Relays, sign_beacon, sign_deletion, sign_manifest};
 use nfx_node::unix_now;
+use nfx_proto::Verified;
 use nfx_proto::beacon::{BeaconContent, Chunks, Endpoint};
 use nfx_proto::event::Event;
 use nfx_proto::manifest::Manifest;
@@ -14,7 +15,7 @@ use serde_json::Value;
 
 const WAIT: Duration = Duration::from_secs(10);
 
-fn vector() -> (Manifest, Keys, Keys) {
+fn vector() -> (Verified<Manifest>, Keys, Keys) {
     let v: Value =
         serde_json::from_str(include_str!("../../../spec/test-vectors/manifest.json")).unwrap();
     let event: Event = serde_json::from_value(v["event"].clone()).unwrap();
@@ -59,7 +60,7 @@ async fn manifests_and_beacons_round_trip_through_a_relay() {
     let (first, _) = sign_manifest(&creator, &vector, now - 60).await.unwrap();
     let revised = Manifest {
         title: "Salt Flats at Dusk (director's cut)".into(),
-        ..vector.clone()
+        ..vector.clone().into_inner()
     };
     let (second, second_parsed) = sign_manifest(&creator, &revised, now - 30).await.unwrap();
     assert_eq!(publisher.publish(&first).await.unwrap(), 1);
@@ -94,7 +95,7 @@ async fn manifests_and_beacons_round_trip_through_a_relay() {
             "salt-flats-future",
         )
         .unwrap(),
-        ..vector.clone()
+        ..vector.clone().into_inner()
     };
     let (future, _) = sign_manifest(&creator, &future, now + 3600).await.unwrap();
     assert_eq!(publisher.publish(&future).await.unwrap(), 1);

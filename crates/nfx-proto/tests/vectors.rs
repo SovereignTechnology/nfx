@@ -337,7 +337,7 @@ fn voucher_is_reproduced_verified_and_bound_to_the_manifest() {
         Voucher::verify(str_of(&v, "wire"), sig, &open, &presenter, now).is_err(),
         "open manifest"
     );
-    let mut not_listed = manifest.clone();
+    let mut not_listed = manifest.clone().into_inner();
     if let License::Licensed(terms) = &mut not_listed.license {
         terms.free_seeders.clear();
     }
@@ -345,7 +345,7 @@ fn voucher_is_reproduced_verified_and_bound_to_the_manifest() {
         Voucher::verify(str_of(&v, "wire"), sig, &not_listed, &presenter, now).is_err(),
         "not a free_seeder"
     );
-    let mut other_author = manifest.clone();
+    let mut other_author = manifest.clone().into_inner();
     other_author.author = public_key_hex(&[7u8; 32]).unwrap();
     assert!(
         Voucher::verify(str_of(&v, "wire"), sig, &other_author, &presenter, now).is_err(),
@@ -544,7 +544,7 @@ fn deletions_withdraw_their_own_addresses_only() {
     );
     let later = Manifest {
         created_at: d.created_at + 1,
-        ..manifest.clone()
+        ..manifest.clone().into_inner()
     };
     assert!(!d.deletes(&later), "a later revision republishes the video");
     assert_eq!(tags(&[str_of(&v, "manifest_a").to_owned()]), ev.tags);

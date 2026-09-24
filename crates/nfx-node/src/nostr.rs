@@ -15,7 +15,7 @@ use nfx_proto::deletion::Deletion;
 use nfx_proto::event::Event;
 use nfx_proto::manifest::Manifest;
 use nfx_proto::namespace::{Namespace, VideoAddr};
-use nfx_proto::{KIND_BEACON, KIND_MANIFEST};
+use nfx_proto::{KIND_BEACON, KIND_MANIFEST, Verified};
 use nostr_sdk::prelude as ns;
 use nostr_sdk::prelude::{AsyncGetPublicKey, AsyncSignEvent, FinalizeEventAsync as _};
 
@@ -74,7 +74,7 @@ pub async fn sign_manifest<S>(
     signer: &S,
     manifest: &Manifest,
     created_at: u64,
-) -> Result<(Event, Manifest)>
+) -> Result<(Event, Verified<Manifest>)>
 where
     S: AsyncGetPublicKey + AsyncSignEvent,
 {
@@ -92,7 +92,7 @@ where
         created_at,
         ..manifest.clone()
     };
-    if parsed != expected {
+    if *parsed != expected {
         return Err(NodeError::Relay(
             "signed manifest does not parse back to itself".into(),
         ));
@@ -232,7 +232,7 @@ impl Relays {
         &self,
         query: &ManifestQuery,
         timeout: Duration,
-    ) -> Result<Vec<Manifest>> {
+    ) -> Result<Vec<Verified<Manifest>>> {
         self.require_connected().await?;
         // A revision dated beyond the clock-skew window is ignored: it would outrank every
         // honest revision until real time caught up with it.
@@ -258,7 +258,8 @@ impl Relays {
             .timeout(timeout)
             .await
             .map_err(NodeError::relay)?;
-        let mut newest: BTreeMap<(String, String), (u64, String, Manifest)> = BTreeMap::new();
+        let mut newest: BTreeMap<(String, String), (u64, String, Verified<Manifest>)> =
+            BTreeMap::new();
         for event in &events {
             let Ok(event) = from_nostr(event) else {
                 continue;
@@ -277,12 +278,13 @@ impl Relays {
                 newest.insert(key, (m.created_at, event.id.clone(), m));
             }
         }
-        let current: Vec<Manifest> = newest.into_values().map(|(_, _, m)| m).collect();
+        let current: Vec<Verified<Manifest>> = newest.into_values().map(|(_, _, m)| m).collect();
         if current.is_empty() {
             return Ok(current);
         }
         // NFX-02 §6: a deletion by the author, at least as new as the revision, withdraws it.
-        let deletions = self.deletions(&current, timeout).await?;
+        let named: Vec<&Manifest> = current.iter().map(|m| &**m).collect();
+        let deletions = self.deletions(&named, timeout).await?;
         Ok(current
             .into_iter()
             .filter(|m| !deletions.iter().any(|d| d.deletes(m)))
@@ -294,14 +296,12 @@ impl Relays {
     /// a deletion.
     pub async fn deleted(&self, manifest: &Manifest, timeout: Duration) -> Result<bool> {
         self.require_connected().await?;
-        let deletions = self
-            .deletions(std::slice::from_ref(manifest), timeout)
-            .await?;
+        let deletions = self.deletions(&[manifest], timeout).await?;
         Ok(deletions.iter().any(|d| d.deletes(manifest)))
     }
 
     /// Valid NFX deletions by the authors of `manifests`, naming their addresses.
-    async fn deletions(&self, manifests: &[Manifest], timeout: Duration) -> Result<Vec<Deletion>> {
+    async fn deletions(&self, manifests: &[&Manifest], timeout: Duration) -> Result<Vec<Deletion>> {
         let authors = manifests
             .iter()
             .map(|m| ns::PublicKey::parse(&m.author))
@@ -312,7 +312,7 @@ impl Relays {
             .authors(authors)
             .custom_tags(
                 ns::SingleLetterTag::LOWERCASE_A,
-                manifests.iter().map(Manifest::a_tag),
+                manifests.iter().map(|m| m.a_tag()),
             );
         let events = self
             .client
@@ -404,7 +404,7 @@ impl BeaconWatch {
     /// A relay that closes the subscription (a lagging reader, a restart) gets it again,
     /// at most once per [`RESUBSCRIBE_EVERY`]: nostr-sdk drops a subscription on most
     /// `CLOSED` reasons, and a silent watch would stop a fetcher from learning seeders.
-    pub async fn next(&mut self) -> Option<Beacon> {
+    pub async fn next(&mut self) -> Option<Verified<Beacon>> {
         while let Some(notification) = self.notifications.next().await {
             let event = match notification {
                 ns::ClientNotification::Event {
@@ -452,6 +452,7 @@ impl BeaconWatch {
                 &mut self.live,
                 key,
                 beacon.clone(),
+                |b| b.expiration,
                 unix_now(),
                 MAX_LIVE_BEACONS,
             );
@@ -475,28 +476,29 @@ impl BeaconWatch {
 
     /// Beacons not yet expired at `now`, newest per seeder and manifest. Expired ones are
     /// dropped from the table.
-    pub fn live(&mut self, now: u64) -> Vec<&Beacon> {
+    pub fn live(&mut self, now: u64) -> Vec<&Verified<Beacon>> {
         self.live.retain(|_, b| now < b.expiration);
         self.live.values().collect()
     }
 }
 
-type LiveTable = BTreeMap<(String, String), Beacon>;
+type LiveTable = BTreeMap<(String, String), Verified<Beacon>>;
 
-/// Insert into the live table: drop what has expired at `now`, then, if a new key would
+/// Insert into a live table: drop what has expired at `now`, then, if a new key would
 /// exceed `cap`, evict the entry closest to expiry.
-fn insert_bounded(
-    live: &mut LiveTable,
+fn insert_bounded<V>(
+    live: &mut BTreeMap<(String, String), V>,
     key: (String, String),
-    beacon: Beacon,
+    beacon: V,
+    expiration: impl Fn(&V) -> u64,
     now: u64,
     cap: usize,
 ) {
-    live.retain(|_, b| now < b.expiration);
+    live.retain(|_, b| now < expiration(b));
     if !live.contains_key(&key) && live.len() >= cap {
         let soonest = live
             .iter()
-            .min_by_key(|(_, b)| b.expiration)
+            .min_by_key(|(_, b)| expiration(b))
             .map(|(k, _)| k.clone());
         if let Some(k) = soonest {
             live.remove(&k);
@@ -536,23 +538,24 @@ mod tests {
 
     #[test]
     fn the_live_table_prunes_expired_and_evicts_the_soonest_past_its_cap() {
-        let mut live = LiveTable::new();
+        let mut live: BTreeMap<(String, String), Beacon> = BTreeMap::new();
+        let expiry = |b: &Beacon| b.expiration;
         for (seeder, exp) in [("s1", 1_000), ("s2", 1_100)] {
             let (k, b) = beacon(seeder, exp);
-            insert_bounded(&mut live, k, b, 900, 2);
+            insert_bounded(&mut live, k, b, expiry, 900, 2);
         }
         // Full: a new seeder evicts s1, the entry closest to expiry.
         let (k, b) = beacon("s3", 1_200);
-        insert_bounded(&mut live, k, b, 900, 2);
+        insert_bounded(&mut live, k, b, expiry, 900, 2);
         let seeders: Vec<_> = live.keys().map(|(s, _)| s.as_str()).collect();
         assert_eq!(seeders, ["s2", "s3"]);
         // Replacing an existing key never evicts another.
         let (k, b) = beacon("s3", 1_300);
-        insert_bounded(&mut live, k, b, 900, 2);
+        insert_bounded(&mut live, k, b, expiry, 900, 2);
         assert_eq!(live.len(), 2);
         // Expired entries go first: at t=1_150, s2 has expired.
         let (k, b) = beacon("s4", 1_400);
-        insert_bounded(&mut live, k, b, 1_150, 2);
+        insert_bounded(&mut live, k, b, expiry, 1_150, 2);
         let seeders: Vec<_> = live.keys().map(|(s, _)| s.as_str()).collect();
         assert_eq!(seeders, ["s3", "s4"]);
     }

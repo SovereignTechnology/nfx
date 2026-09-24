@@ -9,10 +9,15 @@
 //! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--relay-only]
 //!          [--seed <a>]… [--fetch <a>]… [--pull <a>]… [--origin <addr:port>]
 //!          [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]…
+//!          [--allow-creator <hex>]… [--gossip-peer <id>@<ip:port|relay-url>]…
 //! ```
 //!
 //! `<a>` is a manifest address, `38504:<creator-hex>:<namespace>:<video-id>`, as
 //! `publish` prints it. Secrets never reach the terminal: only public keys are printed.
+//!
+//! `run` joins each video's gossip swarm (NFX-06 §4) through the seeders its beacons name
+//! and any `--gossip-peer`, and prints its own `gossip peer:` lines for others to use. A
+//! `--relay-only` node does not gossip.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -31,7 +36,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]...";
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip-peer <id>@<ip:port|relay-url>]...";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -190,6 +195,8 @@ async fn run(args: &[String]) -> Result<()> {
             "https-url",
             "embed-relay",
             "namespace",
+            "allow-creator",
+            "gossip-peer",
         ],
     )?;
     let addr = |name: &str| -> Result<Option<std::net::SocketAddr>> {
@@ -226,6 +233,8 @@ async fn run(args: &[String]) -> Result<()> {
             .map(|n| Namespace::parse(n).map_err(Error::from))
             .collect::<Result<_>>()?,
         deletion_check_every: None,
+        allow_creators: all(&f, "allow-creator"),
+        gossip_peers: gossip_peers(&all(&f, "gossip-peer"))?,
         internal_origin: false,
     };
     let daemon = Daemon::start(cfg).await?;
@@ -234,6 +243,16 @@ async fn run(args: &[String]) -> Result<()> {
     }
     if let Some(addr) = daemon.origin_addr {
         eprintln!("origin: http://{addr}/");
+    }
+    if !daemon.node().relay_only() {
+        let me = daemon.node().addr();
+        for t in &me.addrs {
+            match t {
+                iroh::TransportAddr::Ip(ip) => eprintln!("gossip peer: {}@{ip}", me.id),
+                iroh::TransportAddr::Relay(url) => eprintln!("gossip peer: {}@{url}", me.id),
+                _ => {}
+            }
+        }
     }
     let mut last = std::collections::BTreeMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(2));
@@ -253,4 +272,57 @@ async fn run(args: &[String]) -> Result<()> {
     }
     daemon.shutdown().await;
     Ok(())
+}
+
+/// `--gossip-peer ID@ADDR`, where `ADDR` is `ip:port` or an iroh relay URL; repeat the flag
+/// for more addresses of the same peer. `nfxd run` prints its own in this form.
+fn gossip_peers(values: &[String]) -> Result<Vec<iroh::EndpointAddr>> {
+    let mut peers: Vec<iroh::EndpointAddr> = Vec::new();
+    for v in values {
+        let bad = |why: &str| Error::Config(format!("--gossip-peer {v}: {why}"));
+        let (id, at) = v
+            .split_once('@')
+            .ok_or_else(|| bad("expected ENDPOINT_ID@ADDR"))?;
+        let id: iroh::EndpointId = id.parse().map_err(|_| bad("not an endpoint id"))?;
+        let addr = if at.contains("://") {
+            iroh::TransportAddr::Relay(at.parse().map_err(|_| bad("not a relay URL"))?)
+        } else {
+            iroh::TransportAddr::Ip(at.parse().map_err(|_| bad("not ip:port"))?)
+        };
+        match peers.iter_mut().find(|p| p.id == id) {
+            Some(p) => {
+                p.addrs.insert(addr);
+            }
+            None => peers.push(iroh::EndpointAddr::from_parts(id, [addr])),
+        }
+    }
+    Ok(peers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gossip_peers;
+
+    #[test]
+    fn gossip_peers_merge_by_id_and_refuse_what_they_cannot_parse() {
+        let id = iroh::SecretKey::from([7u8; 32]).public();
+        let peers = gossip_peers(&[
+            format!("{id}@127.0.0.1:4433"),
+            format!("{id}@https://relay.example/"),
+        ])
+        .unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].addrs.len(), 2);
+        for bad in [
+            id.to_string(),
+            format!("{id}@localhost"),
+            format!("{id}@ftp:/x"),
+            "not-an-id@127.0.0.1:1".to_owned(),
+        ] {
+            let err = gossip_peers(std::slice::from_ref(&bad))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("--gossip-peer"), "{bad}: {err}");
+        }
+    }
 }

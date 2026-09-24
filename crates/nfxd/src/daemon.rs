@@ -9,6 +9,9 @@
 //!   beacons, then seed it (a free M1 peer gives back what it watched).
 //! - **pull**: hold the video on the origin only, filling misses from the swarm
 //!   (NFX-05 §6.2).
+//! - **gossip** (NFX-06 §4): every seeded video's swarm hears a signed `here` envelope
+//!   with each beacon, and every fetched, pulled or watched video learns seeders from
+//!   the swarm as well as from beacons, once it knows a first peer to join through.
 //! - **watch** (at runtime, [`Daemon::watch`]): what a viewer does. Hold the video on the
 //!   origin so playback can start from on-demand pulls, and fetch it whole in the
 //!   background to seed it.
@@ -20,13 +23,17 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use iroh::RelayUrl;
+use nfx_node::gossip::envelope_wire;
 use nfx_node::node::{Node, NodeConfig};
 use nfx_node::nostr::{BEACON_TTL, ManifestQuery, Relays};
 use nfx_node::origin::{Origin, SwarmPull, serve};
 use nfx_node::relay::ScopedRelay;
 use nfx_node::seed::Seeded;
 use nfx_node::store::FsStore;
+use nfx_node::unix_now;
+use nfx_proto::Verified;
 use nfx_proto::beacon::{BeaconContent, Chunks, Endpoint, parse_a_tag};
+use nfx_proto::gossip::{Envelope, Op};
 use nfx_proto::manifest::Manifest;
 use nfx_proto::namespace::Namespace;
 use nostr_sdk::prelude::Keys;
@@ -67,6 +74,14 @@ pub struct Config {
     pub embed_relay: Option<SocketAddr>,
     /// Namespaces the embedded relay serves; by default those of the videos above.
     pub namespaces: Vec<Namespace>,
+    /// When non-empty, the embedded relay admits only these creators (x-only pubkey hex):
+    /// their manifests and deletions, and beacons for their videos.
+    pub allow_creators: Vec<String>,
+    /// iroh endpoints to bootstrap every video's gossip swarm from, besides the seeders
+    /// learned from beacons (NFX-06 §4). Each needs an address this node may use (a
+    /// direct one, or one of `iroh_relays`). Ignored with `relay_only`, which never
+    /// gossips.
+    pub gossip_peers: Vec<iroh::EndpointAddr>,
     /// How often a seeded video is checked for its creator's deletion (NFX-02 §6).
     /// Default: every beacon republish (60 s).
     pub deletion_check_every: Option<Duration>,
@@ -113,10 +128,68 @@ struct Shared {
     origin: Option<Arc<Origin>>,
     https_url: Option<String>,
     deletion_check_every: Duration,
+    gossip_peers: Vec<iroh::EndpointAddr>,
+    /// This node's own pubkey: its own beacons and envelopes are never learned.
+    own: Option<String>,
     state: Arc<Mutex<BTreeMap<String, VideoState>>>,
 }
 
+/// Aborts its task when dropped (a loop's helper dies with the loop).
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Learn a swarm member's `here` (NFX-06 §4) as a pull source for the manifest at `a`;
+/// never this node's own.
+fn learn_presence(pull: &SwarmPull, own: Option<&str>, env: &Verified<Envelope>, a: &str) {
+    if Some(env.pubkey.as_str()) != own
+        && let Some(presence) = env.presence_for(a)
+    {
+        pull.learn_gossip(&presence);
+    }
+}
+
 impl Shared {
+    /// The bootstrap for a video's swarm: configured peers plus known seeders' endpoints.
+    fn swarm_peers(&self, a: &str) -> Vec<iroh::EndpointAddr> {
+        let mut peers = self.gossip_peers.clone();
+        for p in self.pull.peers(a) {
+            if !peers.iter().any(|q| q.id == p.id) {
+                peers.push(p);
+            }
+        }
+        peers
+    }
+
+    /// Learn seeders of `a` from its gossip swarm (NFX-06 §4) until the swarm closes. It
+    /// joins once a first peer is known, from configuration or a beacon.
+    async fn learn_from_swarm(self: Arc<Self>, a: String) {
+        let Ok((_, video)) = parse_a_tag(&a) else {
+            return;
+        };
+        if self.node.relay_only() {
+            return;
+        }
+        let peers = loop {
+            let p = self.swarm_peers(&a);
+            if !p.is_empty() {
+                break p;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        };
+        let Ok(swarm) = self.node.join_swarm(&video, peers).await else {
+            return;
+        };
+        let (_announcer, mut listener) = swarm.split();
+        while let Some(env) = listener.next_envelope().await {
+            learn_presence(&self.pull, self.own.as_deref(), &env, &a);
+        }
+    }
+
     fn set(&self, a: &str, s: VideoState) {
         self.state
             .lock()
@@ -125,7 +198,7 @@ impl Shared {
     }
 
     /// The current manifest at `a`, retried until a relay has it.
-    async fn resolve(&self, a: &str) -> Result<Manifest> {
+    async fn resolve(&self, a: &str) -> Result<Verified<Manifest>> {
         let (creator, video) = parse_a_tag(a)?;
         let query = ManifestQuery {
             namespace: video.namespace().clone(),
@@ -143,7 +216,7 @@ impl Shared {
         }
     }
 
-    async fn seed_and_announce(&self, a: &str, manifest: &Manifest) -> Result<()> {
+    async fn seed_and_announce(&self, a: &str, manifest: &Verified<Manifest>) -> Result<()> {
         let keys = self
             .keys
             .clone()
@@ -161,18 +234,53 @@ impl Shared {
             origin.hold(manifest).await?;
         }
         self.set(a, VideoState::Seeding);
+        // The video's gossip swarm: announce into it, and learn from it (NFX-06 §4).
+        let secret = keys.secret_key().to_secret_bytes();
+        let pubkey = keys.public_key().to_hex();
+        let peers = self.swarm_peers(a);
+        let swarm = match self.node.join_swarm(&manifest.addr, peers.clone()).await {
+            Ok(mut swarm) => {
+                // With peers to join through, wait (briefly) to be connected, or the first
+                // envelope reaches nobody.
+                if !peers.is_empty() {
+                    let _ = tokio::time::timeout(Duration::from_secs(5), swarm.joined()).await;
+                }
+                Some(swarm.split())
+            }
+            Err(_) => None,
+        };
+        let (announcer, _learning) = match swarm {
+            Some((announcer, mut listener)) => {
+                let (pull, own, a) = (self.pull.clone(), self.own.clone(), a.to_owned());
+                let learning = AbortOnDrop(tokio::spawn(async move {
+                    while let Some(env) = listener.next_envelope().await {
+                        learn_presence(&pull, own.as_deref(), &env, &a);
+                    }
+                }));
+                (Some(announcer), Some(learning))
+            }
+            None => (None, None),
+        };
         let mut announce = tokio::time::interval(Duration::from_secs(BEACON_TTL / 2));
         let mut check = tokio::time::interval(self.deletion_check_every);
         loop {
             tokio::select! {
                 _ = announce.tick() => {
+                    let content = self.beacon(&seeded, manifest);
+                    if let Some(announcer) = &announcer {
+                        let env = Envelope {
+                            op: Op::Here,
+                            pubkey: pubkey.clone(),
+                            beacon: content.clone(),
+                            created_at: unix_now(),
+                        };
+                        if let Ok(wire) = envelope_wire(&env, &secret) {
+                            let _ = announcer.announce(&wire).await;
+                        }
+                    }
                     // A refused or unreachable relay is retried at the next tick (beacons are
                     // hints), but it shows: a node that cannot announce is invisible.
-                    match self
-                        .relays
-                        .announce(&keys, manifest, &self.beacon(&seeded, manifest))
-                        .await
-                    {
+                    match self.relays.announce(&keys, manifest, &content).await {
                         Ok(_) => self.set(a, VideoState::Seeding),
                         Err(e) => self.set(a, VideoState::Unannounced(e.to_string())),
                     }
@@ -181,6 +289,17 @@ impl Shared {
                     // Only an actual deletion stops seeding: a relay that forgot the
                     // manifest (a restart) is not one.
                     if matches!(self.relays.deleted(manifest, CONNECT_TIMEOUT).await, Ok(true)) {
+                        if let Some(announcer) = &announcer {
+                            let env = Envelope {
+                                op: Op::Bye,
+                                pubkey: pubkey.clone(),
+                                beacon: self.beacon(&seeded, manifest),
+                                created_at: unix_now(),
+                            };
+                            if let Ok(wire) = envelope_wire(&env, &secret) {
+                                let _ = announcer.announce(&wire).await;
+                            }
+                        }
                         self.set(a, VideoState::Deleted);
                         return Ok(());
                     }
@@ -262,6 +381,28 @@ impl Daemon {
         if cfg.relay_only && cfg.iroh_relays.is_empty() {
             return Err(Error::Config("--relay-only needs --iroh-relay".into()));
         }
+        // The allow-list governs the embedded relay; without one it would govern nothing.
+        if !cfg.allow_creators.is_empty() && cfg.embed_relay.is_none() {
+            return Err(Error::Config("--allow-creator needs --embed-relay".into()));
+        }
+        if cfg.relay_only && !cfg.gossip_peers.is_empty() {
+            return Err(Error::Config(
+                "--gossip-peer: a relay-only node does not gossip".into(),
+            ));
+        }
+        // A peer with no address this node may dial would be dropped silently at every join.
+        if let Some(p) = cfg.gossip_peers.iter().find(|p| {
+            !p.addrs.iter().any(|t| match t {
+                iroh::TransportAddr::Ip(_) => true,
+                iroh::TransportAddr::Relay(url) => cfg.iroh_relays.contains(url),
+                _ => false,
+            })
+        }) {
+            return Err(Error::Config(format!(
+                "--gossip-peer {}: no direct address, and no relay among --iroh-relay",
+                p.id
+            )));
+        }
         if !cfg.pull.is_empty() && cfg.origin.is_none() && !cfg.internal_origin {
             return Err(Error::Config("--pull needs --origin".into()));
         }
@@ -309,7 +450,21 @@ impl Daemon {
                 if local.ip().is_unspecified() {
                     local.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
                 }
-                let relay = Arc::new(ScopedRelay::new(&namespaces));
+                if let Some(bad) = cfg.allow_creators.iter().find(|c| {
+                    c.len() != 64
+                        || !c
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                }) {
+                    return Err(Error::Config(format!(
+                        "--allow-creator {bad}: not 64 lowercase hex"
+                    )));
+                }
+                let relay = Arc::new(if cfg.allow_creators.is_empty() {
+                    ScopedRelay::new(&namespaces)
+                } else {
+                    ScopedRelay::with_creators(&namespaces, &cfg.allow_creators)
+                });
                 tasks.push(tokio::spawn(relay.clone().serve(listener)));
                 let url = format!("ws://{local}");
                 // The host speaks to its own relay through the same door (NFX-04 §7).
@@ -365,6 +520,8 @@ impl Daemon {
                 .deletion_check_every
                 .unwrap_or(Duration::from_secs(BEACON_TTL / 2))
                 .max(Duration::from_millis(100)),
+            gossip_peers: cfg.gossip_peers.clone(),
+            own: cfg.keys.as_ref().map(|k| k.public_key().to_hex()),
             state: state.clone(),
         });
 
@@ -395,6 +552,9 @@ impl Daemon {
             (&cfg.fetch, |s, a| Box::pin(s.run_fetch(a))),
             (&cfg.pull, |s, a| Box::pin(s.run_pull(a))),
         ];
+        for a in cfg.fetch.iter().chain(&cfg.pull) {
+            tasks.push(tokio::spawn(shared.clone().learn_from_swarm(a.clone())));
+        }
         for (list, job) in jobs {
             for a in list {
                 shared.set(a, VideoState::Resolving);
@@ -420,6 +580,12 @@ impl Daemon {
         })
     }
 
+    /// The seeders currently known for a video (`a` tag), from beacons and gossip.
+    #[must_use]
+    pub fn sources(&self, a: &str) -> Vec<String> {
+        self.shared.pull.sources(a)
+    }
+
     /// The origin (TCP or internal), when there is one.
     #[must_use]
     pub fn origin(&self) -> Option<Arc<Origin>> {
@@ -437,7 +603,7 @@ impl Daemon {
     /// hold it on the origin (so playback can start while misses are pulled on demand),
     /// and fetch it whole in the background to seed it (with a key). Returns the manifest
     /// once the origin holds it, or an error after `timeout`. Watching twice is harmless.
-    pub async fn watch(&self, a: &str, timeout: Duration) -> Result<Manifest> {
+    pub async fn watch(&self, a: &str, timeout: Duration) -> Result<Verified<Manifest>> {
         let origin = self
             .shared
             .origin
@@ -466,6 +632,7 @@ impl Daemon {
                     }
                 }
             });
+            self.spawn(self.shared.clone().learn_from_swarm(a.to_owned()));
         }
         let shared = self.shared.clone();
         let hold = async {

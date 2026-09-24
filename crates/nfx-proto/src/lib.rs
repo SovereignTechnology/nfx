@@ -17,9 +17,11 @@ pub mod hashlist;
 mod hex32;
 pub mod manifest;
 pub mod namespace;
+mod verified;
 pub mod voucher;
 
 pub use error::{Error, Result};
+pub use verified::Verified;
 
 use sha2::{Digest, Sha256};
 

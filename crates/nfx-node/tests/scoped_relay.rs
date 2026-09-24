@@ -13,6 +13,7 @@ use hyper_util::rt::TokioIo;
 use nfx_node::nostr::{ManifestQuery, Relays, sign_deletion, sign_manifest};
 use nfx_node::relay::{MANIFESTS_PER_HOUR, ScopedRelay};
 use nfx_node::unix_now;
+use nfx_proto::Verified;
 use nfx_proto::beacon::{BeaconContent, Chunks, Endpoint};
 use nfx_proto::event::Event;
 use nfx_proto::manifest::Manifest;
@@ -22,7 +23,7 @@ use serde_json::Value;
 
 const WAIT: Duration = Duration::from_secs(10);
 
-fn vector() -> (Manifest, Keys, Keys) {
+fn vector() -> (Verified<Manifest>, Keys, Keys) {
     let v: Value =
         serde_json::from_str(include_str!("../../../spec/test-vectors/manifest.json")).unwrap();
     let event: Event = serde_json::from_value(v["event"].clone()).unwrap();
@@ -118,7 +119,7 @@ async fn a_scoped_relay_admits_limits_and_forwards_only_nfx() {
             "salt-flats-dusk",
         )
         .unwrap(),
-        ..manifest.clone()
+        ..manifest.clone().into_inner()
     };
     let (foreign, _) = sign_manifest(&creator, &foreign, unix_now()).await.unwrap();
     assert!(
@@ -262,6 +263,61 @@ async fn a_scoped_relay_admits_limits_and_forwards_only_nfx() {
 
     publisher.shutdown().await;
     reader.shutdown().await;
+    relay.shutdown();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_allow_list_admits_only_listed_creators_and_their_beacons() {
+    let (manifest, creator, seeder) = vector();
+    let ns = manifest.addr.namespace().clone();
+    let relay = Arc::new(ScopedRelay::with_creators(
+        std::slice::from_ref(&ns),
+        &[creator.public_key().to_hex()],
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(relay.clone().serve(listener));
+    let publisher = Relays::connect(std::slice::from_ref(&url), WAIT)
+        .await
+        .unwrap();
+    let client = Client::default();
+    client.add_relay(url.as_str()).await.unwrap();
+    client.connect().and_wait(WAIT).await;
+
+    // The listed creator: manifest and a beacon for it are admitted.
+    let (ev, listed) = sign_manifest(&creator, &manifest, unix_now())
+        .await
+        .unwrap();
+    assert_eq!(publisher.publish(&ev).await.unwrap(), 1);
+    let beacon =
+        nfx_node::nostr::sign_beacon(&seeder, &listed.a_tag(), &content(&listed), unix_now(), 120)
+            .await
+            .unwrap();
+    assert_eq!(publisher.publish(&beacon).await.unwrap(), 1);
+
+    // Anyone else: their manifest, and beacons for their videos, are refused.
+    let stranger = Keys::generate();
+    let (ev, theirs) = sign_manifest(&stranger, &manifest, unix_now())
+        .await
+        .unwrap();
+    assert!(
+        refusal(&client, &ev)
+            .await
+            .starts_with("blocked: creator not allowed here")
+    );
+    let beacon =
+        nfx_node::nostr::sign_beacon(&seeder, &theirs.a_tag(), &content(&theirs), unix_now(), 120)
+            .await
+            .unwrap();
+    assert!(
+        refusal(&client, &beacon)
+            .await
+            .starts_with("blocked: creator not allowed here")
+    );
+
+    client.shutdown().await;
+    publisher.shutdown().await;
     relay.shutdown();
     server.abort();
 }

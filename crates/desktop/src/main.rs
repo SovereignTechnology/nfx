@@ -171,7 +171,7 @@ async fn watch(state: State<'_, AppState>, a: String) -> Result<Watched, String>
     Ok(Watched {
         a: m.a_tag(),
         root: m.root_hex(),
-        title: m.title,
+        title: m.title.clone(),
         video: m.addr.to_string(),
     })
 }

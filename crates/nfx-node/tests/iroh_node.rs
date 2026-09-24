@@ -1,6 +1,7 @@
 //! Seed, fetch, tamper and gossip, in one process against a self-hosted relay (the same
 //! code as the `iroh-relay` binary). The fetcher has no IP transports, so every byte it
-//! receives crosses the relay. Content: the NFX test-vector video (`spec/test-vectors/`).
+//! receives crosses the relay; it therefore does not gossip, and a normal peer does.
+//! Content: the NFX test-vector video (`spec/test-vectors/`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -195,10 +196,40 @@ async fn seed_fetch_tamper_and_gossip_over_a_self_hosted_relay() {
     );
     assert!(!clean.has(&members[2]));
 
-    // Gossip: the fetcher joins the video's swarm via the seeder; the seeder announces a
-    // signed envelope carrying its real tickets.
+    // Address filtering: a relay-only node keeps only this network's relays, and nobody
+    // keeps a relay the network does not run.
+    let foreign: iroh::RelayUrl = "https://relay.attacker.example/".parse().unwrap();
+    let kept = fetcher.trusted(&seeder.addr());
+    assert!(
+        !kept.addrs.is_empty()
+            && kept
+                .addrs
+                .iter()
+                .all(|t| matches!(t, iroh::TransportAddr::Relay(u) if *u == url))
+    );
+    let lure =
+        iroh::EndpointAddr::from_parts(liar.id(), [iroh::TransportAddr::Relay(foreign.clone())]);
+    assert!(seeder.trusted(&lure).addrs.is_empty());
+    assert!(!seeder.learn_addr(&lure));
+
+    // Gossip. A relay-only node refuses it: swarm members' advertised addresses reach the
+    // endpoint unfiltered, and could point it at any relay host.
+    assert!(
+        fetcher
+            .join_swarm(&video, vec![seeder.addr()])
+            .await
+            .is_err()
+    );
+    // A normal peer joins the video's swarm via the seeder; the seeder announces a signed
+    // envelope carrying its real tickets.
+    let peer = Node::spawn(NodeConfig {
+        relays: vec![url.clone()],
+        ..NodeConfig::default()
+    })
+    .await
+    .unwrap();
     let mut seeder_swarm = seeder.join_swarm(&video, vec![]).await.unwrap();
-    let mut fetcher_swarm = fetcher.join_swarm(&video, vec![seeder.id()]).await.unwrap();
+    let mut fetcher_swarm = peer.join_swarm(&video, vec![seeder.addr()]).await.unwrap();
     tokio::time::timeout(Duration::from_secs(15), fetcher_swarm.joined())
         .await
         .unwrap()
@@ -237,7 +268,7 @@ async fn seed_fetch_tamper_and_gossip_over_a_self_hosted_relay() {
     assert_eq!(got, envelope);
     assert_eq!(fetcher_swarm.rejected, 0);
 
-    for n in [seeder, fetcher, liar, victim] {
+    for n in [seeder, fetcher, liar, victim, peer] {
         n.shutdown().await.unwrap();
     }
 }

@@ -26,7 +26,7 @@ use nfx_proto::beacon::Beacon;
 use nfx_proto::deletion::Deletion;
 use nfx_proto::manifest::Manifest;
 use nfx_proto::namespace::Namespace;
-use nfx_proto::{KIND_BEACON, KIND_DELETION, KIND_MANIFEST, MAX_CLOCK_SKEW};
+use nfx_proto::{KIND_BEACON, KIND_DELETION, KIND_MANIFEST, MAX_CLOCK_SKEW, Verified};
 use nostr_sdk::prelude as ns;
 use tokio::net::TcpListener;
 
@@ -76,6 +76,10 @@ struct Limits {
 #[derive(Debug)]
 struct Admission {
     namespaces: BTreeSet<String>,
+    /// When set, only these creators' manifests and deletions, and beacons for their
+    /// videos, are admitted: an operator's content policy (NFX-04 §8), and the strongest
+    /// answer to floods from freshly minted keys.
+    creators: Option<BTreeSet<String>>,
     limits: Mutex<Limits>,
     /// The relay's own store, for applying NFX deletions (see [`Admission::apply`]).
     db: Arc<dyn ns::NostrDatabase>,
@@ -84,7 +88,7 @@ struct Admission {
 /// What passed the synchronous checks.
 enum Admitted {
     Beacon,
-    Manifest(Box<Manifest>),
+    Manifest(Box<Verified<Manifest>>),
     Deletion(Deletion),
 }
 
@@ -117,6 +121,10 @@ impl Admission {
         if !in_scope {
             return Err((Blocked, "out of scope".into()));
         }
+        let allowed = |creator: &str| self.creators.as_ref().is_none_or(|c| c.contains(creator));
+        if (kind == KIND_MANIFEST || kind == KIND_DELETION) && !allowed(&ev.pubkey) {
+            return Err((Blocked, "creator not allowed here".into()));
+        }
         // A far-future `created_at` would outrank every real revision and, in the
         // capped store, never be evicted (§2).
         if ev.created_at > now.saturating_add(MAX_CLOCK_SKEW) {
@@ -138,6 +146,9 @@ impl Admission {
                 return Err((Invalid, "beacon over 16 KiB".into()));
             }
             let beacon = Beacon::from_event(&ev, now).map_err(|e| (Invalid, e.to_string()))?;
+            if !allowed(&beacon.creator) {
+                return Err((Blocked, "creator not allowed here".into()));
+            }
             let a = format!(
                 "{KIND_MANIFEST}:{}:{}",
                 beacon.creator, beacon.content.video
@@ -291,8 +302,20 @@ pub struct ScopedRelay {
 }
 
 impl ScopedRelay {
+    /// An open scoped relay: any creator's manifests in `namespaces`.
     #[must_use]
     pub fn new(namespaces: &[Namespace]) -> Self {
+        Self::build(namespaces, None)
+    }
+
+    /// A scoped relay admitting only `creators` (x-only pubkey hex): their manifests and
+    /// deletions, and beacons for their videos.
+    #[must_use]
+    pub fn with_creators(namespaces: &[Namespace], creators: &[String]) -> Self {
+        Self::build(namespaces, Some(creators.iter().cloned().collect()))
+    }
+
+    fn build(namespaces: &[Namespace], creators: Option<BTreeSet<String>>) -> Self {
         let names: BTreeSet<String> = namespaces.iter().map(ToString::to_string).collect();
         let database: Arc<dyn ns::NostrDatabase> =
             ns::IntoNostrDatabase::into_nostr_database(nostr_memory::MemoryDatabase::bounded(
@@ -303,6 +326,7 @@ impl ScopedRelay {
             .database(database.clone())
             .write_policy(Admission {
                 namespaces: names.clone(),
+                creators,
                 limits: Mutex::new(Limits::default()),
                 db: database,
             })

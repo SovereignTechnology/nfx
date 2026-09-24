@@ -20,11 +20,16 @@ use iroh_blobs::api::blobs::AddBytesOptions;
 use iroh_blobs::hashseq::HashSeq;
 use iroh_blobs::ticket::BlobTicket;
 use iroh_blobs::{BlobFormat, HashAndFormat};
+use nfx_node::gossip::envelope_wire;
 use nfx_node::node::{Node, NodeConfig};
+use nfx_node::nostr::{sign_beacon, sign_manifest};
 use nfx_node::origin::{IMMUTABLE, Origin, SwarmPull, serve};
 use nfx_node::store::{ContentStore, FsStore};
 use nfx_node::video::rendition_members;
+use nfx_proto::Verified;
 use nfx_proto::beacon::{Beacon, BeaconContent, Chunks, Endpoint};
+use nfx_proto::event::public_key_hex;
+use nfx_proto::gossip::{Envelope, Op};
 use nfx_proto::hashlist::Role;
 use nfx_proto::manifest::{Manifest, Thumb};
 
@@ -169,8 +174,13 @@ async fn routes_headers_and_refusals() {
             sha256: thumb.sha256.clone(),
             mime: "text/html".into(),
         }),
-        ..v.manifest.clone()
+        ..v.manifest.clone().into_inner()
     };
+    // Signed, as `hold` only takes a verified manifest.
+    let keys = nostr_sdk::prelude::Keys::generate();
+    let (_, html_thumb) = sign_manifest(&keys, &html_thumb, nfx_node::unix_now())
+        .await
+        .unwrap();
     let (store2, _) = vector_store(&tmp("origin-thumb"));
     let origin2 = Origin::new(Arc::new(store2), None);
     origin2.hold(&html_thumb).await.unwrap();
@@ -202,24 +212,35 @@ async fn http(
     (parts.status, Response::from_parts(parts, ()), bytes)
 }
 
-fn beacon(manifest: &Manifest, seeder: &str, endpoint: Endpoint) -> Beacon {
-    let now = nfx_node::unix_now();
-    Beacon {
-        seeder: seeder.into(),
-        created_at: now,
-        expiration: now + 120,
-        creator: manifest.author.clone(),
-        content: BeaconContent {
-            v: 1,
-            video: manifest.addr.clone(),
-            endpoints: vec![endpoint],
-            skipped: vec![],
-            chunks: Chunks::All,
-            price_hint: 0,
-            accepts_mints: vec![],
-            free: true,
-        },
-    }
+/// A beacon for `manifest` signed by `seeder` at `at` (lifetime 60 s), verified at `at`.
+async fn beacon_at(
+    manifest: &Manifest,
+    seeder: &nostr_sdk::prelude::Keys,
+    endpoint: Endpoint,
+    at: u64,
+) -> Verified<Beacon> {
+    let content = BeaconContent {
+        v: 1,
+        video: manifest.addr.clone(),
+        endpoints: vec![endpoint],
+        skipped: vec![],
+        chunks: Chunks::All,
+        price_hint: 0,
+        accepts_mints: vec![],
+        free: true,
+    };
+    let event = sign_beacon(seeder, &manifest.a_tag(), &content, at, 60)
+        .await
+        .unwrap();
+    Beacon::from_event(&event, at).unwrap()
+}
+
+async fn beacon(
+    manifest: &Manifest,
+    seeder: &nostr_sdk::prelude::Keys,
+    endpoint: Endpoint,
+) -> Verified<Beacon> {
+    beacon_at(manifest, seeder, endpoint, nfx_node::unix_now()).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -308,60 +329,77 @@ async fn pull_through_skips_a_liar_and_serves_verified_bytes_over_http() {
     let pull = Arc::new(SwarmPull::new(node.clone()));
     // An unreachable seeder, learned first: it costs one failed dial, then waits on cooldown.
     let nowhere = iroh::EndpointAddr::new(iroh::SecretKey::from_bytes(&[7u8; 32]).public());
-    pull.learn(&beacon(
-        &manifest,
-        "unreachable",
-        Endpoint::Iroh {
-            node: nowhere.id.to_string(),
-            relay: String::new(),
-            addrs: vec![],
-            tickets: BTreeMap::from([(
-                "meta".to_string(),
-                BlobTicket::new(nowhere, seeded.meta.hash(), BlobFormat::HashSeq).to_string(),
-            )]),
-        },
-    ));
-    pull.learn(&beacon(
-        &manifest,
-        "liar",
-        Endpoint::Iroh {
-            node: liar.id().to_string(),
-            relay: String::new(),
-            addrs: vec![],
-            tickets: liar_tickets,
-        },
-    ));
-    pull.learn(&beacon(
-        &manifest,
-        "honest",
-        seeder.beacon_endpoint(&seeded),
-    ));
+    let who: BTreeMap<&str, nostr_sdk::prelude::Keys> =
+        ["unreachable", "liar", "honest", "borrowed", "stale"]
+            .into_iter()
+            .map(|n| (n, nostr_sdk::prelude::Keys::generate()))
+            .collect();
+    let pk = |n: &str| who[n].public_key().to_hex();
+    pull.learn(
+        &beacon(
+            &manifest,
+            &who["unreachable"],
+            Endpoint::Iroh {
+                node: nowhere.id.to_string(),
+                relay: String::new(),
+                addrs: vec![],
+                tickets: BTreeMap::from([(
+                    "meta".to_string(),
+                    BlobTicket::new(nowhere, seeded.meta.hash(), BlobFormat::HashSeq).to_string(),
+                )]),
+            },
+        )
+        .await,
+    );
+    pull.learn(
+        &beacon(
+            &manifest,
+            &who["liar"],
+            Endpoint::Iroh {
+                node: liar.id().to_string(),
+                relay: String::new(),
+                addrs: vec![],
+                tickets: liar_tickets,
+            },
+        )
+        .await,
+    );
+    pull.learn(&beacon(&manifest, &who["honest"], seeder.beacon_endpoint(&seeded)).await);
     assert_eq!(
         pull.sources(&manifest.a_tag()),
-        ["unreachable", "liar", "honest"]
+        [pk("unreachable"), pk("liar"), pk("honest")]
     );
     // An endpoint whose tickets name another node is ignored (NFX-06 §2).
-    pull.learn(&beacon(
-        &manifest,
-        "borrowed",
-        Endpoint::Iroh {
-            node: liar.id().to_string(),
-            relay: String::new(),
-            addrs: vec![],
-            tickets: BTreeMap::from([("meta".to_string(), seeded.meta.to_string())]),
-        },
-    ));
+    pull.learn(
+        &beacon(
+            &manifest,
+            &who["borrowed"],
+            Endpoint::Iroh {
+                node: liar.id().to_string(),
+                relay: String::new(),
+                addrs: vec![],
+                tickets: BTreeMap::from([("meta".to_string(), seeded.meta.to_string())]),
+            },
+        )
+        .await,
+    );
     assert_eq!(
         pull.sources(&manifest.a_tag()),
-        ["unreachable", "liar", "honest"]
+        [pk("unreachable"), pk("liar"), pk("honest")]
     );
     // An expired beacon is not a source.
-    let mut stale = beacon(&manifest, "stale", seeder.beacon_endpoint(&seeded));
-    stale.expiration = stale.created_at - 1;
+    // Verified while it was fresh, learned after it lapsed.
+    let stale = beacon_at(
+        &manifest,
+        &who["stale"],
+        seeder.beacon_endpoint(&seeded),
+        nfx_node::unix_now() - 120,
+    )
+    .await;
     pull.learn(&stale);
     assert_eq!(
         pull.sources(&manifest.a_tag()),
-        ["unreachable", "liar", "honest"]
+        [pk("unreachable"), pk("liar"), pk("honest")]
     );
 
     let store = Arc::new(FsStore::open(tmp("pt-origin")).unwrap());
@@ -398,7 +436,7 @@ async fn pull_through_skips_a_liar_and_serves_verified_bytes_over_http() {
     }
     assert_eq!(
         pull.sources(&manifest.a_tag()),
-        ["honest", "unreachable"],
+        [pk("honest"), pk("unreachable")],
         "the liar is forgotten; the unreachable seeder waits at the back"
     );
 
@@ -434,4 +472,89 @@ async fn pull_through_skips_a_liar_and_serves_verified_bytes_over_http() {
         .shutdown()
         .await
         .unwrap();
+}
+
+/// An iroh endpoint whose one `meta` ticket names it (NFX-06 §2); nothing listens there.
+fn idle_endpoint(seed: u8) -> Endpoint {
+    let id = iroh::SecretKey::from_bytes(&[seed; 32]).public();
+    let ticket = BlobTicket::new(
+        iroh::EndpointAddr::new(id),
+        iroh_blobs::Hash::new([seed]),
+        BlobFormat::HashSeq,
+    );
+    Endpoint::Iroh {
+        node: id.to_string(),
+        relay: String::new(),
+        addrs: vec![],
+        tickets: BTreeMap::from([("meta".to_string(), ticket.to_string())]),
+    }
+}
+
+/// A `here` from the swarm, signed with `secret`, as a pull source for `manifest`.
+fn presence(manifest: &Manifest, secret: [u8; 32], endpoint: Endpoint) -> Verified<Beacon> {
+    let now = nfx_node::unix_now();
+    let env = Envelope {
+        op: Op::Here,
+        pubkey: public_key_hex(&secret).unwrap(),
+        beacon: BeaconContent {
+            v: 1,
+            video: manifest.addr.clone(),
+            endpoints: vec![endpoint],
+            skipped: vec![],
+            chunks: Chunks::All,
+            price_hint: 0,
+            accepts_mints: vec![],
+            free: true,
+        },
+        created_at: now,
+    };
+    let wire = envelope_wire(&env, &secret).unwrap();
+    Envelope::verify(&wire, &manifest.addr, now)
+        .unwrap()
+        .presence_for(&manifest.a_tag())
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gossip_never_displaces_a_source_heard_from_a_relay() {
+    let (_, v) = vector_store(&tmp("gossip-rank"));
+    let manifest = v.manifest.clone();
+    let a = manifest.a_tag();
+    let node = Arc::new(Node::spawn(NodeConfig::default()).await.unwrap());
+    let pull = SwarmPull::new(node.clone());
+
+    // One seeder heard from a relay, then a flood of fresh gossip identities.
+    let relayed = nostr_sdk::prelude::Keys::generate();
+    pull.learn(&beacon(&manifest, &relayed, idle_endpoint(1)).await);
+    for i in 0..20u8 {
+        pull.learn_gossip(&presence(&manifest, [i + 10; 32], idle_endpoint(i + 10)));
+    }
+    let known = pull.sources(&a);
+    assert_eq!(known.len(), nfx_node::origin::MAX_SOURCES_PER_VIDEO);
+    assert!(
+        known.contains(&relayed.public_key().to_hex()),
+        "the relay's seeder stays"
+    );
+
+    // A table full of relay sources admits no gossip at all.
+    let pull = SwarmPull::new(node.clone());
+    for i in 0..nfx_node::origin::MAX_SOURCES_PER_VIDEO {
+        let keys = nostr_sdk::prelude::Keys::generate();
+        pull.learn(&beacon(&manifest, &keys, idle_endpoint(100 + i as u8)).await);
+    }
+    let before = pull.sources(&a);
+    pull.learn_gossip(&presence(&manifest, [9; 32], idle_endpoint(9)));
+    assert_eq!(pull.sources(&a), before);
+
+    // Gossip about a seeder a relay later vouches for is promoted, not duplicated.
+    let pull = SwarmPull::new(node.clone());
+    let both = nostr_sdk::prelude::Keys::generate();
+    let secret: [u8; 32] = both.secret_key().to_secret_bytes();
+    pull.learn_gossip(&presence(&manifest, secret, idle_endpoint(2)));
+    pull.learn(&beacon(&manifest, &both, idle_endpoint(2)).await);
+    assert_eq!(pull.sources(&a), [both.public_key().to_hex()]);
+    for i in 0..20u8 {
+        pull.learn_gossip(&presence(&manifest, [i + 40; 32], idle_endpoint(i + 40)));
+    }
+    assert!(pull.sources(&a).contains(&both.public_key().to_hex()));
 }
