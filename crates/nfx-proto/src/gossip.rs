@@ -10,6 +10,8 @@ use crate::{Error, MAX_CLOCK_SKEW, Result, sha256};
 
 /// Peers evict an entry older than this (2 × the 120 s beacon TTL).
 pub const EVICT_AFTER: u64 = 240;
+/// Largest envelope on the wire (NFX-06 §4); larger ones are refused before parsing.
+pub const MAX_ENVELOPE_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -39,6 +41,9 @@ pub struct Envelope {
 impl Envelope {
     /// Verify a received message for the swarm of `video` at time `now`.
     pub fn verify(wire: &str, video: &VideoAddr, now: u64) -> Result<Self> {
+        if wire.len() > MAX_ENVELOPE_BYTES {
+            return Err(bad("envelope over 4 KiB"));
+        }
         let value = canon::Value::parse(wire)?;
         let mut body = value
             .as_object()

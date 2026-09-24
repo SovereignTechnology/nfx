@@ -281,8 +281,19 @@ async fn pull_through_skips_a_liar_and_serves_verified_bytes_over_http() {
         .create(HashAndFormat::hash_seq(seq_hash))
         .await
         .unwrap();
+    // The liar serves an honest meta collection of its own (NFX-06 §2: every ticket names
+    // the endpoint's own node) and a lying rendition.
+    let liar_seeded = liar
+        .seed(
+            &seed_store,
+            &manifest.root_hex(),
+            &manifest.addr,
+            manifest.segs,
+        )
+        .await
+        .unwrap();
     let liar_tickets = BTreeMap::from([
-        ("meta".to_string(), seeded.meta.to_string()),
+        ("meta".to_string(), liar_seeded.meta.to_string()),
         (
             "720p".to_string(),
             BlobTicket::new(liar.addr(), seq_hash, BlobFormat::HashSeq).to_string(),
@@ -324,6 +335,21 @@ async fn pull_through_skips_a_liar_and_serves_verified_bytes_over_http() {
         &manifest,
         "honest",
         seeder.beacon_endpoint(&seeded),
+    ));
+    assert_eq!(
+        pull.sources(&manifest.a_tag()),
+        ["unreachable", "liar", "honest"]
+    );
+    // An endpoint whose tickets name another node is ignored (NFX-06 §2).
+    pull.learn(&beacon(
+        &manifest,
+        "borrowed",
+        Endpoint::Iroh {
+            node: liar.id().to_string(),
+            relay: String::new(),
+            addrs: vec![],
+            tickets: BTreeMap::from([("meta".to_string(), seeded.meta.to_string())]),
+        },
     ));
     assert_eq!(
         pull.sources(&manifest.a_tag()),

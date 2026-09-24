@@ -29,6 +29,7 @@ tungstenite.workspace = true
 [dev-dependencies]
 base64.workspace = true
 iroh-relay = { workspace = true, features = ["server"] }
+iroh-tickets.workspace = true
 nostr-sdk = { workspace = true, features = ["local-relay"] }
 hyper = { workspace = true, features = ["client"] }
 

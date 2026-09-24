@@ -402,6 +402,16 @@ fn gossip_envelope_is_reproduced_and_verified() {
         Envelope::verify(&forged, &addr, now).is_err(),
         "op is signed"
     );
+    // NFX-06 §4: envelopes are at most 4 KiB; padding a valid one past that is refused
+    // before parsing (whitespace is layout, so the signature alone would still verify).
+    let wire = str_of(&v, "wire");
+    let padded = format!("{wire}{}", " ".repeat(4097 - wire.len()));
+    assert!(Envelope::verify(&padded, &addr, now).is_err(), "over 4 KiB");
+    let fits = format!("{wire}{}", " ".repeat(4096 - wire.len()));
+    assert!(
+        Envelope::verify(&fits, &addr, now).is_ok(),
+        "exactly 4 KiB is fine"
+    );
 }
 
 #[test]

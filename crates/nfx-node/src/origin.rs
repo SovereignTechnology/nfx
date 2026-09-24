@@ -449,7 +449,9 @@ impl SwarmPull {
             .endpoints
             .iter()
             .filter_map(|e| match e {
-                Endpoint::Iroh { tickets, .. } => Some(tickets.clone()),
+                Endpoint::Iroh { node, tickets, .. } if tickets_name(node, tickets) => {
+                    Some(tickets.clone())
+                }
                 _ => None,
             })
             .flatten()
@@ -619,6 +621,14 @@ impl SwarmPull {
         }
         Err(NodeError::Collection(format!("{sha} is in no rendition")))
     }
+}
+
+/// NFX-06 §2: every ticket of an iroh endpoint parses and names the endpoint's own `node`.
+fn tickets_name(node: &str, tickets: &BTreeMap<String, String>) -> bool {
+    tickets.values().all(|t| {
+        t.parse::<BlobTicket>()
+            .is_ok_and(|t| t.addr().id.to_string() == node)
+    })
 }
 
 impl SwarmPull {

@@ -2768,6 +2768,7 @@ dependencies = [
  "iroh-blobs",
  "iroh-gossip",
  "iroh-relay",
+ "iroh-tickets",
  "n0-future",
  "nfx-proto",
  "nostr-memory",

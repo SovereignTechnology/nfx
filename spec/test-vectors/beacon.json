@@ -1,11 +1,11 @@
 {
-  "description": "NFX-03 beacon (kind 20464, TTL 120) with one endpoint of every registered type (NFX-11 §3). The iroh tickets are placeholders; ticket encodings pin at the M1 freeze (NFX-11 §4).",
+  "description": "NFX-03 beacon (kind 20464, TTL 120) with one endpoint of every registered type (NFX-11 §3). The iroh tickets are real (see tickets.json).",
   "secret_keys_DO_NOT_USE": {
     "seeder": "115ac24798fa94a35206459d31583a3ad9c57955a9e9784f749cb38327714683"
   },
   "now": 1790000030,
   "event": {
-    "id": "8654ae15d18928a809bdae0f529a8eb5bb6ac8e2db0e5dc28bc9efcb750c1e8c",
+    "id": "874e78c9e111db26300fb533e25ae599a62e8ebf011bbbfdc80842c2e8c15e41",
     "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
     "created_at": 1790000000,
     "kind": 20464,
@@ -23,7 +23,7 @@
         "1790000120"
       ]
     ],
-    "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"f09091cd8afcb7f4be82e0f8229e867811d32f08dc9bc1efd031831198d2b096\",\"relay\":\"https://iroh-relay.example\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"PLACEHOLDER-ticket-format-pinned-at-M1\",\"meta\":\"PLACEHOLDER-meta-collection-ticket-pinned-at-M1\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"renditions\":[\"720p\"]},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
-    "sig": "dc07b7bbdab3b08270d7423e3a9e77ec1512440b0b56b55f8640c5f2b7de59101512ed1681b9db904738c32e66be400f3dad44f1738e95a6a23ac60837b344ee"
+    "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b\",\"relay\":\"https://iroh-relay.example/\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagnhno3bgtru4wjpjbhqvviwuh3macref4op5sdkyl4xtbw4f4mtu\",\"meta\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagkhexm3ythb6omco6aeyiv66mbw3g7z244aeidl6z67j4rfpw7ko\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"renditions\":[\"720p\"]},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+    "sig": "9d04f3d4d368f97cc0a93c1213e093b5ed0192bff0292ea564313b260ad2083f7954aafddc483d3b6f08b08ec1ae3030b3932be57ed39577968acde0b4b82ed0"
   }
 }

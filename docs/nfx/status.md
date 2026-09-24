@@ -268,9 +268,12 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 2. ~~**`nfx-proto` WASM bindings**~~ done (`crates/nfx-wasm`; the test player uses
    them). ~~Resolving a manifest by `a` tag over Nostr in the browser~~ done
    (2026-09-24): see below.
-3. Carried risk: the iroh-blobs 0.103 README still says "not production quality". The
+3. **M1 spec freeze:** a candidate is ready ([`freeze-m1-candidate.md`](freeze-m1-candidate.md)),
+   with real iroh tickets pinned byte for byte, schemas checked in CI, and gossip size
+   enforced. It is blocked on one decision: NIP-09 deletion versus scoped-relay admission.
+4. Carried risk: the iroh-blobs 0.103 README still says "not production quality". The
    containment plan is in the S1 page.
-4. Optional: add the schema check (`jsonschema`) to `check.sh`.
+5. ~~Add the schema check (`jsonschema`) to `check.sh`~~ done (`spec/schemas/check.py`).
 
 ## Not verified / known gaps
 

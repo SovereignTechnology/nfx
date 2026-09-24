@@ -51,7 +51,7 @@ video-id MUST NOT be reused for different content or migrated across namespaces.
 | `cashu_key` | 33-byte compressed secp256k1 hex | – | R | where the creator's share is P2PK-locked (NUT-11) |
 | `free_seeder` | seeder pubkey hex, repeatable | – | O | whitelisted for zero-cost key release via voucher (NFX-08 §5) |
 | `t` | hashtag, repeatable | O | O | discovery aid; not namespaced |
-| `alt` | ≤280-char plain summary | O | O | SHOULD be present (screen readers, indexers) |
+| `alt` | plain summary | O | O | SHOULD be present (screen readers, indexers); publishers SHOULD keep it ≤ 280 characters, and readers MUST NOT reject a longer one |
 
 Unknown tags MUST be ignored (NFX-01 §4 non-breaking rule).
 
@@ -151,3 +151,5 @@ see a playable video; NFX consumers ignore the mirror.
   the `free_seeder` shape and a `mint` without userinfo. The worked example and vector moved to `nfx:mainnet:1`.
 - Draft 2026-09-23 (A2 pre-push audit): §4 "Revisions" (the current-revision rule, with
   a 15-minute future horizon).
+- Draft 2026-09-24 (M1 freeze candidate): `alt` length is a publisher SHOULD, never a
+  reason to reject.

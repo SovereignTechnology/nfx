@@ -1,0 +1,81 @@
+{
+  "description": "NFX-06 §2 iroh collections and tickets for the hash-list vector. Each collection's members are hashed with BLAKE3; 'hash_seq' is their concatenation and 'blake3' its BLAKE3, the collection's address. 'meta' = hash list, then every playlist, thumb and subtitle in files order; '720p' = init, then segments in playlist order. A ticket is an iroh-blobs 0.103 BlobTicket: 'bytes' per the layout in NFX-06 §2, 'string' = \"blob\" + lowercase unpadded RFC 4648 base32 of them. The endpoint id is the ed25519 public key of the 'iroh_node' seed and equals the beacon endpoint's 'node'.",
+  "secret_keys_DO_NOT_USE": {
+    "iroh_node": "df85b2d9b3fb93d399dc5c61e6c65d2eb279319326e00294c5521e0ca9e99154"
+  },
+  "endpoint": {
+    "endpoint_id": "b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b",
+    "relay_url": "https://iroh-relay.example/",
+    "direct_addresses": [
+      "203.0.113.10:11204"
+    ]
+  },
+  "collections": {
+    "meta": {
+      "members": [
+        {
+          "file": "(hash list)",
+          "sha256": "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3",
+          "blake3": "c113929458eaef33c7053f89db0e08c435550c01979c72e72a573a00cd062a68"
+        },
+        {
+          "file": "master.m3u8",
+          "sha256": "52fac7f6a42a3df0682c870e0424c85cadb70c1c02d10931aa69225ab697538c",
+          "blake3": "7d075d181adcf5a58c32238a809dbd076075aca0b290dfa574223499d843baa2"
+        },
+        {
+          "file": "r720.m3u8",
+          "sha256": "024b287dd868144c1c66eb3bd5025f6a64f22418f27d455868d53c60b5f555b3",
+          "blake3": "279553296dd230f241896119f1d37ef0995188874b7cdf3787386c9c2b5beb42"
+        },
+        {
+          "file": "thumb.jpg",
+          "sha256": "87912cd4c418929084e120d6c37fc8115aa6de2828440acf68f4331022c87349",
+          "blake3": "d982e8690c441b8277e4467281b83b48430b7a3d12f104552fa62aa43d8f14c7"
+        }
+      ],
+      "hash_seq": "c113929458eaef33c7053f89db0e08c435550c01979c72e72a573a00cd062a687d075d181adcf5a58c32238a809dbd076075aca0b290dfa574223499d843baa2279553296dd230f241896119f1d37ef0995188874b7cdf3787386c9c2b5beb42d982e8690c441b8277e4467281b83b48430b7a3d12f104552fa62aa43d8f14c7",
+      "blake3": "94725d9bc4ce1f398277804c22bef3036d9bf9d73802206bf67df4f2257dbea7"
+    },
+    "720p": {
+      "members": [
+        {
+          "file": "init-720.mp4",
+          "sha256": "0445210eb8755a75f545c3ae58de1162d6ec6490ad8d197ed613d7bbe17f3569",
+          "blake3": "5e0b8bf11a1c59f7bfa48c34c0e1bf6460ef2d94e34237921dd101e886314759"
+        },
+        {
+          "file": "seg0.m4s",
+          "sha256": "601d8df40fa7854d1e336a04eec641cdc705d0855c24060957072aa161f49f0b",
+          "blake3": "2921829cefea8a84dc6457740c71c6247e415fc4bd7a6bfc2fb9e4c4a1f69f96"
+        },
+        {
+          "file": "seg1.m4s",
+          "sha256": "8ef971da21a4d0c21e20be4e7b8c2ec90dcacff9f2c43947291625b062427a3d",
+          "blake3": "1d54fc54f7b6cb6fc60a3a630611b2ac197655c9f26766d3904d720e2f432774"
+        },
+        {
+          "file": "seg2.m4s",
+          "sha256": "37d3f6f65fcaff6b0a161c02f5e47930ddb109c381b23e1debda7a96fed33bd8",
+          "blake3": "5f45f266a30843cbc569633583abd5289c07602b42c47a6b101a6fcf092597b8"
+        }
+      ],
+      "hash_seq": "5e0b8bf11a1c59f7bfa48c34c0e1bf6460ef2d94e34237921dd101e8863147592921829cefea8a84dc6457740c71c6247e415fc4bd7a6bfc2fb9e4c4a1f69f961d54fc54f7b6cb6fc60a3a630611b2ac197655c9f26766d3904d720e2f4327745f45f266a30843cbc569633583abd5289c07602b42c47a6b101a6fcf092597b8",
+      "blake3": "9a76bb6134e34e592f484f0ad516a1f6c00a242f1cfec86ac2f97986dc2f193a"
+    }
+  },
+  "tickets": {
+    "meta": {
+      "string": "blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagkhexm3ythb6omco6aeyiv66mbw3g7z244aeidl6z67j4rfpw7ko",
+      "bytes": "00b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b011b68747470733a2f2f69726f682d72656c61792e6578616d706c652f0100cb00710ac4570194725d9bc4ce1f398277804c22bef3036d9bf9d73802206bf67df4f2257dbea7",
+      "format": "hash_seq",
+      "hash": "94725d9bc4ce1f398277804c22bef3036d9bf9d73802206bf67df4f2257dbea7"
+    },
+    "720p": {
+      "string": "blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagnhno3bgtru4wjpjbhqvviwuh3macref4op5sdkyl4xtbw4f4mtu",
+      "bytes": "00b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b011b68747470733a2f2f69726f682d72656c61792e6578616d706c652f0100cb00710ac457019a76bb6134e34e592f484f0ad516a1f6c00a242f1cfec86ac2f97986dc2f193a",
+      "format": "hash_seq",
+      "hash": "9a76bb6134e34e592f484f0ad516a1f6c00a242f1cfec86ac2f97986dc2f193a"
+    }
+  }
+}

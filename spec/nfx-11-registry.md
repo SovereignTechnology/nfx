@@ -56,7 +56,7 @@ Capability keys:
 | Component | Pin | Notes |
 |---|---|---|
 | iroh / iroh-relay | **1.x** (1.2.0 at pinning, 2026-09-23) | the iroh 1.x wire; nothing pre-1.0 is conformant |
-| iroh-blobs | **0.103.x** (depends on iroh ^1) | its standard ALPN is the NFX blob wire; tickets are its `BlobTicket` string form (NFX-06 §2) |
+| iroh-blobs | **0.103.x** (depends on iroh ^1) | its standard ALPN is the NFX blob wire; tickets are its `BlobTicket` string form, whose byte layout NFX-06 §2 states and `tickets.json` pins |
 | iroh-gossip | **0.101.x** (depends on iroh ^1) | carries `nfx/gossip/1` (NFX-06 §4) |
 | p2p-media-loader | **v4** (4.0.0 at pinning; upstream for the free mesh, a maintained v4 fork for the paid mesh) | NFX-10 §§1–3; its `computeInfoHash` defines the tracker infohash |
 | Hypercore stack | hypercore 11, hyperdrive 13, hyperswarm 4, protomux 3 | NFX-12 (optional) |
@@ -191,3 +191,6 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   tracker infohash replace the per-video web infohash; the ticket string form is pinned;
   `unknown-root` → `unknown-video`; new code `below-fee`; NUT-08 listed (blank outputs).
 - 2026-09-23 — licensed-mode encryption vector added (NFX-08 §2 associated data).
+- 2026-09-24 — M1 freeze candidate: `tickets.json` (real iroh tickets and collection hashes,
+  encoded independently of iroh by the generator and checked against iroh-blobs 0.103);
+  the beacon vector's placeholder tickets are replaced. The generator now needs `blake3`.

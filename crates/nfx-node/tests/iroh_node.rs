@@ -45,6 +45,17 @@ async fn seed_fetch_tamper_and_gossip_over_a_self_hosted_relay() {
         .await
         .unwrap();
     assert_eq!(seeded.renditions.keys().collect::<Vec<_>>(), ["720p"]);
+    // NFX-06 §2 collections, pinned by spec/test-vectors/tickets.json.
+    let pinned: serde_json::Value =
+        serde_json::from_str(include_str!("../../../spec/test-vectors/tickets.json")).unwrap();
+    assert_eq!(
+        seeded.meta.hash().to_hex().to_string(),
+        pinned["collections"]["meta"]["blake3"]
+    );
+    assert_eq!(
+        seeded.renditions["720p"].hash().to_hex().to_string(),
+        pinned["collections"]["720p"]["blake3"]
+    );
 
     // Fetcher: relay-only, learns the seeder's address from the ticket.
     let lookup = MemoryLookup::new();

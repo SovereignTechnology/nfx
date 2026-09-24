@@ -8,7 +8,8 @@ does not restate iroh's own specs.
 
 ## 1. Roles and identities
 
-- A seeder's (or watcher's) **iroh NodeId** is a transport identity only. The
+- A seeder's (or watcher's) **iroh endpoint id** (an ed25519 public key; "NodeId" before
+  iroh 1.0) is a transport identity only. The
   long-term identity is the nostr key of the beacon/manifest (NFX-01); beacons bind
   the two by signature.
 - NAT traversal (dialback, relay servers) is iroh's job. NFX defines no
@@ -24,8 +25,9 @@ does not restate iroh's own specs.
 - Blobs are served with the **iroh-blobs protocol using its standard ALPN** from the
   pinned iroh series (register: NFX-11). No custom ALPN for video bytes.
 - A provider forms, per rendition, an iroh **collection (HashSeq)** whose members are,
-  in order: the rendition's `init` file, then its `segment` files in playlist order
-  (hash-list order). The collection root (BLAKE3) is embedded in the **BlobTicket**.
+  in order: the rendition's `init` file, then its `segment` files in the order its
+  playlist lists them. Membership and order come from the playlist, never from the
+  hash list's file order. The collection root (BLAKE3) is embedded in the **BlobTicket**.
 - Beacons (NFX-03) carry one ticket per held rendition. A watcher dials by ticket,
   then re-anchors every file to the sha256 in the hash list (NFX-05 §4). A ticket from
   a stale or lying beacon can waste time, not bytes, and only if the watcher never
@@ -50,10 +52,26 @@ does not restate iroh's own specs.
     a free seeder (NFX-08 §5) or otherwise exempt by local policy.
   - Without this rule a single request could pull a whole rendition past the payment
     window (spike S1).
-- **Tickets** are the string form of the pinned iroh-blobs `BlobTicket` (NFX-11 §4).
-  They are opaque to NFX and embed the provider's endpoint address (id, relay URL,
-  direct addresses), the hash and the format. Beacons still carry `node` and `relay`,
-  because `nfx/pay/1` must dial the same endpoint.
+- **Tickets** are the string form of the pinned iroh-blobs `BlobTicket` (NFX-11 §4),
+  pinned at M1 with vectors (`tickets.json`). They embed the provider's endpoint address
+  (id, relay URL, direct addresses), the hash and the format:
+
+  ```
+  bytes  = 0x00                                   variant 0
+           endpoint_id[32]                        ed25519 public key
+           relay:  0x00 | 0x01 uvarint(len) utf8  the URL in normal form (trailing "/")
+           uvarint(n), then n direct addresses, sorted and unique, each
+             0x00 ipv4[4] uvarint(port) | 0x01 ipv6[16] uvarint(port)
+           uvarint(format)                        0 raw, 1 hash_seq (collections)
+           hash[32]                               BLAKE3 of the blob
+  string = "blob" || lowercase(base32(bytes))     RFC 4648 alphabet, no padding
+  ```
+
+  `uvarint` is unsigned LEB128. A collection's hash is the BLAKE3 of its HashSeq: the
+  concatenation of its members' 32-byte BLAKE3 hashes, in the order below. Beacons
+  still carry `node` and `relay`, because `nfx/pay/1` must dial the same endpoint.
+  Every ticket's endpoint id MUST equal the endpoint's `node`, and a watcher ignores an
+  iroh endpoint whose tickets name another node.
 - **Metadata rides a separate collection.** The hash list plus every playlist, thumb and
   subtitle file form their own HashSeq (order: hash list first, then those files in
   `files` order), offered under the beacon's `tickets.meta` entry. Thumbs and subtitles
@@ -77,7 +95,8 @@ Optional, recommended for warm swarms:
   TopicId = sha256( utf8( "nfx/1/swarm/" + namespace + "/" + video-id ) )   (hex)
   ```
 
-- Messages are self-signed envelopes (JSON, ≤ 4 KiB):
+- Messages are self-signed envelopes (JSON, at most 4 KiB on the wire; a larger one is
+  refused before it is parsed):
 
   ```json
   { "v": 1, "op": "here" | "bye", "pubkey": "<64-hex nostr pubkey>",
@@ -135,3 +154,7 @@ lands on 2/3 and verifies NFX-05 §4.
   subtitle files, which otherwise rode no iroh collection.
 - Draft 2026-09-23 (A2 pre-push audit): §2 bounded fetching (HashSeq alone, then each
   member capped at its hash-list size) and dialling only the network's own relays.
+- Draft 2026-09-24 (M1 freeze candidate): the ticket byte layout, collection hashing and
+  the ticket/`node` agreement rule are stated normatively, with vectors (`tickets.json`).
+- Draft 2026-09-24 (M1 freeze candidate): "endpoint id" for iroh 1.x; collection order
+  comes from the playlist alone; the 4 KiB envelope limit is enforced before parsing.

@@ -10,16 +10,20 @@ Usage:
   python3 generate.py            # (re)write vectors
   python3 generate.py --verify   # recompute and compare against the files on disk
 
-Requires: coincurve and pynacl (pip install coincurve pynacl). No network access.
+Requires: coincurve, pynacl and blake3 (pip install coincurve pynacl blake3). No network
+access.
 """
 
 import argparse
 import base64
 import copy
 import hashlib
+import ipaddress
 import json
 import sys
 from pathlib import Path
+
+import blake3
 
 import nacl.bindings as sodium
 import nacl.exceptions
@@ -32,6 +36,51 @@ NAMESPACE = "nfx:mainnet:1"
 VIDEO_ID = "salt-flats-dusk"
 TTL = 120
 MAX_SAFE_INT = 2**53 - 1
+
+
+def uvarint(n: int) -> bytes:
+    """Unsigned LEB128, postcard's integer encoding."""
+    out = bytearray()
+    while True:
+        byte, n = n & 0x7F, n >> 7
+        out.append(byte | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def blob_ticket(endpoint_id: bytes, relay_url: str | None, direct: list[str], fmt: int,
+                hash32: bytes) -> tuple[str, bytes]:
+    """NFX-06 §2 ticket string: an iroh-blobs 0.103 BlobTicket, encoded independently of
+    iroh from the documented layout (the Rust vector test decodes and re-encodes it with
+    iroh itself).
+
+    bytes = 0x00 (variant 0) || endpoint_id[32] || relay (0x00 | 0x01 uvarint(len) utf8)
+            || uvarint(n) || n x (0x00 ipv4[4] | 0x01 ipv6[16]) uvarint(port)
+            || uvarint(format: 0 raw, 1 hash_seq) || hash[32]
+    string = "blob" || lowercase(base32(bytes), RFC 4648, no padding)
+    Direct addresses are sorted (IPv4 before IPv6, then address, then port) and unique.
+    """
+    assert len(endpoint_id) == 32 and len(hash32) == 32
+    b = bytearray(uvarint(0))
+    b += endpoint_id
+    if relay_url is None:
+        b += b"\x00"
+    else:
+        u = relay_url.encode()
+        b += b"\x01" + uvarint(len(u)) + u
+    addrs = []
+    for a in direct:
+        host, port = a.rsplit(":", 1)
+        ip = ipaddress.ip_address(host.strip("[]"))
+        addrs.append((ip.version, ip.packed, int(port)))
+    addrs = sorted(set(addrs))
+    b += uvarint(len(addrs))
+    for version, packed, port in addrs:
+        b += uvarint(0 if version == 4 else 1) + packed + uvarint(port)
+    b += uvarint(fmt)
+    b += hash32
+    raw = bytes(b)
+    return "blob" + base64.b32encode(raw).decode().rstrip("=").lower(), raw
 
 
 def keypair(seed: str) -> PrivateKey:
@@ -327,6 +376,32 @@ def main() -> int:
     invalid.append({"name": "id-mismatch", "reason": "id must equal the NIP-01 serialization hash",
                     "event": id_mismatch})
 
+    # ---- 3b. iroh collections and tickets (NFX-06 §2) ----
+    # The seeder's iroh identity is an ed25519 key; its public key is the endpoint id.
+    iroh_seed = hashlib.sha256(b"nfx-test-vector/iroh-node").digest()
+    iroh_pk, _ = sodium.crypto_sign_seed_keypair(iroh_seed)
+    relay_url = "https://iroh-relay.example/"
+    direct = ["203.0.113.10:11204"]
+    by_name = {"master.m3u8": master, "r720.m3u8": r720, "init-720.mp4": fabricated["init-720.mp4"],
+               "seg0.m4s": fabricated["seg-0"], "seg1.m4s": fabricated["seg-1"],
+               "seg2.m4s": fabricated["seg-2"], "thumb.jpg": fabricated["thumb.jpg"]}
+    meta_names = ["(hash list)"] + [f["name"] for f in files if f["role"] not in ("init", "segment")]
+    r720_names = ["init-720.mp4", "seg0.m4s", "seg1.m4s", "seg2.m4s"]  # init, then playlist order
+
+    def collection(names: list[str]) -> dict:
+        members = []
+        for n in names:
+            data = hashlist_bytes if n == "(hash list)" else by_name[n]
+            members.append({"file": n, "sha256": sha256(data), "blake3": blake3.blake3(data).hexdigest()})
+        seq = b"".join(bytes.fromhex(m["blake3"]) for m in members)
+        return {"members": members, "hash_seq": seq.hex(), "blake3": blake3.blake3(seq).hexdigest()}
+
+    collections = {"meta": collection(meta_names), "720p": collection(r720_names)}
+    tickets = {}
+    for cid, col in collections.items():
+        text, raw = blob_ticket(iroh_pk, relay_url, direct, 1, bytes.fromhex(col["blake3"]))
+        tickets[cid] = {"string": text, "bytes": raw.hex(), "format": "hash_seq", "hash": col["blake3"]}
+
     # ---- 4. Beacon event (NFX-03), signed by the seeder ----
     beacon_content = {
         "v": 1,
@@ -334,13 +409,10 @@ def main() -> int:
         "endpoints": [
             {
                 "t": "iroh",
-                "node": sha256(b"nfx-test-vector/node-id"),
-                "relay": "https://iroh-relay.example",
-                "addrs": ["203.0.113.10:11204"],
-                "tickets": {
-                    "720p": "PLACEHOLDER-ticket-format-pinned-at-M1",
-                    "meta": "PLACEHOLDER-meta-collection-ticket-pinned-at-M1",
-                },
+                "node": iroh_pk.hex(),
+                "relay": relay_url,
+                "addrs": direct,
+                "tickets": {"720p": tickets["720p"]["string"], "meta": tickets["meta"]["string"]},
             },
             {"t": "https", "url": "https://seed.example/nfx"},
             {"t": "webrtc", "tracker_urls": ["wss://tracker.example/announce"], "renditions": ["720p"]},
@@ -586,8 +658,8 @@ def main() -> int:
         },
         "beacon.json": {
             "description": "NFX-03 beacon (kind 20464, TTL 120) with one endpoint of every "
-                           "registered type (NFX-11 §3). The iroh tickets are placeholders; "
-                           "ticket encodings pin at the M1 freeze (NFX-11 §4).",
+                           "registered type (NFX-11 §3). The iroh tickets are real (see "
+                           "tickets.json).",
             "secret_keys_DO_NOT_USE": {"seeder": secrets["seeder"]},
             "now": now,
             "event": beacon,
@@ -634,6 +706,21 @@ def main() -> int:
             "canon": gossip_canon.decode("utf-8"),
             "digest": gossip_digest.hex(),
             "sig": gossip_sig,
+        },
+        "tickets.json": {
+            "description": "NFX-06 §2 iroh collections and tickets for the hash-list vector. "
+                           "Each collection's members are hashed with BLAKE3; 'hash_seq' is "
+                           "their concatenation and 'blake3' its BLAKE3, the collection's "
+                           "address. 'meta' = hash list, then every playlist, thumb and "
+                           "subtitle in files order; '720p' = init, then segments in playlist "
+                           "order. A ticket is an iroh-blobs 0.103 BlobTicket: 'bytes' per the "
+                           "layout in NFX-06 §2, 'string' = \"blob\" + lowercase unpadded "
+                           "RFC 4648 base32 of them. The endpoint id is the ed25519 public key "
+                           "of the 'iroh_node' seed and equals the beacon endpoint's 'node'.",
+            "secret_keys_DO_NOT_USE": {"iroh_node": iroh_seed.hex()},
+            "endpoint": {"endpoint_id": iroh_pk.hex(), "relay_url": relay_url, "direct_addresses": direct},
+            "collections": collections,
+            "tickets": tickets,
         },
         "derived.json": derived,
         "licensed.json": {

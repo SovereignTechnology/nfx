@@ -10,7 +10,7 @@ swarm economy and no implementation ever re-encodes between products.
 
 - Container: **fMP4/CMAF**. One **init segment** per rendition, then media segments.
 - Baseline codecs (every publisher MUST offer): H.264 (`avc1`) at High profile or a subset
-  of it (Main, Constrained Baseline), plus AAC-LC (`mp4a`). Encoders signal the lowest
+  of it (Main, Constrained Baseline), plus AAC-LC (`mp4a`) when the source has audio. Encoders signal the lowest
   profile a stream fits (x264's fastest presets emit Constrained Baseline even when High
   is requested), so `CODECS` MUST be read from the stream, never assumed.
 - Optional renditions: AV1 (`av01`) or VP9 (`vp09`) video, Opus (`opus`) audio —
@@ -137,6 +137,9 @@ Cache-Control: public, max-age=31536000, immutable
 and MUST NOT vary on request headers. A CDN or any shared cache in front of an origin
 is therefore always correct, and origins SHOULD use one. The rule has three limits:
 
+- **Hash-addressed URLs carry no query string.** Clients MUST NOT add one, and origins
+  MAY refuse one: each variant would be a separate year-long cache object, and the
+  cache would stop shielding the origin.
 - **Errors are not content.** `404`, `5xx` and any response that is not the file
   itself MUST carry `Cache-Control: no-store` (or `max-age` ≤ 60). A pull-through
   origin (§6.2) that lacks a file now will usually have it seconds later.
@@ -198,3 +201,5 @@ server generalizes to an origin when its admin pins NFX-05 content.
   `CODECS` comes from the stream, never from the requested profile.
 - Draft 2026-09-23 (A2 pre-push audit): §3 every `URI` attribute counts and a tag with
   two is invalid (`hashlist-invalid.json` case `duplicate-uri-attribute`).
+- Draft 2026-09-24 (M1 freeze candidate): AAC-LC is required when the source has audio
+  (a silent video has none); §6.1 hash-addressed URLs carry no query string.

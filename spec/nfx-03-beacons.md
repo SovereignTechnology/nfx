@@ -23,7 +23,8 @@ Required tags (each exactly once):
 ["expiration", "<created_at + TTL>"]                   # NIP-40; TTL ∈ [60, 120] s
 ```
 
-Optional tags: `["t", "nfx"]` (cosmetic), nothing else. No payments, no media.
+Optional tags: `["t", "nfx"]` (cosmetic). Publishers add no other tags, and readers
+ignore tags they do not know (NFX-01 §4). No payments, no media.
 
 ## 2. Semantics
 
@@ -51,10 +52,10 @@ Optional tags: `["t", "nfx"]` (cosmetic), nothing else. No payments, no media.
   "endpoints": [
     {
       "t": "iroh",
-      "node": "<64-hex iroh NodeId>",
+      "node": "<64-hex iroh endpoint id (ed25519 public key)>",
       "relay": "<iroh relay URL or empty>",
       "addrs": ["host:port", "…"],
-      "tickets": { "720p": "<iroh BlobTicket for that rendition's HashSeq>", "…": "…" }
+      "tickets": { "720p": "<iroh BlobTicket for that rendition's HashSeq>", "meta": "<… the meta collection's>" }
     },
     { "t": "https", "url": "https://seed.example/nfx" }
   ],
@@ -124,3 +125,6 @@ edit in this spec is ever required to grow the relay set.
 - Draft 2026-09-23 (sovtech's decision, ADR 0008 addendum): `accepts_mints` is
   required and non-empty unless `free`; the "absent means any" reading is gone. The
   `webrtc` endpoint follows NFX-10 §2 (per-rendition swarms, no `infohash`).
+- Draft 2026-09-24 (M1 freeze candidate): the vector carries real iroh tickets
+  (`tickets.json`, NFX-06 §2); extra tags are ignored by readers, never added by
+  publishers; the content schema is checked against the vectors in CI.

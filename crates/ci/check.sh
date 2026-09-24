@@ -11,6 +11,8 @@ step() { printf '\n== %s\n' "$*"; }
 
 step "spec: test vectors regenerate byte for byte"
 "$py" spec/test-vectors/generate.py --verify
+step "spec: JSON schemas agree with the vectors"
+"$py" spec/schemas/check.py
 
 step "add-only: mirrored demo paths unchanged on this side since the last demo merge"
 if git rev-parse -q --verify refs/remotes/demo/main >/dev/null; then
