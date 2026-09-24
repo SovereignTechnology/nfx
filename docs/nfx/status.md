@@ -145,6 +145,23 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
   on the shared runner, stalled for 30 min linking ~15 debug test binaries of ~450 MB each,
   so it was cancelled. CI now builds without debug info and with 2 jobs (sovtech's
   choice), about 94 MB per binary, and still runs every test.
+- **The desktop viewer, `crates/desktop` (M1, 2026-09-24):**
+  - A Tauri 2 window around `nfxd`'s `Daemon`, which gained an internal origin with no
+    listener and a runtime `watch`.
+  - `watch` works like a viewer: it resolves the manifest, learns seeders from verified
+    beacons and holds the video on the origin.
+  - The page plays through `nfx://` while misses are pulled over iroh and re-hashed; the
+    app then fetches the whole video and seeds it.
+  - The key is created at first run (mode 0600, never printed). The CSP allows only the
+    app's own scripts.
+  - Its own Cargo workspace (like spike S2), outside CI: clippy is clean, and
+    `cargo deny` passes with a desktop policy (MPL-2.0 per crate for Servo's CSS
+    parsers, `unic-*` unmaintained notices ignored by ID).
+  - `./e2e.sh` (PASS) runs in a private headless GNOME Shell:
+    - it packages a clip and starts an `nfxd` seeder with an embedded relay;
+    - the app watches before the manifest exists;
+    - once the manifest is published, the app plays 360p and 720p past 3 s and ends up
+      seeding the video.
 - **The browser resolves videos by manifest address (2026-09-24):**
   - `?a=<address>&relay=<ws(s)>` makes the player query the relays for the manifest
     (NFX-04 §5 filter).
@@ -263,6 +280,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    - ~~`nfxd`~~ done (gossip is not wired into it yet: Nostr beacons carry discovery);
    - ~~a scoped relay~~ done (`nfx-node::relay`, for `nfxd` to embed or run alone);
    - ~~a test player page~~ done (`web/player/`);
+   - ~~the desktop viewer~~ done (`crates/desktop/`, Tauri 2, `./e2e.sh`);
    - ~~**the Phase A exit run: multi-host**~~ PASS 2026-09-24, host-b ↔ laptop
      ([`phase-a-exit.md`](phase-a-exit.md)).
 2. ~~**`nfx-proto` WASM bindings**~~ done (`crates/nfx-wasm`; the test player uses

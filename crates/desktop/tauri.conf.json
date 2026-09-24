@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "NFX",
+  "version": "0.1.0",
+  "identifier": "xyz.sovit.nfx.desktop",
+  "build": { "frontendDist": "ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{ "title": "NFX", "width": 1024, "height": 720 }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: nfx: http://nfx.localhost; media-src 'self' blob: nfx: http://nfx.localhost; connect-src 'self' ipc: http://ipc.localhost nfx: http://nfx.localhost"
+    }
+  },
+  "bundle": { "active": false, "icon": ["icons/icon.png"] }
+}

@@ -9,6 +9,9 @@
 //!   beacons, then seed it (a free M1 peer gives back what it watched).
 //! - **pull**: hold the video on the origin only, filling misses from the swarm
 //!   (NFX-05 §6.2).
+//! - **watch** (at runtime, [`Daemon::watch`]): what a viewer does. Hold the video on the
+//!   origin so playback can start from on-demand pulls, and fetch it whole in the
+//!   background to seed it.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -55,6 +58,9 @@ pub struct Config {
     pub pull: Vec<String>,
     /// Serve the origin here (HTTP; TLS belongs in front).
     pub origin: Option<SocketAddr>,
+    /// An origin with no listener, reached through [`Daemon::origin`] (the desktop app's
+    /// `nfx://` scheme). Ignored when `origin` is set, which also provides one.
+    pub internal_origin: bool,
     /// The origin's public URL, announced as an `https` endpoint when set.
     pub https_url: Option<String>,
     /// Embed a scoped relay listening here (NFX-04 §7).
@@ -92,7 +98,10 @@ pub struct Daemon {
     pub relay_url: Option<String>,
     pub origin_addr: Option<SocketAddr>,
     state: Arc<Mutex<BTreeMap<String, VideoState>>>,
-    tasks: Vec<JoinHandle<()>>,
+    shared: Arc<Shared>,
+    /// This node's own beacons are never learned as sources.
+    own: Option<String>,
+    tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 struct Shared {
@@ -253,7 +262,7 @@ impl Daemon {
         if cfg.relay_only && cfg.iroh_relays.is_empty() {
             return Err(Error::Config("--relay-only needs --iroh-relay".into()));
         }
-        if !cfg.pull.is_empty() && cfg.origin.is_none() {
+        if !cfg.pull.is_empty() && cfg.origin.is_none() && !cfg.internal_origin {
             return Err(Error::Config("--pull needs --origin".into()));
         }
         if let Some(url) = &cfg.https_url {
@@ -329,6 +338,10 @@ impl Daemon {
         let pull = Arc::new(SwarmPull::new(node.clone()));
 
         let (origin, origin_addr) = match cfg.origin {
+            None if cfg.internal_origin => (
+                Some(Arc::new(Origin::new(store.clone(), Some(pull.clone())))),
+                None,
+            ),
             None => (None, None),
             Some(addr) => {
                 let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -401,8 +414,83 @@ impl Daemon {
             relay_url,
             origin_addr,
             state,
-            tasks,
+            shared,
+            own,
+            tasks: Mutex::new(tasks),
         })
+    }
+
+    /// The origin (TCP or internal), when there is one.
+    #[must_use]
+    pub fn origin(&self) -> Option<Arc<Origin>> {
+        self.shared.origin.clone()
+    }
+
+    fn spawn(&self, task: impl std::future::Future<Output = ()> + Send + 'static) {
+        self.tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(tokio::spawn(task));
+    }
+
+    /// Watch a video, as a viewer: learn seeders from its beacons, resolve its manifest,
+    /// hold it on the origin (so playback can start while misses are pulled on demand),
+    /// and fetch it whole in the background to seed it (with a key). Returns the manifest
+    /// once the origin holds it, or an error after `timeout`. Watching twice is harmless.
+    pub async fn watch(&self, a: &str, timeout: Duration) -> Result<Manifest> {
+        let origin = self
+            .shared
+            .origin
+            .clone()
+            .ok_or_else(|| Error::Config("watching needs an origin".into()))?;
+        let (_, video) = parse_a_tag(a)?;
+        let fresh = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.contains_key(a) {
+                false
+            } else {
+                state.insert(a.to_owned(), VideoState::Resolving);
+                true
+            }
+        };
+        if fresh {
+            let mut beacons = self
+                .relays
+                .watch_beacons(video.namespace(), &[a.to_owned()])
+                .await?;
+            let (pull, own) = (self.shared.pull.clone(), self.own.clone());
+            self.spawn(async move {
+                while let Some(beacon) = beacons.next().await {
+                    if Some(&beacon.seeder) != own.as_ref() {
+                        pull.learn(&beacon);
+                    }
+                }
+            });
+        }
+        let shared = self.shared.clone();
+        let hold = async {
+            let manifest = shared.resolve(a).await?;
+            while origin.hold(&manifest).await.is_err() {
+                tokio::time::sleep(RETRY).await;
+            }
+            Ok::<_, Error>(manifest)
+        };
+        let manifest = tokio::time::timeout(timeout, hold)
+            .await
+            .map_err(|_| Error::Config(format!("no seeder served {a} in time")))??;
+        if fresh {
+            if shared.keys.is_some() {
+                let (shared, a) = (shared.clone(), a.to_owned());
+                self.spawn(async move {
+                    if let Err(e) = shared.clone().run_fetch(a.clone()).await {
+                        shared.set(&a, VideoState::Failed(e.to_string()));
+                    }
+                });
+            } else {
+                shared.set(a, VideoState::Serving);
+            }
+        }
+        Ok(manifest)
     }
 
     /// Each video's state, by `a` tag.
@@ -420,12 +508,14 @@ impl Daemon {
     }
 
     pub async fn shutdown(self) {
-        for task in &self.tasks {
+        let tasks = std::mem::take(&mut *self.tasks.lock().unwrap_or_else(PoisonError::into_inner));
+        for task in &tasks {
             task.abort();
         }
-        for task in self.tasks {
+        for task in tasks {
             let _ = task.await;
         }
+        drop(self.shared);
         if let Some(relay) = &self.embedded {
             relay.shutdown();
         }

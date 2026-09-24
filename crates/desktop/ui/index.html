@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFX</title>
+<style>
+  :root { color-scheme: dark; --bg: #101114; --panel: #1a1c21; --line: #2c2f36; --text: #e9eaee; --muted: #9a9ea8; --accent: #7aa2ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  main { max-width: 980px; margin: 0 auto; padding: 16px; display: grid; gap: 12px; }
+  h1 { font-size: 18px; margin: 0; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  label { display: block; color: var(--muted); font-size: 12px; margin: 6px 0 2px; }
+  input, textarea { width: 100%; padding: 7px 8px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+  textarea { min-height: 3.2em; resize: vertical; }
+  button { margin-top: 8px; padding: 7px 14px; background: var(--accent); color: #0b0d12; border: 0; border-radius: 6px; font-weight: 600; cursor: pointer; }
+  .row { display: flex; gap: 8px; align-items: end; }
+  .row > div { flex: 1; }
+  video { width: 100%; background: #000; border-radius: 6px; }
+  #title { font-weight: 600; margin: 8px 0 0; }
+  #msg { color: var(--muted); min-height: 1.2em; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; border-top: 1px solid var(--line); font-size: 12px; }
+  li span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+  code { font-size: 12px; color: var(--muted); word-break: break-all; }
+</style>
+<main>
+  <h1>NFX</h1>
+  <section>
+    <div class="row">
+      <div>
+        <label for="a">Video address (38504:&lt;creator&gt;:&lt;namespace&gt;:&lt;video-id&gt;)</label>
+        <input id="a" autocomplete="off" spellcheck="false">
+      </div>
+      <button id="play">Watch</button>
+    </div>
+    <p id="title"></p>
+    <p id="msg"></p>
+    <video id="v" controls playsinline></video>
+  </section>
+  <section>
+    <label>Videos on this node</label>
+    <ul id="status"></ul>
+  </section>
+  <section>
+    <label for="relays">Relays (one per line, wss://…)</label>
+    <textarea id="relays" spellcheck="false"></textarea>
+    <label for="iroh">iroh relays (one per line, optional)</label>
+    <textarea id="iroh" spellcheck="false"></textarea>
+    <button id="save">Save and restart node</button>
+    <label>This node's key</label>
+    <code id="pubkey"></code>
+  </section>
+</main>
+<script src="hls.min.js"></script>
+<script src="app.js"></script>
+</html>

@@ -1,0 +1,28 @@
+[package]
+name = "nfx-desktop"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The NFX desktop viewer: nfx-node behind a Tauri 2 window; plays verified bytes through nfx:// and seeds what it watched"
+license = "AGPL-3.0-or-later"
+
+# Its own workspace: Tauri's and WebKitGTK's dependency tree stays out of the main crates/
+# graph and its CI (spike S2 did the same). Build with ./run.sh.
+[workspace]
+
+[build-dependencies]
+tauri-build = "2.6.3"
+
+[dependencies]
+bytes = "1.12.1"
+http-body-util = "0.1.5"
+hyper = "1.11.1"
+nfx-proto = { path = "../nfx-proto", version = "0.1.0" }
+nfxd = { path = "../nfxd", version = "0.1.0" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.151"
+tauri = "2.11.6"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+
+[profile.release]
+debug = 0

@@ -319,3 +319,89 @@ async fn fetch_serve_and_reseed_through_an_embedded_relay() {
     seeder.shutdown().await;
     b.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_watches_plays_through_its_origin_and_then_seeds() {
+    let (_iroh, iroh_url) = iroh_relay().await;
+    let seed_dir = tmp("watch-seed");
+    let (event, manifest, list) = vector_package(&seed_dir);
+    let a = manifest.a_tag();
+
+    // A seeder with an embedded relay; the manifest is published once the viewer watches,
+    // so the viewer sees the seeder's first beacon (beacons are ephemeral, NFX-03 §5).
+    let seeder = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: seed_dir.join("store"),
+        iroh_relays: vec![iroh_url.clone()],
+        seed: vec![a.clone()],
+        embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let relay_url = seeder.relay_url.clone().unwrap();
+    let client = Relays::connect(std::slice::from_ref(&relay_url), Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    // The viewer: no TCP listener, an internal origin (the desktop app's nfx:// scheme).
+    let viewer = std::sync::Arc::new(
+        Daemon::start(Config {
+            keys: Some(Keys::generate()),
+            store: tmp("watch-viewer"),
+            relays: vec![relay_url.clone()],
+            iroh_relays: vec![iroh_url.clone()],
+            internal_origin: true,
+            ..Config::default()
+        })
+        .await
+        .unwrap(),
+    );
+    assert!(viewer.origin_addr.is_none(), "no listener");
+    let watching = {
+        let (viewer, a) = (viewer.clone(), a.clone());
+        tokio::spawn(async move { viewer.watch(&a, WAIT).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    client.publish(&event).await.unwrap();
+    let watched = watching.await.unwrap().unwrap();
+    assert_eq!(watched.root, manifest.root);
+    assert_eq!(
+        viewer.watch(&a, WAIT).await.unwrap().root,
+        manifest.root,
+        "idempotent"
+    );
+
+    // Playback reads through the origin; a segment not yet held is pulled on demand.
+    let origin = viewer.origin().unwrap();
+    let root = manifest.root_hex();
+    let master = origin
+        .respond(&hyper::Method::GET, &format!("/{root}/master.m3u8"))
+        .await;
+    assert_eq!(master.status(), StatusCode::OK);
+    let seg = list.files.iter().find(|f| f.role == Role::Segment).unwrap();
+    let res = origin
+        .respond(&hyper::Method::GET, &format!("/{root}/{}.m4s", seg.sha256))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        body.as_ref(),
+        FsStore::open(seed_dir.join("store"))
+            .unwrap()
+            .get(&seg.sha256)
+            .unwrap()
+            .as_slice()
+    );
+
+    // Then the viewer fetches the whole video and gives it back.
+    until_state(&viewer, &a, &VideoState::Seeding).await;
+
+    client.shutdown().await;
+    std::sync::Arc::try_unwrap(viewer)
+        .ok()
+        .expect("sole owner")
+        .shutdown()
+        .await;
+    seeder.shutdown().await;
+}

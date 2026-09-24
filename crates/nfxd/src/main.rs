@@ -226,6 +226,7 @@ async fn run(args: &[String]) -> Result<()> {
             .map(|n| Namespace::parse(n).map_err(Error::from))
             .collect::<Result<_>>()?,
         deletion_check_every: None,
+        internal_origin: false,
     };
     let daemon = Daemon::start(cfg).await?;
     if let Some(url) = &daemon.relay_url {
