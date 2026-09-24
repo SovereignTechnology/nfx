@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use n0_future::{Stream, StreamExt};
 use nfx_proto::beacon::{Beacon, BeaconContent};
+use nfx_proto::deletion::Deletion;
 use nfx_proto::event::Event;
 use nfx_proto::manifest::Manifest;
 use nfx_proto::namespace::{Namespace, VideoAddr};
@@ -113,6 +114,28 @@ where
     let tags = nfx_proto::beacon::tags(manifest_a, created_at, ttl)?;
     let event = sign(signer, KIND_BEACON, tags, content.to_content(), created_at).await?;
     Beacon::from_event(&event, created_at)?;
+    Ok(event)
+}
+
+/// Sign a NIP-09 deletion of `manifest_a_tags` (each a [`Manifest::a_tag`] of the
+/// signer's own) and check it is a valid NFX deletion (NFX-02 §6).
+pub async fn sign_deletion<S>(
+    signer: &S,
+    manifest_a_tags: &[String],
+    created_at: u64,
+) -> Result<Event>
+where
+    S: AsyncGetPublicKey + AsyncSignEvent,
+{
+    let event = sign(
+        signer,
+        nfx_proto::KIND_DELETION,
+        nfx_proto::deletion::tags(manifest_a_tags),
+        String::new(),
+        created_at,
+    )
+    .await?;
+    Deletion::from_event(&event)?;
     Ok(event)
 }
 
@@ -254,7 +277,54 @@ impl Relays {
                 newest.insert(key, (m.created_at, event.id.clone(), m));
             }
         }
-        Ok(newest.into_values().map(|(_, _, m)| m).collect())
+        let current: Vec<Manifest> = newest.into_values().map(|(_, _, m)| m).collect();
+        if current.is_empty() {
+            return Ok(current);
+        }
+        // NFX-02 §6: a deletion by the author, at least as new as the revision, withdraws it.
+        let deletions = self.deletions(&current, timeout).await?;
+        Ok(current
+            .into_iter()
+            .filter(|m| !deletions.iter().any(|d| d.deletes(m)))
+            .collect())
+    }
+
+    /// Whether `manifest` has been withdrawn by a valid deletion from its author. Only an
+    /// actual deletion counts: a relay that no longer holds the manifest (a restart) is not
+    /// a deletion.
+    pub async fn deleted(&self, manifest: &Manifest, timeout: Duration) -> Result<bool> {
+        self.require_connected().await?;
+        let deletions = self
+            .deletions(std::slice::from_ref(manifest), timeout)
+            .await?;
+        Ok(deletions.iter().any(|d| d.deletes(manifest)))
+    }
+
+    /// Valid NFX deletions by the authors of `manifests`, naming their addresses.
+    async fn deletions(&self, manifests: &[Manifest], timeout: Duration) -> Result<Vec<Deletion>> {
+        let authors = manifests
+            .iter()
+            .map(|m| ns::PublicKey::parse(&m.author))
+            .collect::<core::result::Result<Vec<_>, _>>()
+            .map_err(NodeError::relay)?;
+        let filter = ns::Filter::new()
+            .kind(ns::Kind::from(nfx_proto::KIND_DELETION))
+            .authors(authors)
+            .custom_tags(
+                ns::SingleLetterTag::LOWERCASE_A,
+                manifests.iter().map(Manifest::a_tag),
+            );
+        let events = self
+            .client
+            .fetch_events(filter)
+            .timeout(timeout)
+            .await
+            .map_err(NodeError::relay)?;
+        Ok(events
+            .iter()
+            .filter_map(|e| from_nostr(e).ok())
+            .filter_map(|e| Deletion::from_event(&e).ok())
+            .collect())
     }
 
     /// Subscribe to beacons for the manifests addressed by `manifest_a_tags` on `namespace`

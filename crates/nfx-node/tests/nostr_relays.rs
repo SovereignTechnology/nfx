@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use nfx_node::nostr::{ManifestQuery, Relays, sign_beacon, sign_manifest};
+use nfx_node::nostr::{ManifestQuery, Relays, sign_beacon, sign_deletion, sign_manifest};
 use nfx_node::unix_now;
 use nfx_proto::beacon::{BeaconContent, Chunks, Endpoint};
 use nfx_proto::event::Event;
@@ -205,4 +205,63 @@ async fn no_connected_relay_is_an_error_not_an_empty_answer() {
             .is_err()
     );
     relays.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn readers_honour_deletions_even_on_a_relay_that_keeps_the_manifest() {
+    // A relay that stores kind 5 but does not apply it (NIP-09 off): the reader alone must
+    // drop the deleted revision (NFX-02 §6).
+    let db = nostr_memory::MemoryDatabase::builder()
+        .process_nip09(false)
+        .build();
+    let relay = nostr_sdk::prelude::LocalRelay::builder()
+        .database(db)
+        .build();
+    relay.run().await.unwrap();
+    let url = relay.url().await.to_string();
+    let (vector, creator, seeder) = vector();
+    let client = Relays::connect(std::slice::from_ref(&url), WAIT)
+        .await
+        .unwrap();
+    let now = unix_now();
+    let (ev, m) = sign_manifest(&creator, &vector, now - 60).await.unwrap();
+    client.publish(&ev).await.unwrap();
+    let query = ManifestQuery {
+        namespace: vector.addr.namespace().clone(),
+        authors: vec![creator.public_key().to_hex()],
+        videos: vec![],
+    };
+    assert_eq!(
+        client.manifests(&query, WAIT).await.unwrap(),
+        vec![m.clone()]
+    );
+    assert!(!client.deleted(&m, WAIT).await.unwrap());
+
+    // Someone else cannot delete it: not a valid NFX deletion, never counted.
+    assert!(
+        sign_deletion(&seeder, &[m.a_tag()], now - 30)
+            .await
+            .is_err()
+    );
+
+    let del = sign_deletion(&creator, &[m.a_tag()], now - 30)
+        .await
+        .unwrap();
+    client.publish(&del).await.unwrap();
+    assert!(
+        client.manifests(&query, WAIT).await.unwrap().is_empty(),
+        "deleted"
+    );
+    assert!(client.deleted(&m, WAIT).await.unwrap());
+
+    // A later revision republishes the video (NIP-09).
+    let (ev, back) = sign_manifest(&creator, &vector, now - 10).await.unwrap();
+    client.publish(&ev).await.unwrap();
+    assert_eq!(
+        client.manifests(&query, WAIT).await.unwrap(),
+        vec![back.clone()]
+    );
+    assert!(!client.deleted(&back, WAIT).await.unwrap());
+    client.shutdown().await;
+    relay.shutdown();
 }

@@ -92,6 +92,18 @@ pub fn beacon_json(event_json: &str, now: u64) -> Result<String, String> {
     .to_string())
 }
 
+/// An NFX deletion (NFX-02 §6) as JSON: `{author, created_at, addresses}`.
+pub fn deletion_json(event_json: &str) -> Result<String, String> {
+    let d = nfx_proto::deletion::Deletion::from_event(&parse_event(event_json)?)
+        .map_err(|e| e.to_string())?;
+    Ok(json!({
+        "author": d.author,
+        "created_at": d.created_at,
+        "addresses": d.addresses.iter().map(ToString::to_string).collect::<Vec<_>>(),
+    })
+    .to_string())
+}
+
 /// A manifest address `38504:<creator>:<namespace>:<video-id>`, checked by the NFX grammar;
 /// returns `{creator, video, namespace}` as JSON.
 pub fn a_tag_json(a: &str) -> Result<String, String> {
@@ -252,6 +264,12 @@ pub fn js_verify_manifest(event_json: &str) -> Result<String, JsError> {
     manifest_json(event_json).map_err(|e| JsError::new(&e))
 }
 
+/// `verifyDeletion(eventJson)`: `{author, created_at, addresses}` as JSON, or a thrown error.
+#[wasm_bindgen(js_name = verifyDeletion)]
+pub fn js_verify_deletion(event_json: &str) -> Result<String, JsError> {
+    deletion_json(event_json).map_err(|e| JsError::new(&e))
+}
+
 /// `parseATag(a)`: `{creator, video, namespace}` as JSON, or a thrown error.
 #[wasm_bindgen(js_name = parseATag)]
 pub fn js_parse_a_tag(a: &str) -> Result<String, JsError> {
@@ -315,6 +333,18 @@ mod tests {
             beacon_json(&b["event"].to_string(), now + 10_000).is_err(),
             "expired"
         );
+    }
+
+    #[test]
+    fn deletions_verify_and_summarise() {
+        let v: Value =
+            serde_json::from_str(include_str!("../../../spec/test-vectors/deletion.json")).unwrap();
+        let out: Value =
+            serde_json::from_str(&deletion_json(&v["event"].to_string()).unwrap()).unwrap();
+        assert_eq!(out["addresses"][0], "nfx:mainnet:1:salt-flats-dusk");
+        for case in v["cases"].as_array().unwrap() {
+            assert!(deletion_json(&case["event"].to_string()).is_err());
+        }
     }
 
     #[test]

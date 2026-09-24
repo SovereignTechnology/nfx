@@ -528,3 +528,32 @@ fn licensed_encryption_is_reproduced_by_rustcrypto() {
     );
     assert!(moved.is_err(), "a file in the wrong place must not decrypt");
 }
+
+#[test]
+fn deletions_withdraw_their_own_addresses_only() {
+    use nfx_proto::deletion::{Deletion, tags};
+    let v = vector!("deletion.json");
+    let ev = event(&v["event"]);
+    let d = Deletion::from_event(&ev).unwrap();
+    let manifest = Manifest::from_event(&event(&vector!("manifest.json")["event"])).unwrap();
+    assert_eq!(d.author, manifest.author);
+    assert_eq!(d.addresses, vec![manifest.addr.clone()]);
+    assert!(
+        d.deletes(&manifest),
+        "the deletion is newer than the revision"
+    );
+    let later = Manifest {
+        created_at: d.created_at + 1,
+        ..manifest.clone()
+    };
+    assert!(!d.deletes(&later), "a later revision republishes the video");
+    assert_eq!(tags(&[str_of(&v, "manifest_a").to_owned()]), ev.tags);
+    assert_eq!(resign(&ev, &secret(&v, "creator")), ev);
+    for case in v["cases"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        assert!(
+            Deletion::from_event(&event(&case["event"])).is_err(),
+            "{name} must be rejected"
+        );
+    }
+}

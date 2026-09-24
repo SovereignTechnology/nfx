@@ -1,0 +1,143 @@
+{
+  "description": "NFX-02 §6 deletion of the manifest vector's address by its creator (kind 5, `a` tags only, created after the manifest). Readers treat that manifest as deleted; 'cases' MUST all be rejected as NFX deletions.",
+  "secret_keys_DO_NOT_USE": {
+    "creator": "bdabb76590ff1cd7f14b86be0747913d9efaf04473f3c06a3d4736063f72ad92"
+  },
+  "manifest_a": "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk",
+  "event": {
+    "id": "0e51fcf7d8a24daa9b25d760df2d6574739eea3b88493831a008bfb216a8eae4",
+    "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+    "created_at": 1790000100,
+    "kind": 5,
+    "tags": [
+      [
+        "a",
+        "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+      ],
+      [
+        "k",
+        "38504"
+      ]
+    ],
+    "content": "withdrawn by the creator",
+    "sig": "62ed796f12978be6b43ec8a8f908fe8e80439c42b1c8917fe2b66de512240da6a2debb210e8e0c5deea906050203f1f000dca867abf242dbef98294ee0dbd2eb"
+  },
+  "cases": [
+    {
+      "name": "foreign-address",
+      "reason": "every `a` must be the deletion author's own address",
+      "event": {
+        "id": "0e6dae2bff5a559a7cdfa5297380e6c2b2b99d7fa5e23f18aceeda9bc7787f01",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000100,
+        "kind": 5,
+        "tags": [
+          [
+            "a",
+            "38504:84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb:nfx:mainnet:1:salt-flats-dusk"
+          ]
+        ],
+        "content": "",
+        "sig": "4e5d77307290c1aa9be184af261085569b4cf04294b6e0b8a14d50b968510c9d702d527939045bfc997ffc7824a6bc27ee0662bf294503106e931e562993416a"
+      }
+    },
+    {
+      "name": "one-of-two-foreign",
+      "reason": "every `a`, not just one, must be the author's",
+      "event": {
+        "id": "e28a00c7cf5c421923f51d46196131dfb23ee3b1339a0be040d40cf7e8da0379",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000100,
+        "kind": 5,
+        "tags": [
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "a",
+            "38504:84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb:nfx:mainnet:1:salt-flats-dusk"
+          ]
+        ],
+        "content": "",
+        "sig": "cd80c02032778091900a3997478a282667c165c3957c094c13c2edba74683368ce238210bba2f9864349f44223424668d404f0586769af7c584bc568924b6594"
+      }
+    },
+    {
+      "name": "e-tag",
+      "reason": "manifests are addressed; an `e` tag is not allowed",
+      "event": {
+        "id": "9695a8de9489bbe5c3440d0da3fa3518ec1860489acc937284ccce5ebc2c82ca",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000100,
+        "kind": 5,
+        "tags": [
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "e",
+            "8e82e846295006d5406715f4d1ad53675926b74b6c10ea45e0ee8516ff351b49"
+          ]
+        ],
+        "content": "",
+        "sig": "3b4d5852a23edbe0628f2e03622293cd65db17b185db04f22b96f83f8cd78f6d1257b0ad71a8909545cc53fff76a677c22126f3f162fd8c1aca11faf12b3fdca"
+      }
+    },
+    {
+      "name": "no-a-tag",
+      "reason": "at least one `a` tag is required",
+      "event": {
+        "id": "737f461279e5905c5a4a6875e640a9c5eea058e7b56951a6a8a3ca34f0aa5689",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000100,
+        "kind": 5,
+        "tags": [
+          [
+            "k",
+            "38504"
+          ]
+        ],
+        "content": "",
+        "sig": "c2b65580495ea98f077c786fb77bb9acc5925fe1b5d83e996f4a4549dbe787fad4f3971c263a1020760d9af1654b2e7f5414ea6171c4038005d0b41f131a5aa0"
+      }
+    },
+    {
+      "name": "not-a-manifest-address",
+      "reason": "`a` must name a kind-38504 address",
+      "event": {
+        "id": "ae526f911c6984bbde49c190353dfc1461a80bd08354d3f3fca0f2534600e7ba",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000100,
+        "kind": 5,
+        "tags": [
+          [
+            "a",
+            "30023:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ]
+        ],
+        "content": "",
+        "sig": "bd36034fd7b139926bbbd6f5d0bb8aa3d9a6239cf7ade06a302dccd496ce54b72ae668b9fdc43bd1e7f370ab91c319283db3d89cb8b8bb110bb2e14938e62ede"
+      }
+    },
+    {
+      "name": "wrong-kind",
+      "reason": "a deletion is kind 5",
+      "event": {
+        "id": "f28145e73ffb08f441ece3742121d597a8315b208b2f15296df2e6628f8f93ed",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000100,
+        "kind": 1,
+        "tags": [
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ]
+        ],
+        "content": "",
+        "sig": "6379aab06aca5fecc079cddfa3ff3b31349a9437d8f229eb4dca341deadd2787010a6db5901ee2d0b278cdae6f3d5ad8684da68f1af6007c0bfd53a8eba3660a"
+      }
+    }
+  ]
+}

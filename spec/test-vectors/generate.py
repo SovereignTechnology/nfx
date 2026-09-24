@@ -529,6 +529,26 @@ def main() -> int:
          "playlist": duplicate_uri.decode()},
     ]
 
+    # ---- 5b. Deletion (NFX-02 §6): kind 5, `a` tags only, the author's own addresses ----
+    deleted_at = CREATED_AT + 100
+    deletion = nostr_event(creator, 5, [["a", a_tag], ["k", "38504"]],
+                           "withdrawn by the creator", deleted_at)
+    foreign_a = f"38504:{schnorr_id_pubkey(seeder)}:{video}"
+    deletion_invalid = [
+        {"name": "foreign-address", "reason": "every `a` must be the deletion author's own address",
+         "event": nostr_event(creator, 5, [["a", foreign_a]], "", deleted_at)},
+        {"name": "one-of-two-foreign", "reason": "every `a`, not just one, must be the author's",
+         "event": nostr_event(creator, 5, [["a", a_tag], ["a", foreign_a]], "", deleted_at)},
+        {"name": "e-tag", "reason": "manifests are addressed; an `e` tag is not allowed",
+         "event": nostr_event(creator, 5, [["a", a_tag], ["e", manifest["id"]]], "", deleted_at)},
+        {"name": "no-a-tag", "reason": "at least one `a` tag is required",
+         "event": nostr_event(creator, 5, [["k", "38504"]], "", deleted_at)},
+        {"name": "not-a-manifest-address", "reason": "`a` must name a kind-38504 address",
+         "event": nostr_event(creator, 5, [["a", f"30023:{manifest['pubkey']}:{video}"]], "", deleted_at)},
+        {"name": "wrong-kind", "reason": "a deletion is kind 5",
+         "event": nostr_event(creator, 1, [["a", a_tag]], "", deleted_at)},
+    ]
+
     # ---- 6. canon (NFX-11 §9) ----
     canon_inputs = [
         ("key-order", '{"b":1,"a":2,"aa":3,"A":4,"é":5,"z":6}'),
@@ -706,6 +726,16 @@ def main() -> int:
             "canon": gossip_canon.decode("utf-8"),
             "digest": gossip_digest.hex(),
             "sig": gossip_sig,
+        },
+        "deletion.json": {
+            "description": "NFX-02 §6 deletion of the manifest vector's address by its creator "
+                           "(kind 5, `a` tags only, created after the manifest). Readers treat "
+                           "that manifest as deleted; 'cases' MUST all be rejected as NFX "
+                           "deletions.",
+            "secret_keys_DO_NOT_USE": {"creator": secrets["creator"]},
+            "manifest_a": a_tag,
+            "event": deletion,
+            "cases": deletion_invalid,
         },
         "tickets.json": {
             "description": "NFX-06 §2 iroh collections and tickets for the hash-list vector. "

@@ -1,9 +1,10 @@
 //! An NFX-04 scoped relay that a seeder can embed (§7): nostr-sdk's relay behind NFX
 //! admission (§1), the §2 rate limits and a §3 NIP-11 document, served over HTTP/1.1.
 //!
-//! Admission runs the full `nfx-proto` checks: a kind-38504 event must pass NFX-02, and
-//! a kind-20464 event must pass NFX-03 at the time it arrives, both in a namespace this
-//! relay serves. Everything else is `blocked: out of scope`. Beacons are ephemeral, so
+//! Admission runs the full `nfx-proto` checks: a kind-38504 event must pass NFX-02, a
+//! kind-20464 event must pass NFX-03 at the time it arrives, and a kind-5 deletion must
+//! be a valid NFX deletion (NFX-02 §6), all in namespaces this relay serves. nostr-sdk's
+//! store then applies deletions (NIP-09). Everything else is `blocked: out of scope`. Beacons are ephemeral, so
 //! nostr-sdk forwards them to live subscribers and never stores them; expired events are
 //! refused on write and skipped on read (NIP-40). The host's own events go through the
 //! same door as everyone else's (§7).
@@ -22,9 +23,10 @@ use hyper::header::{self, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use nfx_proto::beacon::Beacon;
+use nfx_proto::deletion::Deletion;
 use nfx_proto::manifest::Manifest;
 use nfx_proto::namespace::Namespace;
-use nfx_proto::{KIND_BEACON, KIND_MANIFEST, MAX_CLOCK_SKEW};
+use nfx_proto::{KIND_BEACON, KIND_DELETION, KIND_MANIFEST, MAX_CLOCK_SKEW};
 use nostr_sdk::prelude as ns;
 use tokio::net::TcpListener;
 
@@ -75,22 +77,43 @@ struct Limits {
 struct Admission {
     namespaces: BTreeSet<String>,
     limits: Mutex<Limits>,
+    /// The relay's own store, for applying NFX deletions (see [`Admission::apply`]).
+    db: Arc<dyn ns::NostrDatabase>,
+}
+
+/// What passed the synchronous checks.
+enum Admitted {
+    Beacon,
+    Manifest(Box<Manifest>),
+    Deletion(Deletion),
 }
 
 impl Admission {
     /// Verification (signatures, NFX-02/03) runs before the lock is taken; the lock
     /// guards only the rate-limit counters.
-    fn admit(&self, event: &ns::Event, now: u64) -> Result<(), Refusal> {
+    fn admit(&self, event: &ns::Event, now: u64) -> Result<Admitted, Refusal> {
         use ns::MachineReadablePrefix::{Blocked, Invalid, RateLimited};
         let kind = event.kind.as_u16();
-        if kind != KIND_MANIFEST && kind != KIND_BEACON {
+        if kind != KIND_MANIFEST && kind != KIND_BEACON && kind != KIND_DELETION {
             return Err((Blocked, "out of scope".into()));
         }
         let ev = from_nostr(event).map_err(|_| (Invalid, "unreadable event".to_owned()))?;
-        let in_scope = matches!(
-            ev.single_tag("n"),
-            Ok(Some([n, ..])) if self.namespaces.contains(n)
-        );
+        // NFX-02 §6: `a` tags only, all the author's own manifests, all served here.
+        let deletion = if kind == KIND_DELETION {
+            Some(Deletion::from_event(&ev).map_err(|e| (Invalid, e.to_string()))?)
+        } else {
+            None
+        };
+        let in_scope = if let Some(d) = &deletion {
+            d.addresses
+                .iter()
+                .all(|a| self.namespaces.contains(&a.namespace().to_string()))
+        } else {
+            matches!(
+                ev.single_tag("n"),
+                Ok(Some([n, ..])) if self.namespaces.contains(n)
+            )
+        };
         if !in_scope {
             return Err((Blocked, "out of scope".into()));
         }
@@ -100,11 +123,15 @@ impl Admission {
             return Err((Invalid, "created_at is in the future".into()));
         }
         let size = event.as_json().len();
-        let beacon_key = if kind == KIND_MANIFEST {
+        let mut manifest = None;
+        let beacon_key = if kind == KIND_MANIFEST || kind == KIND_DELETION {
+            // Deletions were verified above and share the manifest budget (§2).
             if size > MAX_MANIFEST_BYTES {
-                return Err((Invalid, "manifest over 64 KiB".into()));
+                return Err((Invalid, "event over 64 KiB".into()));
             }
-            Manifest::from_event(&ev).map_err(|e| (Invalid, e.to_string()))?;
+            if kind == KIND_MANIFEST {
+                manifest = Some(Manifest::from_event(&ev).map_err(|e| (Invalid, e.to_string()))?);
+            }
             None
         } else {
             if size > MAX_BEACON_BYTES {
@@ -137,7 +164,10 @@ impl Admission {
                     times.pop_front();
                 }
                 if times.len() >= MANIFESTS_PER_HOUR {
-                    return Err((RateLimited, "manifest publishes per hour".into()));
+                    return Err((
+                        RateLimited,
+                        "manifest publishes and deletions per hour".into(),
+                    ));
                 }
                 times.push_back(now);
             }
@@ -152,7 +182,47 @@ impl Admission {
                 limits.beacons.insert(key, now);
             }
         }
-        Ok(())
+        Ok(match (manifest, deletion) {
+            (Some(m), _) => Admitted::Manifest(Box::new(m)),
+            (None, Some(d)) => Admitted::Deletion(d),
+            (None, None) => Admitted::Beacon,
+        })
+    }
+
+    /// Remove the stored revisions a deletion withdraws. nostr-sdk's own NIP-09 handling
+    /// cannot: it splits an `a` tag at every colon, so an NFX address
+    /// (`38504:<pk>:nfx:<network>:<specver>:<id>`) reaches it as `d` = `nfx`.
+    async fn apply(&self, d: &Deletion) {
+        let Ok(author) = ns::PublicKey::parse(&d.author) else {
+            return;
+        };
+        for addr in &d.addresses {
+            let filter = ns::Filter::new()
+                .kind(ns::Kind::from(KIND_MANIFEST))
+                .author(author)
+                .identifier(addr.to_string())
+                .until(ns::Timestamp::from(d.created_at));
+            let _ = self.db.delete(filter).await;
+        }
+    }
+
+    /// Whether a stored deletion withdraws this revision (a replay of a deleted one).
+    async fn withdrawn(&self, m: &Manifest) -> bool {
+        let Ok(author) = ns::PublicKey::parse(&m.author) else {
+            return false;
+        };
+        let filter = ns::Filter::new()
+            .kind(ns::Kind::from(KIND_DELETION))
+            .author(author)
+            .custom_tag(ns::SingleLetterTag::LOWERCASE_A, m.a_tag());
+        let Ok(found) = self.db.query(filter).await else {
+            return false;
+        };
+        found
+            .iter()
+            .filter_map(|e| from_nostr(e).ok())
+            .filter_map(|e| Deletion::from_event(&e).ok())
+            .any(|d| d.deletes(m))
     }
 }
 
@@ -164,7 +234,18 @@ impl ns::WritePolicy for Admission {
     ) -> BoxFuture<'a, ns::WritePolicyResult> {
         Box::pin(async move {
             match self.admit(event, unix_now()) {
-                Ok(()) => ns::WritePolicyResult::Accept,
+                Ok(Admitted::Beacon) => ns::WritePolicyResult::Accept,
+                Ok(Admitted::Manifest(m)) if self.withdrawn(&m).await => {
+                    ns::WritePolicyResult::reject(
+                        ns::MachineReadablePrefix::Invalid,
+                        "deleted by its author (NFX-02 §6)",
+                    )
+                }
+                Ok(Admitted::Manifest(_)) => ns::WritePolicyResult::Accept,
+                Ok(Admitted::Deletion(d)) => {
+                    self.apply(&d).await;
+                    ns::WritePolicyResult::Accept
+                }
                 Err((prefix, message)) => ns::WritePolicyResult::reject(prefix, message),
             }
         })
@@ -213,14 +294,17 @@ impl ScopedRelay {
     #[must_use]
     pub fn new(namespaces: &[Namespace]) -> Self {
         let names: BTreeSet<String> = namespaces.iter().map(ToString::to_string).collect();
-        let database = nostr_memory::MemoryDatabase::bounded(
-            std::num::NonZeroUsize::new(MAX_STORED_EVENTS).unwrap_or(std::num::NonZeroUsize::MIN),
-        );
+        let database: Arc<dyn ns::NostrDatabase> =
+            ns::IntoNostrDatabase::into_nostr_database(nostr_memory::MemoryDatabase::bounded(
+                std::num::NonZeroUsize::new(MAX_STORED_EVENTS)
+                    .unwrap_or(std::num::NonZeroUsize::MIN),
+            ));
         let local = ns::LocalRelay::builder()
-            .database(database)
+            .database(database.clone())
             .write_policy(Admission {
                 namespaces: names.clone(),
                 limits: Mutex::new(Limits::default()),
+                db: database,
             })
             .query_policy(QueryLimits)
             .rate_limit(ns::RateLimit {
@@ -245,7 +329,7 @@ impl ScopedRelay {
             },
             "nfx": {
                 "networks": names,
-                "kinds": [KIND_MANIFEST, KIND_BEACON],
+                "kinds": [KIND_MANIFEST, KIND_BEACON, KIND_DELETION],
                 "roles": ["catalog", "availability"]
             }
         });

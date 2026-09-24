@@ -24,6 +24,8 @@ pub enum Error {
     Voucher(String),
     #[error("invalid gossip envelope: {0}")]
     Gossip(String),
+    #[error("invalid deletion: {0}")]
+    Deletion(String),
 }
 
 pub type Result<T> = core::result::Result<T, Error>;

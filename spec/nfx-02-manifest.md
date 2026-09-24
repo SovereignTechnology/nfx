@@ -29,6 +29,12 @@ video-id  = [a-z0-9][a-z0-9-]{6,62}
 Chosen by the creator at publish; unique per creator per network by addressability. A
 video-id MUST NOT be reused for different content or migrated across namespaces.
 
+The `d` value contains colons, so an address `38504:<pubkey>:<d>` (in `a` tags, NIP-01)
+is split at its **first two colons only**; everything after the second colon is `d`.
+Some generic Nostr libraries split at every colon and truncate `d` to `nfx`. nostr-sdk
+0.45's `Coordinate` parser does, for one, so its NIP-09 handling misses NFX addresses.
+Implementations MUST NOT rely on such parsers for NFX addresses.
+
 ## 3. Tag table
 
 "Licensed" / "Open" columns: **R** required, **O** optional, **–** prohibited.
@@ -124,9 +130,22 @@ See `test-vectors/manifest.json` — a complete, real-signature event (regenerab
 - Delisting (creator renunciation): publish a manifest with `license` set to `open`,
   `price_hint` `0`, and **all licensed-only tags removed** (`key_price`, `split`,
   `mint`, `cashu_key`, `free_seeder` — otherwise the event fails §4 and no client
-  ever parses it), or issue a NIP-09 deletion request. Clients SHOULD honor NIP-09
-  for manifests; seeders MUST stop beacons for deleted manifests but are not required
-  to delete stored bytes (they are just content-addressed blobs).
+  ever parses it). The video stays playable; only its price and license change.
+- **Deletion** withdraws a video. The creator publishes a NIP-09 deletion request, and
+  it is valid for NFX when all of these hold:
+  - it is kind 5, and its `id` and `sig` verify against its `pubkey`;
+  - it carries at least one `a` tag;
+  - every `a` tag names a kind-38504 address of the deletion's own author
+    (`38504:<pubkey>:<namespace>:<video-id>`, per §2);
+  - it carries no `e` tag, since manifests are addressed, not referenced by id.
+
+  It withdraws every revision at those addresses up to its own `created_at`, and a
+  later revision republishes the video (NIP-09).
+- Readers MUST treat a manifest as deleted when a valid deletion by its author for its
+  address is at least as new as the current revision (§4 "Revisions").
+- Seeders MUST stop beaconing a deleted manifest. They need not delete stored bytes,
+  which are content-addressed blobs.
+- Scoped relays admit and apply such deletions (NFX-04 §1).
 
 ## 7. Annex A (non-normative): NIP-71 mirror
 
@@ -153,3 +172,8 @@ see a playable video; NFX consumers ignore the mirror.
   a 15-minute future horizon).
 - Draft 2026-09-24 (M1 freeze candidate): `alt` length is a publisher SHOULD, never a
   reason to reject.
+- Draft 2026-09-24 (M1 freeze candidate): §6 deletion made normative (a valid NFX
+  deletion: kind 5, `a` tags only, own addresses), with reader and seeder duties;
+  vectors `deletion.json`. Renunciation no longer described as a deletion.
+- Draft 2026-09-24 (M1 freeze candidate): §2 how an address is split (first two colons),
+  after nostr-sdk's parser was found to truncate NFX addresses.

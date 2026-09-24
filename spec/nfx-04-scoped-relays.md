@@ -13,6 +13,9 @@ A scoped relay for namespace(s) `N…`:
 - MUST accept kind **38504** manifests (NFX-02) whose `n` tag ∈ `N…`;
 - MUST accept kind **20464** beacons (NFX-03) whose `n` tag ∈ `N…`, handling them as
   ephemerals per NIP-01 (forward to live subscribers, never persist);
+- MUST accept kind **5** deletion requests that are valid for NFX (NFX-02 §6) and whose
+  every address is in a namespace it serves. It MUST apply them to stored manifests
+  (NIP-09) and store them, so that later readers see the deletion;
 - MUST implement **NIP-40** and prune expired beacons;
 - MUST reject every other kind with `OK false "blocked: out of scope"` and SHOULD do
   the same for in-scope kinds whose `n` tag is absent/foreign;
@@ -23,7 +26,7 @@ A scoped relay for namespace(s) `N…`:
 | Rule | Limit |
 |---|---|
 | Beacon publishes | ≤ 1 per 20 s per (`pubkey`,`a`; relaxed to 1/15 s if NIP-42-authed) |
-| Manifest publishes | ≤ 12/hour per pubkey (catches loops; humans publish ≤ a few/day) |
+| Manifest publishes and deletions | ≤ 12/hour per pubkey, together (catches loops; humans publish ≤ a few/day) |
 | `REQ` per connection | ≤ 20 concurrent subscriptions |
 | Filter cardinality | `#a` / `#n` lists ≤ 256 entries |
 | Event size | manifests ≤ 64 KiB hard; beacons ≤ 16 KiB hard |
@@ -41,7 +44,7 @@ The relay's NIP-11 document MUST list `"supported_nips"` including `11` and `40`
 ```json
 "nfx": {
   "networks": ["nfx:mainnet:1"],
-  "kinds": [38504, 20464],
+  "kinds": [38504, 20464, 5],
   "roles": ["catalog", "availability"]
 }
 ```
@@ -104,3 +107,5 @@ redundancy comes from many operators).
 - Draft 2026-09-23 — wire token `nfx` (NIP-11 key `"nfx"`, ADR 0008 §2). New §7:
   a seeder node MAY embed a scoped relay (plan amendment 8); former §7 is §8.
 - Draft 2026-09-23 (A2 pre-push audit): §2 `created_at` future bound.
+- Draft 2026-09-24 (M1 freeze candidate): §1 admits NFX deletions (kind 5, NFX-02 §6)
+  and applies them; §2 counts them with manifest publishes; §3 lists kind 5.

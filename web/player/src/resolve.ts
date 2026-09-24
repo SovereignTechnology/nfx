@@ -6,7 +6,7 @@
  * - **where to fetch** comes from verified beacons' `https` endpoints (NFX-03 §5) or an
  *   operator's hint. Those are hints only: every byte is still checked against the anchor.
  */
-import { parseATag, verifyBeacon, verifyManifest } from '../out/wasm/nfx_wasm.js';
+import { parseATag, verifyBeacon, verifyDeletion, verifyManifest } from '../out/wasm/nfx_wasm.js';
 import { query, subscribe } from './nostr';
 import { loadWasm } from './verify';
 
@@ -63,6 +63,22 @@ export async function resolveManifest(a: string, relays: string[], timeoutMs = 8
     if (!best || m.created_at > best.created_at || (m.created_at === best.created_at && m.id < best.id)) {
       best = m;
     }
+  }
+  // NFX-02 §6: a valid deletion by the author withdraws every revision at least as old as
+  // itself. Relays that apply deletions drop the manifest too, so a withdrawn video is
+  // reported as such whether or not a revision is still around.
+  const deletions = await Promise.all(
+    relays.map((r) => query(r, { kinds: [5], authors: [want.creator], '#a': [a] }, timeoutMs)),
+  );
+  for (const json of deletions.flat()) {
+    let d: { author: string; created_at: number; addresses: string[] };
+    try {
+      d = JSON.parse(verifyDeletion(json));
+    } catch {
+      continue;
+    }
+    if (d.author !== want.creator || !d.addresses.includes(want.video)) continue;
+    if (!best || d.created_at >= best.created_at) throw new Error(`${a} was deleted by its creator`);
   }
   if (!best) throw new Error(`no valid manifest for ${a} on ${relays.length} relay(s)`);
   return best;

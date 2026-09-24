@@ -267,6 +267,14 @@ async function main(): Promise<void> {
     results.liar = { ...lied, rejected: lied.rejected.length };
     const allSegments = lied.rejected.every((sha: string | null) => sha !== null && segments.has(sha));
     if (lied.playing || lied.t !== 0 || lied.rejected.length === 0 || !allSegments) throw new Error(`lying origin: ${JSON.stringify(lied)}`);
+    // The creator withdraws the video (NFX-02 §6): resolving it now fails, never plays.
+    run(bin('nfxd'), ['delete', '--key', key, '--relay', relay, '--a', a]);
+    const gone = await context.newPage();
+    await gone.goto(q(`&origin=${encodeURIComponent(origin)}`));
+    await gone.waitForFunction(() => (window as any).__nfx.errors.length > 0, null, { timeout: 30_000 });
+    const deleted = await gone.evaluate(() => ({ errors: (window as any).__nfx.errors as string[], playing: (window as any).__nfx.playing }));
+    results.deleted = deleted;
+    if (!deleted.errors[0]?.includes('deleted by its creator') || deleted.playing) throw new Error(`deleted video: ${JSON.stringify(deleted)}`);
     await context.close();
   } finally {
     await browser.close();

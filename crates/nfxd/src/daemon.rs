@@ -61,6 +61,9 @@ pub struct Config {
     pub embed_relay: Option<SocketAddr>,
     /// Namespaces the embedded relay serves; by default those of the videos above.
     pub namespaces: Vec<Namespace>,
+    /// How often a seeded video is checked for its creator's deletion (NFX-02 §6).
+    /// Default: every beacon republish (60 s).
+    pub deletion_check_every: Option<Duration>,
 }
 
 /// Where each video stands, by `a` tag.
@@ -74,6 +77,8 @@ pub enum VideoState {
     Seeding,
     /// Seeding, but the last beacon reached no relay (the reason).
     Unannounced(String),
+    /// Withdrawn by its creator (NFX-02 §6): no longer announced. Stored bytes stay.
+    Deleted,
     /// On the origin only.
     Serving,
     Failed(String),
@@ -98,6 +103,7 @@ struct Shared {
     pull: Arc<SwarmPull>,
     origin: Option<Arc<Origin>>,
     https_url: Option<String>,
+    deletion_check_every: Duration,
     state: Arc<Mutex<BTreeMap<String, VideoState>>>,
 }
 
@@ -146,18 +152,30 @@ impl Shared {
             origin.hold(manifest).await?;
         }
         self.set(a, VideoState::Seeding);
-        let mut tick = tokio::time::interval(Duration::from_secs(BEACON_TTL / 2));
+        let mut announce = tokio::time::interval(Duration::from_secs(BEACON_TTL / 2));
+        let mut check = tokio::time::interval(self.deletion_check_every);
         loop {
-            tick.tick().await;
-            // A refused or unreachable relay is retried at the next tick (beacons are
-            // hints), but it shows: a node that cannot announce is invisible to fetchers.
-            match self
-                .relays
-                .announce(&keys, manifest, &self.beacon(&seeded, manifest))
-                .await
-            {
-                Ok(_) => self.set(a, VideoState::Seeding),
-                Err(e) => self.set(a, VideoState::Unannounced(e.to_string())),
+            tokio::select! {
+                _ = announce.tick() => {
+                    // A refused or unreachable relay is retried at the next tick (beacons are
+                    // hints), but it shows: a node that cannot announce is invisible.
+                    match self
+                        .relays
+                        .announce(&keys, manifest, &self.beacon(&seeded, manifest))
+                        .await
+                    {
+                        Ok(_) => self.set(a, VideoState::Seeding),
+                        Err(e) => self.set(a, VideoState::Unannounced(e.to_string())),
+                    }
+                }
+                _ = check.tick() => {
+                    // Only an actual deletion stops seeding: a relay that forgot the
+                    // manifest (a restart) is not one.
+                    if matches!(self.relays.deleted(manifest, CONNECT_TIMEOUT).await, Ok(true)) {
+                        self.set(a, VideoState::Deleted);
+                        return Ok(());
+                    }
+                }
             }
         }
     }
@@ -330,6 +348,10 @@ impl Daemon {
             pull: pull.clone(),
             origin,
             https_url: cfg.https_url.clone(),
+            deletion_check_every: cfg
+                .deletion_check_every
+                .unwrap_or(Duration::from_secs(BEACON_TTL / 2))
+                .max(Duration::from_millis(100)),
             state: state.clone(),
         });
 

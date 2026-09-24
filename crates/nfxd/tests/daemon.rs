@@ -220,6 +220,7 @@ async fn fetch_serve_and_reseed_through_an_embedded_relay() {
         fetch: vec![a.clone()],
         origin: Some("127.0.0.1:0".parse().unwrap()),
         embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        deletion_check_every: Some(Duration::from_millis(500)),
         ..Config::default()
     })
     .await
@@ -254,6 +255,7 @@ async fn fetch_serve_and_reseed_through_an_embedded_relay() {
         relays: vec![relay_url.clone()],
         iroh_relays: vec![iroh_url.clone()],
         seed: vec![a.clone()],
+        deletion_check_every: Some(Duration::from_millis(500)),
         ..Config::default()
     })
     .await
@@ -300,6 +302,18 @@ async fn fetch_serve_and_reseed_through_an_embedded_relay() {
     .await
     .unwrap_or_else(|_| panic!("seeders seen: {seen:?}"));
     assert_eq!(watch.rejected, 0);
+
+    // The creator withdraws the video (NFX-02 §6): both seeders stop announcing it.
+    let m: Value =
+        serde_json::from_str(include_str!("../../../spec/test-vectors/manifest.json")).unwrap();
+    let creator = Keys::parse(m["secret_keys_DO_NOT_USE"]["creator"].as_str().unwrap()).unwrap();
+    let del = nfx_node::nostr::sign_deletion(&creator, std::slice::from_ref(&a), unix_now())
+        .await
+        .unwrap();
+    assert_eq!(client.publish(&del).await.unwrap(), 1);
+    until_state(&seeder, &a, &VideoState::Deleted).await;
+    until_state(&b, &a, &VideoState::Deleted).await;
+    assert!(client.manifests(&query, WAIT).await.unwrap().is_empty());
 
     client.shutdown().await;
     seeder.shutdown().await;

@@ -10,7 +10,7 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Empty};
 use hyper::Request;
 use hyper_util::rt::TokioIo;
-use nfx_node::nostr::{ManifestQuery, Relays, sign_manifest};
+use nfx_node::nostr::{ManifestQuery, Relays, sign_deletion, sign_manifest};
 use nfx_node::relay::{MANIFESTS_PER_HOUR, ScopedRelay};
 use nfx_node::unix_now;
 use nfx_proto::beacon::{BeaconContent, Chunks, Endpoint};
@@ -88,7 +88,7 @@ async fn a_scoped_relay_admits_limits_and_forwards_only_nfx() {
     let doc: Value =
         serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(doc["nfx"]["networks"], serde_json::json!([ns.to_string()]));
-    assert_eq!(doc["nfx"]["kinds"], serde_json::json!([38504, 20464]));
+    assert_eq!(doc["nfx"]["kinds"], serde_json::json!([38504, 20464, 5]));
     let nips = doc["supported_nips"].as_array().unwrap();
     assert!(nips.contains(&11.into()) && nips.contains(&40.into()));
 
@@ -203,6 +203,49 @@ async fn a_scoped_relay_admits_limits_and_forwards_only_nfx() {
     .await
     .unwrap();
     assert!(refusal(&client, &again).await.starts_with("rate-limited:"));
+
+    // NFX-02 §6 deletions: admitted from the author and applied to the store; a foreign
+    // "deletion" is refused.
+    let foreign = EventBuilder::new(Kind::from(5u16), "")
+        .tags([nostr_sdk::prelude::Tag::parse(["a", &manifest.a_tag()]).unwrap()])
+        .finalize(&seeder)
+        .unwrap();
+    let foreign: Event = serde_json::from_str(&foreign.as_json()).unwrap();
+    assert!(refusal(&client, &foreign).await.starts_with("invalid:"));
+    // Deletions share the manifest budget (§2), which this creator has spent.
+    let del = sign_deletion(&creator, &[manifest.a_tag()], unix_now())
+        .await
+        .unwrap();
+    assert!(refusal(&client, &del).await.starts_with("rate-limited:"));
+    // A creator with budget left: published, deleted, gone from the store.
+    let other = Keys::generate();
+    let (ev, theirs) = sign_manifest(&other, &manifest, unix_now() - 5)
+        .await
+        .unwrap();
+    publisher.publish(&ev).await.unwrap();
+    let del = sign_deletion(&other, &[theirs.a_tag()], unix_now())
+        .await
+        .unwrap();
+    assert_eq!(publisher.publish(&del).await.unwrap(), 1);
+    let stored_manifests = client
+        .fetch_events(
+            Filter::new()
+                .kind(Kind::from(38504u16))
+                .author(other.public_key()),
+        )
+        .timeout(WAIT)
+        .await
+        .unwrap();
+    assert!(
+        stored_manifests.is_empty(),
+        "the relay applied the deletion"
+    );
+    // Replaying the deleted revision does not bring it back.
+    assert!(
+        refusal(&client, &ev)
+            .await
+            .starts_with("invalid: deleted by its author")
+    );
 
     // Ephemeral: a fresh REQ finds no beacon stored.
     let stored = client

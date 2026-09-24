@@ -1,7 +1,8 @@
 # M1 freeze candidate: NFX-02 to NFX-06 (2026-09-24)
 
-**Status: candidate, not frozen.** Freezing is sovtech's call. This page shows what a
-freeze would lock, what changed to get here, and the one decision still open.
+**Status: candidate, not frozen. No blockers remain.** Freezing is sovtech's call. This
+page shows what a freeze would lock and what changed to get here. The one open decision,
+deletion, was settled on 2026-09-24 (option 1) and is implemented.
 
 ## What freezing does
 
@@ -53,28 +54,39 @@ Earlier amendments, in the documents since 2026-09-23 and part of what would fre
 - **Not yet:** a second, independent full implementation (the README's "Stable" bar).
   That is not needed for a freeze.
 
-## Open decision (blocks the freeze)
+## Deletion: decided and implemented
 
-**NIP-09 deletion collides with scoped-relay admission.**
-- NFX-02 §6 says a creator may delete a manifest with a NIP-09 request, and seeders MUST
-  stop beaconing a deleted manifest.
-- NFX-04 §1 has scoped relays refuse every kind except 38504 and 20464. A kind-5
-  deletion therefore never reaches them, and seeders listening there never learn of it.
-- Nothing implements the seeder side today either.
+**Decision (sovtech, 2026-09-24): admit targeted deletions.** This resolves the collision
+between NFX-02 §6 (NIP-09 deletions) and NFX-04 §1 (scoped relays admitted only 38504 and
+20464).
 
-Options:
-1. **Admit targeted deletions (recommended).** Scoped relays accept a kind-5 event
-   only when every `a`/`e` it names is a kind-38504 manifest of the same author in a
-   served namespace. They apply it to stored manifests and forward it. Readers and
-   seeders honour it: `Relays::manifests` drops deleted revisions, and `nfxd` stops
-   beaconing. This needs NFX-04 §1 and §2 text (a rate limit for kind 5), a vector, and
-   code in the relay, the reader and the daemon.
-2. **Drop NIP-09 from NFX-02.** Withdrawal would then be the renunciation manifest only.
-   But that still leaves the video playable (open, price 0), so there would be no real
-   "withdraw". Simpler, weaker.
-3. **Defer:** freeze with §6 reworded to "SHOULD, where the reader can see NIP-09
-   events", and solve deletion at a later specver. This leaves a known gap in a frozen
-   document.
+- **Spec:**
+  - NFX-02 §6 defines a valid NFX deletion: kind 5, at least one `a` tag, every `a` the
+    author's own kind-38504 address, and no `e` tag. It also sets the reader's duty
+    (treat the video as deleted) and the seeder's (stop beaconing).
+  - NFX-04 §1 has scoped relays admit, apply and store deletions; §2 counts them in the
+    per-author manifest budget; §3 lists kind 5.
+  - NFX-02 §2 says an address is split at its first two colons only.
+- **Vectors:** `deletion.json`, one valid deletion and six invalid ones.
+- **Code:**
+  - `nfx-proto::deletion`;
+  - the scoped relay admits deletions and applies them itself, because nostr-sdk's
+    NIP-09 handling truncates NFX addresses (below). It also refuses replays of a
+    deleted revision;
+  - `Relays::manifests` drops withdrawn revisions, and `Relays::deleted` checks for one;
+  - `nfxd delete`, and seeders move to `Deleted` and stop beaconing;
+  - the player reports "deleted by its creator".
+- **Tests:**
+  - a reader on a relay that keeps the manifest still drops it, and a later revision
+    republishes it;
+  - the relay applies a deletion, refuses a foreign one, refuses the replay, and
+    rate-limits deletions over budget;
+  - both `nfxd` seeders reach `Deleted`;
+  - the player e2e ends with `nfxd delete` and a refused resolve.
+- **Found on the way:** nostr-sdk 0.45 splits an `a` tag at every colon, so it reads an
+  NFX address's `d` as `nfx`. Its automatic deletion handling therefore silently misses
+  NFX manifests. NFX-02 §2 now states the parsing rule, and NFX code never relies on
+  that parser.
 
 ## Not blocking (SHOULD-level, not implemented)
 
@@ -89,7 +101,6 @@ These are conformant omissions: a SHOULD, or an optional feature.
 
 ## Recommendation
 
-1. Decide the deletion question. Option 1 is roughly a day of work.
-2. Freeze NFX-02 to 06 at M1 once it is in.
-
-Everything else in this candidate is ready.
+**Freeze NFX-02 to 06 at M1.** Everything in this candidate is implemented and tested.
+The SHOULD-level omissions above are conformant. The freeze itself is three edits: the
+status lines, the README table, and the NFX-11 changelog.

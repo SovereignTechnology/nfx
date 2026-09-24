@@ -5,6 +5,7 @@
 //! nfxd key show <file>                     print a key file's public key
 //! nfxd publish --key <file> --relay <url>… --package <dir> --title <text>
 //!              [--description <md>] [--alt <text>] [--tag <t>]…
+//! nfxd delete --key <file> --relay <url>… --a <a>…   withdraw your own videos (NFX-02 §6)
 //! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--relay-only]
 //!          [--seed <a>]… [--fetch <a>]… [--pull <a>]… [--origin <addr:port>]
 //!          [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]…
@@ -29,6 +30,7 @@ const USAGE: &str = "usage:
   nfxd key new <file>
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
+  nfxd delete --key <file> --relay <url>... --a <a>...
   nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]...";
 
 fn usage() -> ExitCode {
@@ -42,6 +44,7 @@ async fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("key") => key_cmd(&args[1..]),
         Some("publish") => publish(&args[1..]).await,
+        Some("delete") => delete(&args[1..]).await,
         Some("run") => run(&args[1..]).await,
         _ => return usage(),
     };
@@ -146,6 +149,23 @@ async fn publish(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+async fn delete(args: &[String]) -> Result<()> {
+    let f = flags(args, &["key", "relay", "a"])?;
+    let keys = key::load(Path::new(&required(&f, "key")?))?;
+    let relays = all(&f, "relay");
+    let addresses = all(&f, "a");
+    if relays.is_empty() || addresses.is_empty() {
+        return Err(Error::Config("--relay and --a are required".into()));
+    }
+    // Refused unless every address is the key's own manifest (NFX-02 §6).
+    let event = nfx_node::nostr::sign_deletion(&keys, &addresses, unix_now()).await?;
+    let relays = Relays::connect(&relays, Duration::from_secs(10)).await?;
+    let accepted = relays.publish(&event).await;
+    relays.shutdown().await;
+    eprintln!("deletion accepted by {} relay(s)", accepted?);
+    Ok(())
+}
+
 async fn run(args: &[String]) -> Result<()> {
     // The one flag without a value.
     let relay_only = args.iter().any(|a| a == "--relay-only");
@@ -205,6 +225,7 @@ async fn run(args: &[String]) -> Result<()> {
             .iter()
             .map(|n| Namespace::parse(n).map_err(Error::from))
             .collect::<Result<_>>()?,
+        deletion_check_every: None,
     };
     let daemon = Daemon::start(cfg).await?;
     if let Some(url) = &daemon.relay_url {

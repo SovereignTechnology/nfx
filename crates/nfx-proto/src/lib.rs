@@ -9,6 +9,7 @@
 
 pub mod beacon;
 pub mod canon;
+pub mod deletion;
 mod error;
 pub mod event;
 pub mod gossip;
@@ -26,6 +27,8 @@ use sha2::{Digest, Sha256};
 pub const KIND_MANIFEST: u16 = 38504;
 /// Kind of the ephemeral availability beacon (NFX-03).
 pub const KIND_BEACON: u16 = 20464;
+/// Kind of a NIP-09 deletion request; NFX admits only manifest deletions (NFX-02 §6).
+pub const KIND_DELETION: u16 = 5;
 /// Largest `|now - created_at|` accepted for beacons and gossip envelopes, in seconds.
 pub const MAX_CLOCK_SKEW: u64 = 15 * 60;
 
