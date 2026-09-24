@@ -10,6 +10,14 @@ variables:
   GIT_DEPTH: "0"            # the add-only check needs the merge base with demo/main
   CARGO_HOME: $CI_PROJECT_DIR/.cargo-home
   CARGO_TERM_COLOR: always
+  # Keep the shared runner light. With debug info each iroh/nostr test binary is ~450 MB
+  # and ~15 of them link in parallel.
+  # Without it they are ~94 MB, and a clean test build with 2 jobs measured 3.6 min
+  # wall and 0.9 GB peak per process on the dev laptop. Every test still runs.
+  CARGO_BUILD_JOBS: "2"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
   CARGO_DENY_VERSION: "0.20.2"
   # Matches the release's own .sha256 file and GitHub's asset digest.
   CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"

@@ -139,6 +139,10 @@ Still to come is the Phase A exit run across hosts, which needs sovtech's OK.
     - every playlist `URI` attribute is checked.
   - Spec amendments: NFX-02 §4, NFX-04 §2, NFX-05 §3 and NFX-06 §2, and one new vector
     (`duplicate-uri-attribute`).
+- **CI after A2 (2026-09-23):** the first pipeline to build iroh and nostr-sdk
+  on the shared runner, stalled for 30 min linking ~15 debug test binaries of ~450 MB each,
+  so it was cancelled. CI now builds without debug info and with 2 jobs (sovtech's
+  choice), about 94 MB per binary, and still runs every test.
 - **`nfx-wasm`, `nfx-proto` for browsers (2026-09-23):**
   - It exports `verifyManifest`, `verifyBeacon`, `sha256Hex` and `VerifiedHashList`
     (constructed from a manifest's `video` and `segs`, or `fromRoot`, with `check` and
