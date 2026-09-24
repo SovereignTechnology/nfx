@@ -425,6 +425,7 @@ async fn a_viewer_watches_plays_through_its_origin_and_then_seeds() {
             relays: vec![relay_url.clone()],
             iroh_relays: vec![iroh_url.clone()],
             internal_origin: true,
+            seed_watched: true,
             ..Config::default()
         })
         .await
@@ -596,6 +597,7 @@ async fn a_watch_that_timed_out_does_not_stop_a_later_one_from_seeding() {
             relays: vec![relay_url.clone()],
             iroh_relays: vec![iroh_url.clone()],
             internal_origin: true,
+            seed_watched: true,
             ..Config::default()
         })
         .await
@@ -659,4 +661,78 @@ async fn shutdown_frees_the_store_while_a_watch_is_still_pending() {
     pending.abort();
     new.shutdown().await;
     relay.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_that_does_not_share_plays_but_never_announces() {
+    let (_iroh, iroh_url) = iroh_relay().await;
+    let seed_dir = tmp("private-seed");
+    let (event, manifest, _) = vector_package(&seed_dir);
+    let a = manifest.a_tag();
+    let seeder_keys = Keys::generate();
+    let seeder = Daemon::start(Config {
+        keys: Some(seeder_keys.clone()),
+        store: seed_dir.join("store"),
+        iroh_relays: vec![iroh_url.clone()],
+        seed: vec![a.clone()],
+        embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let relay_url = seeder.relay_url.clone().unwrap();
+    let client = Relays::connect(std::slice::from_ref(&relay_url), Duration::from_secs(10))
+        .await
+        .unwrap();
+    let mut beacons = client
+        .watch_beacons(manifest.addr.namespace(), std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    // The default: a key, but no sharing, and no portmapper.
+    let viewer_keys = Keys::generate();
+    let viewer = std::sync::Arc::new(
+        Daemon::start(Config {
+            keys: Some(viewer_keys.clone()),
+            store: tmp("private-viewer"),
+            relays: vec![relay_url.clone()],
+            iroh_relays: vec![iroh_url.clone()],
+            internal_origin: true,
+            no_portmapper: true,
+            ..Config::default()
+        })
+        .await
+        .unwrap(),
+    );
+    let watching = {
+        let (viewer, a) = (viewer.clone(), a.clone());
+        tokio::spawn(async move { viewer.watch(&a, WAIT).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    client.publish(&event).await.unwrap();
+    assert_eq!(watching.await.unwrap().unwrap().root, manifest.root);
+    until_state(&viewer, &a, &VideoState::Serving).await;
+
+    // Only the seeder ever announces it.
+    let seen = tokio::time::timeout(Duration::from_secs(4), async {
+        let mut seen = BTreeSet::new();
+        while let Some(b) = beacons.next().await {
+            seen.insert(b.seeder.clone());
+        }
+        seen
+    })
+    .await
+    .unwrap_or_default();
+    assert!(
+        !seen.contains(&viewer_keys.public_key().to_hex()),
+        "the viewer announced"
+    );
+    assert_eq!(
+        viewer.state()[&a],
+        VideoState::Serving,
+        "served, never seeding"
+    );
+
+    client.shutdown().await;
+    viewer.shutdown().await;
+    seeder.shutdown().await;
 }

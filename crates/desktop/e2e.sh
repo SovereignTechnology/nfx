@@ -20,7 +20,7 @@ pids=()
 cleanup() {
   for p in "${pids[@]}"; do kill -TERM -- "-$p" 2>/dev/null || true; done
   rm -rf "$work"
-  rm -f "$runtime/$display" "$runtime/$display.lock"
+  rm -f "$runtime/$display"-* "$runtime/$display"-*.lock
 }
 trap cleanup EXIT
 
@@ -53,24 +53,36 @@ pids+=($!)
 wait_for "$work/seeder.log" 'embedded relay: ws://' 30
 relay=$(grep -oE 'ws://[0-9.:]+' "$work/seeder.log" | head -1)
 
-# The app, in its own headless compositor.
-test_json=$(printf '{"a":"%s","relays":["%s"]}' "$a" "$relay")
-setsid dbus-run-session -- bash -c '
-  gnome-shell --wayland --no-x11 --headless --virtual-monitor 1280x720 \
-    --wayland-display "$4" >/dev/null 2>&1 &
-  for _ in $(seq 1 100); do [ -S "$XDG_RUNTIME_DIR/$4" ] && break; sleep 0.2; done
-  [ -S "$XDG_RUNTIME_DIR/$4" ] || { echo "the headless compositor never started"; exit 1; }
-  WAYLAND_DISPLAY="$4" GDK_BACKEND=wayland NFX_DESKTOP_TEST="$1" \
-    NFX_DESKTOP_DATA="$2" "$3"
-  echo "EXIT $?"
-' _ "$test_json" "$work/app" "$here/target/release/nfx-desktop" "$display" > "$work/app.log" 2>&1 &
-pids+=($!)
+# The app, in its own headless compositor, with its own data dir: once with sharing off
+# (the default: it plays and only serves), once with sharing on (it plays and seeds).
+start_app() { # share tag
+  local json
+  json=$(printf '{"a":"%s","relays":["%s"],"share":%s}' "$a" "$relay" "$1")
+  setsid dbus-run-session -- bash -c '
+    gnome-shell --wayland --no-x11 --headless --virtual-monitor 1280x720 \
+      --wayland-display "$4" >/dev/null 2>&1 &
+    for _ in $(seq 1 100); do [ -S "$XDG_RUNTIME_DIR/$4" ] && break; sleep 0.2; done
+    [ -S "$XDG_RUNTIME_DIR/$4" ] || { echo "the headless compositor never started"; exit 1; }
+    WAYLAND_DISPLAY="$4" GDK_BACKEND=wayland NFX_DESKTOP_TEST="$1" \
+      NFX_DESKTOP_DATA="$2" "$3"
+    echo "EXIT $?"
+  ' _ "$json" "$work/app-$2" "$here/target/release/nfx-desktop" "$display-$2" \
+    > "$work/app-$2.log" 2>&1 &
+  pids+=($!)
+}
+check_app() { # tag step
+  wait_for "$work/app-$1.log" '^EXIT ' 240 || true
+  grep -E '^\{|^RESULT' "$work/app-$1.log" || true
+  grep -q '^RESULT PASS' "$work/app-$1.log" && grep -q "\"step\":\"$2\"" "$work/app-$1.log"
+}
 
+start_app false private
 # Publish once the app is watching, so it sees the seeder's first beacon.
-wait_for "$work/app.log" '"step":"watching"' 90
+wait_for "$work/app-private.log" '"step":"watching"' 90
 "$bin/nfxd" publish --key "$work/creator.key" --relay "$relay" --package "$work/pkg" \
   --title "Desktop e2e" > /dev/null 2>&1
-
-wait_for "$work/app.log" '^EXIT ' 240 || true
-grep -E '^\{|^RESULT' "$work/app.log" || true
-if grep -q '^RESULT PASS' "$work/app.log"; then echo "desktop e2e: PASS"; else echo "desktop e2e: FAIL"; exit 1; fi
+check_app private played-not-shared || { echo "desktop e2e: FAIL (sharing off)"; exit 1; }
+# With sharing on, the next beacon (within 60 s) names the seeder.
+start_app true shared
+check_app shared played-and-seeding || { echo "desktop e2e: FAIL (sharing on)"; exit 1; }
+echo "desktop e2e: PASS"

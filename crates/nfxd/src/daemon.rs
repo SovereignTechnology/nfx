@@ -75,6 +75,12 @@ pub struct Config {
     pub https_url: Option<String>,
     /// Embed a scoped relay listening here (NFX-04 §7).
     pub embed_relay: Option<SocketAddr>,
+    /// After a [`Daemon::watch`] plays, fetch the whole video and seed it: announce it
+    /// publicly, signed with this node's key, with this node's addresses. Off by default:
+    /// a viewer shares only when it chooses to, and otherwise announces nothing.
+    pub seed_watched: bool,
+    /// Never ask the local gateway to open a port (see `NodeConfig::no_portmapper`).
+    pub no_portmapper: bool,
     /// Embed a WebTorrent tracker for the browser mesh (NFX-10 §2) listening here. It
     /// admits exactly the per-rendition swarms of the videos this node seeds or holds.
     pub embed_tracker: Option<SocketAddr>,
@@ -143,6 +149,7 @@ pub struct Daemon {
     watching: Mutex<std::collections::BTreeSet<String>>,
     /// Addresses being fetched, seeded or served.
     handled: Mutex<std::collections::BTreeSet<String>>,
+    seed_watched: bool,
 }
 
 struct Shared {
@@ -620,6 +627,7 @@ impl Daemon {
                 relays: cfg.iroh_relays.clone(),
                 relay_only: cfg.relay_only,
                 blobs_dir: Some(state.join("iroh-blobs")),
+                no_portmapper: cfg.no_portmapper,
                 ..NodeConfig::default()
             })
             .await?,
@@ -734,6 +742,7 @@ impl Daemon {
             own,
             tasks: Mutex::new(tasks),
             watching: Mutex::new(cfg.fetch.iter().chain(&cfg.pull).cloned().collect()),
+            seed_watched: cfg.seed_watched,
             handled: Mutex::new(
                 cfg.seed
                     .iter()
@@ -765,8 +774,9 @@ impl Daemon {
     }
 
     /// Watch a video, as a viewer: learn seeders from its beacons, resolve its manifest,
-    /// hold it on the origin (so playback can start while misses are pulled on demand),
-    /// and fetch it whole in the background to seed it (with a key). Returns the manifest
+    /// and hold it on the origin, so playback can start while misses are pulled on demand.
+    /// With `seed_watched` (and a key) it is then fetched whole in the background and
+    /// seeded; otherwise it is only served here and never announced. Returns the manifest
     /// once the origin holds it, or an error after `timeout`. Watching twice is harmless.
     pub async fn watch(&self, a: &str, timeout: Duration) -> Result<Verified<Manifest>> {
         let origin = self
@@ -830,7 +840,7 @@ impl Daemon {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(a.to_owned());
         if first {
-            if shared.keys.is_some() {
+            if self.seed_watched && shared.keys.is_some() {
                 let (shared, a) = (shared.clone(), a.to_owned());
                 self.spawn(async move {
                     if let Err(e) = shared.clone().run_fetch(a.clone()).await {

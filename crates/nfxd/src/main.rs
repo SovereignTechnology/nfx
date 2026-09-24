@@ -246,6 +246,9 @@ async fn run(args: &[String]) -> Result<()> {
         gossip,
         gossip_peers: gossip_peers(&all(&f, "gossip-peer"))?,
         internal_origin: false,
+        // `run` seeds only what `--seed` names, and a seeder may use the portmapper.
+        seed_watched: false,
+        no_portmapper: false,
     };
     let daemon = Daemon::start(cfg).await?;
     if let Some(url) = &daemon.relay_url {

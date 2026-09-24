@@ -7,12 +7,15 @@
 //!   `http://nfx.localhost/…`), served by the daemon's internal origin. The origin
 //!   re-verifies every file on read and pulls misses from the swarm, so playback starts
 //!   before the whole video is here.
-//! - **Give back**: once the video is fetched whole, the app seeds it (a free M1 peer).
+//! - **Give back, if you choose to**: with "share" on, a watched video is fetched whole and
+//!   seeded (a free M1 peer). Sharing announces each video publicly, signed with this
+//!   node's key and with this computer's addresses, so it is **off by default**; without
+//!   it the app announces nothing and never asks the router to open a port.
 //!
 //! State lives in the app data directory: `node.key` (the node's Nostr key, mode 0600,
-//! never printed), `settings.json` (relays), and `store/` (content by sha256).
+//! never printed), `settings.json` (relays, share), and `store/` (content by sha256).
 //!
-//! Test mode (`NFX_DESKTOP_TEST` = `{"a", "relays", "iroh_relays"}` JSON, optional
+//! Test mode (`NFX_DESKTOP_TEST` = `{"a", "relays", "iroh_relays", "share"}` JSON, optional
 //! `NFX_DESKTOP_DATA` = data directory): the page plays that address by itself, reports
 //! each step on stdout as JSON lines and exits with `RESULT PASS|FAIL`.
 
@@ -37,6 +40,9 @@ struct Settings {
     relays: Vec<String>,
     /// The network's iroh relays (NFX-06 §1).
     iroh_relays: Vec<String>,
+    /// Seed what is watched (see the module docs). Off unless the user turns it on.
+    #[serde(default)]
+    share: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -45,6 +51,8 @@ struct TestConfig {
     relays: Vec<String>,
     #[serde(default)]
     iroh_relays: Vec<String>,
+    #[serde(default)]
+    share: bool,
 }
 
 struct AppState {
@@ -70,6 +78,9 @@ impl AppState {
             relays: settings.relays.clone(),
             iroh_relays,
             internal_origin: true,
+            seed_watched: settings.share,
+            // A viewer that shares nothing needs no inbound port.
+            no_portmapper: !settings.share,
             ..Config::default()
         })
         .await
@@ -128,6 +139,7 @@ fn app_page(url: &tauri::Url) -> bool {
 struct SettingsView {
     relays: Vec<String>,
     iroh_relays: Vec<String>,
+    share: bool,
     pubkey: String,
 }
 
@@ -137,6 +149,7 @@ async fn settings(state: State<'_, AppState>) -> Result<SettingsView, String> {
     Ok(SettingsView {
         relays: s.relays,
         iroh_relays: s.iroh_relays,
+        share: s.share,
         pubkey: state.pubkey.clone(),
     })
 }
@@ -146,6 +159,7 @@ async fn save_settings(
     state: State<'_, AppState>,
     relays: Vec<String>,
     iroh_relays: Vec<String>,
+    share: bool,
 ) -> Result<(), String> {
     let trim = |v: Vec<String>| -> Vec<String> {
         v.into_iter()
@@ -156,6 +170,7 @@ async fn save_settings(
     let new = Settings {
         relays: trim(relays),
         iroh_relays: trim(iroh_relays),
+        share,
     };
     // Checked before anything stops: a bad setting leaves the running node alone.
     if let Some(bad) = new.relays.iter().find(|u| !relay_ok(u)) {
@@ -297,6 +312,7 @@ fn main() {
                 settings = Settings {
                     relays: t.relays.clone(),
                     iroh_relays: t.iroh_relays.clone(),
+                    share: t.share,
                 };
             }
             let state = AppState {

@@ -19,6 +19,7 @@ async function loadSettings() {
   const s = await invoke('settings');
   $('relays').value = s.relays.join('\n');
   $('iroh').value = s.iroh_relays.join('\n');
+  $('share').checked = s.share;
   $('pubkey').textContent = s.pubkey;
 }
 
@@ -68,8 +69,12 @@ async function watch(a) {
 $('play').addEventListener('click', () => watch($('a').value.trim()).catch((e) => say(String(e))));
 $('save').addEventListener('click', async () => {
   try {
-    await invoke('save_settings', { relays: lines($('relays').value), irohRelays: lines($('iroh').value) });
-    say('Node restarted with the new relays.');
+    await invoke('save_settings', {
+      relays: lines($('relays').value),
+      irohRelays: lines($('iroh').value),
+      share: $('share').checked,
+    });
+    say('Node restarted with the new settings.');
   } catch (e) {
     say(String(e));
   }
@@ -81,7 +86,7 @@ $('save').addEventListener('click', async () => {
   test = await invoke('test_config');
   if (!test) return;
   // Test mode: play the address, then wait until playback passes 3 s and the node has
-  // fetched the video whole and seeds it.
+  // fetched the video whole and seeds it (sharing on), or only serves it (sharing off).
   const video = $('v');
   $('a').value = test.a;
   try {
@@ -94,10 +99,11 @@ $('save').addEventListener('click', async () => {
   const deadline = Date.now() + 150_000;
   const tick = setInterval(async () => {
     const rows = await refreshStatus().catch(() => []);
-    const seeding = rows.some(([a, s]) => a === test.a && s.startsWith('seeding'));
-    if (video.currentTime > 3 && seeding) {
+    const state = rows.find(([a]) => a === test.a)?.[1] ?? '';
+    const settled = test.share ? state.startsWith('seeding') : state === 'serving';
+    if (video.currentTime > 3 && settled) {
       clearInterval(tick);
-      report('played-and-seeding', { t: Math.round(video.currentTime * 10) / 10 });
+      report(test.share ? 'played-and-seeding' : 'played-not-shared', { t: Math.round(video.currentTime * 10) / 10, state });
       invoke('done', { ok: true });
     } else if (Date.now() > deadline) {
       clearInterval(tick);

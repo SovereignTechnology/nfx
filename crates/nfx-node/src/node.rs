@@ -38,6 +38,9 @@ pub struct NodeConfig {
     /// Extra address lookup, trusted as given: the operator's peers known out of band. It
     /// bypasses [`Node::trusted`], so never fill it from the network.
     pub lookup: Option<MemoryLookup>,
+    /// Never ask the local gateway (UPnP, PCP, NAT-PMP) to open a port. A node that only
+    /// fetches, such as a viewer that shares nothing, needs no inbound port.
+    pub no_portmapper: bool,
 }
 
 /// The secret key is never printed.
@@ -49,6 +52,7 @@ impl std::fmt::Debug for NodeConfig {
             .field("relay_only", &self.relay_only)
             .field("blobs_dir", &self.blobs_dir)
             .field("lookup", &self.lookup.is_some())
+            .field("no_portmapper", &self.no_portmapper)
             .finish()
     }
 }
@@ -78,6 +82,9 @@ impl Node {
         }
         if cfg.relay_only {
             builder = builder.clear_ip_transports();
+        }
+        if cfg.no_portmapper {
+            builder = builder.portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
         }
         if let Some(lookup) = cfg.lookup {
             builder = builder.address_lookup(lookup);
