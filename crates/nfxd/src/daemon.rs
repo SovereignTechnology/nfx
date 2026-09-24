@@ -424,6 +424,7 @@ impl Shared {
             endpoints.push(Endpoint::Https { url: url.clone() });
         }
         if let Some(url) = &self.tracker_public_url
+            && self.bridge.as_ref().is_some_and(|b| b.is_running())
             && let Some(renditions) = self
                 .bridged
                 .lock()
@@ -478,7 +479,19 @@ impl Shared {
         }
         self.admit_swarms(&manifest).await;
         self.set(&a, VideoState::Serving);
-        Ok(())
+        // A deletion by its creator withdraws its mesh swarms too (NFX-02 §6).
+        let mut check = tokio::time::interval(self.deletion_check_every);
+        loop {
+            check.tick().await;
+            if matches!(
+                self.relays.deleted(&manifest, CONNECT_TIMEOUT).await,
+                Ok(true)
+            ) {
+                self.forget_swarms(&manifest).await;
+                self.set(&a, VideoState::Deleted);
+                return Ok(());
+            }
+        }
     }
 }
 

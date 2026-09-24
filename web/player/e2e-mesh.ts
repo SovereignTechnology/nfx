@@ -74,7 +74,8 @@ async function pageServer(): Promise<string> {
   const files: Record<string, [string, string]> = {
     '/': ['index.html', 'text/html; charset=utf-8'],
     '/out/player.js': ['out/player.js', 'text/javascript'],
-    '/out/e2e-peer.js': ['out/e2e-peer.js', 'text/javascript'],
+    // A test fixture: built outside out/, so the player's own server never serves it.
+    '/out/e2e-peer.js': ['out-e2e/e2e-peer.js', 'text/javascript'],
     '/out/wasm/nfx_wasm_bg.wasm': ['out/wasm/nfx_wasm_bg.wasm', 'application/wasm'],
   };
   const port = await listen(

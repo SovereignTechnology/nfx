@@ -170,10 +170,11 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
     commits. All are fixed except L4 below; the fixes and their tests are in the audit
     record. **Gossip is now opt-in (`--gossip`)**, because iroh-gossip lets any swarm
     member steer the endpoint (a blind SSRF).
-    - **Open decision (L4, desktop privacy), sovtech's call.** The viewer announces every
-      video it watches publicly, signed with its persistent key and with every local IP,
-      and iroh's portmapper asks the router to open ports. Options: make seeding opt-in,
-      leave private addresses out of beacons, turn the portmapper off for viewers.
+    - **L4 (desktop privacy), decided by sovtech: seeding is opt-in.** The desktop app
+      has a "Share videos I watch" setting, off by default. Without it, a watched video
+      is only served to the window and never announced, and the portmapper is off
+      (`Config::seed_watched`, `Config::no_portmapper`). The desktop e2e runs both
+      ways.
   - **Gossip in `nfxd` (NFX-06 §4), opt-in.** With `--gossip`, every seeded or watched
     video joins its swarm.
     Seeders announce a signed `here` every 60 s and a `bye` on deletion, and every node
@@ -333,9 +334,14 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 5. ~~Add the schema check (`jsonschema`) to `check.sh`~~ done (`spec/schemas/check.py`).
 6. ~~M1 hardening carry-forwards~~ done 2026-09-24: gossip in `nfxd`, the creator
    allow-list and `Verified<T>`. NIP-42 is blocked upstream (see above).
-7. ~~The WebRTC browser mesh (NFX-10)~~ **built 2026-09-24 on `nfx10/mesh`**, awaiting
-   an independent audit and sovtech's OK to push
+7. ~~The WebRTC browser mesh (NFX-10)~~ **built 2026-09-24**
    ([`nfx-10-m1-plan.md`](nfx-10-m1-plan.md)).
+   - The independent audit found no High issue and no unverified-bytes path. Its 5
+     Medium and 5 Low findings are fixed
+     ([`reviews/2026-09-24-nfx10-independent-audit.md`](reviews/2026-09-24-nfx10-independent-audit.md)).
+   - sovtech approved the push.
+   - A tracker behind a same-host TLS proxy needs that proxy to set
+     `X-Forwarded-For`.
    - The player joins with `&tracker=`, and every segment from a peer or HTTP is
      verified by WASM.
    - `nfxd --embed-tracker` admits only the swarms of videos it holds.

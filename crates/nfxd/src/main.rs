@@ -20,6 +20,12 @@
 //! others to use. Gossip is off by default: iroh-gossip hands the addresses swarm members
 //! advertise to the node's endpoint unfiltered, so any member can make the node contact
 //! hosts of its choosing. A `--relay-only` node never gossips.
+//!
+//! `--embed-tracker` serves the NFX-10 browser mesh (plain `ws`), and `--bridge` joins it
+//! as a native WebRTC peer. In public, put the tracker behind a TLS proxy (browsers need
+//! `wss://`, and `--tracker-url` names that URL). A proxy on the same host must set
+//! `X-Forwarded-For`: the tracker counts clients by it, and without it every client
+//! shares the proxy's one allowance.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

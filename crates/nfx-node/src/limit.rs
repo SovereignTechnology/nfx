@@ -46,7 +46,7 @@ impl ConnLimits {
     #[must_use]
     pub fn admit(self: &Arc<Self>, peer: SocketAddr) -> Option<ConnGuard> {
         let permit = self.total.clone().try_acquire_owned().ok()?;
-        let ip = peer.ip().to_canonical();
+        let ip = client_key(peer.ip());
         let counted = (!ip.is_loopback()).then_some(ip);
         if let Some(ip) = counted {
             let mut per = self
@@ -64,6 +64,20 @@ impl ConnLimits {
             ip: counted,
             limits: self.clone(),
         })
+    }
+}
+
+/// The address one client is counted by: IPv4 as is, IPv6 by its /64 (one host gets a
+/// whole /64, so single addresses would be free to it).
+#[must_use]
+pub fn client_key(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => {
+            let mut o = v6.octets();
+            o[8..].fill(0);
+            IpAddr::V6(o.into())
+        }
+        v4 => v4,
     }
 }
 

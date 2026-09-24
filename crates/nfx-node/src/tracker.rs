@@ -54,6 +54,11 @@ pub const MAX_PEERS_PER_SWARM: usize = 1000;
 pub const MAX_SWARMS_PER_SOCKET: usize = 16;
 /// Swarms admitted in total.
 pub const MAX_ADMITTED: usize = 65_536;
+/// Open WebSockets per client (address, or IPv6 /64). Behind a reverse proxy on the same
+/// host the client is taken from `X-Forwarded-For`, which the proxy must set.
+pub const MAX_SOCKETS_PER_CLIENT: usize = 8;
+/// A send the client does not take within this closes its socket (it stopped reading).
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Messages queued for one socket; beyond this, relayed offers to it are dropped (the
 /// offerer times them out, as it would for a peer that never answers).
@@ -70,6 +75,8 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct Tracker {
     /// Infohash → the stream swarm ID it names.
     admitted: Mutex<HashMap<String, String>>,
+    /// Open WebSockets per client key.
+    clients: Mutex<HashMap<std::net::IpAddr, usize>>,
     /// Infohash → peer id → peer.
     swarms: Mutex<HashMap<String, HashMap<String, Peer>>>,
     next_socket: AtomicU64,
@@ -78,6 +85,8 @@ pub struct Tracker {
 struct Peer {
     socket: u64,
     outbox: mpsc::Sender<String>,
+    /// The node's own bridge: never displaced by a network client.
+    trusted: bool,
 }
 
 /// One WebSocket's state.
@@ -163,6 +172,7 @@ impl Default for Tracker {
     fn default() -> Self {
         Self {
             admitted: Mutex::new(HashMap::new()),
+            clients: Mutex::new(HashMap::new()),
             swarms: Mutex::new(HashMap::new()),
             next_socket: AtomicU64::new(0),
         }
@@ -346,7 +356,8 @@ impl Tracker {
     }
 
     /// Put this socket's peer in the swarm, or refresh it there. A `peer_id` held by
-    /// another live socket is refused; one left by a closed socket is taken over.
+    /// another socket moves to this one, the newest: a browser that reconnects (a network
+    /// change) keeps its id at once. The node's own bridge is never displaced.
     fn join(
         &self,
         socket: &mut Socket,
@@ -362,10 +373,12 @@ impl Tracker {
         let mut swarms = self.swarms.lock().unwrap_or_else(PoisonError::into_inner);
         let swarm = swarms.entry(info_hash.to_owned()).or_default();
         match swarm.get(peer_id) {
-            Some(p) if p.socket != socket.id && !p.outbox.is_closed() => {
+            Some(p) if p.trusted && !socket.trusted && !p.outbox.is_closed() => {
                 return Err("peer_id in use");
             }
-            None if swarm.len() >= MAX_PEERS_PER_SWARM => return Err("swarm full"),
+            None if swarm.len() >= MAX_PEERS_PER_SWARM && !socket.trusted => {
+                return Err("swarm full");
+            }
             _ => {}
         }
         swarm.insert(
@@ -373,6 +386,7 @@ impl Tracker {
             Peer {
                 socket: socket.id,
                 outbox: socket.outbox.clone(),
+                trusted: socket.trusted,
             },
         );
         socket.joined.insert(info_hash.to_owned());
@@ -458,7 +472,11 @@ impl Tracker {
                 },
                 _ = ping.tick() => {
                     if heard.elapsed() > SILENCE_LIMIT
-                        || ws.send(Message::Ping(Bytes::new())).await.is_err()
+                        || !matches!(
+                            tokio::time::timeout(SEND_TIMEOUT, ws.send(Message::Ping(Bytes::new())))
+                                .await,
+                            Ok(Ok(()))
+                        )
                     {
                         Reply::Close
                     } else {
@@ -468,7 +486,9 @@ impl Tracker {
             };
             match reply {
                 Reply::Send(text) => {
-                    if ws.send(Message::text(text)).await.is_err() {
+                    let sent =
+                        tokio::time::timeout(SEND_TIMEOUT, ws.send(Message::text(text))).await;
+                    if !matches!(sent, Ok(Ok(()))) {
                         break;
                     }
                 }
@@ -505,6 +525,7 @@ impl Tracker {
     fn respond(
         self: &Arc<Self>,
         mut req: Request<hyper::body::Incoming>,
+        addr: SocketAddr,
         guard: Arc<ConnGuard>,
     ) -> Response<Full<Bytes>> {
         let headers = req.headers();
@@ -536,10 +557,30 @@ impl Tracker {
             );
             return r;
         }
+        // The client: the TCP peer, or behind a reverse proxy on this host the address
+        // it forwards (the last `X-Forwarded-For` entry is the one it added).
+        let client = if addr.ip().is_loopback() {
+            headers
+                .get_all("x-forwarded-for")
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .flat_map(|v| v.split(','))
+                .next_back()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(addr.ip())
+        } else {
+            addr.ip()
+        };
+        let Some(slot) = ClientSlot::take(self, client) else {
+            return plain(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many sockets from this client",
+            );
+        };
         let on_upgrade = hyper::upgrade::on(&mut req);
         let tracker = self.clone();
         tokio::spawn(async move {
-            let _guard = guard;
+            let (_guard, _slot) = (guard, slot);
             if let Ok(upgraded) = on_upgrade.await {
                 tracker.run_socket(upgraded).await;
             }
@@ -574,7 +615,7 @@ impl Tracker {
             tokio::spawn(async move {
                 let service = hyper::service::service_fn(move |req| {
                     let (tracker, guard) = (tracker.clone(), guard.clone());
-                    async move { Ok::<_, Infallible>(tracker.respond(req, guard)) }
+                    async move { Ok::<_, Infallible>(tracker.respond(req, addr, guard)) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .timer(TokioTimer::new())
@@ -617,6 +658,47 @@ impl Drop for LocalSocket {
     fn drop(&mut self) {
         for info_hash in self.socket.joined.clone() {
             self.tracker.leave_swarm(&mut self.socket, &info_hash);
+        }
+    }
+}
+
+/// One client's WebSocket slot; released on drop.
+struct ClientSlot {
+    tracker: Arc<Tracker>,
+    key: std::net::IpAddr,
+}
+
+impl ClientSlot {
+    fn take(tracker: &Arc<Tracker>, client: std::net::IpAddr) -> Option<Self> {
+        let key = crate::limit::client_key(client);
+        let mut clients = tracker
+            .clients
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let n = clients.entry(key).or_insert(0);
+        if *n >= MAX_SOCKETS_PER_CLIENT {
+            return None;
+        }
+        *n += 1;
+        Some(Self {
+            tracker: tracker.clone(),
+            key,
+        })
+    }
+}
+
+impl Drop for ClientSlot {
+    fn drop(&mut self) {
+        let mut clients = self
+            .tracker
+            .clients
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(n) = clients.get_mut(&self.key) {
+            *n -= 1;
+            if *n == 0 {
+                clients.remove(&self.key);
+            }
         }
     }
 }

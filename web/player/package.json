@@ -11,7 +11,7 @@
     "typecheck": "tsc -p .",
     "e2e": "tsx e2e.ts",
     "unit": "tsx unit.ts",
-    "e2e:mesh": "esbuild e2e-peer.ts --bundle --format=esm --target=es2022 --outfile=out/e2e-peer.js && tsx e2e-mesh.ts"
+    "e2e:mesh": "esbuild e2e-peer.ts --bundle --format=esm --target=es2022 --outfile=out-e2e/e2e-peer.js && tsx e2e-mesh.ts"
   },
   "devDependencies": {
     "@types/node": "22.18.0",

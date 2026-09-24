@@ -129,14 +129,15 @@ async fn relays_offers_and_answers_only_for_admitted_swarms() {
     send(&mut a, &json!({ "action": "scrape", "info_hash": ih })).await;
     assert!(failure(&recv(&mut a).await).contains("only announce"));
 
-    // Another socket cannot take over A's peer_id while A is connected.
+    // A browser that reconnects keeps its id: the newest socket with A's peer_id holds it.
     let mut c = connect().await;
     send(&mut c, &announce(&ih, pa, 0, Some("started"))).await;
-    assert!(failure(&recv(&mut c).await).contains("in use"));
-
-    // A still works after all that, and `stopped` takes it out of the swarm.
+    assert_eq!(recv(&mut c).await["incomplete"], 2);
+    // A no longer holds it, so A's `stopped` removes nothing; C's does.
     send(&mut a, &announce(&ih, pa, 0, Some("stopped"))).await;
-    assert_eq!(recv(&mut a).await["incomplete"], 1);
+    assert_eq!(recv(&mut a).await["incomplete"], 2);
+    send(&mut c, &announce(&ih, pa, 0, Some("stopped"))).await;
+    assert_eq!(recv(&mut c).await["incomplete"], 1);
     assert_eq!(tracker.peers(&ih), 1);
 
     // Closing B's socket removes it.
@@ -272,7 +273,60 @@ async fn a_local_socket_is_a_peer_like_any_other() {
             .unwrap()
             .contains("not an NFX swarm")
     );
+    // A network client cannot take the bridge's id over.
+    let (mut thief, _) = connect_async(url.as_str()).await.unwrap();
+    send(&mut thief, &announce(&ih, bridge, 0, Some("started"))).await;
+    let r = recv(&mut thief).await;
+    assert!(
+        r["failure reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("in use"),
+        "{r}"
+    );
     drop(local);
     assert_eq!(tracker.peers(&ih), 1);
     server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_client_gets_a_bounded_number_of_sockets() {
+    let tracker = Arc::new(Tracker::new());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(tracker.clone().serve(listener));
+    let mut open = Vec::new();
+    for _ in 0..nfx_node::tracker::MAX_SOCKETS_PER_CLIENT {
+        open.push(connect_async(url.as_str()).await.unwrap().0);
+    }
+    assert!(
+        connect_async(url.as_str()).await.is_err(),
+        "one over the cap"
+    );
+    // Closing one frees its slot.
+    open.pop().unwrap().close(None).await.unwrap();
+    let mut ok = false;
+    for _ in 0..50 {
+        if connect_async(url.as_str()).await.is_ok() {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(ok, "the slot came back");
+    server.abort();
+}
+
+#[test]
+fn ipv6_clients_are_counted_by_their_slash_64() {
+    use nfx_node::limit::client_key;
+    let a: std::net::IpAddr = "2001:db8:1:2:aaaa::1".parse().unwrap();
+    let b: std::net::IpAddr = "2001:db8:1:2:bbbb::9".parse().unwrap();
+    let c: std::net::IpAddr = "2001:db8:1:3::1".parse().unwrap();
+    assert_eq!(client_key(a), client_key(b));
+    assert_ne!(client_key(a), client_key(c));
+    let v4: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+    assert_eq!(client_key(v4), v4);
+    let mapped: std::net::IpAddr = "::ffff:203.0.113.7".parse().unwrap();
+    assert_eq!(client_key(mapped), v4);
 }
