@@ -145,6 +145,26 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
   on the shared runner, stalled for 30 min linking ~15 debug test binaries of ~450 MB each,
   so it was cancelled. CI now builds without debug info and with 2 jobs (sovtech's
   choice), about 94 MB per binary, and still runs every test.
+- **The browser resolves videos by manifest address (2026-09-24):**
+  - `?a=<address>&relay=<ws(s)>` makes the player query the relays for the manifest
+    (NFX-04 §5 filter).
+  - The current revision is picked by nfx-proto in WASM, with the NFX-02 §4 rules and
+    the 15-minute future horizon; it supplies `root`, `video` and `segs`.
+  - Beacons for that address are then watched (NFX-03 §5). Each verified `https`
+    endpoint is an origin candidate, with an optional `&origin=` hint.
+  - Origins are hints only: every byte is still checked against the signed anchor.
+  - Beacon-named origins are reduced to `https://host[/prefix]` (no query, fragment or
+    credentials) and capped at 8, so a hostile beacon cannot steer viewers' requests
+    to arbitrary URLs.
+  - `nfx-wasm` gained `parseATag` and the manifest `id`. Its master-playlist check now
+    also accepts an origin under a path prefix, like NFX-03's
+    `https://seed.example/nfx`, which previously failed every check.
+  - The player e2e adds three runs, all PASS:
+    - by address with an origin hint;
+    - by address alone, with the origin found through a verified beacon's `https`
+      endpoint (a self-signed TLS proxy in front of nfxd, `--https-url`);
+    - an address nobody published, which fails with "no valid manifest".
+  - `npm run unit` checks the origin sanitiser (8 cases).
 - **`nfx-wasm`, `nfx-proto` for browsers (2026-09-23):**
   - It exports `verifyManifest`, `verifyBeacon`, `sha256Hex` and `VerifiedHashList`
     (constructed from a manifest's `video` and `segs`, or `fromRoot`, with `check` and
@@ -246,7 +266,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    - ~~**the Phase A exit run: multi-host**~~ PASS 2026-09-24, host-b ↔ laptop
      ([`phase-a-exit.md`](phase-a-exit.md)).
 2. ~~**`nfx-proto` WASM bindings**~~ done (`crates/nfx-wasm`; the test player uses
-   them). Still open: resolving a manifest by `a` tag over Nostr in the browser.
+   them). ~~Resolving a manifest by `a` tag over Nostr in the browser~~ done
+   (2026-09-24): see below.
 3. Carried risk: the iroh-blobs 0.103 README still says "not production quality". The
    containment plan is in the S1 page.
 4. Optional: add the schema check (`jsonschema`) to `check.sh`.

@@ -12,11 +12,14 @@
   pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; }
 </style>
 <h1>NFX test player</h1>
-<p>Plays <code>&lt;origin&gt;/&lt;root&gt;/master.m3u8</code>. Every file is checked against its sha256
-  and the hash list before the player uses it (NFX-05 §4).</p>
+<p>Give a manifest address and a relay to resolve the signed manifest over Nostr and find an
+  origin in seeders' beacons, or give an origin and a root directly. Every file is checked
+  against its sha256 and the hash list before the player uses it (NFX-05 §4).</p>
 <form method="get">
-  <input id="origin" name="origin" placeholder="origin, e.g. https://origin.example" autocomplete="off">
-  <input id="root" name="root" placeholder="root (64 hex)" autocomplete="off" pattern="[0-9a-f]{64}">
+  <input id="a" name="a" placeholder="manifest address, 38504:&lt;creator&gt;:&lt;namespace&gt;:&lt;video-id&gt;" autocomplete="off">
+  <input id="relay" name="relay" placeholder="relay, e.g. wss://relay.example" autocomplete="off">
+  <input id="origin" name="origin" placeholder="origin (optional hint), e.g. https://origin.example" autocomplete="off">
+  <input id="root" name="root" placeholder="root (64 hex), without an address" autocomplete="off" pattern="[0-9a-f]{64}">
   <button>Play</button>
 </form>
 <video id="v" controls muted playsinline></video>

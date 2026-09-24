@@ -3,10 +3,15 @@
  *
  *   ffmpeg test clip → nfx-package → nfxd (embedded scoped relay + origin + seeding)
  *   → nfxd publish → the player in headless Chromium (fresh context, never a real
- *   profile) plays it with every file verified by nfx-proto (WASM): once from a secure
- *   context, once from an insecure one (no WebCrypto; `http://player.test` mapped to
- *   loopback). Then the same player against a lying origin that flips a byte in every
- *   segment must reject them and never play.
+ *   profile) plays it with every file verified by nfx-proto (WASM):
+ *   - by origin and root, from a secure context and from an insecure one (no WebCrypto;
+ *     `http://player.test` mapped to loopback);
+ *   - by manifest address over Nostr, with an origin hint, and with no hint at all, the
+ *     origin then coming from a verified beacon's `https` endpoint (a throwaway
+ *     self-signed TLS proxy in front of nfxd's origin);
+ *   - by an address nobody published: it must fail, not guess.
+ *   Then the same player against a lying origin that flips a byte in every segment must
+ *   reject them and never play.
  *
  * Usage: npm run build && npm run e2e
  * Needs `cargo` (builds nfxd and nfx-package) and ffmpeg (`NFX_FFMPEG`, else PATH).
@@ -15,6 +20,7 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, chmodSync } from 'node:fs';
 import { createServer, request as httpRequest, type Server } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -98,6 +104,43 @@ async function liar(upstream: string, segments: Set<string>): Promise<string> {
   return `http://127.0.0.1:${port}`;
 }
 
+/** An https front for the origin, with a throwaway self-signed certificate (deleted with the
+ * work dir); the upstream is set once nfxd has printed its origin. */
+async function tlsProxy(): Promise<{ url: string; setUpstream: (u: string) => void }> {
+  const key = join(work, 'tls.key');
+  const cert = join(work, 'tls.crt');
+  run('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1']);
+  let upstream = '';
+  const server = createHttpsServer({ key: readFileSync(key), cert: readFileSync(cert) }, (req, res) => {
+    const up = httpRequest(`${upstream}${req.url}`, { method: req.method }, (r) => {
+      res.writeHead(r.statusCode ?? 502, r.headers);
+      r.pipe(res);
+    });
+    up.on('error', () => res.writeHead(502).end());
+    up.end();
+  });
+  servers.push(server as unknown as Server);
+  const port = await new Promise<number>((ok) => server.listen(0, '127.0.0.1', () => ok((server.address() as AddressInfo).port)));
+  return { url: `https://127.0.0.1:${port}`, setUpstream: (u) => (upstream = u) };
+}
+
+/** Wait until the player plays past 2 s or reports an error; return its state. */
+async function settle(page: import('playwright').Page, timeout: number): Promise<any> {
+  await page.waitForFunction(
+    () => {
+      const s = (window as any).__nfx;
+      const v = document.querySelector('video') as HTMLVideoElement;
+      return s.errors.length > 0 || (s.playing && v.currentTime > 2);
+    },
+    null,
+    { timeout },
+  );
+  return page.evaluate(() => {
+    const s = (window as any).__nfx;
+    return { resolved: s.resolved, origin: s.origin, origins: s.origins, playing: s.playing, verified: s.verified.length, rejected: s.rejected.length, errors: s.errors };
+  });
+}
+
 async function main(): Promise<void> {
   run('cargo', ['build', '--locked', '--manifest-path', join(crates, 'Cargo.toml'), '-p', 'nfxd', '-p', 'nfx-media', '--bins']);
   const clip = join(work, 'clip.mp4');
@@ -109,13 +152,15 @@ async function main(): Promise<void> {
   const key = join(work, 'node.key');
   const pubkey = run(bin('nfxd'), ['key', 'new', key]).split('\n')[0]!;
   const a = `38504:${pubkey}:${meta.video}`;
+  const tls = await tlsProxy();
   const node = await start(
     bin('nfxd'),
-    ['run', '--key', key, '--store', join(pkg, 'store'), '--seed', a, '--embed-relay', '127.0.0.1:0', '--origin', '127.0.0.1:0'],
+    ['run', '--key', key, '--store', join(pkg, 'store'), '--seed', a, '--embed-relay', '127.0.0.1:0', '--origin', '127.0.0.1:0', '--https-url', tls.url],
     [/embedded relay: (ws:\/\/\S+)/, /origin: (http:\/\/\S+?)\/?\s/],
   );
   const relay = node.matches[0]![1]!;
   const origin = node.matches[1]![1]!.replace(/\/$/, '');
+  tls.setUpstream(origin);
   const published = run(bin('nfxd'), ['publish', '--key', key, '--relay', relay, '--package', pkg, '--title', 'Player e2e']).trim();
   if (published !== a) throw new Error(`published ${published}, expected ${a}`);
   await new Promise<void>((ok, fail) => {
@@ -180,6 +225,36 @@ async function main(): Promise<void> {
     });
     results.insecure = plain;
     if (plain.secureContext || plain.subtle || !plain.playing || plain.rejected !== 0 || plain.errors.length !== 0) throw new Error(`insecure context: ${JSON.stringify(plain)}`);
+
+    // By manifest address over Nostr, with the origin as a hint.
+    const q = (extra: string): string => `${player}/?a=${encodeURIComponent(a)}&relay=${encodeURIComponent(relay)}${extra}`;
+    const byHint = await context.newPage();
+    await byHint.goto(q(`&origin=${encodeURIComponent(origin)}`));
+    const hinted = await settle(byHint, 60_000);
+    results.byAddressWithHint = hinted;
+    if (hinted.resolved?.root !== meta.root || hinted.origin !== origin || !hinted.playing || hinted.rejected !== 0 || hinted.errors.length !== 0) {
+      throw new Error(`by address with hint: ${JSON.stringify(hinted)}`);
+    }
+
+    // By manifest address alone: the origin must come from a verified beacon's https
+    // endpoint. Beacons are ephemeral, so this waits for the seeder's next republish.
+    const tlsContext = await browser.newContext({ ignoreHTTPSErrors: true }); // self-signed, test only
+    const byBeacon = await tlsContext.newPage();
+    await byBeacon.goto(q(''));
+    const beaconed = await settle(byBeacon, 120_000);
+    results.byAddressViaBeacon = beaconed;
+    if (beaconed.resolved?.root !== meta.root || beaconed.origin !== tls.url || !beaconed.playing || beaconed.rejected !== 0 || beaconed.errors.length !== 0) {
+      throw new Error(`by address via beacon: ${JSON.stringify(beaconed)}`);
+    }
+    await tlsContext.close();
+
+    // An address nobody published: an error, never a guess.
+    const nobody = await context.newPage();
+    await nobody.goto(`${player}/?a=${encodeURIComponent(a.replace(pubkey, '0'.repeat(64)))}&relay=${encodeURIComponent(relay)}`);
+    await nobody.waitForFunction(() => (window as any).__nfx.errors.length > 0, null, { timeout: 30_000 });
+    const unknown = await nobody.evaluate(() => (window as any).__nfx.errors as string[]);
+    results.unknownAddress = unknown;
+    if (!unknown[0]?.includes('no valid manifest')) throw new Error(`unknown address: ${JSON.stringify(unknown)}`);
 
     const page2 = await context.newPage();
     await page2.goto(`${player}/?origin=${encodeURIComponent(lying)}&root=${meta.root}`);

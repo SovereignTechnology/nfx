@@ -1,8 +1,15 @@
 /**
- * The A2 test player. `?origin=<url>&root=<hex>[&video=<d>&segs=<n>]` plays
- * `<origin>/<root>/master.m3u8` with hls.js. A loader wrapper checks every playlist,
- * init and segment with nfx-proto (WASM, ./verify.ts) before hls.js sees a byte: a
- * mismatch is a load error, never data. `window.__nfx` exposes state for automation.
+ * The NFX test player. Two ways in:
+ *
+ * - `?a=<manifest address>&relay=<ws(s) URL>[&relay=…][&origin=<hint>]`: resolve the
+ *   current signed manifest over Nostr, then play from an origin named by a verified
+ *   beacon's `https` endpoint (or the hint). Signatures give the anchor; endpoints are
+ *   only hints.
+ * - `?origin=<url>&root=<hex>[&video=<d>&segs=<n>]`: play a known root from a known origin.
+ *
+ * A loader wrapper checks every playlist, init and segment with nfx-proto (WASM,
+ * ./verify.ts) before hls.js sees a byte: a mismatch is a load error, never data.
+ * `window.__nfx` exposes state for automation.
  */
 import Hls, {
   type HlsConfig,
@@ -12,10 +19,16 @@ import Hls, {
   type LoaderContext,
 } from 'hls.js';
 
+import { resolveManifest, watchOrigins } from './resolve';
 import { Anchor, type ManifestBinding } from './verify';
+
+/** How long to wait for a seeder's beacon to name an origin (beacons republish at TTL/2). */
+const ORIGIN_WAIT_MS = 90_000;
 
 interface State {
   secureContext: boolean;
+  resolved: { a: string; title: string; root: string; video: string; segs: number; created_at: number } | null;
+  origins: string[];
   origin: string | null;
   root: string | null;
   engine: string | null;
@@ -28,6 +41,8 @@ interface State {
 
 const st: State = {
   secureContext: window.isSecureContext,
+  resolved: null,
+  origins: [],
   origin: null,
   root: null,
   engine: null,
@@ -89,14 +104,16 @@ function verifyingLoader(anchor: Anchor): new (config: HlsConfig) => Loader<Load
   };
 }
 
+$<HTMLVideoElement>('v').addEventListener('playing', () => {
+  st.playing = true;
+});
+
+/** Play `root` from `origin`. Throws if the origin cannot serve a hash list that verifies. */
 async function start(origin: string, root: string, manifest?: ManifestBinding): Promise<void> {
+  const video = $<HTMLVideoElement>('v');
+  const anchor = await Anchor.load(origin, root, manifest);
   st.origin = origin;
   st.root = root;
-  const video = $<HTMLVideoElement>('v');
-  video.addEventListener('playing', () => {
-    st.playing = true;
-  });
-  const anchor = await Anchor.load(origin, root, manifest);
   log(`hash list verified: ${anchor.size} files of ${anchor.video}${manifest ? ' (bound to the manifest)' : ''}`);
   if (!Hls.isSupported()) {
     // Native HLS would fetch unverified bytes; this player refuses rather than degrade.
@@ -119,17 +136,70 @@ async function start(origin: string, root: string, manifest?: ManifestBinding): 
   hls.attachMedia(video);
 }
 
+/** Resolve `a` over `relays`, then play from the first origin that serves a verifying copy. */
+async function startByAddress(a: string, relays: string[], hint: string | null): Promise<void> {
+  const m = await resolveManifest(a, relays);
+  st.resolved = { a: m.a, title: m.title, root: m.root, video: m.video, segs: m.segs, created_at: m.created_at };
+  log(`manifest "${m.title}" (${m.video}), revision ${m.created_at}, root ${m.root.slice(0, 12)}…`);
+  const binding = { video: m.video, segs: m.segs };
+  const queue: string[] = hint ? [hint] : [];
+  const seen = new Set(queue);
+  let wake: (() => void) | null = null;
+  const stop = watchOrigins(a, m.namespace, relays, (url) => {
+    if (seen.has(url)) return;
+    seen.add(url);
+    queue.push(url);
+    st.origins.push(url);
+    log(`a seeder names origin ${url}`);
+    wake?.();
+  });
+  try {
+    const deadline = Date.now() + ORIGIN_WAIT_MS;
+    for (;;) {
+      const next = queue.shift();
+      if (next) {
+        try {
+          await start(next, m.root, binding);
+          return;
+        } catch (e) {
+          log(`origin ${next} did not serve a verifying copy: ${e instanceof Error ? e.message : String(e)}`);
+          continue;
+        }
+      }
+      const left = deadline - Date.now();
+      if (left <= 0) throw new Error('no origin served a verifying copy in time');
+      if (queue.length === 0) log('waiting for a seeder beacon that names an https origin…');
+      await new Promise<void>((r) => {
+        wake = r;
+        setTimeout(r, Math.min(left, 5_000));
+      });
+      wake = null;
+    }
+  } finally {
+    stop();
+  }
+}
+
+const fail = (e: Error): void => {
+  st.errors.push(e.message);
+  log(`error: ${e.message}`);
+};
+
 const params = new URLSearchParams(location.search);
+const a = params.get('a') ?? '';
+const relays = params.getAll('relay').filter((r) => /^wss?:\/\//.test(r));
 const origin = (params.get('origin') ?? '').replace(/\/+$/, '');
 const root = params.get('root') ?? '';
 const video = params.get('video');
 const segs = Number(params.get('segs'));
+$<HTMLInputElement>('a').value = a;
+$<HTMLInputElement>('relay').value = relays[0] ?? '';
 $<HTMLInputElement>('origin').value = origin;
 $<HTMLInputElement>('root').value = root;
-if (origin && root) {
+if (a) {
+  if (relays.length === 0) fail(new Error('an address needs at least one ws:// or wss:// relay'));
+  else startByAddress(a, relays, origin || null).catch(fail);
+} else if (origin && root) {
   const binding = video && Number.isSafeInteger(segs) && segs > 0 ? { video, segs } : undefined;
-  start(origin, root, binding).catch((e: Error) => {
-    st.errors.push(e.message);
-    log(`error: ${e.message}`);
-  });
+  start(origin, root, binding).catch(fail);
 }

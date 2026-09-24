@@ -38,9 +38,11 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(nfx_proto::sha256(bytes))
 }
 
-/// NFX-02 §4 on a kind-38504 event (JSON); returns the manifest as JSON.
+/// NFX-02 §4 on a kind-38504 event (JSON); returns the manifest as JSON, with the event
+/// `id` for the revision tie-break (NFX-02 §4 "Revisions").
 pub fn manifest_json(event_json: &str) -> Result<String, String> {
-    let m = Manifest::from_event(&parse_event(event_json)?).map_err(|e| e.to_string())?;
+    let event = parse_event(event_json)?;
+    let m = Manifest::from_event(&event).map_err(|e| e.to_string())?;
     let license = match &m.license {
         License::Open => json!({ "mode": "open" }),
         License::Licensed(t) => json!({
@@ -53,6 +55,7 @@ pub fn manifest_json(event_json: &str) -> Result<String, String> {
         }),
     };
     Ok(json!({
+        "id": event.id,
         "author": m.author,
         "created_at": m.created_at,
         "a": m.a_tag(),
@@ -85,6 +88,18 @@ pub fn beacon_json(event_json: &str, now: u64) -> Result<String, String> {
         "expiration": b.expiration,
         "a": format!("{}:{}:{}", nfx_proto::KIND_MANIFEST, b.creator, b.content.video),
         "content": content,
+    })
+    .to_string())
+}
+
+/// A manifest address `38504:<creator>:<namespace>:<video-id>`, checked by the NFX grammar;
+/// returns `{creator, video, namespace}` as JSON.
+pub fn a_tag_json(a: &str) -> Result<String, String> {
+    let (creator, video) = nfx_proto::beacon::parse_a_tag(a).map_err(|e| e.to_string())?;
+    Ok(json!({
+        "creator": creator,
+        "video": video.to_string(),
+        "namespace": video.namespace().to_string(),
     })
     .to_string())
 }
@@ -124,11 +139,18 @@ impl VerifiedHashList {
     }
 
     /// The sha256 a request path's bytes must have: a listed content name
-    /// (`…/<sha256>[.<ext>]`), or the master playlist for `/<root>/master.m3u8`.
+    /// (`…/<sha256>[.<ext>]`), or the master playlist for `…/<root>/master.m3u8`. An origin
+    /// may sit under a path prefix (NFX-03's `https://seed.example/nfx`), so only the last
+    /// two path elements count.
     pub fn expected_for_path(&self, path: &str) -> Result<String, String> {
         let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
         let last = parts.last().copied().unwrap_or("");
-        if parts.len() == 2 && parts[0] == self.root && last == "master.m3u8" {
+        let parent = parts
+            .len()
+            .checked_sub(2)
+            .and_then(|i| parts.get(i))
+            .copied();
+        if parent == Some(self.root.as_str()) && last == "master.m3u8" {
             return self
                 .list
                 .files
@@ -230,6 +252,12 @@ pub fn js_verify_manifest(event_json: &str) -> Result<String, JsError> {
     manifest_json(event_json).map_err(|e| JsError::new(&e))
 }
 
+/// `parseATag(a)`: `{creator, video, namespace}` as JSON, or a thrown error.
+#[wasm_bindgen(js_name = parseATag)]
+pub fn js_parse_a_tag(a: &str) -> Result<String, JsError> {
+    a_tag_json(a).map_err(|e| JsError::new(&e))
+}
+
 /// `verifyBeacon(eventJson, now)`: the beacon as JSON, or a thrown error.
 #[wasm_bindgen(js_name = verifyBeacon)]
 pub fn js_verify_beacon(event_json: &str, now: f64) -> Result<String, JsError> {
@@ -261,6 +289,19 @@ mod tests {
             serde_json::from_str(&manifest_json(&m["event"].to_string()).unwrap()).unwrap();
         assert_eq!(out["video"], "nfx:mainnet:1:salt-flats-dusk");
         assert_eq!(out["license"]["mode"], "licensed");
+        assert_eq!(out["id"], m["event"]["id"]);
+        let a: Value =
+            serde_json::from_str(&a_tag_json(out["a"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(a["creator"], out["author"]);
+        assert_eq!(a["video"], out["video"]);
+        assert_eq!(a["namespace"], "nfx:mainnet:1");
+        for bad in [
+            "30023:ab:nfx:mainnet:1:x",
+            "38504:AB:nfx:mainnet:1:salt-flats-dusk",
+            "",
+        ] {
+            assert!(a_tag_json(bad).is_err(), "{bad}");
+        }
         let mut forged = m["event"].clone();
         forged["content"] = "tampered".into();
         assert!(manifest_json(&forged.to_string()).is_err());
@@ -303,6 +344,12 @@ mod tests {
             v.check(&format!("/{root}/master.m3u8"), text).unwrap(),
             master.sha256
         );
+        assert_eq!(
+            v.check(&format!("/nfx/{root}/master.m3u8"), text).unwrap(),
+            master.sha256,
+            "an origin under a path prefix"
+        );
+        assert!(v.expected_for_path("/master.m3u8").is_err());
         assert_eq!(
             v.check(&format!("/x/{}.m3u8", master.sha256), text)
                 .unwrap(),

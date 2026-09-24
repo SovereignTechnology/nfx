@@ -3,7 +3,9 @@
 #![cfg(target_arch = "wasm32")]
 #![allow(clippy::unwrap_used)]
 
-use nfx_wasm::{VerifiedHashList, js_sha256_hex, js_verify_beacon, js_verify_manifest};
+use nfx_wasm::{
+    VerifiedHashList, js_parse_a_tag, js_sha256_hex, js_verify_beacon, js_verify_manifest,
+};
 use wasm_bindgen_test::wasm_bindgen_test;
 
 #[wasm_bindgen_test]
@@ -22,4 +24,5 @@ fn bindings_verify_and_throw() {
     assert!(js_verify_beacon(&b["event"].to_string(), now).is_ok());
     assert!(js_verify_beacon(&b["event"].to_string(), 1.5).is_err());
     assert!(VerifiedHashList::js_from_root(b"{}", &"0".repeat(64)).is_err());
+    assert!(js_parse_a_tag("38504:x").is_err());
 }
