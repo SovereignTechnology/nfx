@@ -1,4 +1,4 @@
-# M2 plan: paid delivery, open mode (draft for sovtech, 2026-09-24)
+# M2 plan: paid delivery, open mode (2026-09-24)
 
 M2 is "paid delivery (open mode) on every transport, browser peers earning sats"
 (ADR 0008 §5). The rules are in NFX-07:
@@ -67,7 +67,15 @@ Its outputs:
 - `crates/nfx-node/src/origin_pay.rs`: the 402 surface.
 - M2.2: `web/wallet/` and the fork's upload gate.
 
-## Decisions needed
+## Decided (sovtech, 2026-09-24)
+
+- **The demo's staging:** M2.0 is contracts, mock and adversary tests. M2.1 is one
+  serial security session whose locked-path diffs sovtech reads.
+- **The testnet mint is persistent:** CDK `cdk-mintd` with its fake Lightning backend,
+  on private infrastructure. Tests still use an in-process mint.
+- The locked paths and the order (iroh, HTTPS, then the mesh) stand as proposed.
+
+## Decisions (as asked)
 
 1. Adopt the demo's staging for M2 (mock and adversary tests first; the real money path
    in one serial security session whose locked diffs you read)?
