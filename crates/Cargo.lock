@@ -2770,10 +2770,12 @@ dependencies = [
  "iroh-relay",
  "n0-future",
  "nfx-proto",
+ "nostr-memory",
  "nostr-sdk",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tungstenite",
 ]
 
 [[package]]

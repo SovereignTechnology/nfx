@@ -13,6 +13,7 @@ pub mod gossip;
 pub mod node;
 pub mod nostr;
 pub mod origin;
+pub mod relay;
 pub mod seed;
 pub mod store;
 pub mod video;

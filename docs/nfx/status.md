@@ -8,8 +8,9 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 close
 ## Where things stand
 
 **Phases A0 and A1 are complete. A2, the Rust M1 data plane, is in progress**
-(ADR 0008 §5): `nfx-media` is done, and `nfx-node` has its iroh and Nostr layers and the
-pull-through origin. Still to come are `nfxd`, the scoped relay and a test player page.
+(ADR 0008 §5): `nfx-media` is done. `nfx-node` has its iroh and Nostr layers, the
+pull-through origin and an embeddable scoped relay. Still to come are `nfxd` and a test
+player page.
 
 - **`nfx-media` (A2, 2026-09-23):**
   - the demo's L8 planning (probe, ladder, argv, storyboard) ported to Rust, with
@@ -77,6 +78,17 @@ pull-through origin. Still to come are `nfxd`, the scoped relay and a test playe
     - pull-through over a relay-only node: the lying seeder is tried first, caught
       and forgotten, and four concurrent misses are served verified bytes over real
       HTTP.
+- **`nfx-node` layer 4, the NFX-04 scoped relay (A2, 2026-09-23):**
+  - `ScopedRelay` is nostr-sdk's relay behind hyper:
+    - WebSocket upgrades go to the relay, and `Accept: application/nostr+json` gets the
+      §3 NIP-11 document (`nfx.networks`, kinds, roles; NIPs 1, 11 and 40).
+    - §1 admission runs full `nfx-proto` verification. Anything else is `blocked: out of
+      scope`, including a foreign `n`.
+    - §2 limits: one beacon per (pubkey, `a`) per 20 s; 12 manifests per pubkey per
+      hour; 20 subscriptions per connection; 256 values per filter tag list; 64 KiB
+      and 16 KiB size caps.
+    - Beacons are forwarded, never stored; stored events are capped at 20,000.
+  - The test checks each refusal's reason prefix, not just that it failed.
 
 - **Repository:** the private GitLab project. Every push
   was a fast-forward of `main` with sovtech's OK. The demo history, the spec commit
@@ -164,7 +176,7 @@ pull-through origin. Still to come are `nfxd`, the scoped relay and a test playe
      beacons, the pull-through origin~~ done; the per-member window gate comes with
      M2;
    - `nfxd`;
-   - a scoped relay;
+   - ~~a scoped relay~~ done (`nfx-node::relay`, for `nfxd` to embed or run alone);
    - a test player page, which can grow out of the S3/S4 spike pages.
 2. **`nfx-proto` WASM bindings** for the web client: verify manifest, hash list and
    beacon from JS, and do the sha256 validation without WebCrypto's secure-context

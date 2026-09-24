@@ -53,7 +53,7 @@ where
     from_nostr(&event)
 }
 
-fn from_nostr(event: &ns::Event) -> Result<Event> {
+pub(crate) fn from_nostr(event: &ns::Event) -> Result<Event> {
     let json = event.try_as_json().map_err(NodeError::relay)?;
     serde_json::from_str(&json).map_err(NodeError::relay)
 }
