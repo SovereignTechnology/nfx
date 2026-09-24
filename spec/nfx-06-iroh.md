@@ -44,9 +44,10 @@ does not restate iroh's own specs.
   They are opaque to NFX and embed the provider's endpoint address (id, relay URL,
   direct addresses), the hash and the format. Beacons still carry `node` and `relay`,
   because `nfx/pay/1` must dial the same endpoint.
-- **Metadata rides a separate collection.** The hash list plus all playlist files form
-  their own HashSeq (order: hash list first, then playlists in `files` order), offered
-  under the beacon's `tickets.meta` entry. Per-rendition collections therefore contain
+- **Metadata rides a separate collection.** The hash list plus every playlist, thumb and
+  subtitle file form their own HashSeq (order: hash list first, then those files in
+  `files` order), offered under the beacon's `tickets.meta` entry. Thumbs and subtitles
+  belong to no rendition, so without this an iroh-only fetcher could never obtain them. Per-rendition collections therefore contain
   only `init` + `segment` files and their ordering invariant is trivially checkable.
 
 ## 3. Payment channel: ALPN `nfx/pay/1`
@@ -120,3 +121,5 @@ lands on 2/3 and verifies NFX-05 §4.
   fetches the member list and then one member per request, and seeders may refuse
   spanning requests from paying peers. Tickets are the pinned iroh-blobs `BlobTicket`
   string form.
+- Draft 2026-09-23 (A2 `nfx-node`): the `meta` collection also carries thumb and
+  subtitle files, which otherwise rode no iroh collection.

@@ -8,8 +8,9 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 close
 ## Where things stand
 
 **Phases A0 and A1 are complete. A2, the Rust M1 data plane, is in progress**
-(ADR 0008 §5): `nfx-media` is done; still to come are `nfx-node`, `nfxd`, the scoped
-relay and a test player page.
+(ADR 0008 §5): `nfx-media` is done and `nfx-node` has its first layer; still to come are
+beacons/manifests over Nostr, the pull-through origin, `nfxd`, the scoped relay and a
+test player page.
 
 - **`nfx-media` (A2, 2026-09-23):**
   - the demo's L8 planning (probe, ladder, argv, storyboard) ported to Rust, with
@@ -24,6 +25,23 @@ relay and a test player page.
     ffmpeg 6.1.1 and the pinned n8.1.2.
   - Finding: x264's fastest presets signal Constrained Baseline even when High is
     requested. NFX-05 §1 now says "High or a subset", with CODECS read from the stream.
+- **`nfx-node` layer 1 (A2, 2026-09-23):**
+  - a swappable `ContentStore` (NFX `FsStore`, sha256-named, verified on every read and
+    write);
+  - `Node`: an iroh endpoint with iroh-blobs as transport only. Store files are
+    imported by reference, and per-rendition collections take their membership from
+    each rendition's playlist.
+  - `fetch` re-anchors every member to sha256 by position; a lying peer is
+    `NodeError::Poisoned` and nothing it sent is stored;
+  - signed gossip presence (`nfx/gossip/1`).
+  - Integration test (3/3 runs, ~7 s): a self-hosted relay and a relay-only fetcher.
+    The lying seeder is caught at `720p member 2`, and the gossip envelope carrying real
+    tickets verifies.
+  - Spec: NFX-06 §2's `meta` collection now also carries thumb and subtitle files,
+    which otherwise rode no iroh collection.
+  - `cargo deny` with iroh's tree: CDLA-Permissive-2.0 and Unlicense are allowed; MPL-2.0
+    is excepted for `attohttpc` only; two "unmaintained" proc-macro notices
+    (`paste`, `proc-macro-error`) are ignored by ID with reasons.
 
 - **Repository:** the private GitLab project. Every push
   was a fast-forward of `main` with sovtech's OK. The demo history, the spec commit
@@ -107,8 +125,9 @@ relay and a test player page.
 
 1. **A2 — the Rust M1 data plane**, per ADR 0008 §5:
    - ~~`nfx-media`~~ done;
-   - `nfx-node`: iroh-blobs behind a swappable store trait (S1), gossip, beacons via
-     nostr-sdk, the pull-through origin, and the per-member window gate (S1);
+   - `nfx-node`: ~~store trait, iroh seed/fetch, gossip~~ done; next come beacons and
+     manifests via nostr-sdk, the pull-through origin, and the per-member window gate
+     (M2);
    - `nfxd`;
    - a scoped relay;
    - a test player page, which can grow out of the S3/S4 spike pages.

@@ -15,7 +15,12 @@ all-features = true
 # Every RustSec advisory (vulnerability, unmaintained, unsound, notice) fails the check
 # unless it is listed here with a reason.
 yanked = "deny"
-ignore = []
+ignore = [
+    # "Unmaintained" notices, not vulnerabilities: compile-time proc macros deep in iroh's
+    # tree that cannot be swapped without forking it. Revisit at every iroh bump.
+    { id = "RUSTSEC-2024-0436", reason = "paste (proc macro) via iroh > netwatch > netdev > netlink-packet-core; unmaintained notice only" },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error (proc macro) via iroh-blobs > bao-tree > genawaiter; unmaintained notice only" },
+]
 
 [licenses]
 # Permissive licenses only for dependencies. Our own crates are AGPL-3.0-or-later and
@@ -25,10 +30,17 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "CDLA-Permissive-2.0", # webpki-roots / webpki-root-certs (Mozilla root CA data), via iroh
     "ISC",
     "MIT",
     "Unicode-3.0",
+    "Unlicense", # public-domain dedication; iroh's wasm websocket stack
     "Zlib",
+]
+# Copyleft stays out of the global list: each MPL crate is named. MPL-2.0 is file-level
+# and compatible with this repository's AGPL-3.0-or-later.
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "attohttpc" }, # via iroh > portmapper > igd-next (UPnP)
 ]
 confidence-threshold = 0.9
 unused-allowed-license = "allow"

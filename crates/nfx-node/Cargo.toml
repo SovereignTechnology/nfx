@@ -1,0 +1,27 @@
+[package]
+name = "nfx-node"
+version = "0.1.0"
+description = "NFX peer: content store, iroh seeding and fetching with sha256 re-anchoring (NFX-05/06), gossip presence"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+hex.workspace = true
+iroh.workspace = true
+iroh-blobs.workspace = true
+iroh-gossip.workspace = true
+n0-future.workspace = true
+nfx-proto.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+iroh-relay = { workspace = true, features = ["server"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true
