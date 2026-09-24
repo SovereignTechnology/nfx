@@ -180,6 +180,17 @@ impl VerifiedHashList {
             .ok_or_else(|| format!("{last:?} is not a content name in this hash list"))
     }
 
+    /// The browser-mesh stream swarm ID (NFX-10 §2) of the stream whose playlist is at
+    /// `path`: its last path element is the playlist's content name, which names exactly
+    /// one rendition. `None` when it maps to no rendition; such a stream joins no swarm.
+    #[must_use]
+    pub fn stream_swarm_id(&self, path: &str) -> Option<String> {
+        let last = path.split('/').filter(|p| !p.is_empty()).next_back()?;
+        let rendition = self.list.rendition_for_playlist(last)?;
+        let video = VideoAddr::parse(&self.list.video).ok()?;
+        Some(video.web_stream_swarm_id(&rendition.id))
+    }
+
     /// Check `bytes` fetched from `path`: the right sha256 and, for playlists, the
     /// content-name rule (NFX-05 §3). Returns the sha256.
     pub fn check(&self, path: &str, bytes: &[u8]) -> Result<String, String> {
@@ -245,6 +256,12 @@ impl VerifiedHashList {
     }
 
     /// The hash list as JSON (its canonical rendering).
+    /// NFX-10 §2 stream swarm ID for a playlist path, or `undefined`.
+    #[wasm_bindgen(js_name = streamSwarmId)]
+    pub fn js_stream_swarm_id(&self, path: &str) -> Option<String> {
+        self.stream_swarm_id(path)
+    }
+
     #[wasm_bindgen(js_name = toJSON)]
     pub fn to_json(&self) -> String {
         String::from_utf8_lossy(&self.list.render()).into_owned()
@@ -395,6 +412,29 @@ mod tests {
             "wrong bytes"
         );
         assert!(v.expected_for_path("/nope.m4s").is_err());
+
+        // NFX-10 §2: a stream maps to its rendition by its playlist's content name.
+        let playlist = list
+            .files
+            .iter()
+            .find(|f| f.role == Role::Playlist)
+            .unwrap();
+        let id = "nfx/1/web/nfx:mainnet:1:salt-flats-dusk/720p";
+        for path in [
+            format!("/{}.m3u8", playlist.sha256),
+            format!("/nfx/{root}/{}.m3u8", playlist.sha256),
+        ] {
+            assert_eq!(v.stream_swarm_id(&path).as_deref(), Some(id), "{path}");
+        }
+        for unmapped in [
+            format!("/{}.m3u8", master.sha256),
+            format!("/{root}/master.m3u8"),
+            format!("/{}.m3u8", "a".repeat(64)),
+            format!("/{}", playlist.sha256),
+            String::new(),
+        ] {
+            assert_eq!(v.stream_swarm_id(&unmapped), None, "{unmapped}");
+        }
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub mod origin;
 pub mod relay;
 pub mod seed;
 pub mod store;
+pub mod tracker;
 pub mod video;
 
 pub use error::{NodeError, Result};

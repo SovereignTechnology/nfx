@@ -33,6 +33,7 @@ sha1 = { version = "0.11.0", default-features = false }
 sha2 = { version = "0.11.0", default-features = false }
 thiserror = "2.0.20"
 tungstenite = { version = "0.28.0", default-features = false, features = ["handshake"] }
+tokio-tungstenite = { version = "0.28.0", default-features = false, features = ["handshake"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 wasm-bindgen = "0.2.128"
 wasm-bindgen-test = "0.3.78"
