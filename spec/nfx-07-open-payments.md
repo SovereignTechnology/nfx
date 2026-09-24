@@ -35,8 +35,9 @@ payment-enforced after release, so no mechanism pretends otherwise.
   would refuse.
 - **`session`** is exactly 32 lowercase hex characters (128 bits).
 - **`video`** is an NFX video address (NFX-01).
-- **`price_per_chunk`** (in **sat**) and **`window`** are at least 1. A seeder that
-  serves for free does not quote; it serves without pay/1.
+- **`price_per_chunk`** (in **sat**) is at least 1, and **`window`** at least 2, so a
+  watcher paying at half the window never stalls the seeder. A seeder that serves for
+  free does not quote; it serves without pay/1.
 - **`mints`** holds 1 to 16 URLs. A mint URL is:
   - printable ASCII without space, `\` or `@`;
   - `https://`, then a host, then optionally `:` and a port of 1 to 5 digits (1 to 65535);
@@ -52,10 +53,9 @@ payment-enforced after release, so no mechanism pretends otherwise.
 - **`token`** is `cashuA` or `cashuB` followed by at least one character of
   `[A-Za-z0-9_=+/-]`. What it holds is the engine's to check (§3).
 - **`rej`** carries `code`, 1 to 64 characters of `[a-z0-9-]`. It may carry `detail`, at
-  most 1 KiB of UTF-8 containing none of U+0000–U+001F, U+007F–U+009F, U+00AD, U+061C,
-  U+180E, U+200B–U+200F, U+2028–U+202E, U+2060–U+2064, U+2066–U+206F, U+FEFF,
-  U+FFF9–U+FFFB or U+E0000–U+E007F (controls, and characters that are invisible or
-  reorder text). Unknown codes MUST be tolerated (NFX-11 §6).
+  most 1 KiB of printable ASCII (U+0020–U+007E). It is a diagnostic for logs and
+  screens, and ASCII has no invisible or reordering characters to hide in. Unknown codes
+  MUST be tolerated (NFX-11 §6).
 - **Vectors:** `test-vectors/pay1.json`.
 
 **Messages.**
@@ -80,8 +80,8 @@ payment-enforced after release, so no mechanism pretends otherwise.
     by exactly the chunks paid.
 - **`ack`** means the payment's swap has **completed** (§3). `accepted_upto` is the new
   watermark, and `spent_total` is the face value accepted so far on the account.
-- **`rej` `mint-unavailable`**: the seeder could not complete the swap. It is not a ban,
-  and the payment was not accepted.
+- **`rej` `mint-unavailable`**: the seeder could not complete the swap, and its outcome
+  may be unknown. It is not a ban, and nothing was credited.
 
 ## 3. Seeder duties
 
@@ -90,18 +90,31 @@ payment-enforced after release, so no mechanism pretends otherwise.
   `nfx/pay/1`, or the peer id on the WebRTC mesh (NFX-10 §3.2). Identities are free
   to create on every transport.
 - An **account** is (peer, video). It numbers that peer's chunks of that video and
-  holds its position: `served`, `accepted_upto` and `spent_total`. It persists across
-  the peer's sessions for as long as the seeder keeps it. A new `hello` continues the
-  account; it never opens a fresh window.
+  holds its position: `served`, `accepted_upto` and `spent_total`, all per account.
+  - It is created by its first admission or payment. A `hello` alone creates nothing,
+    and the quote then reports zeros.
+  - It persists across the peer's sessions. A new `hello` continues the account; it
+    never opens a fresh window.
 - Windows, bans and the global cap belong to the **seeder**: one set of state for all
   its videos.
 - A `session` id names one **open** session. A `hello` naming a session id that is open
-  is refused (`bad-session`). A seeder caps the sessions one peer may hold open at once
-  (recommended 8, also `bad-session`). A session closes with its connection.
-- A seeder may forget an account that has had no open session for `account_ttl`
-  (recommended 24 h, and at least `debt_ttl`). Its unpaid chunks are then lost, within
-  the bounds below. Bans may expire after a period of the seeder's choosing, of at
-  least `debt_ttl`.
+  is refused (`bad-session`). A seeder caps the sessions one peer may hold open at once,
+  across all videos (recommended 8, also `bad-session`). A session closes with its
+  connection.
+
+**Configuration.** `window` ≥ 2, a global cap ≥ 1, `debt_ttl` ≥ 10 min (recommended
+1 h), and `account_ttl` ≥ `debt_ttl` (recommended 24 h). A seeder refuses to start with
+anything else. A zero `debt_ttl` would switch the cap off.
+
+**Bounded state.** Identities are free, so everything kept per identity is bounded:
+- An account whose `accepted_upto` is 0 (nothing ever paid) may be forgotten once it has
+  had no open session for `account_ttl`. Its unpaid chunks are then lost, within the
+  bounds below.
+- An account with payments is kept. Forgetting it would contradict the watcher's ledger
+  (§3a), which would then stop paying.
+- Bans may expire after a period of the seeder's choosing, of at least `debt_ttl`.
+- A seeder SHOULD keep a bounded cache of proofs it has seen spent. It then refuses a
+  replayed one (`spent`, with a ban) without asking the mint.
 
 **Admission.** Every request the seeder serves for a file of the session's video
 counts as one chunk of the account **when it is admitted**: whole, ranged or aborted
@@ -109,26 +122,39 @@ alike. It is counted atomically, so concurrent requests cannot share a slot. A r
 for a file of another video is not admitted under this session. A request that is not
 admitted is refused on its transport, and not one byte of it is served.
 
-**Service limit.** A chunk is **covered** while the account's `served` is below its
-`accepted_upto`, that is, pre-paid. A covered chunk is admitted unless the peer is
-banned. An uncovered chunk is admitted only while both of these hold:
+**Service limit.** A chunk is **covered** while its own account's `served` is below
+that account's `accepted_upto`, that is, pre-paid. Credit on one video never covers
+another. A covered chunk is admitted unless the peer is banned. An uncovered chunk is
+admitted only while both of these hold:
 - the peer's unpaid chunks, summed across all its accounts, number fewer than `window`;
-- the unpaid chunks admitted by the seeder within the last `debt_ttl` (recommended
-  1 h), across **all** peers and videos, number fewer than the seeder's global cap.
-  Identities are free, so per-peer windows alone would give every new identity a free
-  window. A banned or forgotten peer's unpaid chunks still count until they age out.
-  Credit on one account never offsets another's debt.
+- the unpaid chunks admitted by the seeder within the last `debt_ttl`, across **all**
+  peers and videos, number fewer than the seeder's global cap. Per-peer windows alone
+  would give every new identity a free window. A banned or forgotten peer's unpaid
+  chunks still count until they age out. Credit on one account never offsets another's
+  debt.
 
 So the seeder's loss is at most the global cap per `debt_ttl`, however many identities
 an attacker makes. One peer's loss is at most `window` per account lifetime. An
 acknowledged payment is always swapped (below), so no delay at the mint widens either
 bound.
 
+A full cap refuses unpaid service, never paid service. A watcher it refuses pays ahead
+(§3a), and covered chunks are served whatever the cap. **Size the cap** for the new
+watchers expected at once. Each holds up to about `window`/2 unpaid chunks between its
+payments, so a cap of C carries about C / (`window`/2) of them before they must pay
+ahead.
+
 **Verifying a `pay`.** One account's payments are processed one at a time, in order
-of arrival. The checks run in this order:
-1. **Structure.** A token that is unreadable, not in unit `sat`, of more than one mint,
-   with proofs locked to a spending condition (NUT-10/11/14), or with a proof lacking a
-   DLEQ proof (NUT-12) is `bad-token`.
+of arrival. Bans are checked when a payment's turn comes, not when it arrives. The
+checks run in this order:
+1. **Structure.** A token is `bad-token` if it is:
+   - unreadable;
+   - not in unit `sat`;
+   - of more than one mint;
+   - holding more than 64 proofs (input fees grow with the proof count, and fees are
+     the seeder's);
+   - holding proofs locked to a spending condition (NUT-10/11/14);
+   - holding a proof that lacks a DLEQ proof (NUT-12).
 2. **The mint** is exactly a quoted URL, else `bad-mint`. Nothing is fetched from any
    mint before this check.
 3. **DLEQ.** Every proof's DLEQ proof verifies against the keys of that quoted mint
@@ -137,21 +163,28 @@ of arrival. The checks run in this order:
    `overpaid`. A product above 2^53−1 is `underpaid`. Never extend credit on a
    miscount.
 5. **Swap, then acknowledge.** All the token's proofs go into one swap (NUT-03) at the
-   quoted mint. The swap is atomic, and the seeder never swaps a subset. Then:
-   - on success, `ack`: `accepted_upto` becomes `upto_chunk`, and `spent_total` grows by
-     the face value;
-   - if any proof is **spent**, `rej` `spent` and ban the peer. Nothing is claimed, and
-     spend detection is by proof, not by token string;
-   - if the mint refuses the proofs as invalid, `rej` `bad-token` and ban the peer;
-   - if the mint cannot be reached, or the outcome stays unknown, `rej`
-     `mint-unavailable`. That is not a ban, and nothing is credited. The seeder retries
-     the same swap request (NUT-19) while it still has time.
+   quoted mint. The swap is atomic, and the seeder never swaps a subset.
+   - **The swap is not tied to the `pay`'s connection.** If the connection drops, a
+     swap that completes is still credited, and the watcher learns of it from its next
+     quote.
+   - **Outcomes:**
+     - on success, `ack`: `accepted_upto` becomes `upto_chunk`, and `spent_total`
+       grows by the face value;
+     - if any proof is **spent**, `rej` `spent` and ban the peer. Nothing is claimed,
+       and spend detection is by proof, not by token string;
+     - if the mint refuses the proofs as invalid, `rej` `bad-token` and ban the peer;
+     - if the mint cannot be reached, or the outcome stays unknown, `rej`
+       `mint-unavailable`. That is not a ban, and nothing is credited.
+   - **Retries.** The seeder retries the same swap request (NUT-19) while it still has
+     time. A retry answered `spent` may be its own earlier attempt that succeeded
+     unseen. The seeder settles that with NUT-09 restore and never bans on it.
 
    The seeder answers every `pay` within **60 s**.
 
-Every refusal leaves the accounting untouched and the proofs unclaimed. A banned peer's
-`hello` and `pay` are refused (`banned`), whatever it offers, and nothing of it is
-admitted.
+Every refusal leaves the accounting untouched and the proofs unclaimed, except that
+after `mint-unavailable` the swap's outcome may be unknown (§3a says how the watcher
+settles that). A banned peer's `hello` and `pay` are refused (`banned`), whatever it
+offers, and nothing of it is admitted.
 
 For licensed videos, step 5's swap is replaced by the offline checks of NFX-08 §4.1:
 chunk proofs there are P2PK-locked and cannot be swapped by the seeder.
@@ -160,27 +193,43 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
 
 ## 3a. Watcher duties
 
-- **Keep a ledger per (seeder, video):** chunks requested, `accepted_upto` and
-  `spent_total`. It lasts as long as the watcher's identity toward that seeder.
-- **Take a quote only if it is honest about the account.** Its `served` must be at most
-  the chunks requested, and its `accepted_upto` and `spent_total` must equal the
-  ledger. Refuse a quote above the watcher's price cap, or one naming no mint it holds
-  tokens from.
-- **Owe every request sent,** except one the seeder refuses on its transport. A request
-  the watcher abandons stays owed; if the seeder never saw it, the payment becomes
-  pre-payment.
-- **Pay** for requested chunks only, never ahead of need, and before the unpaid count
-  reaches `window`, so the seeder need not stall. Keep one payment in flight at a time.
+- **Keep a ledger per (seeder, video):** chunks requested, `accepted_upto`,
+  `spent_total`, and any payment not yet settled. It lasts as long as the watcher's
+  identity toward that seeder.
+- **Take a quote only if it is honest about the account:**
+  - its `served` is at most the chunks requested;
+  - its `accepted_upto` and `spent_total` equal the ledger, or the ledger plus the
+    unsettled payment, which the quote thereby settles as accepted;
+  - a quote **below** the ledger is refused, and the watcher never resyncs down to it;
+  - a quote above the watcher's price cap is refused, on every session, a resumed one
+    included, and so is one naming no mint it holds tokens from.
+- **Owe every request sent,** except one the seeder refuses on its transport. A refused
+  request is always un-owed; if it was already paid for, that payment becomes credit. A
+  request the watcher abandons stays owed; if the seeder never saw it, the payment
+  becomes pre-payment.
+- **Pay exactly the quoted price** for requested chunks.
+  - Pay before the unpaid count, across all the watcher's videos with that seeder,
+    reaches `window`, so the seeder need not stall.
+  - Never pay ahead of need, except after a refusal: then pay ahead up to half of
+    `window`, which the seeder serves whatever its cap.
+  - Keep one payment in flight at a time.
 - **Check every `ack`.** `accepted_upto` must equal the payment's `upto_chunk`, and
   `spent_total` the ledger plus its face value. An inconsistent or unsolicited ack stops
   the watcher paying that seeder.
-- **Reclaim the proofs of every refused payment** by swapping them back at the mint,
-  whatever the code, known or not. A seeder that refuses and then claims gets nothing.
-  After `mint-unavailable` the watcher may pay again later with fresh proofs; after any
-  other code it stops paying that seeder.
-- **Wait 120 s for an answer**, twice the seeder's limit, then reclaim and stop. If the
-  reclaim finds proofs already spent, the seeder was paid and its answer was lost. The
-  watcher counts that payment as lost and does not pay for those chunks again.
+- **Reclaim the proofs of every refused payment,** whatever the code, known or not, by
+  swapping them back at the mint.
+  - If the reclaim finds any proof already spent, the payment is **lost**. The watcher
+    stops paying that seeder and never pays for that range again. That bounds what a
+    seeder can take to one payment, whether it refuses and then claims, or answers
+    `mint-unavailable` after a swap that went through.
+  - Until the reclaim completes (the mint may be down), the watcher pays that seeder
+    nothing more.
+  - After `mint-unavailable` the watcher pays again only once every proof is confirmed
+    reclaimed. After any other code it stops paying that seeder.
+- **Wait 120 s from sending before reclaiming an unanswered payment**, twice the
+  seeder's limit. A dropped connection does not shorten the wait. The next quote may
+  settle the payment as accepted; otherwise the watcher reclaims after 120 s, and a
+  reclaim that finds proofs spent means the payment is lost, as above.
 - **Pay nothing after stopping,** at the end of a session included.
 
 ## 4. HTTPS (origin) payment surface
@@ -197,7 +246,9 @@ therefore loses nothing:
     from other mints are refused) when payment is missing or refused;
   - `503` when the mint cannot be reached.
 
-  On any refusal the client reclaims its proofs, as in §3a.
+  On any refusal the client reclaims its proofs, as in §3a. After a `503` it pays again
+  only once every proof is confirmed reclaimed, and a proof found spent means that
+  payment is lost.
 - Bans do not apply: the payer is anonymous, and spent proofs simply earn a `402`.
 - Origins MAY serve gratis (`price_hint` 0 or `free` beacons). The website's ad/default
   mode is exactly this (origin at price 0).
@@ -271,3 +322,27 @@ therefore loses nothing:
     not repaid.
   - §4: one payment per request, swapped before the response. No sessions, no credit,
     no counters.
+- Draft 2026-09-24 (M2.0 third audit, `docs/nfx/reviews/2026-09-24-m2.0-third-audit.md`).
+  - §2: `window` ≥ 2; `detail` is printable ASCII.
+  - §3:
+    - accounts are created by admission or payment, and only never-paid accounts may be
+      forgotten;
+    - configuration minimums (a zero `debt_ttl` would switch the cap off);
+    - bounded per-identity state, and a spent-proof cache;
+    - credit covers only its own video;
+    - a full cap refuses unpaid service, never paid service, with cap sizing;
+    - bans checked at a payment's turn;
+    - at most 64 proofs per payment;
+    - the swap is not tied to the `pay`'s connection;
+    - a retry answered `spent` is settled by restore, never banned on.
+  - §3a:
+    - unsettled payments are settled by the next quote or reclaimed after 120 s, even
+      across a dropped connection;
+    - a quote below the ledger is refused;
+    - refused requests are always un-owed;
+    - pay ahead after a refusal;
+    - the threshold counts across videos;
+    - a reclaim that finds proofs spent loses that payment and stops the watcher, and
+      nothing more is paid until a reclaim completes. That closes an unbounded drain
+      through `mint-unavailable`.
+  - §4: the same rule after `503`.

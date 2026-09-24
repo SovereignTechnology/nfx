@@ -49,7 +49,14 @@ check:
     # Read-only fetch of the public demo repository for the add-only check.
     - git fetch --no-tags https://example.invalid/sovtech/nutflix.git +main:refs/remotes/demo/main
   script:
-    - PYTHON=/opt/venv/bin/python crates/ci/check.sh
+    # CI=true and an empty LOCKED_DIRS_UNLOCKED are set here, in the pinned file, so no
+    # pipeline or project variable can switch the lock off (crates/ci/check-locked.sh).
+    - CI=true LOCKED_DIRS_UNLOCKED= PYTHON=/opt/venv/bin/python crates/ci/check.sh
+  # Only downloaded archives and the index are cached, keyed by branch and Cargo.lock.
+  # Archives are checked against Cargo.lock and sources re-extracted every run; build
+  # output is never cached, so nothing one pipeline compiles can reach the next.
   cache:
-    key: cargo-$CI_COMMIT_REF_SLUG
-    paths: [.cargo-home/registry, crates/target]
+    key:
+      prefix: cargo-$CI_COMMIT_REF_SLUG
+      files: [crates/Cargo.lock]
+    paths: [.cargo-home/registry/cache, .cargo-home/registry/index]

@@ -13,6 +13,8 @@
 //! - **Payment.** A payment is swapped before it is acknowledged, so an ack is
 //!   confirmation and no mint delay widens either bound.
 
+use std::time::Duration;
+
 use nfx_proto::pay::{Ack, Hello, Pay, Quote, Rej};
 
 /// A payer's identity as the transport gives it (the iroh endpoint id).
@@ -21,16 +23,16 @@ pub type PeerId = [u8; 32];
 /// A seeder's payment engine. Implementations: the real engine (locked until the M2
 /// security stage) and [`crate::mock::MockEngine`].
 pub trait SeederEngine {
-    type Session: SeederSession;
+    type Session: SeederSession + Send;
 
     /// A `hello` from `peer`. The session continues the peer's account for the video, and
-    /// its quote carries the account's position.
+    /// its quote carries the account's position. A `hello` creates no account.
     ///
     /// Refused with:
     /// - `banned` for a banned peer;
     /// - `unknown-video` for a video this seeder does not serve;
     /// - `bad-session` for a session id that is open, or beyond the per-peer cap on open
-    ///   sessions.
+    ///   sessions, counted across all videos.
     fn hello(&self, peer: &PeerId, hello: &Hello) -> Result<Self::Session, Rej>;
 }
 
@@ -48,7 +50,8 @@ pub trait SeederSession {
     /// - the chunk is not pre-paid and the peer's window or the global cap is full.
     fn admit(&mut self, sha256: &str) -> bool;
 
-    /// Handle a `pay` (NFX-07 §3), one at a time per account.
+    /// Handle a `pay` (NFX-07 §3), one at a time per account; bans are checked when its
+    /// turn comes.
     ///
     /// The checks run in this order: structure (`bad-token`), quoted mint (`bad-mint`),
     /// DLEQ (`bad-token`), exact face value (`underpaid`/`overpaid`), then the swap. A
@@ -57,6 +60,10 @@ pub trait SeederSession {
     /// - an unreachable mint: `mint-unavailable`, which is not a ban.
     ///
     /// A refusal changes no accounting and claims nothing.
+    ///
+    /// **Cancel-safe:** once the swap is sent it completes, and is credited or banned on,
+    /// even if this future is dropped (the connection closed). The account's turn is held
+    /// until then.
     async fn pay(&mut self, pay: &Pay) -> Result<Ack, Rej>;
 
     /// Whether this session's peer is banned.
@@ -65,26 +72,31 @@ pub trait SeederSession {
 
 /// The watcher's side, for one seeder and one video: its ledger lasts across sessions.
 /// Implementations: the real wallet-backed viewer (locked until the M2 security stage)
-/// and [`crate::mock::MockViewer`].
+/// and [`crate::mock::MockViewer`]. It keeps time on the harness's clock.
 #[allow(async_fn_in_trait)]
 pub trait Viewer {
-    /// Start a session on its quote. It is refused (`Err`) in these cases:
-    /// - its price is over this viewer's cap;
-    /// - it names no mint the viewer holds tokens from;
-    /// - a session is already open;
-    /// - its account position disagrees with the ledger. The quote claims more chunks
-    ///   than were requested, or another `accepted_upto` or `spent_total`. The viewer
-    ///   then stops paying this seeder.
+    /// Start a session on its quote. A quote whose position equals the ledger plus a
+    /// payment still unsettled settles it as accepted. `Err`, and the viewer stops, when
+    /// the quote is not honest about the account:
+    /// - it claims more chunks than were requested;
+    /// - its `accepted_upto` or `spent_total` is anything else, below the ledger included.
+    ///
+    /// Also `Err`, without stopping: a price over this viewer's cap (on every session), no
+    /// mint it holds tokens from, or a session already open.
     fn quote(&mut self, quote: &Quote) -> Result<(), String>;
 
     /// A request was sent. It is owed unless the seeder refuses it.
     fn requested(&mut self);
 
-    /// The seeder refused a request on its transport: it is not owed.
+    /// The seeder refused a request on its transport. It is not owed, and if it was
+    /// already paid for, that payment becomes credit. The next [`Viewer::due`] may pay
+    /// ahead.
     fn refused(&mut self);
 
-    /// The payment due now, if any. It covers requested chunks only, never ahead, and is
-    /// made before the unpaid count reaches the window. One is in flight at a time.
+    /// The payment due now, if any. It covers requested chunks at the quoted price, made
+    /// before the unpaid count reaches the window, or pays ahead after a refusal. One is
+    /// in flight at a time, and none while a reclaim is incomplete. It first settles an
+    /// unanswered payment older than 120 s by reclaiming it.
     async fn due(&mut self) -> Result<Option<Pay>, String>;
 
     /// The payment for every chunk still owed, when the session ends.
@@ -95,14 +107,20 @@ pub trait Viewer {
     fn ack(&mut self, ack: &Ack) -> Result<(), String>;
 
     /// The seeder's `rej`, whatever its code: the viewer reclaims the payment's proofs.
-    /// It stops paying this seeder, except after `mint-unavailable`.
+    /// - If any proof is found spent, the payment is lost, and the viewer stops.
+    /// - After `mint-unavailable` with every proof reclaimed, it may pay again.
+    /// - After any other code, it stops.
+    ///
+    /// A reclaim the mint cannot serve yet blocks every payment until it completes.
     async fn rej(&mut self, rej: &Rej);
 
-    /// No answer in time. The viewer reclaims the payment's proofs and stops. If the
-    /// proofs were already spent, the payment is counted as lost, never paid again.
+    /// No answer has come. Before 120 s from sending this does nothing. After that, the
+    /// viewer reclaims the proofs and stops; proofs found spent mean the payment is lost,
+    /// never paid again.
     async fn timeout(&mut self);
 
-    /// The session ended (its connection closed). The ledger stays.
+    /// The session ended (its connection closed). The ledger stays, and a payment in
+    /// flight stays unsettled: the next quote, or a reclaim after 120 s, settles it.
     fn end(&mut self);
 
     /// Whether the viewer has stopped paying this seeder.
@@ -124,6 +142,8 @@ pub enum BadToken {
     BadDleq,
     /// Not a token at all.
     Garbage,
+    /// More than 64 proofs (input fees grow with the proof count).
+    TooManyProofs,
     /// Well formed, with valid DLEQs, but the mint refuses its proofs as invalid at the
     /// swap. This one also bans the peer.
     Forged,
@@ -133,10 +153,10 @@ pub enum BadToken {
 /// engine with an in-process mint in the M2 security stage.
 #[allow(async_fn_in_trait)]
 pub trait Harness {
-    type Engine: SeederEngine;
+    type Engine: SeederEngine + Send + Sync;
     type Viewer: Viewer;
 
-    /// A seeder serving two videos (0 and 1) at `price`, quoting `window` and this
+    /// A seeder serving two videos (0 and 1) at `price`, quoting `window` (≥ 2) and this
     /// harness's mint only, with a global cap of `global_cap` unpaid chunks per
     /// [`Harness::debt_ttl`].
     fn engine(&self, price: u64, window: u64, global_cap: u64) -> Self::Engine;
@@ -189,15 +209,19 @@ pub trait Harness {
     /// Whether anything (keys, a swap) has been fetched from the mint at `url`.
     fn dialled(&self, url: &str) -> bool;
 
-    /// Hold every swap until [`Harness::release_swaps`]: a `pay` waits for it.
+    /// Hold every swap until [`Harness::release_swaps`]: the mint processes nothing, and a
+    /// `pay` waits.
     fn hold_swaps(&self);
-    /// Run the held swaps, and hold no more.
+    /// The mint processes swaps at once, but holds their responses until
+    /// [`Harness::release_swaps`]: processed, and not yet answered.
+    fn hold_swap_responses(&self);
+    /// Run the held swaps and deliver the held responses, and hold no more.
     async fn release_swaps(&self);
     /// Make the mint unreachable (`true`) or reachable again.
     fn mint_outage(&self, down: bool);
 
-    /// Move the seeder's clock forward.
-    fn advance(&self, secs: u64);
-    /// How long an unpaid chunk counts toward the global cap, in seconds.
-    fn debt_ttl(&self) -> u64;
+    /// Move the clock the seeder and the viewers keep forward.
+    fn advance(&self, by: Duration);
+    /// How long an unpaid chunk counts toward the global cap.
+    fn debt_ttl(&self) -> Duration;
 }

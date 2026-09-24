@@ -28,23 +28,6 @@ pub const MAX_INT: u64 = (1 << 53) - 1;
 /// The deepest nesting; the message object is level 1.
 pub const MAX_DEPTH: usize = 16;
 
-/// What `rej.detail` may not contain: controls, and characters that are invisible or
-/// reorder text (NFX-07 §2).
-const DETAIL_FORBIDDEN: &[(u32, u32)] = &[
-    (0x0000, 0x001F),
-    (0x007F, 0x009F),
-    (0x00AD, 0x00AD),
-    (0x061C, 0x061C),
-    (0x180E, 0x180E),
-    (0x200B, 0x200F),
-    (0x2028, 0x202E),
-    (0x2060, 0x2064),
-    (0x2066, 0x206F),
-    (0xFEFF, 0xFEFF),
-    (0xFFF9, 0xFFFB),
-    (0xE0000, 0xE007F),
-];
-
 /// What a deployment permits beyond the default rules.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ParseOptions {
@@ -271,16 +254,10 @@ fn token_ok(t: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'=' | b'+' | b'/' | b'-'))
 }
 
-/// A `rej.detail` a log or a screen can show as it is: bounded, and free of the
-/// characters in [`DETAIL_FORBIDDEN`].
+/// A `rej.detail` a log or a screen can show as it is: at most 1 KiB of printable ASCII,
+/// which has no invisible or reordering characters to hide in.
 fn detail_ok(d: &str) -> bool {
-    d.len() <= MAX_DETAIL_BYTES
-        && !d.chars().any(|c| {
-            let c = u32::from(c);
-            DETAIL_FORBIDDEN
-                .iter()
-                .any(|(lo, hi)| (*lo..=*hi).contains(&c))
-        })
+    d.len() <= MAX_DETAIL_BYTES && d.bytes().all(|b| (0x20..=0x7e).contains(&b))
 }
 
 /// Container nesting: the message object is level 1, scalars add nothing.
@@ -336,8 +313,8 @@ impl Message {
                 if price_per_chunk == 0 {
                     return Err(bad("price_per_chunk >= 1"));
                 }
-                if window == 0 {
-                    return Err(bad("window >= 1"));
+                if window < 2 {
+                    return Err(bad("window >= 2"));
                 }
                 let Some(Value::Array(mints)) = obj.get("mints") else {
                     return Err(bad("mints is 1 to 16 URLs"));
@@ -388,7 +365,7 @@ impl Message {
                     None => None,
                     Some(Value::String(d)) if detail_ok(d) => Some(d.clone()),
                     Some(_) => {
-                        return Err(bad("detail is at most 1 KiB, without invisible characters"));
+                        return Err(bad("detail is at most 1 KiB of printable ASCII"));
                     }
                 };
                 Ok(Self::Rej(Rej {

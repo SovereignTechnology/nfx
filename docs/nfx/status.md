@@ -361,21 +361,26 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    wallet. It gets the locked-directory rule and its own security stage (ADR 0008 §4).
    Plan and decisions: [`m2-plan.md`](m2-plan.md). sovtech chose the demo's staging, and a
    persistent testnet mint.
-   - **M2.0 is built and reworked twice** on branch `m2/contracts`, not yet pushed. It
-     holds the pay/1 wire and vectors, the session contracts, the mock, and the
-     adversary suite. Two independent audits found 19 and then 30 gaps; all are
+   - **M2.0 is built and reworked three times** on branch `m2/contracts`, not yet
+     pushed. It holds the pay/1 wire and vectors, the session contracts, the mock, and
+     the adversary suite. Three independent audits found 19, 30 and 28 gaps; all are
      resolved ([first](reviews/2026-09-24-m2.0-independent-audit.md),
-     [second](reviews/2026-09-24-m2.0-second-audit.md)).
+     [second](reviews/2026-09-24-m2.0-second-audit.md),
+     [third](reviews/2026-09-24-m2.0-third-audit.md)).
+     - A refused watcher pays ahead, so free identities cannot lock out paying ones.
+     - A lying seeder gets at most one payment.
+     - An unsettled payment survives a dropped connection.
      - **NFX-07 changed shape.**
        - The seeder swaps before it acks.
        - Bounds and bans are seeder-wide, and the global cap is a rate (`debt_ttl`).
        - `quote` carries the account's position, so a watcher can resume.
        - HTTPS origins take one payment per request.
-     - The suite has 35 scenarios and catches each of 61 planted defects.
-     - The lock pins all of nfx-pay and what builds it, and after the build it
-       verifies what the compiler read.
+     - The suite has 43 scenarios and catches each of 83 planted defects.
+     - The lock pins all of nfx-pay and what builds it, and refuses build-environment
+       tricks. After the build it verifies what every target compiled, and that the
+       money tests all ran.
    - **Next:**
-     - a third independent audit;
+     - a fourth independent audit;
      - sovtech's OK to push M2.0;
      - sovtech's go-ahead for the testnet mint, whose deployment is proposed in
        [`m2-plan.md`](m2-plan.md);

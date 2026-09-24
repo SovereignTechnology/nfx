@@ -31,6 +31,10 @@ else
   echo "skipped: no demo/main ref (no demo-base tag)"
 fi
 
+step "locked paths: cached crates match Cargo.lock, then fetch"
+PYTHON="$py" crates/ci/check-locked.sh --sources
+(cd crates && cargo fetch --locked)
+
 cd crates
 step "cargo fmt --check"
 cargo fmt --all --check

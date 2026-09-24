@@ -45,3 +45,8 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# Release builds keep integer overflow checks: a wrapped count in the payment code must
+# panic, never silently free or jam the global cap (M2.0 third audit).
+[profile.release]
+overflow-checks = true

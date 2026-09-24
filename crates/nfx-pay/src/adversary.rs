@@ -12,8 +12,9 @@
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::task::Poll;
+use std::time::Duration;
 
-use nfx_proto::pay::{Ack, Pay, Rej, RejCode};
+use nfx_proto::pay::{Ack, Pay, Quote, Rej, RejCode};
 
 use crate::session::{BadToken, Harness, SeederEngine, SeederSession, Viewer};
 
@@ -43,20 +44,28 @@ macro_rules! adversary_suite {
             a_global_cap_bounds_free_service,
             the_global_cap_holds_whatever_payments_do,
             prepaid_chunks_are_served_whatever_the_cap,
-            debt_ages_out_of_the_global_cap_only,
+            debt_counts_for_exactly_debt_ttl,
+            credit_covers_only_its_own_video,
+            debt_is_freed_exactly_once,
             prepayment_extends_service_exactly,
             peers_are_isolated,
             one_accounts_payments_are_serialised,
+            a_dropped_pay_is_credited_or_never_claimed,
+            concurrent_admission_is_atomic,
             a_viewer_pays_for_every_request_and_no_more,
+            a_viewer_owes_nothing_for_refused_requests,
             a_viewer_refuses_quotes_it_cannot_honour,
             a_viewer_stops_on_a_wrong_or_unsolicited_ack,
             a_viewer_reclaims_a_refused_payment,
             a_viewer_reclaims_an_unanswered_payment,
+            a_lying_seeder_takes_at_most_one_payment,
             a_stopped_viewer_pays_nothing,
             an_honest_pair_streams_a_whole_video,
             an_honest_pair_resumes_after_a_reconnect,
             an_honest_pair_waits_out_a_slow_mint,
             an_honest_pair_rides_out_a_mint_outage,
+            an_honest_pair_survives_a_dropped_connection,
+            a_paying_watcher_gets_through_a_full_cap,
         );
     };
     (@each $h:expr; $($name:ident),* $(,)?) => {
@@ -109,6 +118,16 @@ async fn yield_once() {
             cx.waker().wake_by_ref();
             Poll::Pending
         }
+    })
+    .await;
+}
+
+/// Poll `f` once, then drop it: a connection that closes while its request is in flight.
+async fn poll_once<F: Future>(f: F) {
+    let mut f = pin!(f);
+    poll_fn(|cx| {
+        let _ = f.as_mut().poll(cx);
+        Poll::Ready(())
     })
     .await;
 }
@@ -245,8 +264,8 @@ pub async fn foreign_and_lookalike_mints_are_refused<H: Harness>(h: &H) {
     assert!(h.dialled(&m), "keys come from the quoted mint");
 }
 
-/// Tokens of the wrong shape are `bad-token`: the wrong unit, two mints, locked proofs,
-/// a missing or invalid DLEQ, or not a token at all. A proof the mint refuses as invalid
+/// Tokens of the wrong shape are `bad-token`: the wrong unit, two mints, more than 64
+/// proofs, locked proofs, a missing or invalid DLEQ, or not a token at all. A proof the mint refuses as invalid
 /// is `bad-token` too, and bans the peer.
 pub async fn bad_tokens_are_refused<H: Harness>(h: &H) {
     let e = h.engine(3, 4, 1000);
@@ -255,6 +274,7 @@ pub async fn bad_tokens_are_refused<H: Harness>(h: &H) {
     for kind in [
         BadToken::WrongUnit,
         BadToken::TwoMints,
+        BadToken::TooManyProofs,
         BadToken::Locked,
         BadToken::NoDleq,
         BadToken::BadDleq,
@@ -384,7 +404,8 @@ pub async fn a_double_spend_bans_the_peer<H: Harness>(h: &H) {
 }
 
 /// A banned peer gets nothing more: not a pre-paid chunk, not a new session on any
-/// video, not a hearing for a valid payment, whose token stays unclaimed.
+/// video, not a hearing for a valid payment, whose token stays unclaimed. A payment
+/// queued behind the one that bans is refused when its turn comes.
 pub async fn a_banned_peer_stays_banned<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1);
@@ -428,10 +449,38 @@ pub async fn a_banned_peer_stays_banned<H: Harness>(h: &H) {
             "no new session on video {video}"
         );
     }
+    // A payment queued behind the one that bans is checked when its turn comes.
+    let e = h.engine(1, 4, 1000);
+    let mut first = open(h, &e, 2);
+    let mut second = open(h, &e, 2);
+    serve(h, &mut first, 0, 4);
+    let spent = h.token(4).await;
+    assert!(h.steal(&spent).await, "someone else spent it");
+    let replay = Pay {
+        upto_chunk: 4,
+        token: h.reencode(&spent).await,
+    };
+    let valid = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    h.hold_swaps();
+    let ((r1, r2), ()) = both(both(first.pay(&replay), second.pay(&valid)), async {
+        yield_once().await;
+        yield_once().await;
+        h.release_swaps().await;
+    })
+    .await;
+    assert!(is_rej(&r1, &RejCode::Spent), "{r1:?}");
+    assert!(
+        is_rej(&r2, &RejCode::Banned),
+        "checked when its turn came: {r2:?}"
+    );
+    assert!(!h.claimed_any(&valid.token).await);
 }
 
 /// A new `hello` continues the account: its quote carries the account's position, it
-/// never opens a fresh window, and `spent_total` counts the whole account.
+/// never opens a fresh window, and `spent_total` counts the whole account, and only it.
 pub async fn a_new_hello_continues_the_account<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1);
@@ -463,6 +512,25 @@ pub async fn a_new_hello_continues_the_account<H: Harness>(h: &H) {
     assert_eq!(ack.spent_total, 8, "spent_total is the account's");
     let q = open(h, &e, 1).quote().clone();
     assert_eq!((q.served, q.accepted_upto, q.spent_total), (8, 8, 8));
+    // Positions are per account: paying on one video moves nothing on the other.
+    let mut other = open_on(h, &e, 1, 1);
+    assert_eq!(serve_on(h, &mut other, 1, 0, 2), 2);
+    let ack = other
+        .pay(&Pay {
+            upto_chunk: 2,
+            token: h.token(2).await,
+        })
+        .await
+        .expect("paid on video 1");
+    assert_eq!(
+        (ack.accepted_upto, ack.spent_total),
+        (2, 2),
+        "per account, not per peer"
+    );
+    let q0 = open_on(h, &e, 1, 0).quote().clone();
+    let q1 = open_on(h, &e, 1, 1).quote().clone();
+    assert_eq!((q0.served, q0.accepted_upto, q0.spent_total), (8, 8, 8));
+    assert_eq!((q1.served, q1.accepted_upto, q1.spent_total), (2, 2, 2));
 }
 
 /// A session id names one open session: while it is open, neither another peer nor the
@@ -475,15 +543,21 @@ pub async fn a_session_id_names_one_open_session<H: Harness>(h: &H) {
     assert!(is_rej(&e.hello(&h.peer(1), &hello), &RejCode::BadSession));
 }
 
-/// A peer holds at most the cap of sessions open at once; closed ones do not count.
+/// A peer holds at most the cap of sessions open at once, across all its videos; closed
+/// ones do not count.
 pub async fn open_sessions_are_capped_and_released<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let cap = h.session_cap();
-    let held: Vec<Session<H>> = (0..cap).map(|_| open(h, &e, 3)).collect();
-    assert!(
-        is_rej(&e.hello(&h.peer(3), &h.hello()), &RejCode::BadSession),
-        "one past the cap of {cap}"
-    );
+    let held: Vec<Session<H>> = (0..cap).map(|i| open_on(h, &e, 3, (i % 2) as u8)).collect();
+    for video in [0, 1] {
+        assert!(
+            is_rej(
+                &e.hello(&h.peer(3), &h.hello_for(video)),
+                &RejCode::BadSession
+            ),
+            "one past the cap of {cap}, counted across videos (video {video})"
+        );
+    }
     drop(held);
     for play in 0..3 * cap {
         assert!(
@@ -674,21 +748,117 @@ pub async fn prepaid_chunks_are_served_whatever_the_cap<H: Harness>(h: &H) {
     assert_eq!(serve(h, &mut payer, 0, 10), 5, "exactly what it paid for");
 }
 
-/// An unpaid chunk counts toward the global cap for `debt_ttl`, then frees it for new
-/// peers. It never frees the debtor's own window.
-pub async fn debt_ages_out_of_the_global_cap_only<H: Harness>(h: &H) {
+/// An unpaid chunk counts toward the global cap for exactly `debt_ttl`, then frees it for
+/// new peers. It never frees the debtor's own window.
+pub async fn debt_counts_for_exactly_debt_ttl<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 4);
     let mut debtor = open(h, &e, 1);
     assert_eq!(serve(h, &mut debtor, 0, 4), 4);
     let mut late = open(h, &e, 2);
     assert_eq!(serve(h, &mut late, 0, 1), 0, "the cap is full");
-    h.advance(h.debt_ttl());
+    h.advance(h.debt_ttl() - Duration::from_secs(1));
+    assert_eq!(
+        serve(h, &mut late, 0, 1),
+        0,
+        "still counted a second before debt_ttl"
+    );
+    h.advance(Duration::from_secs(1));
     assert_eq!(
         serve(h, &mut debtor, 4, 1),
         0,
         "the debtor still owes its window"
     );
     assert_eq!(serve(h, &mut late, 0, 10), 4, "the old debt has aged out");
+}
+
+/// Credit on one video covers only that video's chunks.
+pub async fn credit_covers_only_its_own_video<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut one = open_on(h, &e, 1, 1);
+    one.pay(&Pay {
+        upto_chunk: 1,
+        token: h.token(1).await,
+    })
+    .await
+    .expect("one chunk of video 1, pre-paid");
+    let mut zero = open_on(h, &e, 1, 0);
+    assert_eq!(
+        serve_on(h, &mut zero, 0, 0, 100),
+        4,
+        "video 0: its window, no more"
+    );
+    assert_eq!(
+        serve_on(h, &mut one, 1, 0, 100),
+        1,
+        "video 1: its one covered chunk"
+    );
+}
+
+/// Each unpaid chunk leaves the global count exactly once, whichever comes first, its
+/// payment or its ageing, and a pre-paid chunk never enters it.
+pub async fn debt_is_freed_exactly_once<H: Harness>(h: &H) {
+    let half = h.debt_ttl() / 2;
+    // Paid, then aged, while other debt is live: ageing must not free it again.
+    let e = h.engine(1, 4, 4);
+    let mut a = open(h, &e, 1);
+    assert_eq!(serve(h, &mut a, 0, 4), 4);
+    a.pay(&Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    })
+    .await
+    .expect("a pays");
+    h.advance(half);
+    let mut b = open(h, &e, 2);
+    assert_eq!(serve(h, &mut b, 0, 4), 4, "the cap refills");
+    h.advance(half);
+    assert_eq!(
+        serve(h, &mut open(h, &e, 3), 0, 1),
+        0,
+        "a's paid chunks aged, and b's are still live"
+    );
+    // Aged, then paid: the payment must not free it again.
+    h.advance(half);
+    let mut d = open(h, &e, 4);
+    assert_eq!(serve(h, &mut d, 0, 4), 4, "b's debt has aged out");
+    b.pay(&Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    })
+    .await
+    .expect("b pays late");
+    assert_eq!(serve(h, &mut open(h, &e, 5), 0, 1), 0, "d's debt is live");
+    // Paid, then aged, with nothing else live: the count cannot go below zero.
+    let e = h.engine(1, 4, 4);
+    let mut f = open(h, &e, 1);
+    serve(h, &mut f, 0, 4);
+    f.pay(&Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    })
+    .await
+    .expect("f pays");
+    h.advance(h.debt_ttl());
+    assert_eq!(
+        serve(h, &mut open(h, &e, 2), 0, 10),
+        4,
+        "nothing is owed: the cap is free"
+    );
+    // A pre-paid chunk never enters the count.
+    let e = h.engine(1, 4, 4);
+    let mut p = open(h, &e, 1);
+    p.pay(&Pay {
+        upto_chunk: 10,
+        token: h.token(10).await,
+    })
+    .await
+    .expect("a pre-payment");
+    assert_eq!(serve(h, &mut p, 0, 10), 10);
+    assert_eq!(
+        serve(h, &mut open(h, &e, 2), 0, 10),
+        4,
+        "pre-paid chunks are not debt"
+    );
 }
 
 /// Paying ahead extends service by exactly the chunks paid.
@@ -757,8 +927,72 @@ pub async fn one_accounts_payments_are_serialised<H: Harness>(h: &H) {
     assert!(!h.claimed_any(&token.token).await);
 }
 
-/// A viewer pays for every request it sent and the seeder did not refuse, never ahead,
-/// one payment at a time.
+/// A `pay` abandoned mid-swap (its connection dropped) is cancel-safe: if its proofs
+/// were claimed, the account is credited, and the next quote shows it.
+pub async fn a_dropped_pay_is_credited_or_never_claimed<H: Harness>(h: &H) {
+    for held in ["the swap", "its response"] {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1);
+        serve(h, &mut s, 0, 4);
+        let pay = Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        };
+        if held == "the swap" {
+            h.hold_swaps();
+        } else {
+            h.hold_swap_responses();
+        }
+        poll_once(s.pay(&pay)).await;
+        h.release_swaps().await;
+        drop(s);
+        let q = open(h, &e, 1).quote().clone();
+        if h.claimed_any(&pay.token).await {
+            assert_eq!(
+                (q.accepted_upto, q.spent_total),
+                (4, 4),
+                "claimed, so credited ({held} held)"
+            );
+        } else {
+            assert_eq!(
+                (q.accepted_upto, q.spent_total),
+                (0, 0),
+                "unclaimed, so not credited ({held} held)"
+            );
+        }
+    }
+}
+
+/// Admission is atomic: the most sessions one peer may hold, admitting from as many
+/// threads at once, get exactly `window` unpaid chunks between them.
+pub async fn concurrent_admission_is_atomic<H: Harness + Sync>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let sessions: Vec<Session<H>> = (0..h.session_cap()).map(|_| open(h, &e, 1)).collect();
+    let barrier = std::sync::Barrier::new(sessions.len());
+    let admitted: u64 = std::thread::scope(|scope| {
+        let threads: Vec<_> = sessions
+            .into_iter()
+            .enumerate()
+            .map(|(t, mut s)| {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    (0..64u16)
+                        .filter(|i| s.admit(&h.chunk(t as u16 * 64 + i)))
+                        .count() as u64
+                })
+            })
+            .collect();
+        threads
+            .into_iter()
+            .map(|t| t.join().expect("an admitting thread"))
+            .sum()
+    });
+    assert_eq!(admitted, 4);
+}
+
+/// A viewer pays for every request it sent and the seeder did not refuse, never ahead of
+/// need (except half a window after a refusal), one payment at a time.
 pub async fn a_viewer_pays_for_every_request_and_no_more<H: Harness>(h: &H) {
     let e = h.engine(2, 4, 1000);
     let mut s = open(h, &e, 1);
@@ -780,7 +1014,8 @@ pub async fn a_viewer_pays_for_every_request_and_no_more<H: Harness>(h: &H) {
     assert_eq!(ack.spent_total, 4);
     v.ack(&ack).expect("a consistent ack");
 
-    // At a full global cap the seeder refuses every request, and nothing is owed.
+    // At a full global cap the seeder refuses every request: none is owed, and the
+    // viewer's next payment pays ahead for half a window, no more.
     let e = h.engine(1, 4, 4);
     let mut crowd = open(h, &e, 1);
     serve(h, &mut crowd, 0, 4);
@@ -792,15 +1027,81 @@ pub async fn a_viewer_pays_for_every_request_and_no_more<H: Harness>(h: &H) {
         assert!(!s.admit(&h.chunk(i)), "the cap is full");
         v.refused();
     }
-    assert!(v.due().await.unwrap().is_none());
     assert!(
         v.last_pay().await.unwrap().is_none(),
         "refused requests are not owed"
     );
+    let ahead = v.due().await.unwrap().expect("refused, it pays ahead");
+    assert_eq!(
+        ahead.upto_chunk, 2,
+        "half the window, nothing for the refusals"
+    );
 }
 
-/// A viewer refuses a quote over its cap, one naming no mint it holds, a second quote in
-/// the same session, and one whose account position disagrees with its ledger.
+/// A refused request is never owed, even one already paid for, which becomes credit.
+pub async fn a_viewer_owes_nothing_for_refused_requests<H: Harness>(h: &H) {
+    // A refusal after admissions: the last payment covers exactly what was served.
+    let e = h.engine(1, 8, 3);
+    let mut s = open(h, &e, 1);
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).unwrap();
+    for i in 0..4 {
+        v.requested();
+        if !s.admit(&h.chunk(i)) {
+            v.refused();
+        }
+    }
+    let tail = pay_the_tail::<H>(&mut s, &mut v)
+        .await
+        .expect("three chunks are owed");
+    assert_eq!((tail.accepted_upto, tail.spent_total), (3, 3));
+    drop(s);
+    v.end();
+    v.quote(open(h, &e, 1).quote())
+        .expect("the ledger agrees with the seeder");
+
+    // An ack that overtakes a refusal: the refused chunk was paid for, so it is credit.
+    let e = h.engine(1, 8, 3);
+    let mut s = open(h, &e, 2);
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).unwrap();
+    let admitted = (0..4)
+        .filter(|i| {
+            v.requested();
+            s.admit(&h.chunk(*i))
+        })
+        .count();
+    assert_eq!(admitted, 3, "the fourth is refused");
+    let pay = v.due().await.unwrap().expect("half the window is due");
+    assert_eq!(pay.upto_chunk, 4);
+    v.ack(&s.pay(&pay).await.expect("accepted")).unwrap();
+    v.refused();
+    v.requested();
+    assert!(s.admit(&h.chunk(3)), "the retry is served from the credit");
+    assert!(
+        v.last_pay().await.unwrap().is_none(),
+        "nothing more is owed"
+    );
+}
+
+/// A viewer that has streamed 4 chunks and ended its session, and the quote its next
+/// session gets.
+async fn resumed_viewer<H: Harness>(h: &H) -> (H::Viewer, Quote) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1);
+    let mut v = h.viewer(2);
+    v.quote(s.quote()).unwrap();
+    stream(h, &mut s, &mut v, 0, 4).await;
+    drop(s);
+    v.end();
+    let q = open(h, &e, 1).quote().clone();
+    (v, q)
+}
+
+/// A viewer refuses a quote over its cap, one naming no mint it holds, and a second quote
+/// in the same session. It refuses, and stops on, a quote whose account position
+/// disagrees with its ledger, a lower one on resume included. And it refuses a resumed
+/// quote over its cap.
 pub async fn a_viewer_refuses_quotes_it_cannot_honour<H: Harness>(h: &H) {
     let fair = open(h, &h.engine(1, 8, 1000), 1).quote().clone();
     let mut v = h.viewer(2);
@@ -813,10 +1114,10 @@ pub async fn a_viewer_refuses_quotes_it_cannot_honour<H: Harness>(h: &H) {
     v.quote(&fair).expect("a fair quote");
     assert!(v.quote(&fair).is_err(), "one quote per session");
 
-    let lies = [
-        |q: &mut nfx_proto::pay::Quote| q.served = 5,
-        |q: &mut nfx_proto::pay::Quote| q.accepted_upto = 5,
-        |q: &mut nfx_proto::pay::Quote| q.spent_total = 5,
+    let lies: [fn(&mut Quote); 3] = [
+        |q| q.served = 5,
+        |q| q.accepted_upto = 5,
+        |q| q.spent_total = 5,
     ];
     for lie in lies {
         let mut v = h.viewer(2);
@@ -828,6 +1129,20 @@ pub async fn a_viewer_refuses_quotes_it_cannot_honour<H: Harness>(h: &H) {
         );
         assert!(v.stopped());
     }
+
+    let lower: [fn(&mut Quote); 2] = [|q| q.accepted_upto -= 2, |q| q.spent_total -= 2];
+    for lie in lower {
+        let (mut v, mut q) = resumed_viewer(h).await;
+        lie(&mut q);
+        assert!(
+            v.quote(&q).is_err(),
+            "a quote below the ledger is never resynced"
+        );
+        assert!(v.stopped());
+    }
+    let (mut v, mut q) = resumed_viewer(h).await;
+    q.price_per_chunk = 3;
+    assert!(v.quote(&q).is_err(), "over its price cap, on resume too");
 }
 
 /// A viewer stops paying a seeder whose `ack` is unsolicited, or does not match the
@@ -904,9 +1219,9 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     }
 }
 
-/// A viewer reclaims a payment that is never answered, and stops. If the seeder had
-/// swapped it and the answer was lost, the viewer stops without paying those chunks
-/// again, and nobody is banned.
+/// A viewer waits 120 s for an answer, then reclaims its payment and stops. If the
+/// seeder had swapped it and the answer was lost, the viewer stops without paying those
+/// chunks again, and nobody is banned.
 pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
     let s = open(h, &h.engine(3, 2, 1000), 1);
     let mut v = h.viewer(3);
@@ -914,9 +1229,15 @@ pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
     v.requested();
     let pay = v.due().await.unwrap().expect("due");
     v.timeout().await;
+    assert!(
+        !h.claimed_any(&pay.token).await && !v.stopped(),
+        "nothing before 120 s"
+    );
+    h.advance(Duration::from_secs(120));
+    v.timeout().await;
     assert!(v.stopped());
     assert!(
-        !h.steal(&pay.token).await,
+        h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
         "the unanswered proofs were taken back"
     );
 
@@ -927,9 +1248,36 @@ pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
     v.requested();
     let pay = v.due().await.unwrap().expect("due");
     let _lost = s.pay(&pay).await.expect("swapped and acknowledged");
+    h.advance(Duration::from_secs(120));
     v.timeout().await;
     assert!(v.stopped() && !s.banned());
     assert!(v.last_pay().await.unwrap().is_none(), "not paid twice");
+}
+
+/// A seeder that swaps a payment and then refuses it, `mint-unavailable` included, gets
+/// that one payment and nothing more: the viewer finds the proofs spent and stops.
+pub async fn a_lying_seeder_takes_at_most_one_payment<H: Harness>(h: &H) {
+    for code in [RejCode::MintUnavailable, RejCode::Underpaid] {
+        let s = open(h, &h.engine(1, 4, 1000), 1);
+        let mut v = h.viewer(1);
+        v.quote(s.quote()).unwrap();
+        for _ in 0..2 {
+            v.requested();
+        }
+        let pay = v.due().await.unwrap().expect("due");
+        assert!(h.steal(&pay.token).await, "the seeder swapped it");
+        v.rej(&Rej {
+            code: code.clone(),
+            detail: None,
+        })
+        .await;
+        assert!(v.stopped(), "{code:?} after a swap: the payment is lost");
+        v.requested();
+        assert!(
+            v.due().await.unwrap().is_none() && v.last_pay().await.unwrap().is_none(),
+            "never paid again ({code:?})"
+        );
+    }
 }
 
 /// A stopped viewer pays nothing more, at the end of a session included.
@@ -981,12 +1329,12 @@ async fn pay_the_tail<H: Harness>(s: &mut Session<H>, v: &mut H::Viewer) -> Opti
 }
 
 /// An honest pair streams a whole video without the seeder ever stalling, and the total
-/// paid is exactly chunks × price.
+/// paid is exactly chunks × the quoted price, whatever the viewer would pay at most.
 pub async fn an_honest_pair_streams_a_whole_video<H: Harness>(h: &H) {
     let (chunks, price) = (101u16, 2);
     let e = h.engine(price, 8, 1000);
     let mut s = open(h, &e, 1);
-    let mut v = h.viewer(price);
+    let mut v = h.viewer(price * 3);
     v.quote(s.quote()).unwrap();
     stream(h, &mut s, &mut v, 0, chunks).await;
     let tail = pay_the_tail::<H>(&mut s, &mut v)
@@ -1046,8 +1394,9 @@ pub async fn an_honest_pair_waits_out_a_slow_mint<H: Harness>(h: &H) {
     stream(h, &mut s, &mut v, 2, 20).await;
 }
 
-/// An honest pair rides out a mint outage: `mint-unavailable`, proofs reclaimed, then
-/// paid again with fresh proofs once the mint is back.
+/// An honest pair rides out a mint outage. The seeder answers `mint-unavailable`; the
+/// viewer pays nothing more until its reclaim completes, then pays again with fresh
+/// proofs once the mint is back.
 pub async fn an_honest_pair_rides_out_a_mint_outage<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1);
@@ -1063,9 +1412,92 @@ pub async fn an_honest_pair_rides_out_a_mint_outage<H: Harness>(h: &H) {
     assert_eq!(rej.code, RejCode::MintUnavailable);
     v.rej(&rej).await;
     assert!(!v.stopped() && !s.banned());
+    assert!(
+        v.due().await.unwrap().is_none(),
+        "nothing more until its reclaim completes"
+    );
     h.mint_outage(false);
-    let again = v.due().await.unwrap().expect("paid again");
+    let again = v.due().await.unwrap().expect("paid again once reclaimed");
     assert_ne!(again.token, pay.token, "with fresh proofs");
+    assert!(
+        h.claimed_all(&pay.token).await,
+        "the first proofs came back"
+    );
     v.ack(&s.pay(&again).await.expect("accepted")).unwrap();
     stream(h, &mut s, &mut v, 2, 20).await;
+}
+
+/// A connection dropped while a payment's swap is in flight: the seeder's swap completes
+/// and is credited, the viewer's next quote settles it, and nobody is banned or pays
+/// twice.
+pub async fn an_honest_pair_survives_a_dropped_connection<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut v = h.viewer(1);
+    let mut s = open(h, &e, 1);
+    v.quote(s.quote()).unwrap();
+    for i in 0..2 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    let pay = v.due().await.unwrap().expect("due");
+    h.hold_swaps();
+    poll_once(s.pay(&pay)).await;
+    drop(s);
+    v.end();
+    h.release_swaps().await;
+    let mut s = open(h, &e, 1);
+    v.quote(s.quote())
+        .expect("the quote settles the payment as accepted");
+    assert!(!s.banned() && !v.stopped());
+    stream(h, &mut s, &mut v, 2, 10).await;
+    pay_the_tail::<H>(&mut s, &mut v).await;
+    drop(s);
+    let q = open(h, &e, 1).quote().clone();
+    assert_eq!(
+        (q.served, q.spent_total),
+        (12, 12),
+        "every chunk paid exactly once"
+    );
+}
+
+/// Free identities filling the global cap cannot lock out a paying watcher. Refused, it
+/// pays ahead, and pre-paid chunks are served whatever the cap.
+pub async fn a_paying_watcher_gets_through_a_full_cap<H: Harness>(h: &H) {
+    let (price, window) = (2, 4);
+    let e = h.engine(price, window, 8);
+    for p in 10..=11u8 {
+        let mut s = open(h, &e, p);
+        serve(h, &mut s, 0, 4);
+    }
+    let mut s = open(h, &e, 1);
+    let mut v = h.viewer(price);
+    v.quote(s.quote()).unwrap();
+    let mut served = 0u64;
+    for i in 0..40u16 {
+        v.requested();
+        if !s.admit(&h.chunk(i)) {
+            v.refused();
+            let pay = v.due().await.unwrap().expect("refused, it pays ahead");
+            v.ack(&s.pay(&pay).await.expect("a pre-payment is accepted"))
+                .unwrap();
+            v.requested();
+            assert!(
+                s.admit(&h.chunk(i)),
+                "then served from its credit (chunk {i})"
+            );
+        }
+        served += 1;
+        if let Some(pay) = v.due().await.unwrap() {
+            v.ack(&s.pay(&pay).await.expect("honest payments are accepted"))
+                .unwrap();
+        }
+    }
+    pay_the_tail::<H>(&mut s, &mut v).await;
+    drop(s);
+    let q = open(h, &e, 1).quote().clone();
+    assert_eq!(q.served, served);
+    assert!(
+        q.spent_total >= served * price && q.spent_total <= (served + window) * price,
+        "paid for what it got, and at most a window ahead: {q:?}"
+    );
 }

@@ -19,62 +19,58 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after two independent
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after three independent
 audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
-[second](reviews/2026-09-24-m2.0-second-audit.md)):
+[second](reviews/2026-09-24-m2.0-second-audit.md),
+[third](reviews/2026-09-24-m2.0-third-audit.md)):
 - **Spec (NFX-07, Draft):**
-  - §2 message rules:
-    - the NFX-11 §9 value rules and a nesting limit;
-    - unit `sat`;
-    - mint URLs with a parsed authority, and base64 tokens;
-    - limits on `rej` codes and details;
-    - a `quote` that carries the account's position.
-  - §3: **swap before ack**.
-    - Windows, bans and the global cap are seeder-wide, and the window is per peer
-      across its videos.
-    - Pre-paid chunks are served whatever the cap.
-    - Unpaid chunks count toward the cap for `debt_ttl`, so the bound is a rate.
-    - One account's payments are serialised.
-    - The checks run structure, mint, DLEQ, amount, swap. New code `mint-unavailable`.
-  - §3a: the watcher's ledger across sessions, with reclaim after every refusal.
-  - §4: HTTPS origins take one payment per request, swapped before the response, with no
-    credit.
-  - NFX-10 §3.2 and NFX-11 §5/§6 follow.
-- **Vectors:** `pay1.json` holds 18 valid lines, 3 valid only with loopback allowed, and
-  66 invalid lines. The generator checks every verdict against its own reference reader.
-  The Rust reader agrees with that reference on all 4,141 cases tried: the second
-  audit's 141 probes and 4,000 fuzzed lines.
-- **Wire:** `nfx_proto::pay` parses pay/1 through `canon`. Its writers refuse what a
-  reader with the same options would. It is pure, so the web wallet can use it through
-  WASM.
-- **Contracts:** `nfx_pay::session` defines `SeederEngine` (one seeder), `SeederSession`,
-  `Viewer` (one watcher's ledger with one seeder) and `Harness`.
+  - The seeder swaps before it acks.
+  - Bounds and bans are seeder-wide. The global cap is a rate (`debt_ttl`) that refuses
+    unpaid service, never paid service: a refused watcher pays ahead.
+  - Credit covers only its own video.
+  - `quote` carries the account's position. Unsettled payments survive a dropped
+    connection (a 120 s wait, then the next quote or a reclaim settles them).
+  - A reclaim that finds a proof spent loses that payment and stops the watcher, so a
+    lying seeder gets at most one payment.
+  - Configuration minimums and bounded per-identity state.
+  - At most 64 proofs per payment; `detail` is printable ASCII; `window` ≥ 2.
+  - HTTPS origins take one payment per request.
+- **Vectors:** `pay1.json` holds 20 valid lines, 3 loopback-only and 83 invalid, each
+  checked by the reference reader `spec/test-vectors/pay1.py`. It and the Rust reader
+  agree on 20,141 probe and fuzz cases.
+- **Wire:** `nfx_proto::pay`, pure, with writers that refuse what a reader with the same
+  options would.
+- **Contracts:** `nfx_pay::session`:
+  - `SeederEngine` (one seeder), with sessions that are `Send`;
+  - `SeederSession`, whose `pay` is cancel-safe;
+  - `Viewer` (one watcher's ledger with one seeder, on a clock);
+  - `Harness`.
 - **Mock:** `nfx_pay::mock` has:
-  - a proof-based mock mint network: multi-proof tokens, atomic swaps that can be held,
-    an outage switch and a record of dialled URLs;
-  - honest seeder and viewer engines on a harness clock, with plantable flaws.
-- **Suite:** `nfx_pay::adversary` has 35 scenarios, run through `adversary_suite!`.
-  - They pass against the honest mock.
-  - **Each of 61 planted defects fails its scenario** (`tests/mutants.rs`). The defects
-    include every mutant both audits ran.
-- **Locked paths:** `crates/ci/check-locked.sh` runs first in `check.sh`, then again last
-  with `--compiled`. It pins, from git by mode and content (`locked.sha256`):
+  - a proof-based mock mint: multi-proof tokens, atomic swaps, held swaps or held
+    responses, outages, dial records;
+  - honest seeder and viewer engines, with a validated configuration.
+- **Suite:** `nfx_pay::adversary` has 43 scenarios, and **each of 83 planted defects
+  fails its scenario**, every surviving mutant from all three audits among them.
+- **Locked paths:** `crates/ci/check-locked.sh` runs first, before the build
+  (`--sources`) and last (`--compiled`). It pins:
   - the locked stubs;
   - all of `crates/nfx-pay`;
-  - the pay/1 parser and the modules it rests on;
-  - the workspace manifest's profile, patch, replace and lints sections;
+  - the pay/1 parser with nfx-proto's `lib.rs`, `error.rs`, manifest and the modules the
+    parser rests on;
+  - the parser's tests, vectors and reference reader;
+  - the workspace manifest's build-shaping sections;
   - the check, its helper `locked.py`, `check.sh` and the CI config.
 
-  After the build it also verifies (`locked-compiled.txt`):
-  - every file the compiler read for nfx-pay is pinned;
-  - nfx-node's library reads nothing from outside its crate;
-  - only locked paths name `nfx_pay`;
-  - nfx-pay's resolved dependency closure, the crates allowed to depend on it, and the
-    workspace's build scripts and proc-macros.
+  It refuses a `CARGO_*`/`RUST*` variable outside an allow-list, and any Cargo config
+  or toolchain file where cargo reads one. It checks every cached `.crate` against
+  `Cargo.lock`. After the build it verifies:
+  - every file every workspace target compiled (tracked, and in its own crate);
+  - nfx-pay's dependency closure with its unified features;
+  - who depends on nfx-pay, and who names it;
+  - build scripts and proc-macros;
+  - that the money tests ran, all of them.
 
-  It also refuses tracked Cargo configuration. Re-pinning needs `LOCKED_DIRS_UNLOCKED=1`,
-  and neither is allowed in CI. 23 bypass attempts were refused, each for its intended
-  reason.
+  37 bypass attempts were refused.
 
 ## Proposed stages
 
