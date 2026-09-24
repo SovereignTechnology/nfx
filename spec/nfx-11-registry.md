@@ -194,3 +194,7 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
 - 2026-09-24 — M1 freeze candidate: `tickets.json` (real iroh tickets and collection hashes,
   encoded independently of iroh by the generator and checked against iroh-blobs 0.103);
   the beacon vector's placeholder tickets are replaced. The generator now needs `blake3`.
+- 2026-09-24 — **M1 freeze**: NFX-02, 03, 04, 05 and 06 frozen (sovtech). The pins they rest
+  on are the iroh 1.x series with iroh-blobs 0.103.x (the `BlobTicket` layout in NFX-06 §2)
+  and iroh-gossip 0.101.x (§4), plus the vectors as of this date, including `tickets.json`
+  and `deletion.json`.

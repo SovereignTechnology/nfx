@@ -1,6 +1,6 @@
 # NFX-06 — iroh transport profile
 
-**Status: Draft (target freeze: M1)** · depends on NFX-01/03/05
+**Status: Frozen (M1)** · 2026-09-24 · depends on NFX-01/03/05
 
 iroh is the native transport: QUIC connections with hole-punching, relay fallback,
 and hash-verified blob transfer built in. This profile pins *how* NFX uses it; it
@@ -158,3 +158,6 @@ lands on 2/3 and verifies NFX-05 §4.
   the ticket/`node` agreement rule are stated normatively, with vectors (`tickets.json`).
 - Draft 2026-09-24 (M1 freeze candidate): "endpoint id" for iroh 1.x; collection order
   comes from the playlist alone; the 4 KiB envelope limit is enforced before parsing.
+- **Frozen at M1, 2026-09-24** (sovtech). From here on, a behaviour change needs a
+  `specver` bump (NFX-01 §4); only clarifications that change no behaviour are edited in
+  place. Record: `docs/nfx/freeze-m1-candidate.md`.

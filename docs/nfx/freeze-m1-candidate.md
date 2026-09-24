@@ -1,6 +1,7 @@
 # M1 freeze candidate: NFX-02 to NFX-06 (2026-09-24)
 
-**Status: candidate, not frozen. No blockers remain.** Freezing is sovtech's call. This
+**Status: FROZEN at M1 on 2026-09-24 (sovtech).** What follows is the candidate record
+that led to the freeze. No blockers remained. Freezing is sovtech's call. This
 page shows what a freeze would lock and what changed to get here. The one open decision,
 deletion, was settled on 2026-09-24 (option 1) and is implemented.
 

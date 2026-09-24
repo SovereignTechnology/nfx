@@ -25,11 +25,11 @@ desktop shell.
 | Doc | Title | Status | Freezes |
 |---|---|---|---|
 | NFX-01 | Networks & versions | **Frozen** (re-frozen 2026-09-23) | M0 |
-| NFX-02 | Catalog manifest (kind 38504) | Draft | M1 |
-| NFX-03 | Availability beacons (kind 20464) | Draft | M1 |
-| NFX-04 | Scoped relay profile | Draft | M1 |
-| NFX-05 | Segments & content integrity | Draft | M1 |
-| NFX-06 | iroh transport profile | Draft | M1 |
+| NFX-02 | Catalog manifest (kind 38504) | **Frozen** (2026-09-24) | M1 |
+| NFX-03 | Availability beacons (kind 20464) | **Frozen** (2026-09-24) | M1 |
+| NFX-04 | Scoped relay profile | **Frozen** (2026-09-24) | M1 |
+| NFX-05 | Segments & content integrity | **Frozen** (2026-09-24) | M1 |
+| NFX-06 | iroh transport profile | **Frozen** (2026-09-24) | M1 |
 | NFX-07 | Payments — open mode | Draft | M2 |
 | NFX-08 | Payments — licensed mode & vouchers | Draft | M3 |
 | NFX-09 | Split-mint extension (mint API) | Draft | M3 |

@@ -1,6 +1,6 @@
 # NFX-05 — Segments & content integrity
 
-**Status: Draft (target freeze: M1)** · depends on NFX-01/02
+**Status: Frozen (M1)** · 2026-09-24 · depends on NFX-01/02
 
 The data plane. One content-addressed unit (a **file**) used identically by every
 transport — iroh, HTTPS origin, and (NFX-10) WebRTC mesh — so all transports feed one
@@ -203,3 +203,6 @@ server generalizes to an origin when its admin pins NFX-05 content.
   two is invalid (`hashlist-invalid.json` case `duplicate-uri-attribute`).
 - Draft 2026-09-24 (M1 freeze candidate): AAC-LC is required when the source has audio
   (a silent video has none); §6.1 hash-addressed URLs carry no query string.
+- **Frozen at M1, 2026-09-24** (sovtech). From here on, a behaviour change needs a
+  `specver` bump (NFX-01 §4); only clarifications that change no behaviour are edited in
+  place. Record: `docs/nfx/freeze-m1-candidate.md`.

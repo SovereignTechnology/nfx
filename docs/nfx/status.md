@@ -268,8 +268,9 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 2. ~~**`nfx-proto` WASM bindings**~~ done (`crates/nfx-wasm`; the test player uses
    them). ~~Resolving a manifest by `a` tag over Nostr in the browser~~ done
    (2026-09-24): see below.
-3. **M1 spec freeze:** the candidate is ready with no blockers
-   ([`freeze-m1-candidate.md`](freeze-m1-candidate.md)).
+3. ~~**M1 spec freeze**~~ **done 2026-09-24:** NFX-02 to 06 are Frozen (M1)
+   ([`freeze-m1-candidate.md`](freeze-m1-candidate.md)). A behaviour change now needs a
+   `specver` bump.
    - Real iroh tickets are pinned byte for byte, schemas are checked in CI, and the gossip
      size limit is enforced.
    - Deletion is decided (targeted NIP-09 deletions admitted) and implemented end to end.

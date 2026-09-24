@@ -1,6 +1,6 @@
 # NFX-02 — Catalog manifest (kind 38504)
 
-**Status: Draft (target freeze: M1)** · supersedes nothing · depends on NFX-01, NFX-05
+**Status: Frozen (M1)** · 2026-09-24 · supersedes nothing · depends on NFX-01, NFX-05
 
 One signed, addressable Nostr event per video. It is the *only* low-churn nostr object
 in the protocol; everything above ~1 msg/min lives elsewhere (NFX-03, NFX-06).
@@ -177,3 +177,6 @@ see a playable video; NFX consumers ignore the mirror.
   vectors `deletion.json`. Renunciation no longer described as a deletion.
 - Draft 2026-09-24 (M1 freeze candidate): §2 how an address is split (first two colons),
   after nostr-sdk's parser was found to truncate NFX addresses.
+- **Frozen at M1, 2026-09-24** (sovtech). From here on, a behaviour change needs a
+  `specver` bump (NFX-01 §4); only clarifications that change no behaviour are edited in
+  place. Record: `docs/nfx/freeze-m1-candidate.md`.

@@ -1,6 +1,6 @@
 # NFX-03 — Availability beacons (kind 20464)
 
-**Status: Draft (target freeze: M1)** · depends on NFX-01, NFX-02
+**Status: Frozen (M1)** · 2026-09-24 · depends on NFX-01, NFX-02
 
 High-churn "I have these bytes right now" announcements. Nostr is the
 censorship-resistant fallback for swarm discovery; native mechanisms (iroh gossip,
@@ -128,3 +128,6 @@ edit in this spec is ever required to grow the relay set.
 - Draft 2026-09-24 (M1 freeze candidate): the vector carries real iroh tickets
   (`tickets.json`, NFX-06 §2); extra tags are ignored by readers, never added by
   publishers; the content schema is checked against the vectors in CI.
+- **Frozen at M1, 2026-09-24** (sovtech). From here on, a behaviour change needs a
+  `specver` bump (NFX-01 §4); only clarifications that change no behaviour are edited in
+  place. Record: `docs/nfx/freeze-m1-candidate.md`.

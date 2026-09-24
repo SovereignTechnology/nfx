@@ -1,6 +1,6 @@
 # NFX-04 — Scoped relay profile
 
-**Status: Draft (target freeze: M1)** · depends on NFX-01/02/03
+**Status: Frozen (M1)** · 2026-09-24 · depends on NFX-01/02/03
 
 A "scoped relay" is a bog-standard NIP-01 relay with a deliberately narrow admission
 policy. Nothing in this document invents wire mechanics; it is a *profile* — an
@@ -109,3 +109,6 @@ redundancy comes from many operators).
 - Draft 2026-09-23 (A2 pre-push audit): §2 `created_at` future bound.
 - Draft 2026-09-24 (M1 freeze candidate): §1 admits NFX deletions (kind 5, NFX-02 §6)
   and applies them; §2 counts them with manifest publishes; §3 lists kind 5.
+- **Frozen at M1, 2026-09-24** (sovtech). From here on, a behaviour change needs a
+  `specver` bump (NFX-01 §4); only clarifications that change no behaviour are edited in
+  place. Record: `docs/nfx/freeze-m1-candidate.md`.
