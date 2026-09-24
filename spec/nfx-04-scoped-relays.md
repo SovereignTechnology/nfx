@@ -27,6 +27,7 @@ A scoped relay for namespace(s) `N…`:
 | `REQ` per connection | ≤ 20 concurrent subscriptions |
 | Filter cardinality | `#a` / `#n` lists ≤ 256 entries |
 | Event size | manifests ≤ 64 KiB hard; beacons ≤ 16 KiB hard |
+| `created_at` | ≤ now + 15 min (reject later ones: a far-future revision outranks, and in a capped store outlives, every real one) |
 
 The 20 s beacon floor leaves slack under NFX-03's republish rule (TTL 60 → republish
 at 30 s). Being scoped is the rate limiter that makes beacon traffic viable: the relay
@@ -102,3 +103,4 @@ redundancy comes from many operators).
   (30 s) has slack.
 - Draft 2026-09-23 — wire token `nfx` (NIP-11 key `"nfx"`, ADR 0008 §2). New §7:
   a seeder node MAY embed a scoped relay (plan amendment 8); former §7 is §8.
+- Draft 2026-09-23 (A2 pre-push audit): §2 `created_at` future bound.

@@ -44,3 +44,5 @@ without a crypto provider. The test uses hyper's own HTTP/1 client instead (a
 dev-dependency feature, `client`).
 
 Verdict: **no blocker.** The push waits for sovtech's OK.
+
+**Erratum (pre-push audit, same day):** connection caps, a connection lifetime, a 60 s pull deadline, source cooldowns and query refusal were added. See `2026-09-23-a2-pre-push.md` #2, #3, #6.

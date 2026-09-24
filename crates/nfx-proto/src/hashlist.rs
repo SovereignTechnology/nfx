@@ -182,21 +182,31 @@ impl HashList {
         self.renditions.iter().find(|r| r.playlist == file.name)
     }
 
-    /// NFX-05 §3: every URI in a playlist is a content name listed in `files`.
+    /// NFX-05 §3: every URI in a playlist is a content name listed in `files`. On a tag
+    /// line every `URI` attribute counts, and a tag with more than one is invalid (players
+    /// disagree on which duplicate wins).
     pub fn check_playlist(&self, bytes: &[u8]) -> Result<()> {
         let text = core::str::from_utf8(bytes).map_err(|_| Error::Playlist("not UTF-8".into()))?;
+        let listed: BTreeSet<&str> = self.files.iter().map(|f| f.sha256.as_str()).collect();
+        let resolves = |uri: &str| {
+            uri.split_once('.').is_some_and(|(hash, ext)| {
+                !ext.is_empty() && is_lower_hex(hash, 64) && listed.contains(hash)
+            })
+        };
         for line in text.lines().map(|l| l.trim_end_matches('\r')) {
-            let uri = if line.starts_with('#') {
-                match line.split_once("URI=\"") {
-                    Some((_, rest)) => rest.split('"').next().unwrap_or(""),
-                    None => continue,
-                }
+            let uris = if line.starts_with('#') {
+                tag_uris(line)?
             } else if line.trim().is_empty() {
                 continue;
             } else {
-                line
+                vec![line]
             };
-            if self.resolve(uri).is_none() {
+            if uris.len() > 1 {
+                return Err(Error::Playlist(
+                    "a tag carries more than one URI attribute".into(),
+                ));
+            }
+            if let Some(uri) = uris.into_iter().find(|u| !resolves(u)) {
                 return Err(Error::Playlist(format!(
                     "URI {uri:?} is not a listed content name"
                 )));
@@ -219,4 +229,43 @@ pub fn verify_file(expected_sha256_hex: &str, bytes: &[u8]) -> Result<()> {
 
 fn bad(reason: &str) -> Error {
     Error::HashList(reason.to_owned())
+}
+
+/// The values of every `URI` attribute on an HLS tag line. Lines that mention no `URI=` have
+/// none; lines that do must be a well-formed attribute list (`NAME=value`, quoted or not,
+/// comma-separated), or they are refused rather than guessed at.
+fn tag_uris(line: &str) -> Result<Vec<&str>> {
+    if !line.contains("URI=") {
+        return Ok(Vec::new());
+    }
+    let bad = || Error::Playlist(format!("malformed attribute list: {line:?}"));
+    let (_, mut rest) = line.split_once(':').ok_or_else(bad)?;
+    let mut uris = Vec::new();
+    while !rest.is_empty() {
+        let (name, after) = rest.split_once('=').ok_or_else(bad)?;
+        let name = name.trim();
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(bad());
+        }
+        let (value, next) = match after.strip_prefix('"') {
+            Some(quoted) => {
+                let end = quoted.find('"').ok_or_else(bad)?;
+                (&quoted[..end], &quoted[end + 1..])
+            }
+            None => after.split_at(after.find(',').unwrap_or(after.len())),
+        };
+        if name == "URI" {
+            uris.push(value);
+        }
+        rest = match next.strip_prefix(',') {
+            Some(r) => r,
+            None if next.trim().is_empty() => "",
+            None => return Err(bad()),
+        };
+    }
+    Ok(uris)
 }

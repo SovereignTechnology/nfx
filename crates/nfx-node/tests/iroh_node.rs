@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use common::{relay, tmp, vector_store};
 use iroh::address_lookup::MemoryLookup;
 use iroh_blobs::api::blobs::AddBytesOptions;
+use iroh_blobs::api::proto::BlobStatus;
 use iroh_blobs::hashseq::HashSeq;
 use iroh_blobs::ticket::BlobTicket;
 use iroh_blobs::{BlobFormat, HashAndFormat};
@@ -135,12 +136,53 @@ async fn seed_fetch_tamper_and_gossip_over_a_self_hosted_relay() {
         }
         other => panic!("expected Poisoned, got {other}"),
     }
+    // Members that verified before the lie may be stored (they are the right bytes);
+    // the poisoned one never is, and everything stored re-verifies.
+    assert!(
+        !clean.has(&members[2]),
+        "the poisoned member is never stored"
+    );
     for sha in &members {
-        assert!(
-            !clean.has(sha),
-            "no rendition file may be stored after a poisoned collection"
-        );
+        if clean.has(sha) {
+            clean.get(sha).unwrap();
+        }
     }
+
+    // A bloated seeder: member 2 is 5 MiB where the hash list says 27 bytes. The fetcher
+    // asks for at most the listed size, so the blob never completes and is refused: a
+    // lying beacon wastes time, not bytes (NFX-06 §2).
+    let mut hashes = Vec::new();
+    for (i, sha) in members.iter().enumerate() {
+        let bytes = if i == 2 {
+            vec![0u8; 5 << 20]
+        } else {
+            seed_store.get(sha).unwrap()
+        };
+        hashes.push(liar.blobs().add_bytes(bytes).await.unwrap().hash);
+    }
+    let big = hashes[2];
+    let seq: HashSeq = hashes.iter().copied().collect();
+    let seq_hash = liar
+        .blobs()
+        .add_bytes_with_opts(AddBytesOptions {
+            data: seq.into_inner(),
+            format: BlobFormat::HashSeq,
+        })
+        .await
+        .unwrap()
+        .hash;
+    let bloated = BlobTicket::new(liar.addr(), seq_hash, BlobFormat::HashSeq);
+    let err = victim
+        .fetch(&anchor, &meta, &[("720p".into(), bloated)], &clean)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, NodeError::Collection(_)), "{err}");
+    let status = victim.blobs().status(big).await.unwrap();
+    assert!(
+        !matches!(status, BlobStatus::Complete { .. }),
+        "the oversized member was never downloaded whole: {status:?}"
+    );
+    assert!(!clean.has(&members[2]));
 
     // Gossip: the fetcher joins the video's swarm via the seeder; the seeder announces a
     // signed envelope carrying its real tickets.

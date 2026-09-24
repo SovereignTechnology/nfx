@@ -576,3 +576,38 @@ fn storyboard_vtt_cues() {
         "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\ns.jpg#xywh=0,0,160,90\n\n00:00:01.000 --> 00:00:02.000\ns.jpg#xywh=160,0,160,90\n\n00:00:02.000 --> 00:00:02.500\ns.jpg#xywh=0,90,160,90\n"
     );
 }
+
+// NFX addition: every input is opened as a local file with a known demuxer.
+#[test]
+fn every_invocation_guards_its_input() {
+    use nfx_media::argv::INPUT_GUARD;
+    use nfx_media::probe::ffprobe_argv;
+    let sb = storyboard_geometry(120.0).unwrap();
+    let all = [
+        rendition_argv("/in", "/out.mp4", &source(), &spec720(), 30.0, None).unwrap(),
+        rendition_cmaf_argv(
+            "/in",
+            std::path::Path::new("/w"),
+            &source(),
+            &spec720(),
+            30.0,
+            None,
+        )
+        .unwrap(),
+        thumbnail_argv("/in", "/t.jpg", 1.0, 640),
+        placeholder_argv("/in", "/p.jpg", 1.0),
+        storyboard_argv("/in", "/s.jpg", &sb),
+        ffprobe_argv("/in"),
+    ];
+    for argv in &all {
+        let input = argv
+            .iter()
+            .position(|a| a == "-i")
+            .unwrap_or(argv.len() - 1);
+        let guard = argv
+            .windows(4)
+            .position(|w| w == INPUT_GUARD)
+            .unwrap_or_else(|| panic!("no input guard in {argv:?}"));
+        assert!(guard < input, "the guard precedes the input: {argv:?}");
+    }
+}

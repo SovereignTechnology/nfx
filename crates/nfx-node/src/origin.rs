@@ -9,6 +9,8 @@
 //! bad response would otherwise be cached for a year under `immutable`.
 //!
 //! TLS is terminated in front of this server (a CDN or reverse proxy); it speaks HTTP/1.1.
+//! Connections are capped ([`crate::limit`]) and live at most [`CONNECTION_LIFETIME`];
+//! a request that waits on the swarm gives up after [`PULL_DEADLINE`].
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -29,6 +31,7 @@ use nfx_proto::manifest::Manifest;
 use tokio::net::TcpListener;
 
 use crate::fetch::Anchor;
+use crate::limit::ConnLimits;
 use crate::node::Node;
 use crate::store::ContentStore;
 use crate::video::{meta_members, rendition_members};
@@ -40,6 +43,14 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 /// Slow-loris bound: a client must finish its request headers within this.
 pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// A connection is closed after this, whatever it is doing; clients reconnect.
+pub const CONNECTION_LIFETIME: Duration = Duration::from_secs(300);
+/// How long one request waits on a pull before answering 504 (`no-store`).
+pub const PULL_DEADLINE: Duration = Duration::from_secs(60);
+/// Most seeders remembered per video.
+pub const MAX_SOURCES_PER_VIDEO: usize = 16;
+/// A source that failed, or whose attempt was cut short, is tried last for this long.
+pub const SOURCE_COOLDOWN_SECS: u64 = 300;
 
 /// Thumb MIME types the origin will put in `Content-Type`. The manifest's `thumb` MIME is
 /// creator-controlled; anything else is served as `application/octet-stream`, so a "thumb"
@@ -60,15 +71,17 @@ pub trait Pull: Send + Sync {
 
 struct Video {
     manifest: Manifest,
-    list: HashList,
+    /// sha256 → Content-Type, as this video's hash list types the file.
+    types: BTreeMap<String, &'static str>,
+    master: Option<String>,
 }
 
 #[derive(Default)]
 struct Index {
     /// root → video.
     videos: BTreeMap<String, Video>,
-    /// sha256 → (Content-Type, a root whose hash list names it).
-    files: BTreeMap<String, (&'static str, String)>,
+    /// sha256 → the first held root whose hash list names it.
+    files: BTreeMap<String, String>,
 }
 
 pub struct Origin {
@@ -99,32 +112,48 @@ impl Origin {
             self.pull_into_store(manifest, &root).await?;
         }
         let list = HashList::verify_for(&self.store.get(&root)?, manifest)?;
+        let types = list
+            .files
+            .iter()
+            .map(|f| (f.sha256.clone(), content_type(f.role, &f.sha256, manifest)))
+            .collect();
+        let master = list
+            .files
+            .iter()
+            .find(|f| f.role == Role::PlaylistMaster)
+            .map(|f| f.sha256.clone());
         let mut index = self.index.write().unwrap_or_else(PoisonError::into_inner);
         for f in &list.files {
-            let content_type = content_type(f.role, &f.sha256, manifest);
             index
                 .files
                 .entry(f.sha256.clone())
-                .or_insert((content_type, root.clone()));
+                .or_insert_with(|| root.clone());
         }
         index.videos.insert(
             root,
             Video {
                 manifest: manifest.clone(),
-                list,
+                types,
+                master,
             },
         );
         Ok(())
     }
 
-    /// Answer one request (§6). `path` is the request path, without the query string.
-    pub async fn respond(&self, method: &Method, path: &str) -> Response<Full<Bytes>> {
+    /// Answer one request (§6). `target` is the request's path and query. A query string
+    /// is refused: each variant would be a separate year-long CDN object, and the CDN
+    /// would stop shielding the origin.
+    pub async fn respond(&self, method: &Method, target: &str) -> Response<Full<Bytes>> {
         let head = match *method {
             Method::GET => false,
             Method::HEAD => true,
             Method::OPTIONS => return preflight(),
             _ => return error(StatusCode::METHOD_NOT_ALLOWED, "GET or HEAD", false),
         };
+        if target.contains('?') {
+            return error(StatusCode::BAD_REQUEST, "no query strings", head);
+        }
+        let path = target;
         let Some(rest) = path.strip_prefix('/') else {
             return error(StatusCode::NOT_FOUND, "no route", head);
         };
@@ -138,18 +167,26 @@ impl Origin {
         let Some((sha, content_type, manifest)) = target else {
             return error(StatusCode::NOT_FOUND, "not listed here", head);
         };
-        // The cause stays inside: an HTTP client learns only that the file is not here yet.
-        if !self.store.has(&sha) && self.pull_into_store(&manifest, &sha).await.is_err() {
-            return error(StatusCode::BAD_GATEWAY, "not available yet", head);
+        // A stored file that no longer verifies is never served: drop it and pull again.
+        if self.store.has(&sha) && self.store.get(&sha).is_err() {
+            let _ = self.store.remove(&sha);
+        }
+        if !self.store.has(&sha) {
+            // The cause stays inside: a client learns only that the file is not here yet.
+            match tokio::time::timeout(PULL_DEADLINE, self.pull_into_store(&manifest, &sha)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return error(StatusCode::BAD_GATEWAY, "not available yet", head),
+                Err(_) => return error(StatusCode::GATEWAY_TIMEOUT, "not available yet", head),
+            }
         }
         match self.store.get(&sha) {
-            Ok(bytes) => hit(bytes, content_type, head),
-            // Missing or failing verification: never serve it.
+            Ok(bytes) => hit(&sha, bytes, content_type, head),
             Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "store miss", head),
         }
     }
 
-    /// (sha, Content-Type, manifest) for a listed file, or a held root's hash list.
+    /// (sha, Content-Type, manifest) for a listed file, or a held root's hash list. Under
+    /// `/<root>/…` the file is typed as that root's hash list types it.
     fn lookup(&self, sha: &str, root: Option<&str>) -> Option<(String, &'static str, Manifest)> {
         let index = self.index.read().unwrap_or_else(PoisonError::into_inner);
         if root.is_none()
@@ -157,30 +194,20 @@ impl Origin {
         {
             return Some((sha.to_owned(), "application/json", v.manifest.clone()));
         }
-        let (content_type, listed_by) = index.files.get(sha)?;
         let video = match root {
-            Some(root) => {
-                let v = index.videos.get(root)?;
-                v.list.files.iter().any(|f| f.sha256 == sha).then_some(v)?
-            }
-            None => index.videos.get(listed_by)?,
+            Some(root) => index.videos.get(root)?,
+            None => index.videos.get(index.files.get(sha)?)?,
         };
+        let content_type = video.types.get(sha)?;
         Some((sha.to_owned(), content_type, video.manifest.clone()))
     }
 
     fn master(&self, root: &str) -> Option<(String, &'static str, Manifest)> {
         let index = self.index.read().unwrap_or_else(PoisonError::into_inner);
         let v = index.videos.get(root)?;
-        let f = v
-            .list
-            .files
-            .iter()
-            .find(|f| f.role == Role::PlaylistMaster)?;
-        Some((
-            f.sha256.clone(),
-            content_type(f.role, &f.sha256, &v.manifest),
-            v.manifest.clone(),
-        ))
+        let sha = v.master.clone()?;
+        let content_type = v.types.get(&sha)?;
+        Some((sha, content_type, v.manifest.clone()))
     }
 
     async fn pull_into_store(&self, manifest: &Manifest, sha: &str) -> Result<()> {
@@ -273,12 +300,30 @@ fn finish(
         .unwrap_or_else(|_| Response::new(Full::new(Bytes::new())))
 }
 
-fn hit(bytes: Vec<u8>, content_type: &'static str, head: bool) -> Response<Full<Bytes>> {
-    finish(
-        base(StatusCode::OK, content_type, IMMUTABLE),
-        bytes.into(),
-        head,
-    )
+/// The extension a download of this type is saved under. A URL's extension is ignored for
+/// lookup (§6), so `<sha>.exe` fetches a segment; this keeps the saved name honest.
+fn extension(content_type: &str) -> &'static str {
+    match content_type {
+        "application/vnd.apple.mpegurl" => "m3u8",
+        "video/mp4" => "mp4",
+        "video/iso.segment" => "m4s",
+        "text/vtt; charset=utf-8" => "vtt",
+        "application/json" => "json",
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/avif" => "avif",
+        _ => "bin",
+    }
+}
+
+fn hit(sha: &str, bytes: Vec<u8>, content_type: &'static str, head: bool) -> Response<Full<Bytes>> {
+    let disposition = format!("inline; filename=\"{sha}.{}\"", extension(content_type));
+    let builder = base(StatusCode::OK, content_type, IMMUTABLE).header(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&disposition).unwrap_or(HeaderValue::from_static("inline")),
+    );
+    finish(builder, bytes.into(), head)
 }
 
 /// Errors are not content (§6.1): `no-store`.
@@ -310,28 +355,45 @@ fn preflight() -> Response<Full<Bytes>> {
     finish(builder, Bytes::new(), true)
 }
 
-/// Serve `origin` on `listener` until the task is dropped. HTTP/1.1, no TLS.
+/// Serve `origin` on `listener` until the task is dropped, with the default connection
+/// caps. HTTP/1.1, no TLS.
 pub async fn serve(origin: Arc<Origin>, listener: TcpListener) {
+    serve_with_limits(origin, listener, Arc::new(ConnLimits::default())).await;
+}
+
+/// [`serve`] with explicit connection caps.
+pub async fn serve_with_limits(
+    origin: Arc<Origin>,
+    listener: TcpListener,
+    limits: Arc<ConnLimits>,
+) {
     loop {
-        let stream = match listener.accept().await {
-            Ok((stream, _)) => stream,
+        let (stream, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
             // Out of file descriptors and the like: back off rather than spin.
             Err(_) => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
         };
+        let Some(guard) = limits.admit(peer) else {
+            continue; // over a cap: the socket is dropped
+        };
         let origin = origin.clone();
         tokio::spawn(async move {
+            let _guard = guard;
             let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
                 let origin = origin.clone();
-                async move { Ok::<_, Infallible>(origin.respond(req.method(), req.uri().path()).await) }
+                async move {
+                    let target = req.uri().path_and_query().map_or("/", |p| p.as_str());
+                    Ok::<_, Infallible>(origin.respond(req.method(), target).await)
+                }
             });
-            let _ = hyper::server::conn::http1::Builder::new()
+            let conn = hyper::server::conn::http1::Builder::new()
                 .timer(TokioTimer::new())
                 .header_read_timeout(HEADER_READ_TIMEOUT)
-                .serve_connection(TokioIo::new(stream), service)
-                .await;
+                .serve_connection(TokioIo::new(stream), service);
+            let _ = tokio::time::timeout(CONNECTION_LIFETIME, conn).await;
         });
     }
 }
@@ -344,12 +406,20 @@ struct Source {
     expiration: u64,
     /// Rendition id, or `meta` → ticket.
     tickets: BTreeMap<String, String>,
+    /// Tried last until this time (unix seconds); 0 when the last attempt succeeded.
+    cooldown_until: u64,
 }
 
 /// A [`Pull`] over iroh: the tickets come from verified beacons ([`SwarmPull::learn`]).
-/// Sources are tried in the order they were learned and lapse when their beacon expires
-/// (NFX-03: a seeder stops announcing by stopping). A source that serves bytes the hash
-/// list does not name is forgotten ([`NodeError::Poisoned`]).
+///
+/// - Sources lapse when their beacon expires (NFX-03: a seeder stops announcing by
+///   stopping). At most [`MAX_SOURCES_PER_VIDEO`] are kept per video.
+/// - Before each attempt a source is put on cooldown, which success clears. A source
+///   that fails, stalls into a deadline, or is cut short by a cancelled request is
+///   therefore tried after every other one for [`SOURCE_COOLDOWN_SECS`]. A staller
+///   costs one attempt, not one per request.
+/// - A source that serves bytes the hash list does not name is forgotten
+///   ([`NodeError::Poisoned`]).
 pub struct SwarmPull {
     node: Arc<Node>,
     /// manifest a-tag → sources, in the order learned.
@@ -387,26 +457,43 @@ impl SwarmPull {
         if !tickets.contains_key("meta") {
             return;
         }
-        let source = Source {
-            seeder: beacon.seeder.clone(),
-            created_at: beacon.created_at,
-            expiration: beacon.expiration,
-            tickets,
-        };
         let now = unix_now();
         let mut sources = self.sources.write().unwrap_or_else(PoisonError::into_inner);
         let list = sources.entry(a).or_default();
         list.retain(|s| now < s.expiration);
-        match list.iter_mut().find(|s| s.seeder == beacon.seeder) {
-            Some(held) if held.created_at < source.created_at => *held = source,
-            Some(_) => {}
-            None => list.push(source),
+        if let Some(held) = list.iter_mut().find(|s| s.seeder == beacon.seeder) {
+            if held.created_at < beacon.created_at {
+                held.created_at = beacon.created_at;
+                held.expiration = beacon.expiration;
+                held.tickets = tickets; // keeps its cooldown: a new beacon is no new chance
+            }
+            return;
         }
+        if list.len() >= MAX_SOURCES_PER_VIDEO {
+            // Make room: a source on cooldown first, else the one announced longest ago.
+            let evict = list
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, s)| (s.cooldown_until > now, std::cmp::Reverse(s.created_at)))
+                .map(|(i, _)| i);
+            if let Some(i) = evict {
+                list.remove(i);
+            }
+        }
+        list.push(Source {
+            seeder: beacon.seeder.clone(),
+            created_at: beacon.created_at,
+            expiration: beacon.expiration,
+            tickets,
+            cooldown_until: 0,
+        });
     }
 
-    /// Sources for a manifest whose beacons have not expired at `now`, in order.
+    /// Unexpired sources for a manifest at `now`: those not on cooldown first, in the
+    /// order learned, then the rest by when their cooldown ends.
     fn live(&self, manifest_a: &str, now: u64) -> Vec<Source> {
-        self.sources
+        let mut live: Vec<Source> = self
+            .sources
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(manifest_a)
@@ -416,7 +503,53 @@ impl SwarmPull {
                     .cloned()
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        live.sort_by_key(|s| {
+            if s.cooldown_until > now {
+                s.cooldown_until
+            } else {
+                0
+            }
+        });
+        live
+    }
+
+    /// Set a source's cooldown end (0 clears it).
+    fn cool(&self, a: &str, seeder: &str, until: u64) {
+        let mut sources = self.sources.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(s) = sources
+            .get_mut(a)
+            .and_then(|list| list.iter_mut().find(|s| s.seeder == seeder))
+        {
+            s.cooldown_until = until;
+        }
+    }
+
+    /// Run `attempt` against each live source in turn: cooldown first (so a cancelled
+    /// attempt counts as a failure), cleared on success, forgotten on a lie.
+    async fn each_source<T, F, Fut>(&self, a: &str, mut attempt: F) -> Result<T>
+    where
+        F: FnMut(Source) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let mut last = NodeError::Collection(format!("no live source for {a}"));
+        for source in self.live(a, unix_now()) {
+            let seeder = source.seeder.clone();
+            self.cool(a, &seeder, unix_now() + SOURCE_COOLDOWN_SECS);
+            match attempt(source).await {
+                Ok(v) => {
+                    self.cool(a, &seeder, 0);
+                    return Ok(v);
+                }
+                Err(e) => {
+                    if matches!(e, NodeError::Poisoned { .. }) {
+                        self.forget(a, &seeder);
+                    }
+                    last = e;
+                }
+            }
+        }
+        Err(last)
     }
 
     /// The seeders currently usable for a manifest (`a` tag), in the order they are tried.
@@ -504,37 +637,26 @@ impl SwarmPull {
             video: &manifest.addr,
             segs: manifest.segs,
         };
-        let mut last = NodeError::Collection(format!("no live source for {a}"));
-        for source in self.live(&a, unix_now()) {
-            let attempt = async {
-                let ticket = |id: &str| -> Result<BlobTicket> {
-                    source
-                        .tickets
-                        .get(id)
-                        .ok_or_else(|| NodeError::Collection(format!("no {id} ticket")))?
-                        .parse()
-                        .map_err(NodeError::transport)
-                };
-                let meta = ticket("meta")?;
-                let list = self.node.fetch(&anchor, &meta, &[], store).await?;
-                let renditions = list
-                    .renditions
-                    .iter()
-                    .map(|r| Ok((r.id.clone(), ticket(&r.id)?)))
-                    .collect::<Result<Vec<_>>>()?;
-                self.node.fetch(&anchor, &meta, &renditions, store).await
+        let anchor = &anchor;
+        self.each_source(&a, |source| async move {
+            let ticket = |id: &str| -> Result<BlobTicket> {
+                source
+                    .tickets
+                    .get(id)
+                    .ok_or_else(|| NodeError::Collection(format!("no {id} ticket")))?
+                    .parse()
+                    .map_err(NodeError::transport)
             };
-            match attempt.await {
-                Ok(list) => return Ok(list),
-                Err(e) => {
-                    if matches!(e, NodeError::Poisoned { .. }) {
-                        self.forget(&a, &source.seeder);
-                    }
-                    last = e;
-                }
-            }
-        }
-        Err(last)
+            let meta = ticket("meta")?;
+            let list = self.node.fetch(anchor, &meta, &[], store).await?;
+            let renditions = list
+                .renditions
+                .iter()
+                .map(|r| Ok((r.id.clone(), ticket(&r.id)?)))
+                .collect::<Result<Vec<_>>>()?;
+            self.node.fetch(anchor, &meta, &renditions, store).await
+        })
+        .await
     }
 }
 
@@ -547,19 +669,10 @@ impl Pull for SwarmPull {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let a = manifest.a_tag();
-            let mut last = NodeError::Collection(format!("no live source for {a}"));
-            for source in self.live(&a, unix_now()) {
-                match self.pull_from(manifest, sha, &source.tickets, store).await {
-                    Ok(()) => return Ok(()),
-                    Err(e) => {
-                        if matches!(e, NodeError::Poisoned { .. }) {
-                            self.forget(&a, &source.seeder);
-                        }
-                        last = e;
-                    }
-                }
-            }
-            Err(last)
+            self.each_source(&a, |source| async move {
+                self.pull_from(manifest, sha, &source.tickets, store).await
+            })
+            .await
         })
     }
 }

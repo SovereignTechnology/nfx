@@ -115,5 +115,25 @@ fn packages_a_720p_clip_into_verified_nfx05_content() {
     // The store holds every listed file plus the hash list, all named by sha256.
     let stored = std::fs::read_dir(tmp.join("store")).unwrap().count();
     assert_eq!(stored, p.hash_list.files.len() + 1);
+
+    // A playlist posing as a video would make ffmpeg read other local files into the
+    // output; the input guard refuses the HLS demuxer outright.
+    let hostile = tmp.join("upload.m3u8");
+    std::fs::write(
+        &hostile,
+        format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\n{}\n#EXT-X-ENDLIST\n",
+            src.display()
+        ),
+    )
+    .unwrap();
+    let refused = package(
+        &hostile,
+        &tmp.join("store2"),
+        &tmp.join("work2"),
+        &runner(),
+        &opts,
+    );
+    assert!(refused.is_err(), "an HLS playlist is not a video input");
     std::fs::remove_dir_all(&tmp).unwrap();
 }

@@ -124,6 +124,21 @@ Still to come is the Phase A exit run across hosts, which needs sovtech's OK.
       `crypto.subtle`), it plays with 7 files verified by WASM;
     - against a lying proxy that flips a byte in every segment, the player rejects
       them and never plays.
+- **Pre-push audit of all A2 work (2026-09-23), in
+  [`reviews/2026-09-23-a2-pre-push.md`](reviews/2026-09-23-a2-pre-push.md):**
+  - Method: `differential-review`, with an independent adversarial reviewer, plus
+    `sharp-edges`.
+  - 3 HIGH, 4 MEDIUM and 5 LOW findings, 3 plausible ones and 3 sharp edges, all fixed
+    with tests:
+    - fetching is bounded by the hash list;
+    - stalling seeders go on cooldown;
+    - the origin and relay cap connections;
+    - the relay refuses far-future events;
+    - the origin refuses query strings;
+    - ffmpeg inputs are limited to local files and known video demuxers;
+    - every playlist `URI` attribute is checked.
+  - Spec amendments: NFX-02 §4, NFX-04 §2, NFX-05 §3 and NFX-06 §2, and one new vector
+    (`duplicate-uri-attribute`).
 - **`nfx-wasm`, `nfx-proto` for browsers (2026-09-23):**
   - It exports `verifyManifest`, `verifyBeacon`, `sha256Hex` and `VerifiedHashList`
     (constructed from a manifest's `video` and `segs`, or `fromRoot`, with `check` and

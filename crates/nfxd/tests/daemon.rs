@@ -129,6 +129,30 @@ fn key_files_are_private_and_never_overwritten() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bad_https_url_is_refused_at_start_not_silently_every_minute() {
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("bad-url"),
+        https_url: Some("http://origin.example/".into()),
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(err.to_string().contains("--https-url"), "{err}");
+
+    let ok = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("good-url"),
+        https_url: Some("https://origin.example/nfx".into()),
+        ..Config::default()
+    })
+    .await
+    .expect("a valid https URL starts");
+    ok.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_package_becomes_a_verified_open_manifest() {
     let dir = tmp("package");

@@ -27,8 +27,18 @@ does not restate iroh's own specs.
   in order: the rendition's `init` file, then its `segment` files in playlist order
   (hash-list order). The collection root (BLAKE3) is embedded in the **BlobTicket**.
 - Beacons (NFX-03) carry one ticket per held rendition. A watcher dials by ticket,
-  streams the sequence, and then re-anchors every file to the sha256 in the hash list
-  (NFX-05 §4) — a ticket found in a stale or lying beacon can waste time, not bytes.
+  then re-anchors every file to the sha256 in the hash list (NFX-05 §4). A ticket from
+  a stale or lying beacon can waste time, not bytes, and only if the watcher never
+  downloads more than the hash list allows:
+  - It fetches the collection's HashSeq blob **alone**, capped at 32 bytes per member
+    the manifest (`segs` + 1 for `meta`) or the rendition's playlist allows.
+  - It then fetches members one at a time, each capped at its `files[].size`. A member
+    larger than that never completes and is refused.
+  - Streaming a whole collection in one request would let a lying seeder push
+    unbounded bytes before any check.
+- A watcher dials only a ticket's direct addresses and the relays of its own network
+  (§1, NFX-11 §4). A relay URL named by an untrusted ticket is dropped, so a beacon
+  cannot make a node contact a host of the sender's choosing.
 - **Paid delivery is one member per request.** A watcher in a paid session (NFX-07)
   first fetches the rendition collection's HashSeq blob **alone**: a raw request for
   the collection root, which yields the member list. It then requests one member per
@@ -123,3 +133,5 @@ lands on 2/3 and verifies NFX-05 §4.
   string form.
 - Draft 2026-09-23 (A2 `nfx-node`): the `meta` collection also carries thumb and
   subtitle files, which otherwise rode no iroh collection.
+- Draft 2026-09-23 (A2 pre-push audit): §2 bounded fetching (HashSeq alone, then each
+  member capped at its hash-list size) and dialling only the network's own relays.

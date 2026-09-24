@@ -38,3 +38,5 @@ Method: `differential-review` (a public-facing relay) and `sharp-edges`.
   publicly reachable relay.
 
 Verdict: **no blocker.** The push waits for sovtech's OK.
+
+**Erratum (pre-push audit, same day):** connections were *not* capped by nostr-sdk's `max_connections`; it was never set. Fixed; see `2026-09-23-a2-pre-push.md` #3.

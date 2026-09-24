@@ -10,6 +10,7 @@
 mod error;
 pub mod fetch;
 pub mod gossip;
+pub mod limit;
 pub mod node;
 pub mod nostr;
 pub mod origin;

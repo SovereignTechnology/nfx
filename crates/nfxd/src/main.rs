@@ -5,7 +5,7 @@
 //! nfxd key show <file>                     print a key file's public key
 //! nfxd publish --key <file> --relay <url>… --package <dir> --title <text>
 //!              [--description <md>] [--alt <text>] [--tag <t>]…
-//! nfxd run [--key <file>] --store <dir> [--relay <url>]… [--iroh-relay <url>]…
+//! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]…
 //!          [--seed <a>]… [--fetch <a>]… [--pull <a>]… [--origin <addr:port>]
 //!          [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]…
 //! ```
@@ -29,7 +29,7 @@ const USAGE: &str = "usage:
   nfxd key new <file>
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
-  nfxd run [--key <file>] --store <dir> [--relay <url>]... [--iroh-relay <url>]... [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]...";
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--namespace <ns>]...";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -152,6 +152,7 @@ async fn run(args: &[String]) -> Result<()> {
         &[
             "key",
             "store",
+            "state",
             "relay",
             "iroh-relay",
             "seed",
@@ -176,6 +177,7 @@ async fn run(args: &[String]) -> Result<()> {
             .map(|p| key::load(Path::new(&p)))
             .transpose()?,
         store: PathBuf::from(required(&f, "store")?),
+        state: one(&f, "state")?.map(PathBuf::from),
         relays: all(&f, "relay"),
         iroh_relays: all(&f, "iroh-relay")
             .iter()

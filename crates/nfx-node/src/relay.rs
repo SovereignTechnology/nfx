@@ -24,10 +24,11 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use nfx_proto::beacon::Beacon;
 use nfx_proto::manifest::Manifest;
 use nfx_proto::namespace::Namespace;
-use nfx_proto::{KIND_BEACON, KIND_MANIFEST};
+use nfx_proto::{KIND_BEACON, KIND_MANIFEST, MAX_CLOCK_SKEW};
 use nostr_sdk::prelude as ns;
 use tokio::net::TcpListener;
 
+use crate::limit::{ConnGuard, ConnLimits};
 use crate::nostr::from_nostr;
 use crate::origin::{BoxFuture, HEADER_READ_TIMEOUT};
 use crate::unix_now;
@@ -52,6 +53,10 @@ const EVENTS_PER_MINUTE: u32 = 1_200;
 pub const MAX_STORED_EVENTS: usize = 20_000;
 /// Rate-limit keys kept before stale ones are swept.
 const SWEEP_ABOVE: usize = 10_000;
+/// Sweeps are O(keys), so they run at most this often, never once per admission.
+const SWEEP_EVERY_SECS: u64 = 60;
+/// Room for the `["EVENT", …]` framing around the largest admitted event.
+const MAX_MESSAGE_BYTES: usize = MAX_MANIFEST_BYTES + 1024;
 
 type Refusal = (ns::MachineReadablePrefix, String);
 
@@ -61,6 +66,8 @@ struct Limits {
     beacons: HashMap<(String, String), u64>,
     /// pubkey → admission times within the last hour.
     manifests: HashMap<String, VecDeque<u64>>,
+    /// When stale keys were last swept (at most once per [`SWEEP_EVERY_SECS`]).
+    swept_at: u64,
 }
 
 /// NFX-04 §1 admission and §2 publish limits.
@@ -71,6 +78,8 @@ struct Admission {
 }
 
 impl Admission {
+    /// Verification (signatures, NFX-02/03) runs before the lock is taken; the lock
+    /// guards only the rate-limit counters.
     fn admit(&self, event: &ns::Event, now: u64) -> Result<(), Refusal> {
         use ns::MachineReadablePrefix::{Blocked, Invalid, RateLimited};
         let kind = event.kind.as_u16();
@@ -85,49 +94,63 @@ impl Admission {
         if !in_scope {
             return Err((Blocked, "out of scope".into()));
         }
+        // A far-future `created_at` would outrank every real revision and, in the
+        // capped store, never be evicted (§2).
+        if ev.created_at > now.saturating_add(MAX_CLOCK_SKEW) {
+            return Err((Invalid, "created_at is in the future".into()));
+        }
         let size = event.as_json().len();
-        let mut limits = self.limits.lock().unwrap_or_else(PoisonError::into_inner);
-        if kind == KIND_MANIFEST {
+        let beacon_key = if kind == KIND_MANIFEST {
             if size > MAX_MANIFEST_BYTES {
                 return Err((Invalid, "manifest over 64 KiB".into()));
             }
             Manifest::from_event(&ev).map_err(|e| (Invalid, e.to_string()))?;
-            if limits.manifests.len() > SWEEP_ABOVE {
-                limits
-                    .manifests
-                    .retain(|_, times| times.back().is_some_and(|t| now < t + 3600));
-            }
-            let times = limits.manifests.entry(ev.pubkey.clone()).or_default();
-            while times.front().is_some_and(|t| now >= t + 3600) {
-                times.pop_front();
-            }
-            if times.len() >= MANIFESTS_PER_HOUR {
-                return Err((RateLimited, "manifest publishes per hour".into()));
-            }
-            times.push_back(now);
+            None
         } else {
             if size > MAX_BEACON_BYTES {
                 return Err((Invalid, "beacon over 16 KiB".into()));
             }
             let beacon = Beacon::from_event(&ev, now).map_err(|e| (Invalid, e.to_string()))?;
-            if limits.beacons.len() > SWEEP_ABOVE {
-                limits
-                    .beacons
-                    .retain(|_, last| now < *last + BEACON_FLOOR_SECS);
-            }
             let a = format!(
                 "{KIND_MANIFEST}:{}:{}",
                 beacon.creator, beacon.content.video
             );
-            let key = (ev.pubkey.clone(), a);
-            if limits
+            Some((ev.pubkey.clone(), a))
+        };
+
+        let mut limits = self.limits.lock().unwrap_or_else(PoisonError::into_inner);
+        if now >= limits.swept_at.saturating_add(SWEEP_EVERY_SECS)
+            && limits.beacons.len() + limits.manifests.len() > SWEEP_ABOVE
+        {
+            limits.swept_at = now;
+            limits
                 .beacons
-                .get(&key)
-                .is_some_and(|last| now < last + BEACON_FLOOR_SECS)
-            {
-                return Err((RateLimited, "one beacon per 20 s per video".into()));
+                .retain(|_, last| now < *last + BEACON_FLOOR_SECS);
+            limits
+                .manifests
+                .retain(|_, times| times.back().is_some_and(|t| now < t + 3600));
+        }
+        match beacon_key {
+            None => {
+                let times = limits.manifests.entry(ev.pubkey.clone()).or_default();
+                while times.front().is_some_and(|t| now >= t + 3600) {
+                    times.pop_front();
+                }
+                if times.len() >= MANIFESTS_PER_HOUR {
+                    return Err((RateLimited, "manifest publishes per hour".into()));
+                }
+                times.push_back(now);
             }
-            limits.beacons.insert(key, now);
+            Some(key) => {
+                if limits
+                    .beacons
+                    .get(&key)
+                    .is_some_and(|last| now < last + BEACON_FLOOR_SECS)
+                {
+                    return Err((RateLimited, "one beacon per 20 s per video".into()));
+                }
+                limits.beacons.insert(key, now);
+            }
         }
         Ok(())
     }
@@ -205,6 +228,8 @@ impl ScopedRelay {
                 notes_per_minute: EVENTS_PER_MINUTE,
             })
             .max_event_size(MAX_MANIFEST_BYTES)
+            .max_websocket_message_size(MAX_MESSAGE_BYTES)
+            .max_connections(crate::limit::MAX_CONNECTIONS)
             .build();
         let nip11 = serde_json::json!({
             "name": "nfx scoped relay",
@@ -230,10 +255,12 @@ impl ScopedRelay {
         }
     }
 
+    /// `guard` is the connection's admission slot; an upgraded WebSocket keeps it.
     fn respond(
         self: &Arc<Self>,
         mut req: Request<hyper::body::Incoming>,
         addr: SocketAddr,
+        guard: Arc<ConnGuard>,
     ) -> Response<Full<Bytes>> {
         let headers = req.headers();
         let has = |name: header::HeaderName, token: &str| {
@@ -265,6 +292,7 @@ impl ScopedRelay {
             let on_upgrade = hyper::upgrade::on(&mut req);
             let relay = self.clone();
             tokio::spawn(async move {
+                let _guard = guard;
                 if let Ok(upgraded) = on_upgrade.await {
                     let _ = relay
                         .local
@@ -300,7 +328,10 @@ impl ScopedRelay {
 
     /// Serve on `listener` until the task is dropped: WebSocket upgrades go to the relay,
     /// `Accept: application/nostr+json` gets the NIP-11 document.
+    /// Connections are capped per address and in total ([`crate::limit`]); a WebSocket
+    /// holds its slot for as long as it is open.
     pub async fn serve(self: Arc<Self>, listener: TcpListener) {
+        let limits = Arc::new(ConnLimits::default());
         loop {
             let (stream, addr) = match listener.accept().await {
                 Ok(accepted) => accepted,
@@ -309,11 +340,15 @@ impl ScopedRelay {
                     continue;
                 }
             };
+            let Some(guard) = limits.admit(addr) else {
+                continue;
+            };
+            let guard = Arc::new(guard);
             let relay = self.clone();
             tokio::spawn(async move {
                 let service = hyper::service::service_fn(move |req| {
-                    let relay = relay.clone();
-                    async move { Ok::<_, Infallible>(relay.respond(req, addr)) }
+                    let (relay, guard) = (relay.clone(), guard.clone());
+                    async move { Ok::<_, Infallible>(relay.respond(req, addr, guard)) }
                 });
                 let _ = hyper::server::conn::http1::Builder::new()
                     .timer(TokioTimer::new())

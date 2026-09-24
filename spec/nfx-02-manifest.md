@@ -83,6 +83,12 @@ A manifest object exists only after all of:
 
 Any failure: discard the event entirely (do not partially render).
 
+**Revisions.** Of the valid revisions at one address (author, `d`), the current one is
+the NIP-01 addressable choice: highest `created_at`, ties to the lowest `id`. Clients
+SHOULD ignore a revision whose `created_at` is more than 15 minutes ahead of their
+clock. Otherwise it would outrank every honest revision until real time caught up with
+it. Scoped relays refuse such events outright (NFX-04 §2).
+
 ## 5. Worked example
 
 See `test-vectors/manifest.json` — a complete, real-signature event (regenerable via
@@ -143,3 +149,5 @@ see a playable video; NFX consumers ignore the mirror.
   clarifications from `nfx-proto`: single-valued tags may appear at most once; integer
   grammar pinned; §4 now names the `id` check, the single-`n` rule, the `thumb` shape,
   the `free_seeder` shape and a `mint` without userinfo. The worked example and vector moved to `nfx:mainnet:1`.
+- Draft 2026-09-23 (A2 pre-push audit): §4 "Revisions" (the current-revision rule, with
+  a 15-minute future horizon).

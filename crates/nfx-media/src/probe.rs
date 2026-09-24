@@ -36,10 +36,15 @@ pub struct AudioInfo {
 /// Argv for probing `path`. `path` is one argv element — never shell-interpolated.
 #[must_use]
 pub fn ffprobe_argv(path: &str) -> Vec<String> {
+    let g = crate::argv::INPUT_GUARD;
     [
         "-hide_banner",
         "-v",
         "error",
+        g[0],
+        g[1],
+        g[2],
+        g[3],
         "-print_format",
         "json",
         "-show_format",

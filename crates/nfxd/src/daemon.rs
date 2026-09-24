@@ -40,6 +40,9 @@ pub struct Config {
     /// Signs beacons. Required to seed or fetch (a fetched video is seeded).
     pub keys: Option<Keys>,
     pub store: PathBuf,
+    /// The node's own state (iroh-blobs' index). Default: `<store>/.nfxd`. Kept on disk so
+    /// seeded files are imported by reference, not copied into memory.
+    pub state: Option<PathBuf>,
     /// Nostr relays (scoped relays, NFX-04).
     pub relays: Vec<String>,
     /// iroh relays this network runs (NFX-06 §1). Empty: direct connections only.
@@ -66,6 +69,8 @@ pub enum VideoState {
     Fetching,
     /// Seeding (and on the origin, when there is one).
     Seeding,
+    /// Seeding, but the last beacon reached no relay (the reason).
+    Unannounced(String),
     /// On the origin only.
     Serving,
     Failed(String),
@@ -141,11 +146,16 @@ impl Shared {
         let mut tick = tokio::time::interval(Duration::from_secs(BEACON_TTL / 2));
         loop {
             tick.tick().await;
-            // A refused or unreachable relay is retried at the next tick; beacons are hints.
-            let _ = self
+            // A refused or unreachable relay is retried at the next tick (beacons are
+            // hints), but it shows: a node that cannot announce is invisible to fetchers.
+            match self
                 .relays
                 .announce(&keys, manifest, &self.beacon(&seeded, manifest))
-                .await;
+                .await
+            {
+                Ok(_) => self.set(a, VideoState::Seeding),
+                Err(e) => self.set(a, VideoState::Unannounced(e.to_string())),
+            }
         }
     }
 
@@ -222,6 +232,29 @@ impl Daemon {
         if !cfg.pull.is_empty() && cfg.origin.is_none() {
             return Err(Error::Config("--pull needs --origin".into()));
         }
+        if let Some(url) = &cfg.https_url {
+            // Checked the way every reader will check it (NFX-03 §4): a bad URL would
+            // otherwise make every beacon fail, every minute, forever.
+            let probe = BeaconContent {
+                v: 1,
+                video: nfx_proto::namespace::VideoAddr::parse("nfx:mainnet:1:https-url-probe")?,
+                endpoints: vec![Endpoint::Https { url: url.clone() }],
+                skipped: vec![],
+                chunks: Chunks::All,
+                price_hint: 0,
+                accepts_mints: vec![],
+                free: true,
+            };
+            let json: serde_json::Value = serde_json::from_str(&probe.to_content())
+                .map_err(|e| Error::Config(e.to_string()))?;
+            let parsed = BeaconContent::from_json(&json)
+                .map_err(|e| Error::Config(format!("--https-url {url}: {e}")))?;
+            if parsed.endpoints.is_empty() {
+                return Err(Error::Config(format!(
+                    "--https-url {url}: not an https URL"
+                )));
+            }
+        }
 
         let mut tasks = Vec::new();
         let mut relays = cfg.relays.clone();
@@ -252,9 +285,12 @@ impl Daemon {
             }
         };
 
+        let state = cfg.state.clone().unwrap_or_else(|| cfg.store.join(".nfxd"));
+        std::fs::create_dir_all(state.join("iroh-blobs"))?;
         let node = Arc::new(
             Node::spawn(NodeConfig {
                 relays: cfg.iroh_relays.clone(),
+                blobs_dir: Some(state.join("iroh-blobs")),
                 ..NodeConfig::default()
             })
             .await?,

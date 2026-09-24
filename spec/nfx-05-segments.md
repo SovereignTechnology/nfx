@@ -79,7 +79,10 @@ Within every playlist file, URIs MUST be content names:
 
 A resolver maps `<hex>.<ext>` → the `files` entry with that sha256 (any transport).
 Publishers MUST NOT use content names that are not in `files`. Playlists whose URIs
-are path-like (`seg/0001.m4s`) are invalid. This keeps any hash-addressed source
+are path-like (`seg/0001.m4s`) are invalid. Every `URI` attribute of every tag counts,
+and a tag with more than one `URI` attribute is invalid: players disagree on which
+duplicate wins (hls.js takes the last), so a checker that reads only one would pass a
+URI the player then fetches. This keeps any hash-addressed source
 sufficient to play from with zero rewriting.
 
 ## 4. Verification (the "Blossom rule")
@@ -193,3 +196,5 @@ server generalizes to an origin when its admin pins NFX-05 content.
   data binds ciphertext to the name, NFX-08 §2).
 - Draft 2026-09-23 (A2 `nfx-media`): the baseline codec is H.264 at High *or a subset*;
   `CODECS` comes from the stream, never from the requested profile.
+- Draft 2026-09-23 (A2 pre-push audit): §3 every `URI` attribute counts and a tag with
+  two is invalid (`hashlist-invalid.json` case `duplicate-uri-attribute`).

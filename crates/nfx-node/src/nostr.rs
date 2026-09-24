@@ -28,6 +28,9 @@ pub const BEACON_TTL: u64 = 120;
 /// closest to expiry is evicted.
 pub const MAX_LIVE_BEACONS: usize = 4096;
 
+/// Least time between re-sending a beacon subscription a relay closed.
+pub const RESUBSCRIBE_EVERY: Duration = Duration::from_secs(5);
+
 /// Sign an event with a nostr-sdk signer and return it in `nfx-proto` form.
 async fn sign<S>(
     signer: &S,
@@ -148,6 +151,25 @@ impl Relays {
         Ok(Self { client })
     }
 
+    /// How many relays are connected now.
+    pub async fn connected(&self) -> usize {
+        self.client
+            .relays()
+            .await
+            .values()
+            .filter(|r| r.status().is_connected())
+            .count()
+    }
+
+    /// An error when no relay is connected: an empty answer must mean "none found", never
+    /// "nobody was asked".
+    async fn require_connected(&self) -> Result<()> {
+        if self.connected().await == 0 {
+            return Err(NodeError::Relay("no relay is connected".into()));
+        }
+        Ok(())
+    }
+
     /// Send a signed event. Succeeds when at least one relay accepted it; returns how many did.
     pub async fn publish(&self, event: &Event) -> Result<usize> {
         let out = self
@@ -188,6 +210,10 @@ impl Relays {
         query: &ManifestQuery,
         timeout: Duration,
     ) -> Result<Vec<Manifest>> {
+        self.require_connected().await?;
+        // A revision dated beyond the clock-skew window is ignored: it would outrank every
+        // honest revision until real time caught up with it.
+        let horizon = unix_now().saturating_add(nfx_proto::MAX_CLOCK_SKEW);
         let mut filter = ns::Filter::new()
             .kind(ns::Kind::from(KIND_MANIFEST))
             .custom_tag(n_tag(), query.namespace.to_string());
@@ -217,7 +243,7 @@ impl Relays {
             let Ok(m) = Manifest::from_event(&event) else {
                 continue;
             };
-            if !query.admits(&m) {
+            if !query.admits(&m) || m.created_at > horizon {
                 continue;
             }
             let key = (m.author.clone(), m.addr.to_string());
@@ -249,6 +275,7 @@ impl Relays {
                 return Err(NodeError::Relay(format!("{a} is not on {namespace}")));
             }
         }
+        self.require_connected().await?;
         let notifications = self.client.notifications();
         let filter = ns::Filter::new()
             .kind(ns::Kind::from(KIND_BEACON))
@@ -259,11 +286,14 @@ impl Relays {
             );
         let sub = self
             .client
-            .subscribe(filter)
+            .subscribe(filter.clone())
             .await
             .map_err(NodeError::relay)?
             .value;
         Ok(BeaconWatch {
+            client: self.client.clone(),
+            filter,
+            resubscribed_at: None,
             notifications,
             sub,
             wanted: manifest_a_tags.iter().cloned().collect(),
@@ -283,6 +313,10 @@ fn n_tag() -> ns::SingleLetterTag {
 
 /// A live beacon table fed by one subscription (NFX-03 §5).
 pub struct BeaconWatch {
+    client: ns::Client,
+    filter: ns::Filter,
+    /// When the subscription was last re-sent after a relay closed it.
+    resubscribed_at: Option<tokio::time::Instant>,
     notifications: Pin<Box<dyn Stream<Item = ns::ClientNotification> + Send>>,
     sub: ns::SubscriptionId,
     wanted: BTreeSet<String>,
@@ -296,6 +330,10 @@ impl BeaconWatch {
     /// The next beacon that verifies now and is newer than the one held for its seeder and
     /// manifest. Older duplicates (NFX-03 §2) are skipped silently; invalid or unrequested
     /// events are counted in [`BeaconWatch::rejected`]. `None` when the client shuts down.
+    ///
+    /// A relay that closes the subscription (a lagging reader, a restart) gets it again,
+    /// at most once per [`RESUBSCRIBE_EVERY`]: nostr-sdk drops a subscription on most
+    /// `CLOSED` reasons, and a silent watch would stop a fetcher from learning seeders.
     pub async fn next(&mut self) -> Option<Beacon> {
         while let Some(notification) = self.notifications.next().await {
             let event = match notification {
@@ -304,6 +342,16 @@ impl BeaconWatch {
                     event,
                     ..
                 } if subscription_id == self.sub => event,
+                ns::ClientNotification::Message { relay_url, message }
+                    if matches!(
+                        message.as_ref(),
+                        ns::RelayMessage::Closed { subscription_id, .. }
+                            if subscription_id.as_ref() == &self.sub
+                    ) =>
+                {
+                    self.resubscribe(relay_url).await;
+                    continue;
+                }
                 ns::ClientNotification::Shutdown => return None,
                 _ => continue,
             };
@@ -340,6 +388,19 @@ impl BeaconWatch {
             return Some(beacon);
         }
         None
+    }
+
+    async fn resubscribe(&mut self, relay: ns::RelayUrl) {
+        if let Some(at) = self.resubscribed_at {
+            tokio::time::sleep_until(at + RESUBSCRIBE_EVERY).await;
+        }
+        self.resubscribed_at = Some(tokio::time::Instant::now());
+        // Best effort: if it fails, the next CLOSED (or a reconnect) tries again.
+        let _ = self
+            .client
+            .subscribe(ns::ReqTarget::single(relay, [self.filter.clone()]))
+            .with_id(self.sub.clone())
+            .await;
     }
 
     /// Beacons not yet expired at `now`, newest per seeder and manifest. Expired ones are

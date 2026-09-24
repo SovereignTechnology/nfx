@@ -12,9 +12,34 @@ use crate::ladder::{
 use crate::probe::{MediaProbe, display_dimensions};
 use crate::{MediaError, Result};
 
+/// Demuxers an input may be opened with. Playlist-like formats (`hls`, `concat`, `dash`,
+/// `image2`…) are left out: they read other files, so a hostile "video" named `.m3u8`
+/// could otherwise pull local files into the published output.
+pub const INPUT_FORMATS: &str =
+    "mov,matroska,webm,avi,flv,mpegts,mpeg,ogg,asf,m4v,h264,hevc,ivf,mp3,aac,wav,flac";
+
+/// Input options on every ffmpeg and ffprobe call: local files only, known demuxers only.
+pub const INPUT_GUARD: [&str; 4] = [
+    "-protocol_whitelist",
+    "file",
+    "-format_whitelist",
+    INPUT_FORMATS,
+];
+
 /// `-hide_banner -nostdin -y -loglevel error`: stderr carries only real errors (plus the
-/// `-progress pipe:2` lines for renditions).
-const COMMON: [&str; 5] = ["-hide_banner", "-nostdin", "-y", "-loglevel", "error"];
+/// `-progress pipe:2` lines for renditions). Then [`INPUT_GUARD`], which applies to the
+/// input that follows.
+const COMMON: [&str; 9] = [
+    "-hide_banner",
+    "-nostdin",
+    "-y",
+    "-loglevel",
+    "error",
+    INPUT_GUARD[0],
+    INPUT_GUARD[1],
+    INPUT_GUARD[2],
+    INPUT_GUARD[3],
+];
 
 /// Placeholder width in px (~500 bytes of JPEG, small enough to inline).
 pub const PLACEHOLDER_WIDTH: u32 = 32;

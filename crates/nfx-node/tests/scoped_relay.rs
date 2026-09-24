@@ -139,6 +139,16 @@ async fn a_scoped_relay_admits_limits_and_forwards_only_nfx() {
         "fails NFX-02"
     );
 
+    // A far-future revision would outrank every real one and never leave a capped store.
+    let (future, _) = sign_manifest(&creator, &manifest, unix_now() + 3600)
+        .await
+        .unwrap();
+    assert!(
+        refusal(&client, &future)
+            .await
+            .starts_with("invalid: created_at is in the future")
+    );
+
     // §2: 12 manifests per pubkey per hour, then refused.
     let now = unix_now();
     let mut latest = None;

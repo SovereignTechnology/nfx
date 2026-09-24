@@ -137,15 +137,30 @@ async fn routes_headers_and_refusals() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(header(&r, "access-control-allow-origin"), "*");
 
-    // A store file that rotted on disk is never served.
+    // Query strings would make each variant a separate year-long CDN object.
+    let (status, r, _) = call(&origin, Method::GET, &format!("/{}.m4s?x=1", seg.sha256)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(header(&r, "cache-control"), "no-store");
+
+    // The extension is ignored for lookup, but a download keeps an honest name.
+    let (status, r, _) = call(&origin, Method::GET, &format!("/{}.exe", seg.sha256)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        header(&r, "content-disposition"),
+        format!("inline; filename=\"{}.m4s\"", seg.sha256)
+    );
+
+    // A store file that rotted on disk is never served: it is dropped, and with no swarm
+    // to pull from the origin says so (no-store).
     let path = store.path_of(&seg.sha256).unwrap();
     let mut bytes = std::fs::read(&path).unwrap();
     bytes[0] ^= 1;
     std::fs::write(&path, &bytes).unwrap();
     let (status, r, body) = call(&origin, Method::GET, &format!("/{}.m4s", seg.sha256)).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(header(&r, "cache-control"), "no-store");
     assert_ne!(body.as_ref(), bytes.as_slice());
+    assert!(!store.has(&seg.sha256), "the rotted copy is removed");
 
     // A creator-chosen thumb MIME outside the allow-list is served as opaque bytes.
     let thumb = v.list.files.iter().find(|f| f.role == Role::Thumb).unwrap();
@@ -280,6 +295,21 @@ async fn pull_through_skips_a_liar_and_serves_verified_bytes_over_http() {
     lookup.add_endpoint_info(liar.addr());
     let node = Arc::new(spawn(true, Some(lookup)).await);
     let pull = Arc::new(SwarmPull::new(node.clone()));
+    // An unreachable seeder, learned first: it costs one failed dial, then waits on cooldown.
+    let nowhere = iroh::EndpointAddr::new(iroh::SecretKey::from_bytes(&[7u8; 32]).public());
+    pull.learn(&beacon(
+        &manifest,
+        "unreachable",
+        Endpoint::Iroh {
+            node: nowhere.id.to_string(),
+            relay: String::new(),
+            addrs: vec![],
+            tickets: BTreeMap::from([(
+                "meta".to_string(),
+                BlobTicket::new(nowhere, seeded.meta.hash(), BlobFormat::HashSeq).to_string(),
+            )]),
+        },
+    ));
     pull.learn(&beacon(
         &manifest,
         "liar",
@@ -295,12 +325,18 @@ async fn pull_through_skips_a_liar_and_serves_verified_bytes_over_http() {
         "honest",
         seeder.beacon_endpoint(&seeded),
     ));
-    assert_eq!(pull.sources(&manifest.a_tag()), ["liar", "honest"]);
+    assert_eq!(
+        pull.sources(&manifest.a_tag()),
+        ["unreachable", "liar", "honest"]
+    );
     // An expired beacon is not a source.
     let mut stale = beacon(&manifest, "stale", seeder.beacon_endpoint(&seeded));
     stale.expiration = stale.created_at - 1;
     pull.learn(&stale);
-    assert_eq!(pull.sources(&manifest.a_tag()), ["liar", "honest"]);
+    assert_eq!(
+        pull.sources(&manifest.a_tag()),
+        ["unreachable", "liar", "honest"]
+    );
 
     let store = Arc::new(FsStore::open(tmp("pt-origin")).unwrap());
     let origin = Arc::new(Origin::new(store.clone(), Some(pull.clone())));
@@ -336,8 +372,18 @@ async fn pull_through_skips_a_liar_and_serves_verified_bytes_over_http() {
     }
     assert_eq!(
         pull.sources(&manifest.a_tag()),
-        ["honest"],
-        "the liar is forgotten"
+        ["honest", "unreachable"],
+        "the liar is forgotten; the unreachable seeder waits at the back"
+    );
+
+    // A stored copy that rots is dropped and pulled again from the swarm.
+    let path = store.path_of(&segments[1].sha256).unwrap();
+    std::fs::write(&path, b"rot").unwrap();
+    let (status, _, body) = http(addr, Method::GET, &format!("/{}.m4s", segments[1].sha256)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.as_ref(),
+        seed_store.get(&segments[1].sha256).unwrap().as_slice()
     );
 
     // HEAD over the wire keeps the length; unlisted is 404 no-store.

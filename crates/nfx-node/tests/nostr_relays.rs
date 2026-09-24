@@ -84,6 +84,21 @@ async fn manifests_and_beacons_round_trip_through_a_relay() {
         authors: vec![creator.public_key().to_hex()],
         videos: vec![],
     };
+    // A manifest dated beyond the clock-skew window is ignored by readers. (It sits at its
+    // own address here: a stock relay keeps only the newest revision per address, so a
+    // creator who future-dates a revision hides the video from readers until then; scoped
+    // relays refuse such events outright.)
+    let future = Manifest {
+        addr: nfx_proto::namespace::VideoAddr::new(
+            vector.addr.namespace().clone(),
+            "salt-flats-future",
+        )
+        .unwrap(),
+        ..vector.clone()
+    };
+    let (future, _) = sign_manifest(&creator, &future, now + 3600).await.unwrap();
+    assert_eq!(publisher.publish(&future).await.unwrap(), 1);
+
     let found = reader.manifests(&query, WAIT).await.unwrap();
     assert_eq!(found, vec![second_parsed.clone()]);
     let by_video = ManifestQuery {
@@ -163,4 +178,31 @@ async fn manifests_and_beacons_round_trip_through_a_relay() {
 
     publisher.shutdown().await;
     reader.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_connected_relay_is_an_error_not_an_empty_answer() {
+    // Nothing listens on port 1: the client never connects.
+    let relays = Relays::connect(
+        &["ws://127.0.0.1:1".to_string()],
+        Duration::from_millis(500),
+    )
+    .await
+    .unwrap();
+    assert_eq!(relays.connected().await, 0);
+    let (vector, _, _) = vector();
+    let query = ManifestQuery {
+        namespace: vector.addr.namespace().clone(),
+        authors: vec![],
+        videos: vec![],
+    };
+    let err = relays.manifests(&query, Duration::from_millis(500)).await;
+    assert!(err.is_err(), "{err:?}");
+    assert!(
+        relays
+            .watch_beacons(vector.addr.namespace(), &[vector.a_tag()])
+            .await
+            .is_err()
+    );
+    relays.shutdown().await;
 }

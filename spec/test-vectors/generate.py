@@ -444,11 +444,17 @@ def main() -> int:
     ]
     path_like = r720.replace((fhash["seg-1"] + ".m4s").encode(), b"seg/0001.m4s")
     unlisted = r720.replace(fhash["seg-1"].encode(), ("ab" * 32).encode())
+    init_uri = ('URI="' + fhash["init-720.mp4"] + '.mp4"').encode()
+    duplicate_uri = r720.replace(init_uri, init_uri + b',URI="https://tracker.example/x.mp4"')
+    assert duplicate_uri != r720
     playlist_invalid = [
         {"name": "path-like-uri", "reason": "playlist URIs are content names (NFX-05 §3)",
          "playlist": path_like.decode()},
         {"name": "unlisted-content-name", "reason": "every content name must be in files",
          "playlist": unlisted.decode()},
+        {"name": "duplicate-uri-attribute",
+         "reason": "every URI attribute counts; a tag with two is invalid (NFX-05 §3)",
+         "playlist": duplicate_uri.decode()},
     ]
 
     # ---- 6. canon (NFX-11 §9) ----

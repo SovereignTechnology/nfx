@@ -100,6 +100,11 @@
       "name": "unlisted-content-name",
       "reason": "every content name must be in files",
       "playlist": "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"0445210eb8755a75f545c3ae58de1162d6ec6490ad8d197ed613d7bbe17f3569.mp4\"\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXTINF:2.000,\n601d8df40fa7854d1e336a04eec641cdc705d0855c24060957072aa161f49f0b.m4s\n#EXTINF:2.000,\nabababababababababababababababababababababababababababababababab.m4s\n#EXTINF:2.000,\n37d3f6f65fcaff6b0a161c02f5e47930ddb109c381b23e1debda7a96fed33bd8.m4s\n#EXT-X-ENDLIST\n"
+    },
+    {
+      "name": "duplicate-uri-attribute",
+      "reason": "every URI attribute counts; a tag with two is invalid (NFX-05 §3)",
+      "playlist": "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"0445210eb8755a75f545c3ae58de1162d6ec6490ad8d197ed613d7bbe17f3569.mp4\",URI=\"https://tracker.example/x.mp4\"\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXTINF:2.000,\n601d8df40fa7854d1e336a04eec641cdc705d0855c24060957072aa161f49f0b.m4s\n#EXTINF:2.000,\n8ef971da21a4d0c21e20be4e7b8c2ec90dcacff9f2c43947291625b062427a3d.m4s\n#EXTINF:2.000,\n37d3f6f65fcaff6b0a161c02f5e47930ddb109c381b23e1debda7a96fed33bd8.m4s\n#EXT-X-ENDLIST\n"
     }
   ]
 }
