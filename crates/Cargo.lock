@@ -2795,6 +2795,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nfx-wasm"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "nfx-proto",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "nfxd"
 version = "0.1.0"
 dependencies = [

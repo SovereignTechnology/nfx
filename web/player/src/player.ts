@@ -1,8 +1,8 @@
 /**
- * The A2 test player. `?origin=<url>&root=<hex>` plays `<origin>/<root>/master.m3u8`
- * with hls.js. A loader wrapper checks every playlist, init and segment against the
- * hash list (./verify.ts) before hls.js sees a byte: a mismatch is a load error, never
- * data. `window.__nfx` exposes state for automation.
+ * The A2 test player. `?origin=<url>&root=<hex>[&video=<d>&segs=<n>]` plays
+ * `<origin>/<root>/master.m3u8` with hls.js. A loader wrapper checks every playlist,
+ * init and segment with nfx-proto (WASM, ./verify.ts) before hls.js sees a byte: a
+ * mismatch is a load error, never data. `window.__nfx` exposes state for automation.
  */
 import Hls, {
   type HlsConfig,
@@ -12,9 +12,10 @@ import Hls, {
   type LoaderContext,
 } from 'hls.js';
 
-import { Anchor } from './verify';
+import { Anchor, type ManifestBinding } from './verify';
 
 interface State {
+  secureContext: boolean;
   origin: string | null;
   root: string | null;
   engine: string | null;
@@ -26,6 +27,7 @@ interface State {
 }
 
 const st: State = {
+  secureContext: window.isSecureContext,
   origin: null,
   root: null,
   engine: null,
@@ -60,41 +62,42 @@ function verifyingLoader(anchor: Anchor): new (config: HlsConfig) => Loader<Load
         onAbort: callbacks.onAbort,
         // No onProgress: unverified bytes must never reach hls.js.
         onSuccess: (response, stats, ctx, details) => {
+          if (stats.aborted) return;
           const bytes = response.data as ArrayBuffer;
-          anchor.check(ctx.url, bytes).then(
-            (sha) => {
-              if (stats.aborted) return;
-              st.verified.push(sha);
-              response.data = wantText ? new TextDecoder('utf-8', { fatal: true }).decode(bytes) : bytes;
-              callbacks.onSuccess(response, stats, ctx, details);
-            },
-            (err: Error) => {
-              let sha: string | null = null;
-              try {
-                sha = anchor.expected(ctx.url);
-              } catch {
-                // unanchored URL: reported with sha256 null
-              }
-              st.rejected.push({ sha256: sha, url: ctx.url, why: err.message });
-              log(`REJECTED ${ctx.url}: ${err.message}`);
-              if (!stats.aborted) callbacks.onError({ code: 0, text: `nfx: ${err.message}` }, ctx, details, stats);
-            },
-          );
+          let sha: string;
+          try {
+            sha = anchor.check(ctx.url, bytes);
+          } catch (e) {
+            const why = e instanceof Error ? e.message : String(e);
+            let expected: string | null = null;
+            try {
+              expected = anchor.expected(ctx.url);
+            } catch {
+              // an unanchored URL is reported with sha256 null
+            }
+            st.rejected.push({ sha256: expected, url: ctx.url, why });
+            log(`REJECTED ${ctx.url}: ${why}`);
+            callbacks.onError({ code: 0, text: `nfx: ${why}` }, ctx, details, stats);
+            return;
+          }
+          st.verified.push(sha);
+          response.data = wantText ? new TextDecoder('utf-8', { fatal: true }).decode(bytes) : bytes;
+          callbacks.onSuccess(response, stats, ctx, details);
         },
       });
     }
   };
 }
 
-async function start(origin: string, root: string): Promise<void> {
+async function start(origin: string, root: string, manifest?: ManifestBinding): Promise<void> {
   st.origin = origin;
   st.root = root;
   const video = $<HTMLVideoElement>('v');
   video.addEventListener('playing', () => {
     st.playing = true;
   });
-  const anchor = await Anchor.load(origin, root);
-  log(`hash list verified: ${anchor.files.size} files`);
+  const anchor = await Anchor.load(origin, root, manifest);
+  log(`hash list verified: ${anchor.size} files of ${anchor.video}${manifest ? ' (bound to the manifest)' : ''}`);
   if (!Hls.isSupported()) {
     // Native HLS would fetch unverified bytes; this player refuses rather than degrade.
     throw new Error('MediaSource unavailable: this player only plays verified bytes');
@@ -119,10 +122,13 @@ async function start(origin: string, root: string): Promise<void> {
 const params = new URLSearchParams(location.search);
 const origin = (params.get('origin') ?? '').replace(/\/+$/, '');
 const root = params.get('root') ?? '';
+const video = params.get('video');
+const segs = Number(params.get('segs'));
 $<HTMLInputElement>('origin').value = origin;
 $<HTMLInputElement>('root').value = root;
 if (origin && root) {
-  start(origin, root).catch((e: Error) => {
+  const binding = video && Number.isSafeInteger(segs) && segs > 0 ? { video, segs } : undefined;
+  start(origin, root, binding).catch((e: Error) => {
     st.errors.push(e.message);
     log(`error: ${e.message}`);
   });

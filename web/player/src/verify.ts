@@ -1,78 +1,61 @@
 /**
- * NFX-05 §4 in the browser: bytes are trusted only after their sha256 matches the name
- * the hash list gives them, and the hash list only after its sha256 matches `root`.
- * Digests come from WebCrypto (`crypto.subtle`), never from hand-written code.
+ * NFX-05 §4 in the browser, by nfx-proto itself (compiled to WASM, `crates/nfx-wasm`):
+ * the hash list must hash to `root` (and, given a manifest's `video` and `segs`, match
+ * them), every file must hash to the listed content name its URL names, and playlists
+ * must obey the content-name rule. sha256 is RustCrypto's, so this works without
+ * WebCrypto and therefore without a secure context (spike S3).
  */
+import init, { VerifiedHashList } from '../out/wasm/nfx_wasm.js';
 
-const HEX64 = /^[0-9a-f]{64}$/;
-const CONTENT_NAME = /^([0-9a-f]{64})(\.[a-z0-9]{1,16})?$/;
+let ready: Promise<unknown> | null = null;
 
-export interface Listed {
-  name: string;
-  role: string;
+/** Load the WASM module once; it sits next to the bundle in out/wasm/. */
+export function loadWasm(): Promise<unknown> {
+  ready ??= init({ module_or_path: new URL('./wasm/nfx_wasm_bg.wasm', import.meta.url) });
+  return ready;
 }
 
-export async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
-  // WebCrypto exists only in secure contexts (https:, localhost). Without it there is
-  // nothing to verify with, and this player refuses rather than play unverified bytes.
-  // The nfx-proto WASM build lifts this (status: next).
-  if (!globalThis.crypto?.subtle) {
-    throw new Error('no WebCrypto here: open this page over https:// or from localhost');
-  }
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+/** Optional manifest binding for the hash list (NFX-02 `d` and `segs`). */
+export interface ManifestBinding {
+  video: string;
+  segs: number;
 }
 
-/** A hash list fetched by `root` and anchored to it. */
+/** A hash list fetched by `root` and verified against it. */
 export class Anchor {
   private constructor(
     readonly origin: string,
     readonly root: string,
-    readonly files: Map<string, Listed>,
-    readonly master: string,
+    private readonly list: VerifiedHashList,
   ) {}
 
-  /** Fetch `<origin>/<root>`, check its sha256 is `root`, and index its files. */
-  static async load(origin: string, root: string): Promise<Anchor> {
-    if (!HEX64.test(root)) throw new Error('root must be 64 lowercase hex');
+  static async load(origin: string, root: string, manifest?: ManifestBinding): Promise<Anchor> {
+    if (!/^[0-9a-f]{64}$/.test(root)) throw new Error('root must be 64 lowercase hex');
+    await loadWasm();
     const res = await fetch(`${origin}/${root}`);
     if (!res.ok) throw new Error(`hash list: HTTP ${res.status}`);
-    const bytes = await res.arrayBuffer();
-    const got = await sha256Hex(bytes);
-    if (got !== root) throw new Error(`hash list sha256 ${got} is not root ${root}`);
-    const list = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as {
-      files?: { name: string; role: string; sha256: string }[];
-    };
-    const files = new Map<string, Listed>();
-    for (const f of list.files ?? []) {
-      if (!HEX64.test(f.sha256)) throw new Error(`hash list: bad sha256 for ${f.name}`);
-      files.set(f.sha256, { name: f.name, role: f.role });
-    }
-    const master = [...files].find(([, f]) => f.role === 'playlist-master')?.[0];
-    if (!master) throw new Error('hash list has no master playlist');
-    return new Anchor(origin, root, files, master);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const list = manifest
+      ? new VerifiedHashList(bytes, root, manifest.video, manifest.segs)
+      : VerifiedHashList.fromRoot(bytes, root);
+    return new Anchor(origin, root, list);
   }
 
-  /**
-   * The sha256 a URL's bytes must have: its content name when the hash list lists it,
-   * the master playlist's for the convenience URL, and nothing otherwise.
-   */
+  get size(): number {
+    return this.list.size;
+  }
+
+  get video(): string {
+    return this.list.video;
+  }
+
+  /** The sha256 `url`'s bytes must have; throws for anything the list does not name. */
   expected(url: string): string {
-    const u = new URL(url, location.href);
-    const parts = u.pathname.split('/').filter(Boolean);
-    const last = parts.at(-1) ?? '';
-    if (parts.length === 2 && parts[0] === this.root && last === 'master.m3u8') return this.master;
-    const m = CONTENT_NAME.exec(last);
-    if (!m || !m[1]) throw new Error(`not a content name: ${u.pathname}`);
-    if (!this.files.has(m[1])) throw new Error(`${m[1]} is not in this hash list`);
-    return m[1];
+    return this.list.expected(new URL(url, location.href).pathname);
   }
 
-  /** Throws unless `bytes` are what `url` names. */
-  async check(url: string, bytes: ArrayBuffer): Promise<string> {
-    const want = this.expected(url);
-    const got = await sha256Hex(bytes);
-    if (got !== want) throw new Error(`sha256 mismatch for ${want}: got ${got}`);
-    return want;
+  /** The verified sha256 of `bytes` fetched from `url`; throws on any mismatch. */
+  check(url: string, bytes: ArrayBuffer): string {
+    return this.list.check(new URL(url, location.href).pathname, new Uint8Array(bytes));
   }
 }

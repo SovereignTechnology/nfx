@@ -43,5 +43,7 @@ cargo deny check
 if [ "${NFX_SKIP_WASM:-0}" != 1 ]; then
   step "wasm32: nfx-proto vectors under node"
   wasm-pack test --node nfx-proto
+  step "wasm32: nfx-wasm bindings under node"
+  wasm-pack test --node nfx-wasm
 fi
 printf '\nall checks passed\n'

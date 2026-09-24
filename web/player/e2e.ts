@@ -3,8 +3,10 @@
  *
  *   ffmpeg test clip → nfx-package → nfxd (embedded scoped relay + origin + seeding)
  *   → nfxd publish → the player in headless Chromium (fresh context, never a real
- *   profile) plays it with every file verified; then the same player against a lying
- *   origin that flips a byte in every segment must reject them and never play.
+ *   profile) plays it with every file verified by nfx-proto (WASM): once from a secure
+ *   context, once from an insecure one (no WebCrypto; `http://player.test` mapped to
+ *   loopback). Then the same player against a lying origin that flips a byte in every
+ *   segment must reject them and never play.
  *
  * Usage: npm run build && npm run e2e
  * Needs `cargo` (builds nfxd and nfx-package) and ffmpeg (`NFX_FFMPEG`, else PATH).
@@ -58,11 +60,12 @@ function listen(server: Server): Promise<number> {
   return new Promise((ok) => server.listen(0, '127.0.0.1', () => ok((server.address() as AddressInfo).port)));
 }
 
-/** Serves index.html and out/player.js. */
+/** Serves the page, its bundle and the WASM module. */
 async function playerServer(): Promise<string> {
   const files: Record<string, [string, string]> = {
     '/': ['index.html', 'text/html; charset=utf-8'],
     '/out/player.js': ['out/player.js', 'text/javascript'],
+    '/out/wasm/nfx_wasm_bg.wasm': ['out/wasm/nfx_wasm_bg.wasm', 'application/wasm'],
   };
   const port = await listen(
     createServer((req, res) => {
@@ -132,7 +135,11 @@ async function main(): Promise<void> {
   const player = await playerServer();
   const lying = await liar(origin, segments);
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    // `player.test` is not localhost, so a page there is not a secure context.
+    args: ['--host-resolver-rules=MAP player.test 127.0.0.1'],
+  });
   const results: Record<string, unknown> = { root: meta.root, a };
   try {
     const context = await browser.newContext(); // fresh: never a real profile
@@ -153,6 +160,26 @@ async function main(): Promise<void> {
     });
     results.honest = honest;
     if (!honest.playing || honest.rejected !== 0 || honest.errors.length !== 0 || honest.verified < 4) throw new Error(`honest origin: ${JSON.stringify(honest)}`);
+
+    const insecure = await context.newPage();
+    const port = new URL(player).port;
+    const manifestParams = `&video=${encodeURIComponent(meta.video)}&segs=${list.files.length}`;
+    await insecure.goto(`http://player.test:${port}/?origin=${encodeURIComponent(origin)}&root=${meta.root}${manifestParams}`);
+    await insecure.waitForFunction(
+      () => {
+        const s = (window as any).__nfx;
+        const v = document.querySelector('video') as HTMLVideoElement;
+        return s.errors.length > 0 || (s.playing && v.currentTime > 2);
+      },
+      null,
+      { timeout: 60_000 },
+    );
+    const plain = await insecure.evaluate(() => {
+      const s = (window as any).__nfx;
+      return { secureContext: s.secureContext, subtle: Boolean(globalThis.crypto?.subtle), playing: s.playing, verified: s.verified.length, rejected: s.rejected.length, errors: s.errors };
+    });
+    results.insecure = plain;
+    if (plain.secureContext || plain.subtle || !plain.playing || plain.rejected !== 0 || plain.errors.length !== 0) throw new Error(`insecure context: ${JSON.stringify(plain)}`);
 
     const page2 = await context.newPage();
     await page2.goto(`${player}/?origin=${encodeURIComponent(lying)}&root=${meta.root}`);

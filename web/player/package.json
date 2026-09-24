@@ -2,13 +2,14 @@
   "name": "@nfx/test-player",
   "private": true,
   "type": "module",
-  "description": "A2 test player: hls.js over an NFX-05 \u00a76 origin, every file verified against its sha256 and the hash list before hls.js sees it",
+  "description": "A2 test player: hls.js over an NFX-05 \u00a76 origin, every file verified by nfx-proto (WASM) before hls.js sees it",
   "license": "AGPL-3.0-or-later",
   "scripts": {
-    "build": "esbuild src/player.ts --bundle --format=esm --target=es2022 --outdir=out",
-    "serve": "esbuild src/player.ts --bundle --format=esm --target=es2022 --outdir=out --servedir=. --serve=0.0.0.0:3471",
-    "e2e": "tsx e2e.ts",
-    "typecheck": "tsc -p ."
+    "wasm": "wasm-pack build --target web --release --no-opt --out-dir ../../web/player/out/wasm --out-name nfx_wasm ../../crates/nfx-wasm",
+    "build": "npm run wasm && esbuild src/player.ts --bundle --format=esm --target=es2022 --outdir=out",
+    "serve": "npm run wasm && esbuild src/player.ts --bundle --format=esm --target=es2022 --outdir=out --servedir=. --serve=0.0.0.0:3471",
+    "typecheck": "tsc -p .",
+    "e2e": "tsx e2e.ts"
   },
   "devDependencies": {
     "@types/node": "22.18.0",

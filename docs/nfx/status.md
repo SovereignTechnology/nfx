@@ -112,15 +112,25 @@ Still to come is the Phase A exit run across hosts, which needs sovtech's OK.
     - every URL must be a content name listed there, or the master convenience URL;
     - there is no `onProgress`, so no partial unverified data reaches hls.js;
     - a mismatch is a load error, never data.
-  - It refuses to run without WebCrypto (plain `http://` off localhost) rather than
-    play unverified bytes. The WASM bindings (Next 2) lift that.
-  - `npm run e2e` (3/3 PASS, loopback only):
+  - Verification is `nfx-proto` itself, compiled to WASM (`crates/nfx-wasm`), so it needs
+    no WebCrypto and works from an insecure context. With `&video=<d>&segs=<n>` the hash
+    list is also bound to the manifest.
+  - `npm run e2e` (PASS on every run, loopback only):
     - an ffmpeg clip goes through `nfx-package`, then `nfxd key new`, `nfxd run` (seed,
       embedded relay, origin) and `nfxd publish`;
     - headless Chromium in a fresh context plays it: 360p and 720p levels, 7 files
       verified, 0 rejected, 2 s played;
+    - from an insecure context (`http://player.test`, mapped to loopback; no
+      `crypto.subtle`), it plays with 7 files verified by WASM;
     - against a lying proxy that flips a byte in every segment, the player rejects
       them and never plays.
+- **`nfx-wasm`, `nfx-proto` for browsers (2026-09-23):**
+  - It exports `verifyManifest`, `verifyBeacon`, `sha256Hex` and `VerifiedHashList`
+    (constructed from a manifest's `video` and `segs`, or `fromRoot`, with `check` and
+    `expected` per request path, and the playlist content-name rule).
+  - JS numbers must be safe integers, and structured results are JSON.
+  - The logic is tested natively. The bindings run under Node in `check.sh`
+    (`wasm-pack test --node nfx-wasm`), so CI covers them.
   - `npm run typecheck` is strict and clean. Neither runs in CI: they need Chromium,
     ffmpeg and a cargo build.
 
@@ -214,9 +224,8 @@ Still to come is the Phase A exit run across hosts, which needs sovtech's OK.
    - ~~a test player page~~ done (`web/player/`);
    - **the Phase A exit run: multi-host** (seeder, fetcher and origin on different
      machines over a real iroh relay). It needs sovtech's OK for which hosts.
-2. **`nfx-proto` WASM bindings** for the web client: verify manifest, hash list and
-   beacon from JS, and do the sha256 validation without WebCrypto's secure-context
-   rule (S3).
+2. ~~**`nfx-proto` WASM bindings**~~ done (`crates/nfx-wasm`; the test player uses
+   them). Still open: resolving a manifest by `a` tag over Nostr in the browser.
 3. Carried risk: the iroh-blobs 0.103 README still says "not production quality". The
    containment plan is in the S1 page.
 4. Optional: add the schema check (`jsonschema`) to `check.sh`.
