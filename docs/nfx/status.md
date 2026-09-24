@@ -3,7 +3,7 @@
 **This file, not the demo's `docs/status.md` or the session handoffs (not published), is where work here
 resumes.** Those describe the Pear demo, a read-only mirror in this repository.
 
-Updated 2026-09-24 · branch `desktop/app` (local; `main` = `d9801d0` pushed) · plan: ADR 0008 + `spec/` · Phase A complete · NFX-02..06 Frozen (M1)
+Updated 2026-09-24 · `main` = `f781f37` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
 
 ## Where things stand
 
@@ -348,6 +348,17 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    - `nfxd --bridge` is a Rust WebRTC peer (str0m) that serves browsers from the
      verified store.
    - `e2e-mesh.ts` passes 3/3. NFX-10 stays Draft (freeze at M4).
+
+8. ~~**The M1 exit run**~~ **PASS 2026-09-24**, host-b ↔ laptop
+   ([`m1-exit.md`](m1-exit.md)).
+   - A creator published, and host-b seeded with its relay, origin, tracker and bridge.
+   - The desktop app played over iroh with sharing off (served only) and on (seeded).
+   - A browser resolved the video by address and played on over WebRTC from host-b's
+     bridge after its origin was cut.
+   - **M1, the free end-to-end slice, is complete.**
+9. **Next: M2, paid delivery (open mode) on every transport** (ADR 0008 §5). This is
+   money code: `nfx-wallet`, pay/1 (NFX-07), the mint extension (NFX-09) and the web
+   wallet. It gets the locked-directory rule and its own security stage (ADR 0008 §4).
 
 ## Not verified / known gaps
 
