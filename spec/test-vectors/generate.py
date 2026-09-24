@@ -195,49 +195,83 @@ def pay1_vectors() -> dict:
     line = lambda obj: json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
     video = "nfx:mainnet:1:salt-flats-dusk"
     session = "0123456789abcdef0123456789abcdef"
+    quote = lambda mints: {"t": "quote", "price_per_chunk": 1, "mints": mints, "window": 8}
+    # A pay line of exactly `n` bytes (the line limit counts the newline too).
+    def pay_of(n):
+        base = line({"t": "pay", "upto_chunk": 1, "token": "cashuB"})
+        return line({"t": "pay", "upto_chunk": 1, "token": "cashuB" + "a" * (n - len(base))})
+    at_limit, over_limit = pay_of(32767), pay_of(32768)
+    assert len(at_limit.encode()) == 32767 and len(over_limit.encode()) == 32768
     valid = [
-        ("hello", {"t": "hello", "video": video, "session": session}),
-        ("quote", {"t": "quote", "price_per_chunk": 1, "mints": ["https://mint.example"], "window": 8}),
-        ("quote-loopback-mint", {"t": "quote", "price_per_chunk": 2, "mints": ["http://127.0.0.1:3338"], "window": 1}),
-        ("pay", {"t": "pay", "upto_chunk": 17, "token": "cashuBexampletoken"}),
-        ("ack", {"t": "ack", "accepted_upto": 17, "spent_total": 17}),
-        ("rej", {"t": "rej", "code": "underpaid", "detail": "short by 2 sat"}),
-        ("rej-unknown-code-no-detail", {"t": "rej", "code": "some-future-code"}),
-        ("hello-unknown-field", {"t": "hello", "video": video, "session": session, "x-future": 1}),
-        ("max-safe-integer", {"t": "ack", "accepted_upto": 9007199254740991, "spent_total": 0}),
+        ("hello", line({"t": "hello", "video": video, "session": session})),
+        ("quote", line(quote(["https://mint.example"]))),
+        ("quote-ipv6-host", line(quote(["https://[2001:db8::1]:3338"]))),
+        ("pay", line({"t": "pay", "upto_chunk": 17, "token": "cashuBexampletoken"})),
+        ("ack", line({"t": "ack", "accepted_upto": 17, "spent_total": 17})),
+        ("rej", line({"t": "rej", "code": "underpaid", "detail": "short by 2 sat"})),
+        ("rej-new-codes", line({"t": "rej", "code": "bad-token"})),
+        ("rej-unknown-code-no-detail", line({"t": "rej", "code": "some-future-code"})),
+        ("rej-detail-1024-bytes-of-emoji", line({"t": "rej", "code": "stale", "detail": "\U0001F600" * 256})),
+        ("hello-unknown-field", line({"t": "hello", "video": video, "session": session, "x-future": 1})),
+        ("max-safe-integer", line({"t": "ack", "accepted_upto": 9007199254740991, "spent_total": 0})),
+        ("line-of-32767-bytes", at_limit),
     ]
-    raw_invalid = [
+    loopback = [
+        ("quote-loopback-ipv4", line({"t": "quote", "price_per_chunk": 2, "mints": ["http://127.0.0.1:3338"], "window": 1})),
+        ("quote-loopback-name", line(quote(["http://localhost:3338/"]))),
+    ]
+    invalid = [
         ("not-json", "hello", "not JSON"),
         ("not-an-object", line([1, 2]), "not an object"),
         ("no-t", line({"video": video, "session": session}), "missing t"),
         ("unknown-t", line({"t": "tip", "amount": 1}), "unknown t"),
+        ("duplicate-t", '{"t":"pay","t":"ack","accepted_upto":1,"spent_total":1,"upto_chunk":1,"token":"cashuBx"}', "no duplicate keys"),
+        ("duplicate-upto", '{"t":"pay","upto_chunk":1,"upto_chunk":99,"token":"cashuBx"}', "no duplicate keys"),
         ("session-short", line({"t": "hello", "video": video, "session": session[:-1]}), "session is 32 lowercase hex"),
         ("session-uppercase", line({"t": "hello", "video": video, "session": session.upper()}), "session is 32 lowercase hex"),
         ("bad-video", line({"t": "hello", "video": "mainnet:salt", "session": session}), "video is an NFX address"),
-        ("quote-no-mints", line({"t": "quote", "price_per_chunk": 1, "mints": [], "window": 8}), "mints is 1 to 16 URLs"),
-        ("quote-17-mints", line({"t": "quote", "price_per_chunk": 1, "mints": [f"https://m{i}.example" for i in range(17)], "window": 8}), "mints is 1 to 16 URLs"),
-        ("quote-http-mint", line({"t": "quote", "price_per_chunk": 1, "mints": ["http://mint.example"], "window": 8}), "mint must be https (or loopback http)"),
+        ("quote-no-mints", line(quote([])), "mints is 1 to 16 URLs"),
+        ("quote-17-mints", line(quote([f"https://m{i}.example" for i in range(17)])), "mints is 1 to 16 URLs"),
+        ("mint-http", line(quote(["http://mint.example"])), "mint must be https"),
+        ("mint-empty-host", line(quote(["https://:443"])), "mint needs a host"),
+        ("mint-backslash", line(quote(["https://evil.example\\.mint.example"])), "no backslash"),
+        ("mint-at", line(quote(["https://mint.example@evil.example"])), "no @"),
+        ("mint-rlo", line(quote(["https://mint\u202eelpmaxe.example"])), "printable ASCII only"),
+        ("mint-zero-width", line(quote(["https://mi\u200bnt.example"])), "printable ASCII only"),
+        ("mint-loopback-lookalike", line(quote(["http://127.0.0.1.evil.example"])), "not loopback"),
         ("quote-price-zero", line({"t": "quote", "price_per_chunk": 0, "mints": ["https://mint.example"], "window": 8}), "price_per_chunk >= 1"),
         ("quote-window-zero", line({"t": "quote", "price_per_chunk": 1, "mints": ["https://mint.example"], "window": 0}), "window >= 1"),
-        ("quote-float", '{"t":"quote","price_per_chunk":1.5,"mints":["https://mint.example"],"window":8}', "integers only"),
+        ("quote-fraction", '{"t":"quote","price_per_chunk":17.0,"mints":["https://mint.example"],"window":8}', "integers only"),
+        ("quote-exponent", '{"t":"quote","price_per_chunk":1e3,"mints":["https://mint.example"],"window":8}', "integers only"),
+        ("quote-minus-zero", '{"t":"quote","price_per_chunk":-0,"mints":["https://mint.example"],"window":8}', "integers only"),
         ("quote-negative", line({"t": "quote", "price_per_chunk": -1, "mints": ["https://mint.example"], "window": 8}), "non-negative"),
         ("pay-upto-zero", line({"t": "pay", "upto_chunk": 0, "token": "cashuBx"}), "upto_chunk >= 1"),
         ("pay-no-token", line({"t": "pay", "upto_chunk": 3}), "missing token"),
         ("pay-not-cashu", line({"t": "pay", "upto_chunk": 3, "token": "lnbc1..."}), "token is a NUT-00 token"),
         ("ack-missing", line({"t": "ack", "accepted_upto": 3}), "missing spent_total"),
         ("rej-no-code", line({"t": "rej", "detail": "x"}), "missing code"),
-        ("rej-long-detail", line({"t": "rej", "code": "stale", "detail": "d" * 1025}), "detail at most 1 KiB"),
+        ("rej-empty-code", line({"t": "rej", "code": ""}), "code is 1 to 64 of [a-z0-9-]"),
+        ("rej-code-uppercase", line({"t": "rej", "code": "Underpaid"}), "code is 1 to 64 of [a-z0-9-]"),
+        ("rej-code-65", line({"t": "rej", "code": "a" * 65}), "code is 1 to 64 of [a-z0-9-]"),
+        ("rej-detail-1026-bytes", line({"t": "rej", "code": "stale", "detail": "\u20ac" * 342}), "detail at most 1 KiB (bytes)"),
+        ("rej-detail-escape-sequence", line({"t": "rej", "code": "stale", "detail": "\u001b[31mred"}), "no control characters"),
+        ("rej-detail-bidi", line({"t": "rej", "code": "stale", "detail": "ok\u202eko"}), "no bidirectional overrides"),
+        ("rej-detail-null", line({"t": "rej", "code": "stale", "detail": None}), "detail is a string"),
         ("beyond-2^53", '{"t":"ack","accepted_upto":9007199254740992,"spent_total":0}', "integers at most 2^53-1"),
-        ("over-32-KiB", line({"t": "pay", "upto_chunk": 1, "token": "cashuB" + "a" * 32768}), "a line is at most 32 KiB"),
+        ("line-of-32768-bytes", over_limit, "a line is at most 32 KiB, newline included"),
     ]
+    parsed = lambda w: {k: v for k, v in json.loads(w).items() if k != "x-future"}
     return {
         "description": "NFX-07 §2 pay/1 messages: one JSON object per line (NDJSON), at most "
-                       "32 KiB with its newline. Every 'valid' wire parses to its 'message' "
-                       "(unknown fields dropped); every 'invalid' wire MUST be refused.",
+                       "32 KiB with its newline, under the NFX-11 §9 value rules. Every 'valid' "
+                       "wire parses to its 'message' (unknown fields dropped); every "
+                       "'valid_with_loopback' wire parses only where a deployment allows "
+                       "loopback http mints, and is refused by default; every 'invalid' wire "
+                       "MUST be refused.",
         "max_line_bytes": 32768,
-        "valid": [{"name": n, "wire": line(m), "message": {k: v for k, v in m.items() if k != "x-future"}}
-                  for n, m in valid],
-        "invalid": [{"name": n, "wire": w, "why": why} for n, w, why in raw_invalid],
+        "valid": [{"name": n, "wire": w, "message": parsed(w)} for n, w in valid],
+        "valid_with_loopback": [{"name": n, "wire": w, "message": parsed(w)} for n, w in loopback],
+        "invalid": [{"name": n, "wire": w, "why": why} for n, w, why in invalid],
     }
 
 

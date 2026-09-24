@@ -91,6 +91,9 @@ them.
 | `spent` | proofs already spent (mint swap failed) | NFX-07 §3 |
 | `bad-lock` | licensed chunk proof not P2PK-locked to the mint's `redeem_pubkey`, locktime too near, or no valid DLEQ | NFX-08 §4.1, NFX-09 §2 |
 | `stale` | `pay.upto_chunk` ≤ last acked watermark | NFX-07 §2 |
+| `bad-token` | token unreadable, not unit `sat`, of more than one mint, with locked proofs, or with an invalid DLEQ | NFX-07 §3 |
+| `banned` | the peer is banned by this seeder (a spent proof) | NFX-07 §3 |
+| `bad-session` | the session id belongs to another peer, or the peer holds too many sessions | NFX-07 §3 |
 | `payment-required` | license requested without payment/voucher | NFX-09 §2 |
 | `bad-voucher` | voucher signature, presenter (NIP-98 ≠ `seeder`), whitelist or expiry failed | NFX-08 §5, NFX-09 §2 |
 | `unknown-video` | mint has no escrow for that manifest address `a` | NFX-09 §2 |
@@ -201,3 +204,5 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   and `deletion.json`.
 - 2026-09-24 (M2.0) — `overpaid` also covers a pay/1 `pay` above chunks × price (NFX-07
   §3). New vector file `pay1.json` (NFX-07 §2 message rules).
+- 2026-09-24 (M2.0 audit) — new payment codes `bad-token`, `banned` and `bad-session`
+  (NFX-07 §3).

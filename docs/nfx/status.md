@@ -361,10 +361,19 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    wallet. It gets the locked-directory rule and its own security stage (ADR 0008 §4).
    Plan and decisions: [`m2-plan.md`](m2-plan.md). sovtech chose the demo's staging, and a
    persistent testnet mint.
-   - **M2.0 is built:** the pay/1 wire and vectors, the session contracts, the mock, and
-     the adversary suite (14 scenarios, each of 9 planted defects caught). The locked
-     paths are pinned and checked in CI.
-   - **Next:** the testnet mint, then M2.1, the serial security session.
+   - **M2.0 is built and reworked** on branch `m2/contracts`, not yet pushed. It holds
+     the pay/1 wire and vectors, the session contracts, the mock, and the adversary
+     suite. An independent audit found 19 gaps, and all are resolved
+     ([`reviews/2026-09-24-m2.0-independent-audit.md`](reviews/2026-09-24-m2.0-independent-audit.md)).
+     - The suite has 25 scenarios and catches each of 27 planted defects.
+     - The locked paths and everything that decides how they are built and tested are
+       pinned from git and checked in CI. Every bypass the audit found is refused.
+   - **Next:**
+     - a second independent audit of the rework;
+     - sovtech's OK to push M2.0;
+     - sovtech's go-ahead for the testnet mint, whose deployment is proposed in
+       [`m2-plan.md`](m2-plan.md);
+     - then M2.1, the serial security session.
 
 ## Not verified / known gaps
 

@@ -97,10 +97,11 @@ mesh, and it is NFX-07's:
 - **Unit and window.** The mesh accounts in **chunks, where one chunk is one NFX-05
   file**. That is a whole segment or init, never a WebRTC message fragment. `quote.window`
   is the number of chunks a peer will upload unpaid, default 8 (about 16 s of video at
-  2 s segments). A chunk counts as delivered only once all its bytes have arrived and
-  passed NFX-05 §4. An aborted or failed transfer counts for nothing, so a payer never
-  owes for fragments, and the uploader's exposure to aborted transfers is bounded by
-  `window`. An uploader MUST stop serving a session beyond `window` unpaid chunks.
+  2 s segments). As on iroh (NFX-07 §3), every upload request counts as one chunk when
+  it is admitted, whole or aborted, and the payer pays for every chunk it requested.
+  Counting only whole deliveries would let a peer abort each transfer at 99% and never
+  owe anything. An uploader MUST stop serving a peer beyond `window` chunks not covered
+  by confirmed payment.
   Licensed videos add the proof lock of NFX-08 §4.
 - **Upload gate.** Upstream p2p-media-loader v4 (Apache-2.0) has no hook that can
   approve or refuse an individual upload request, and no application message channel
@@ -161,3 +162,5 @@ NFX-05 byte formats.
   verified bytes; the swarm ID carries no p2p-media-loader protocol version. Evidence:
   `web/player/e2e-mesh.ts` (a real player, the embedded tracker and the Rust bridge, PASS
   3/3).
+- Draft 2026-09-24 (M2.0 audit): §3.2 counts every admitted upload request, not only
+  whole deliveries. The old rule let aborted transfers go unpaid without bound.

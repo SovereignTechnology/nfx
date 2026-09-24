@@ -586,26 +586,77 @@ fn deletions_withdraw_their_own_addresses_only() {
 
 #[test]
 fn pay1_messages_parse_as_the_vectors_say() {
-    use nfx_proto::pay::Message;
+    use nfx_proto::pay::{Message, ParseOptions};
     let v = vector!("pay1.json");
     assert_eq!(v["max_line_bytes"], nfx_proto::pay::MAX_LINE_BYTES);
-    for case in v["valid"].as_array().unwrap() {
+    let loopback = ParseOptions {
+        allow_loopback_http: true,
+    };
+    let check_valid = |case: &Value, opts: ParseOptions| {
         let name = str_of(case, "name");
-        let m = Message::parse(str_of(case, "wire")).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let back: Value = serde_json::from_str(&m.to_line()).unwrap();
+        let m = Message::parse_with(str_of(case, "wire"), opts)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let line = m.to_line().unwrap_or_else(|e| panic!("{name} writes: {e}"));
+        let back: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(back, case["message"], "{name}");
         assert_eq!(
-            Message::parse(&m.to_line()).unwrap(),
+            Message::parse_with(&line, opts).unwrap(),
             m,
             "{name} round-trips"
+        );
+    };
+    for case in v["valid"].as_array().unwrap() {
+        check_valid(case, ParseOptions::default());
+    }
+    for case in v["valid_with_loopback"].as_array().unwrap() {
+        check_valid(case, loopback);
+        assert!(
+            Message::parse(str_of(case, "wire")).is_err(),
+            "{} is refused by default",
+            str_of(case, "name")
         );
     }
     for case in v["invalid"].as_array().unwrap() {
         let name = str_of(case, "name");
-        assert!(
-            Message::parse(str_of(case, "wire")).is_err(),
-            "{name} must be refused ({})",
-            str_of(case, "why")
-        );
+        for opts in [ParseOptions::default(), loopback] {
+            assert!(
+                Message::parse_with(str_of(case, "wire"), opts).is_err(),
+                "{name} must be refused ({})",
+                str_of(case, "why")
+            );
+        }
     }
+}
+
+#[test]
+fn pay1_writers_refuse_what_their_readers_would() {
+    use nfx_proto::pay::{Ack, MAX_INT, Message, Quote, Rej, RejCode};
+    let quote = |price, window, mints: Vec<&str>| {
+        Message::Quote(Quote {
+            price_per_chunk: price,
+            mints: mints.into_iter().map(str::to_owned).collect(),
+            window,
+        })
+    };
+    assert!(quote(0, 8, vec!["https://m.example"]).to_line().is_err());
+    assert!(quote(1, 0, vec!["https://m.example"]).to_line().is_err());
+    assert!(quote(1, 8, vec![]).to_line().is_err());
+    assert!(quote(1, 8, vec!["https://m.example"]).to_line().is_ok());
+    let ack = |n| {
+        Message::Ack(Ack {
+            accepted_upto: n,
+            spent_total: n,
+        })
+    };
+    assert!(ack(MAX_INT).to_line().is_ok());
+    assert!(ack(MAX_INT + 1).to_line().is_err());
+    // A known code built as `Other` does not survive its reader; `from_code` does.
+    let rej = |code| Message::Rej(Rej { code, detail: None });
+    assert!(rej(RejCode::Other("underpaid".into())).to_line().is_err());
+    assert_eq!(RejCode::from_code("underpaid"), RejCode::Underpaid);
+    assert!(
+        rej(RejCode::from_code("some-future-code"))
+            .to_line()
+            .is_ok()
+    );
 }

@@ -19,21 +19,38 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`):**
-- **Spec:** NFX-07 §2 message rules, and `overpaid` for pay/1 (NFX-11 §6). The
-  vectors `pay1.json` hold 9 valid and 22 invalid messages.
-- **Wire:** `nfx_proto::pay` parses and writes pay/1 messages. It is pure, so the web
-  wallet can use it through WASM.
-- **Contracts:** `nfx_pay::session` defines `Seeder`, `Viewer` and `Harness`.
-- **Mock:** `nfx_pay::mock` has a mock mint network plus honest seeder and viewer
-  engines, with plantable flaws.
-- **Suite:** `nfx_pay::adversary` has 14 scenarios covering every NFX-07 §3 duty, every
-  pay/1 `rej` code, isolation, the window, and the viewer's own duties.
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after an independent
+audit** ([`reviews/2026-09-24-m2.0-independent-audit.md`](reviews/2026-09-24-m2.0-independent-audit.md)):
+- **Spec:**
+  - NFX-07 §2 message rules: the NFX-11 §9 value rules, unit `sat`, strict mint URLs,
+    and limits on `rej` codes and details;
+  - NFX-07 §3: accounting per (peer, video), service gated on confirmed swaps, and a
+    global unpaid cap;
+  - NFX-07 §3a: the viewer's duties;
+  - NFX-10 §3.2 counts every admitted request;
+  - NFX-11 §6 adds `bad-token`, `banned` and `bad-session`.
+  - The vectors `pay1.json` hold 12 valid lines, 2 valid only with loopback allowed, and
+    38 invalid lines.
+- **Wire:** `nfx_proto::pay` parses pay/1 through `canon`, so duplicate keys are refused,
+  and its writers refuse what their readers would. It is pure, so the web wallet can use
+  it through WASM.
+- **Contracts:** `nfx_pay::session` defines `SeederEngine`, `SeederSession`, `Viewer` and
+  `Harness`.
+- **Mock:** `nfx_pay::mock` has a proof-based mock mint network (swaps can be held, and
+  the mint taken down) plus honest seeder and viewer engines, with plantable flaws.
+- **Suite:** `nfx_pay::adversary` has 25 scenarios, run through `adversary_suite!`.
   - They pass against the honest mock.
-  - **Each of 9 planted defects fails its scenario** (`tests/mutants.rs`), so the suite
-    has teeth.
-- **Locked paths:** `crates/ci/check-locked.sh` pins five stub files and fails on any
-  edit, addition or removal. It is in `check.sh` and tested all three ways.
+  - **Each of 27 planted defects fails its scenario** (`tests/mutants.rs`), so the suite
+    has teeth. The defects include every mutant the audit ran.
+- **Locked paths:** `crates/ci/check-locked.sh` pins, from git by mode and content:
+  - the locked stubs;
+  - nfx-pay's manifest, `lib.rs`, contracts, suite and tests;
+  - the pay/1 parser;
+  - the check itself, `check.sh` and the CI config.
+
+  It refuses a `build.rs`, and `#[path]` or `include!` anywhere under `crates/`.
+  Re-pinning needs `LOCKED_DIRS_UNLOCKED=1`, and neither is allowed in CI. Every bypass
+  the audit found was retried against it and refused.
 
 ## Proposed stages
 
@@ -92,6 +109,11 @@ Its outputs:
 - **The testnet mint is persistent:** CDK `cdk-mintd` with its fake Lightning backend,
   on private infrastructure. Tests still use an in-process mint.
 - The locked paths and the order (iroh, HTTPS, then the mesh) stand as proposed.
+
+## The testnet mint
+
+A persistent testnet mint (CDK `cdk-mintd` with its fake Lightning backend and SQLite)
+runs on private infrastructure. Its deployment and its audits are recorded privately.
 
 ## Decisions (as asked)
 
