@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFX test player</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #111; color: #eee; }
+  form { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  input { flex: 1 1 18rem; min-width: 0; padding: 6px; background: #222; color: #eee; border: 1px solid #444; }
+  video { width: 100%; max-width: 960px; background: #000; }
+  pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+</style>
+<h1>NFX test player</h1>
+<p>Plays <code>&lt;origin&gt;/&lt;root&gt;/master.m3u8</code>. Every file is checked against its sha256
+  and the hash list before the player uses it (NFX-05 §4).</p>
+<form method="get">
+  <input id="origin" name="origin" placeholder="origin, e.g. https://origin.example" autocomplete="off">
+  <input id="root" name="root" placeholder="root (64 hex)" autocomplete="off" pattern="[0-9a-f]{64}">
+  <button>Play</button>
+</form>
+<video id="v" controls muted playsinline></video>
+<pre id="log"></pre>
+<script type="module" src="out/player.js"></script>
+</html>

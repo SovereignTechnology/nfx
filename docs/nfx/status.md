@@ -8,9 +8,9 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 close
 ## Where things stand
 
 **Phases A0 and A1 are complete. A2, the Rust M1 data plane, is in progress**
-(ADR 0008 §5): `nfx-media`, `nfx-node` (iroh, Nostr, the pull-through origin, the
-scoped relay) and `nfxd` are done. Still to come are the test player page and the
-Phase A exit run across hosts.
+(ADR 0008 §5): every A2 piece is built and tested on this machine: `nfx-media`, `nfx-node`
+(iroh, Nostr, the pull-through origin, the scoped relay), `nfxd` and the test player.
+Still to come is the Phase A exit run across hosts, which needs sovtech's OK.
 
 - **`nfx-media` (A2, 2026-09-23):**
   - the demo's L8 planning (probe, ladder, argv, storyboard) ported to Rust, with
@@ -105,6 +105,24 @@ Phase A exit run across hosts.
     and a seeder that knows only that relay. The fetcher learns the seeder from a
     verified beacon, fetches over iroh, serves the video over HTTP and becomes a
     second seeder.
+- **The test player, `web/player/` (A2, 2026-09-23):**
+  - hls.js behind a loader wrapper that fetches every playlist, init and segment as
+    bytes and checks its sha256 (WebCrypto) before hls.js sees it:
+    - the hash list must hash to `root`;
+    - every URL must be a content name listed there, or the master convenience URL;
+    - there is no `onProgress`, so no partial unverified data reaches hls.js;
+    - a mismatch is a load error, never data.
+  - It refuses to run without WebCrypto (plain `http://` off localhost) rather than
+    play unverified bytes. The WASM bindings (Next 2) lift that.
+  - `npm run e2e` (3/3 PASS, loopback only):
+    - an ffmpeg clip goes through `nfx-package`, then `nfxd key new`, `nfxd run` (seed,
+      embedded relay, origin) and `nfxd publish`;
+    - headless Chromium in a fresh context plays it: 360p and 720p levels, 7 files
+      verified, 0 rejected, 2 s played;
+    - against a lying proxy that flips a byte in every segment, the player rejects
+      them and never plays.
+  - `npm run typecheck` is strict and clean. Neither runs in CI: they need Chromium,
+    ffmpeg and a cargo build.
 
 - **Repository:** the private GitLab project. Every push
   was a fast-forward of `main` with sovtech's OK. The demo history, the spec commit
@@ -193,7 +211,9 @@ Phase A exit run across hosts.
      M2;
    - ~~`nfxd`~~ done (gossip is not wired into it yet: Nostr beacons carry discovery);
    - ~~a scoped relay~~ done (`nfx-node::relay`, for `nfxd` to embed or run alone);
-   - a test player page, which can grow out of the S3/S4 spike pages.
+   - ~~a test player page~~ done (`web/player/`);
+   - **the Phase A exit run: multi-host** (seeder, fetcher and origin on different
+     machines over a real iroh relay). It needs sovtech's OK for which hosts.
 2. **`nfx-proto` WASM bindings** for the web client: verify manifest, hash list and
    beacon from JS, and do the sha256 validation without WebCrypto's secure-context
    rule (S3).
