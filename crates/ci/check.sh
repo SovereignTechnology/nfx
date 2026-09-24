@@ -9,6 +9,10 @@ cd "$repo"
 py=${PYTHON:-python3}
 step() { printf '\n== %s\n' "$*"; }
 
+# First, before any unpinned code runs.
+step "locked paths: money code only as reviewed (docs/nfx/m2-plan.md)"
+PYTHON="$py" crates/ci/check-locked.sh
+
 step "spec: test vectors regenerate byte for byte"
 "$py" spec/test-vectors/generate.py --verify
 step "spec: JSON schemas agree with the vectors"
@@ -26,9 +30,6 @@ if git rev-parse -q --verify refs/remotes/demo/main >/dev/null; then
 else
   echo "skipped: no demo/main ref (no demo-base tag)"
 fi
-
-step "locked paths: money code only as reviewed (docs/nfx/m2-plan.md)"
-crates/ci/check-locked.sh
 
 cd crates
 step "cargo fmt --check"
@@ -51,4 +52,7 @@ if [ "${NFX_SKIP_WASM:-0}" != 1 ]; then
   step "wasm32: nfx-wasm bindings under node"
   wasm-pack test --node nfx-wasm
 fi
+# Last, after everything else has run: the files again, then what was compiled.
+step "locked paths: unchanged, and nfx-pay built only from pinned files and dependencies"
+PYTHON="$py" ../crates/ci/check-locked.sh --compiled
 printf '\nall checks passed\n'

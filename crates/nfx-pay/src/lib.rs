@@ -1,7 +1,8 @@
 //! NFX-07 open-mode payments: watchers pay seeders per chunk in Cashu ecash.
 //!
-//! - [`session`]: the contracts. [`session::Seeder`] and [`session::Viewer`] are one
-//!   side each of a pay/1 session; [`session::Harness`] is what the adversary suite needs.
+//! - [`session`]: the contracts. [`session::SeederEngine`] is one seeder, and
+//!   [`session::Viewer`] one watcher's ledger with it; [`session::Harness`] is what the
+//!   adversary suite needs.
 //! - [`mock`]: a mock mint network and honest mock engines. They are an executable reading
 //!   of NFX-07 §3, and what the transports are built against until the real engine exists.
 //! - [`adversary`]: the adversary suite, written before the engine (M2.0), and run against

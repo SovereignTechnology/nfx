@@ -78,7 +78,7 @@ them.
 | `GET /<sha256>[.<ext>]` (+ HEAD) | NFX-05 §6 |
 | `GET /<root>`, `GET /<root>/master.m3u8`, `GET /<root>/<sha256>.<ext>` | NFX-05 §6 |
 | `Cache-Control: public, max-age=31536000, immutable` (and its limits) | NFX-05 §6.1 |
-| `X-NFX-Pay` / `X-NFX-Accepted` / `X-NFX-Price` / `X-NFX-Mints` / `X-NFX-Session` / 402 | NFX-07 §4 |
+| `X-NFX-Pay` / `X-NFX-Price` / `X-NFX-Mints` / 402 / 503 | NFX-07 §4 |
 | `POST /v1/nfx/{escrow,license,redeem,claim}` | NFX-09 §2 |
 
 ## 6. Error codes (payment)
@@ -88,15 +88,16 @@ them.
 | `underpaid` | pay short of chunks claimed; also license payment short | NFX-07 §3, NFX-09 §2 |
 | `overpaid` | payment exceeds the exact amount: license payment above `key_price`, or a `pay` above chunks × price | NFX-09 §2, NFX-07 §3 |
 | `bad-mint` | proofs from an unaccepted mint | NFX-07 §3 |
-| `spent` | proofs already spent (mint swap failed) | NFX-07 §3 |
+| `spent` | a proof of the token is already spent (the peer is banned) | NFX-07 §3 |
 | `bad-lock` | licensed chunk proof not P2PK-locked to the mint's `redeem_pubkey`, locktime too near, or no valid DLEQ | NFX-08 §4.1, NFX-09 §2 |
 | `stale` | `pay.upto_chunk` ≤ last acked watermark | NFX-07 §2 |
-| `bad-token` | token unreadable, not unit `sat`, of more than one mint, with locked proofs, or with an invalid DLEQ | NFX-07 §3 |
-| `banned` | the peer is banned by this seeder (a spent proof) | NFX-07 §3 |
-| `bad-session` | the session id belongs to another peer, or the peer holds too many sessions | NFX-07 §3 |
+| `bad-token` | token unreadable, not unit `sat`, of more than one mint, with locked proofs, with a missing or invalid DLEQ, or with proofs the mint refuses as invalid (the last is also a ban) | NFX-07 §3 |
+| `banned` | the peer is banned by this seeder (a spent or invalid proof) | NFX-07 §3 |
+| `mint-unavailable` | the seeder could not complete the swap; not a ban, nothing credited | NFX-07 §3 |
+| `bad-session` | the session id names a session that is open, or the peer holds too many open sessions | NFX-07 §3 |
 | `payment-required` | license requested without payment/voucher | NFX-09 §2 |
 | `bad-voucher` | voucher signature, presenter (NIP-98 ≠ `seeder`), whitelist or expiry failed | NFX-08 §5, NFX-09 §2 |
-| `unknown-video` | mint has no escrow for that manifest address `a` | NFX-09 §2 |
+| `unknown-video` | the mint has no escrow for that manifest address `a`; or the seeder does not serve the video named in a pay/1 `hello` | NFX-09 §2, NFX-07 §2 |
 | `root-mismatch` | escrow conflict: same `a` with a different `root` or `key` | NFX-09 §2 |
 | `below-fee` | redemption's NUT-02 input fee ≥ its total; batch and retry | NFX-09 §2 |
 
@@ -206,3 +207,7 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   §3). New vector file `pay1.json` (NFX-07 §2 message rules).
 - 2026-09-24 (M2.0 audit) — new payment codes `bad-token`, `banned` and `bad-session`
   (NFX-07 §3).
+- 2026-09-24 (M2.0 second audit) — new payment code `mint-unavailable`. `unknown-video`
+  also answers a pay/1 `hello`. `spent`, `bad-token`, `banned` and `bad-session` are
+  reworded to NFX-07 §3 as reworked. The HTTP surface loses `X-NFX-Accepted` and
+  `X-NFX-Session` and gains `503` (NFX-07 §4: one payment per request).

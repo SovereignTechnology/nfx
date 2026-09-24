@@ -589,6 +589,7 @@ fn pay1_messages_parse_as_the_vectors_say() {
     use nfx_proto::pay::{Message, ParseOptions};
     let v = vector!("pay1.json");
     assert_eq!(v["max_line_bytes"], nfx_proto::pay::MAX_LINE_BYTES);
+    assert_eq!(v["max_depth"], nfx_proto::pay::MAX_DEPTH);
     let loopback = ParseOptions {
         allow_loopback_http: true,
     };
@@ -596,7 +597,9 @@ fn pay1_messages_parse_as_the_vectors_say() {
         let name = str_of(case, "name");
         let m = Message::parse_with(str_of(case, "wire"), opts)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
-        let line = m.to_line().unwrap_or_else(|e| panic!("{name} writes: {e}"));
+        let line = m
+            .to_line_with(opts)
+            .unwrap_or_else(|e| panic!("{name} writes: {e}"));
         let back: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(back, case["message"], "{name}");
         assert_eq!(
@@ -630,14 +633,28 @@ fn pay1_messages_parse_as_the_vectors_say() {
 
 #[test]
 fn pay1_writers_refuse_what_their_readers_would() {
-    use nfx_proto::pay::{Ack, MAX_INT, Message, Quote, Rej, RejCode};
+    use nfx_proto::pay::{Ack, MAX_INT, Message, ParseOptions, Quote, Rej, RejCode};
     let quote = |price, window, mints: Vec<&str>| {
         Message::Quote(Quote {
             price_per_chunk: price,
             mints: mints.into_iter().map(str::to_owned).collect(),
             window,
+            served: 0,
+            accepted_upto: 0,
+            spent_total: 0,
         })
     };
+    // A writer answers to the reader with the same options: loopback mints are written
+    // only where they would be read.
+    let loopback = quote(1, 8, vec!["http://127.0.0.1:3338"]);
+    assert!(loopback.to_line().is_err());
+    assert!(
+        loopback
+            .to_line_with(ParseOptions {
+                allow_loopback_http: true
+            })
+            .is_ok()
+    );
     assert!(quote(0, 8, vec!["https://m.example"]).to_line().is_err());
     assert!(quote(1, 0, vec!["https://m.example"]).to_line().is_err());
     assert!(quote(1, 8, vec![]).to_line().is_err());
@@ -654,6 +671,11 @@ fn pay1_writers_refuse_what_their_readers_would() {
     let rej = |code| Message::Rej(Rej { code, detail: None });
     assert!(rej(RejCode::Other("underpaid".into())).to_line().is_err());
     assert_eq!(RejCode::from_code("underpaid"), RejCode::Underpaid);
+    assert_eq!(
+        RejCode::from_code("mint-unavailable"),
+        RejCode::MintUnavailable
+    );
+    assert!(rej(RejCode::MintUnavailable).to_line().is_ok());
     assert!(
         rej(RejCode::from_code("some-future-code"))
             .to_line()

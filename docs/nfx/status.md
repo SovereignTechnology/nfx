@@ -361,15 +361,21 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    wallet. It gets the locked-directory rule and its own security stage (ADR 0008 §4).
    Plan and decisions: [`m2-plan.md`](m2-plan.md). sovtech chose the demo's staging, and a
    persistent testnet mint.
-   - **M2.0 is built and reworked** on branch `m2/contracts`, not yet pushed. It holds
-     the pay/1 wire and vectors, the session contracts, the mock, and the adversary
-     suite. An independent audit found 19 gaps, and all are resolved
-     ([`reviews/2026-09-24-m2.0-independent-audit.md`](reviews/2026-09-24-m2.0-independent-audit.md)).
-     - The suite has 25 scenarios and catches each of 27 planted defects.
-     - The locked paths and everything that decides how they are built and tested are
-       pinned from git and checked in CI. Every bypass the audit found is refused.
+   - **M2.0 is built and reworked twice** on branch `m2/contracts`, not yet pushed. It
+     holds the pay/1 wire and vectors, the session contracts, the mock, and the
+     adversary suite. Two independent audits found 19 and then 30 gaps; all are
+     resolved ([first](reviews/2026-09-24-m2.0-independent-audit.md),
+     [second](reviews/2026-09-24-m2.0-second-audit.md)).
+     - **NFX-07 changed shape.**
+       - The seeder swaps before it acks.
+       - Bounds and bans are seeder-wide, and the global cap is a rate (`debt_ttl`).
+       - `quote` carries the account's position, so a watcher can resume.
+       - HTTPS origins take one payment per request.
+     - The suite has 35 scenarios and catches each of 61 planted defects.
+     - The lock pins all of nfx-pay and what builds it, and after the build it
+       verifies what the compiler read.
    - **Next:**
-     - a second independent audit of the rework;
+     - a third independent audit;
      - sovtech's OK to push M2.0;
      - sovtech's go-ahead for the testnet mint, whose deployment is proposed in
        [`m2-plan.md`](m2-plan.md);

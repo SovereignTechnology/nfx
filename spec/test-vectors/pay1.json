@@ -1,6 +1,7 @@
 {
-  "description": "NFX-07 §2 pay/1 messages: one JSON object per line (NDJSON), at most 32 KiB with its newline, under the NFX-11 §9 value rules. Every 'valid' wire parses to its 'message' (unknown fields dropped); every 'valid_with_loopback' wire parses only where a deployment allows loopback http mints, and is refused by default; every 'invalid' wire MUST be refused.",
+  "description": "NFX-07 §2 pay/1 messages: one JSON object per line (NDJSON), at most 32 KiB with its newline, under the NFX-11 §9 value rules. Every 'valid' wire parses to its 'message' (the known fields; unknown ones are dropped); every 'valid_with_loopback' wire parses only where a deployment allows loopback http mints, and is refused by default; every 'invalid' wire MUST be refused, whether or not loopback is allowed.",
   "max_line_bytes": 32768,
+  "max_depth": 16,
   "valid": [
     {
       "name": "hello",
@@ -13,35 +14,110 @@
     },
     {
       "name": "quote",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "message": {
         "t": "quote",
         "price_per_chunk": 1,
+        "window": 8,
+        "served": 0,
+        "accepted_upto": 0,
+        "spent_total": 0,
         "mints": [
           "https://mint.example"
-        ],
-        "window": 8
+        ]
+      }
+    },
+    {
+      "name": "quote-resumed-account",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example\"],\"window\":8,\"served\":40,\"accepted_upto\":36,\"spent_total\":36}",
+      "message": {
+        "t": "quote",
+        "price_per_chunk": 1,
+        "window": 8,
+        "served": 40,
+        "accepted_upto": 36,
+        "spent_total": 36,
+        "mints": [
+          "https://mint.example"
+        ]
       }
     },
     {
       "name": "quote-ipv6-host",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://[2001:db8::1]:3338\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://[2001:db8::1]:3338\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "message": {
         "t": "quote",
         "price_per_chunk": 1,
+        "window": 8,
+        "served": 0,
+        "accepted_upto": 0,
+        "spent_total": 0,
         "mints": [
           "https://[2001:db8::1]:3338"
-        ],
-        "window": 8
+        ]
+      }
+    },
+    {
+      "name": "quote-port-and-path",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example:3338/cashu/api?x=1#y\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "message": {
+        "t": "quote",
+        "price_per_chunk": 1,
+        "window": 8,
+        "served": 0,
+        "accepted_upto": 0,
+        "spent_total": 0,
+        "mints": [
+          "https://mint.example:3338/cashu/api?x=1#y"
+        ]
+      }
+    },
+    {
+      "name": "quote-sixteen-mints",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://m0.example\",\"https://m1.example\",\"https://m2.example\",\"https://m3.example\",\"https://m4.example\",\"https://m5.example\",\"https://m6.example\",\"https://m7.example\",\"https://m8.example\",\"https://m9.example\",\"https://m10.example\",\"https://m11.example\",\"https://m12.example\",\"https://m13.example\",\"https://m14.example\",\"https://m15.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "message": {
+        "t": "quote",
+        "price_per_chunk": 1,
+        "window": 8,
+        "served": 0,
+        "accepted_upto": 0,
+        "spent_total": 0,
+        "mints": [
+          "https://m0.example",
+          "https://m1.example",
+          "https://m2.example",
+          "https://m3.example",
+          "https://m4.example",
+          "https://m5.example",
+          "https://m6.example",
+          "https://m7.example",
+          "https://m8.example",
+          "https://m9.example",
+          "https://m10.example",
+          "https://m11.example",
+          "https://m12.example",
+          "https://m13.example",
+          "https://m14.example",
+          "https://m15.example"
+        ]
       }
     },
     {
       "name": "pay",
-      "wire": "{\"t\":\"pay\",\"upto_chunk\":17,\"token\":\"cashuBexampletoken\"}",
+      "wire": "{\"t\":\"pay\",\"upto_chunk\":17,\"token\":\"cashuBo2FteBtodHRwczovL21pbnQuZXhhbXBsZS5jb20=\"}",
       "message": {
         "t": "pay",
         "upto_chunk": 17,
-        "token": "cashuBexampletoken"
+        "token": "cashuBo2FteBtodHRwczovL21pbnQuZXhhbXBsZS5jb20="
+      }
+    },
+    {
+      "name": "pay-cashuA-base64",
+      "wire": "{\"t\":\"pay\",\"upto_chunk\":1,\"token\":\"cashuAeyJ0b2tlbiI6W119+/_-\"}",
+      "message": {
+        "t": "pay",
+        "upto_chunk": 1,
+        "token": "cashuAeyJ0b2tlbiI6W119+/_-"
       }
     },
     {
@@ -63,11 +139,11 @@
       }
     },
     {
-      "name": "rej-new-codes",
-      "wire": "{\"t\":\"rej\",\"code\":\"bad-token\"}",
+      "name": "rej-mint-unavailable",
+      "wire": "{\"t\":\"rej\",\"code\":\"mint-unavailable\"}",
       "message": {
         "t": "rej",
-        "code": "bad-token"
+        "code": "mint-unavailable"
       }
     },
     {
@@ -88,12 +164,30 @@
       }
     },
     {
+      "name": "rej-detail-accents-and-cjk",
+      "wire": "{\"t\":\"rej\",\"code\":\"stale\",\"detail\":\"café 支払い\"}",
+      "message": {
+        "t": "rej",
+        "code": "stale",
+        "detail": "café 支払い"
+      }
+    },
+    {
       "name": "hello-unknown-field",
       "wire": "{\"t\":\"hello\",\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"session\":\"0123456789abcdef0123456789abcdef\",\"x-future\":1}",
       "message": {
         "t": "hello",
         "video": "nfx:mainnet:1:salt-flats-dusk",
         "session": "0123456789abcdef0123456789abcdef"
+      }
+    },
+    {
+      "name": "nested-16-levels",
+      "wire": "{\"t\":\"ack\",\"accepted_upto\":1,\"spent_total\":1,\"x-future\":[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]}",
+      "message": {
+        "t": "ack",
+        "accepted_upto": 1,
+        "spent_total": 1
       }
     },
     {
@@ -118,26 +212,47 @@
   "valid_with_loopback": [
     {
       "name": "quote-loopback-ipv4",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":2,\"mints\":[\"http://127.0.0.1:3338\"],\"window\":1}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":2,\"mints\":[\"http://127.0.0.1:3338\"],\"window\":1,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "message": {
         "t": "quote",
         "price_per_chunk": 2,
+        "window": 1,
+        "served": 0,
+        "accepted_upto": 0,
+        "spent_total": 0,
         "mints": [
           "http://127.0.0.1:3338"
-        ],
-        "window": 1
+        ]
       }
     },
     {
       "name": "quote-loopback-name",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"http://localhost:3338/\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"http://localhost:3338/\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "message": {
         "t": "quote",
         "price_per_chunk": 1,
+        "window": 8,
+        "served": 0,
+        "accepted_upto": 0,
+        "spent_total": 0,
         "mints": [
           "http://localhost:3338/"
-        ],
-        "window": 8
+        ]
+      }
+    },
+    {
+      "name": "quote-loopback-ipv6",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"http://[::1]:3338\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "message": {
+        "t": "quote",
+        "price_per_chunk": 1,
+        "window": 8,
+        "served": 0,
+        "accepted_upto": 0,
+        "spent_total": 0,
+        "mints": [
+          "http://[::1]:3338"
+        ]
       }
     }
   ],
@@ -173,6 +288,11 @@
       "why": "no duplicate keys"
     },
     {
+      "name": "nested-17-levels",
+      "wire": "{\"t\":\"ack\",\"accepted_upto\":1,\"spent_total\":1,\"x-future\":[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]}",
+      "why": "at most 16 levels"
+    },
+    {
       "name": "session-short",
       "wire": "{\"t\":\"hello\",\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"session\":\"0123456789abcdef0123456789abcde\"}",
       "why": "session is 32 lowercase hex"
@@ -189,77 +309,142 @@
     },
     {
       "name": "quote-no-mints",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "mints is 1 to 16 URLs"
     },
     {
       "name": "quote-17-mints",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://m0.example\",\"https://m1.example\",\"https://m2.example\",\"https://m3.example\",\"https://m4.example\",\"https://m5.example\",\"https://m6.example\",\"https://m7.example\",\"https://m8.example\",\"https://m9.example\",\"https://m10.example\",\"https://m11.example\",\"https://m12.example\",\"https://m13.example\",\"https://m14.example\",\"https://m15.example\",\"https://m16.example\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://m0.example\",\"https://m1.example\",\"https://m2.example\",\"https://m3.example\",\"https://m4.example\",\"https://m5.example\",\"https://m6.example\",\"https://m7.example\",\"https://m8.example\",\"https://m9.example\",\"https://m10.example\",\"https://m11.example\",\"https://m12.example\",\"https://m13.example\",\"https://m14.example\",\"https://m15.example\",\"https://m16.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "mints is 1 to 16 URLs"
     },
     {
+      "name": "quote-missing-served",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example\"],\"window\":8,\"accepted_upto\":0,\"spent_total\":0}",
+      "why": "the account position is required"
+    },
+    {
+      "name": "quote-missing-accepted-upto",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example\"],\"window\":8,\"served\":0,\"spent_total\":0}",
+      "why": "the account position is required"
+    },
+    {
+      "name": "quote-missing-spent-total",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0}",
+      "why": "the account position is required"
+    },
+    {
       "name": "mint-http",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"http://mint.example\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"http://mint.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "mint must be https"
     },
     {
       "name": "mint-empty-host",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://:443\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://:443\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "mint needs a host"
     },
     {
       "name": "mint-backslash",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://evil.example\\\\.mint.example\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://evil.example\\\\.mint.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "no backslash"
     },
     {
       "name": "mint-at",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example@evil.example\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example@evil.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "no @"
     },
     {
+      "name": "mint-space",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example/a b\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "why": "printable ASCII without space"
+    },
+    {
       "name": "mint-rlo",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint‮elpmaxe.example\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint‮elpmaxe.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "printable ASCII only"
     },
     {
       "name": "mint-zero-width",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mi​nt.example\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mi​nt.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "printable ASCII only"
     },
     {
+      "name": "mint-underscore-host",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mi_nt.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "why": "host is [A-Za-z0-9.-]"
+    },
+    {
+      "name": "mint-unclosed-ipv6",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://[2001:db8::1\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "why": "an IPv6 literal closes with ]"
+    },
+    {
+      "name": "mint-bad-ipv6",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://[x]\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "why": "an IPv6 literal is hex, colons and dots"
+    },
+    {
+      "name": "mint-two-colons",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://a:b:c\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "why": "a port is digits"
+    },
+    {
+      "name": "mint-port-empty",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example:/x\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "why": "a port is 1 to 5 digits"
+    },
+    {
+      "name": "mint-port-zero",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example:0\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "why": "a port is 1 to 65535"
+    },
+    {
+      "name": "mint-port-too-big",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example:99999\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "why": "a port is 1 to 65535"
+    },
+    {
+      "name": "mint-junk-after-ipv6",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://[::1]x\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "why": "after the host: a port, a path or nothing"
+    },
+    {
       "name": "mint-loopback-lookalike",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"http://127.0.0.1.evil.example\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"http://127.0.0.1.evil.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "not loopback"
     },
     {
+      "name": "mint-loopback-ipv6-junk",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"http://[::1]x\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "why": "after the host: a port, a path or nothing"
+    },
+    {
       "name": "quote-price-zero",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":0,\"mints\":[\"https://mint.example\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":0,\"mints\":[\"https://mint.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "price_per_chunk >= 1"
     },
     {
       "name": "quote-window-zero",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example\"],\"window\":0}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example\"],\"window\":0,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "window >= 1"
     },
     {
       "name": "quote-fraction",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":17.0,\"mints\":[\"https://mint.example\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":17.0,\"mints\":[\"https://mint.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "integers only"
     },
     {
       "name": "quote-exponent",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1e3,\"mints\":[\"https://mint.example\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1e3,\"mints\":[\"https://mint.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "integers only"
     },
     {
       "name": "quote-minus-zero",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":-0,\"mints\":[\"https://mint.example\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":-0,\"mints\":[\"https://mint.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "integers only"
     },
     {
       "name": "quote-negative",
-      "wire": "{\"t\":\"quote\",\"price_per_chunk\":-1,\"mints\":[\"https://mint.example\"],\"window\":8}",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":-1,\"mints\":[\"https://mint.example\"],\"window\":8,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
       "why": "non-negative"
     },
     {
@@ -278,9 +463,34 @@
       "why": "token is a NUT-00 token"
     },
     {
+      "name": "pay-token-empty-payload",
+      "wire": "{\"t\":\"pay\",\"upto_chunk\":3,\"token\":\"cashuB\"}",
+      "why": "token has a payload"
+    },
+    {
+      "name": "pay-token-escape",
+      "wire": "{\"t\":\"pay\",\"upto_chunk\":3,\"token\":\"cashuBab\\u001b[2Jcd\"}",
+      "why": "token is base64"
+    },
+    {
+      "name": "pay-token-newline",
+      "wire": "{\"t\":\"pay\",\"upto_chunk\":3,\"token\":\"cashuBab\\ncd\"}",
+      "why": "token is base64"
+    },
+    {
+      "name": "pay-token-space",
+      "wire": "{\"t\":\"pay\",\"upto_chunk\":3,\"token\":\"cashuBab cd\"}",
+      "why": "token is base64"
+    },
+    {
       "name": "ack-missing",
       "wire": "{\"t\":\"ack\",\"accepted_upto\":3}",
       "why": "missing spent_total"
+    },
+    {
+      "name": "ack-bool",
+      "wire": "{\"t\":\"ack\",\"accepted_upto\":true,\"spent_total\":1}",
+      "why": "integers only"
     },
     {
       "name": "rej-no-code",
@@ -313,9 +523,49 @@
       "why": "no control characters"
     },
     {
-      "name": "rej-detail-bidi",
+      "name": "rej-detail-c1",
+      "wire": "{\"t\":\"rej\",\"code\":\"stale\",\"detail\":\"ab\"}",
+      "why": "no control characters"
+    },
+    {
+      "name": "rej-detail-bidi-override",
       "wire": "{\"t\":\"rej\",\"code\":\"stale\",\"detail\":\"ok‮ko\"}",
       "why": "no bidirectional overrides"
+    },
+    {
+      "name": "rej-detail-bidi-mark",
+      "wire": "{\"t\":\"rej\",\"code\":\"stale\",\"detail\":\"ok‏ko\"}",
+      "why": "no bidirectional marks"
+    },
+    {
+      "name": "rej-detail-arabic-mark",
+      "wire": "{\"t\":\"rej\",\"code\":\"stale\",\"detail\":\"ok؜ko\"}",
+      "why": "no bidirectional marks"
+    },
+    {
+      "name": "rej-detail-line-separator",
+      "wire": "{\"t\":\"rej\",\"code\":\"stale\",\"detail\":\"ok ko\"}",
+      "why": "no line or paragraph separators"
+    },
+    {
+      "name": "rej-detail-zero-width-space",
+      "wire": "{\"t\":\"rej\",\"code\":\"stale\",\"detail\":\"o​k\"}",
+      "why": "no invisible characters"
+    },
+    {
+      "name": "rej-detail-soft-hyphen",
+      "wire": "{\"t\":\"rej\",\"code\":\"stale\",\"detail\":\"o­k\"}",
+      "why": "no invisible characters"
+    },
+    {
+      "name": "rej-detail-bom",
+      "wire": "{\"t\":\"rej\",\"code\":\"stale\",\"detail\":\"﻿ok\"}",
+      "why": "no invisible characters"
+    },
+    {
+      "name": "rej-detail-tag",
+      "wire": "{\"t\":\"rej\",\"code\":\"stale\",\"detail\":\"ok󠁁\"}",
+      "why": "no tag characters"
     },
     {
       "name": "rej-detail-null",

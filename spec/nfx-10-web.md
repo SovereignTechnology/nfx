@@ -98,10 +98,13 @@ mesh, and it is NFX-07's:
   file**. That is a whole segment or init, never a WebRTC message fragment. `quote.window`
   is the number of chunks a peer will upload unpaid, default 8 (about 16 s of video at
   2 s segments). As on iroh (NFX-07 §3), every upload request counts as one chunk when
-  it is admitted, whole or aborted, and the payer pays for every chunk it requested.
-  Counting only whole deliveries would let a peer abort each transfer at 99% and never
-  owe anything. An uploader MUST stop serving a peer beyond `window` chunks not covered
-  by confirmed payment.
+  it is admitted, whole or aborted, and the payer pays for every chunk it requested
+  and was not refused. Counting only whole deliveries would let a peer abort each
+  transfer at 99% and never owe anything. An uploader serves under NFX-07 §3's service
+  limit: `window` per peer across its videos, and a global cap per `debt_ttl`.
+- **Identity.** A mesh peer's id is self-chosen, so a ban on the mesh holds only until
+  the peer takes a new id. The global cap is what bounds an uploader's loss here, as on
+  every transport (NFX-07 §3).
   Licensed videos add the proof lock of NFX-08 §4.
 - **Upload gate.** Upstream p2p-media-loader v4 (Apache-2.0) has no hook that can
   approve or refuse an individual upload request, and no application message channel
@@ -113,7 +116,8 @@ mesh, and it is NFX-07's:
   serves and fetches for free (the M1 mesh). A paid peer MUST NOT upload beyond
   `window` to a peer that does not speak pay/1, unless it has chosen to serve free.
 - **Earnings.** Ecash a browser earns is written through to the user's NIP-60 wallet
-  (encrypted to the user's key, on the user's relays) as soon as it is `ack`ed, and
+  (encrypted to the user's key, on the user's relays) as soon as it is `ack`ed (an ack
+  follows the completed swap, NFX-07 §3), and
   in licensed mode after `redeem` (NFX-09). Proofs MUST NOT be persisted in any
   browser storage (`localStorage`, IndexedDB, Cache API, cookies). A closed tab
   loses at most the earnings not yet written through.
@@ -164,3 +168,7 @@ NFX-05 byte formats.
   3/3).
 - Draft 2026-09-24 (M2.0 audit): §3.2 counts every admitted upload request, not only
   whole deliveries. The old rule let aborted transfers go unpaid without bound.
+- Draft 2026-09-24 (M2.0 second audit): §3.2 follows NFX-07 §3 as reworked. The service
+  limit is per peer across videos, plus the global cap. Refused requests are not owed,
+  and earnings are written through after the ack, which now follows the swap. Mesh
+  identities are self-chosen, so the global cap is the bound.

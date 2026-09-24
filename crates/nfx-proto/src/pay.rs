@@ -25,6 +25,25 @@ pub const MAX_DETAIL_BYTES: usize = 1024;
 pub const MAX_CODE_BYTES: usize = 64;
 /// The largest integer: JavaScript peers read it exactly.
 pub const MAX_INT: u64 = (1 << 53) - 1;
+/// The deepest nesting; the message object is level 1.
+pub const MAX_DEPTH: usize = 16;
+
+/// What `rej.detail` may not contain: controls, and characters that are invisible or
+/// reorder text (NFX-07 §2).
+const DETAIL_FORBIDDEN: &[(u32, u32)] = &[
+    (0x0000, 0x001F),
+    (0x007F, 0x009F),
+    (0x00AD, 0x00AD),
+    (0x061C, 0x061C),
+    (0x180E, 0x180E),
+    (0x200B, 0x200F),
+    (0x2028, 0x202E),
+    (0x2060, 0x2064),
+    (0x2066, 0x206F),
+    (0xFEFF, 0xFEFF),
+    (0xFFF9, 0xFFFB),
+    (0xE0000, 0xE007F),
+];
 
 /// What a deployment permits beyond the default rules.
 #[derive(Debug, Clone, Copy, Default)]
@@ -50,13 +69,20 @@ pub struct Hello {
     pub session: String,
 }
 
-/// Seeder → watcher: the binding price (sat per chunk), the only mints it takes, and the
-/// unpaid chunks it tolerates.
+/// Seeder → watcher: the binding price (sat per chunk), the only mints it takes, the
+/// unpaid chunks it tolerates from one peer, and the account's position (NFX-07 §3), so
+/// a watcher can resume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Quote {
     pub price_per_chunk: u64,
     pub mints: Vec<String>,
     pub window: u64,
+    /// Chunks the seeder has admitted on this account.
+    pub served: u64,
+    /// The account's payment watermark.
+    pub accepted_upto: u64,
+    /// The face value accepted on this account.
+    pub spent_total: u64,
 }
 
 /// Watcher → seeder: payment for chunks `(last acknowledged, upto_chunk]`.
@@ -67,8 +93,8 @@ pub struct Pay {
     pub token: String,
 }
 
-/// Seeder → watcher: payment accepted up to `accepted_upto`; `spent_total` is the face
-/// value accepted so far in this session.
+/// Seeder → watcher: the payment's swap completed, and the account is paid up to
+/// `accepted_upto`; `spent_total` is the face value accepted so far on the account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ack {
     pub accepted_upto: u64,
@@ -94,6 +120,7 @@ pub enum RejCode {
     Spent,
     Banned,
     BadSession,
+    MintUnavailable,
     BadLock,
     Stale,
     PaymentRequired,
@@ -112,6 +139,7 @@ const CODES: &[(&str, RejCode)] = &[
     ("spent", RejCode::Spent),
     ("banned", RejCode::Banned),
     ("bad-session", RejCode::BadSession),
+    ("mint-unavailable", RejCode::MintUnavailable),
     ("bad-lock", RejCode::BadLock),
     ("stale", RejCode::Stale),
     ("payment-required", RejCode::PaymentRequired),
@@ -170,8 +198,10 @@ fn string<'a>(obj: &'a Object, name: &str) -> Result<&'a str> {
     }
 }
 
-/// A mint URL: printable ASCII with no `\` or `@`, `https://` and a non-empty host; or,
-/// when the deployment allows it, `http://` on a loopback host.
+/// A mint URL (NFX-07 §2): printable ASCII without space, `\` or `@`; `https://`, a host
+/// (`[A-Za-z0-9.-]`, or an IPv6 literal in brackets), an optional port 1 to 65535, then
+/// nothing or a `/`, `?` or `#` and anything printable. Or, when the deployment allows
+/// it, `http://` on a loopback host.
 fn mint_url_ok(u: &str, opts: ParseOptions) -> bool {
     if !u
         .bytes()
@@ -179,31 +209,87 @@ fn mint_url_ok(u: &str, opts: ParseOptions) -> bool {
     {
         return false;
     }
-    let host_of = |rest: &str| {
-        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-        match authority.strip_prefix('[') {
-            Some(v6) => v6.split(']').next().unwrap_or("").to_owned(),
-            None => authority.split(':').next().unwrap_or("").to_owned(),
-        }
-    };
-    if let Some(rest) = u.strip_prefix("https://") {
-        return !host_of(rest).is_empty();
-    }
-    if opts.allow_loopback_http
-        && let Some(rest) = u.strip_prefix("http://")
+    let (rest, loopback_only) = if let Some(rest) = u.strip_prefix("https://") {
+        (rest, false)
+    } else if let Some(rest) = u.strip_prefix("http://")
+        && opts.allow_loopback_http
     {
-        return matches!(host_of(rest).as_str(), "127.0.0.1" | "localhost" | "::1");
+        (rest, true)
+    } else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let (host, after) = if authority.starts_with('[') {
+        let Some(close) = authority.find(']') else {
+            return false;
+        };
+        let inner = &authority[1..close];
+        if !(2..=45).contains(&inner.len())
+            || !inner
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+        {
+            return false;
+        }
+        authority.split_at(close + 1)
+    } else {
+        let host = authority.split(':').next().unwrap_or("");
+        if !(1..=253).contains(&host.len())
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        {
+            return false;
+        }
+        authority.split_at(host.len())
+    };
+    if !after.is_empty() {
+        let Some(port) = after.strip_prefix(':') else {
+            return false;
+        };
+        if !(1..=5).contains(&port.len())
+            || !port.bytes().all(|b| b.is_ascii_digit())
+            || !port.parse::<u32>().is_ok_and(|p| (1..=65535).contains(&p))
+        {
+            return false;
+        }
     }
-    false
+    !loopback_only || matches!(host, "127.0.0.1" | "localhost" | "[::1]")
 }
 
-/// Characters a `rej.detail` may not carry: C0, DEL, C1 and bidirectional overrides, so a
-/// logged refusal cannot rewrite a terminal or reorder text.
+/// A NUT-00 token: `cashuA` or `cashuB`, then base64 (standard or URL-safe).
+fn token_ok(t: &str) -> bool {
+    let Some(body) = t
+        .strip_prefix("cashuA")
+        .or_else(|| t.strip_prefix("cashuB"))
+    else {
+        return false;
+    };
+    !body.is_empty()
+        && body
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'=' | b'+' | b'/' | b'-'))
+}
+
+/// A `rej.detail` a log or a screen can show as it is: bounded, and free of the
+/// characters in [`DETAIL_FORBIDDEN`].
 fn detail_ok(d: &str) -> bool {
     d.len() <= MAX_DETAIL_BYTES
         && !d.chars().any(|c| {
-            c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            let c = u32::from(c);
+            DETAIL_FORBIDDEN
+                .iter()
+                .any(|(lo, hi)| (*lo..=*hi).contains(&c))
         })
+}
+
+/// Container nesting: the message object is level 1, scalars add nothing.
+fn depth(v: &Value) -> usize {
+    match v {
+        Value::Object(o) => 1 + o.values().map(depth).max().unwrap_or(0),
+        Value::Array(a) => 1 + a.iter().map(depth).max().unwrap_or(0),
+        _ => 0,
+    }
 }
 
 fn code_ok(c: &str) -> bool {
@@ -224,8 +310,11 @@ impl Message {
         if line.len() + 1 > MAX_LINE_BYTES {
             return Err(bad("a line is at most 32 KiB"));
         }
-        let Value::Object(obj) = Value::parse(line).map_err(|_| bad("not JSON under NFX-11 §9"))?
-        else {
+        let value = Value::parse(line).map_err(|_| bad("not JSON under NFX-11 §9"))?;
+        if depth(&value) > MAX_DEPTH {
+            return Err(bad("nested deeper than 16 levels"));
+        }
+        let Value::Object(obj) = value else {
             return Err(bad("not an object"));
         };
         match string(&obj, "t")? {
@@ -260,13 +349,16 @@ impl Message {
                     .iter()
                     .map(|m| match m {
                         Value::String(u) if mint_url_ok(u, opts) => Ok(u.clone()),
-                        _ => Err(bad("mint must be an https URL")),
+                        _ => Err(bad("mint must be an https URL (NFX-07 §2)")),
                     })
                     .collect::<Result<Vec<_>>>()?;
                 Ok(Self::Quote(Quote {
                     price_per_chunk,
                     mints,
                     window,
+                    served: int(&obj, "served")?,
+                    accepted_upto: int(&obj, "accepted_upto")?,
+                    spent_total: int(&obj, "spent_total")?,
                 }))
             }
             "pay" => {
@@ -275,7 +367,7 @@ impl Message {
                     return Err(bad("upto_chunk >= 1"));
                 }
                 let token = string(&obj, "token")?;
-                if !(token.starts_with("cashuA") || token.starts_with("cashuB")) {
+                if !token_ok(token) {
                     return Err(bad("token is a NUT-00 token"));
                 }
                 Ok(Self::Pay(Pay {
@@ -295,7 +387,9 @@ impl Message {
                 let detail = match obj.get("detail") {
                     None => None,
                     Some(Value::String(d)) if detail_ok(d) => Some(d.clone()),
-                    Some(_) => return Err(bad("detail is at most 1 KiB, without controls")),
+                    Some(_) => {
+                        return Err(bad("detail is at most 1 KiB, without invisible characters"));
+                    }
                 };
                 Ok(Self::Rej(Rej {
                     code: RejCode::from_code(code),
@@ -306,9 +400,14 @@ impl Message {
         }
     }
 
-    /// The message as one line (without the newline). Refused if its own reader would
-    /// refuse it (NFX-07 §2), loopback mints allowed.
+    /// The message as one line (without the newline), refused if the default reader
+    /// would refuse it (NFX-07 §2).
     pub fn to_line(&self) -> Result<String> {
+        self.to_line_with(ParseOptions::default())
+    }
+
+    /// The message as one line, refused if a reader with `opts` would refuse it.
+    pub fn to_line_with(&self, opts: ParseOptions) -> Result<String> {
         let line = match self {
             Self::Hello(h) => {
                 json!({"t": "hello", "video": h.video.to_string(), "session": h.session})
@@ -318,6 +417,9 @@ impl Message {
                 "price_per_chunk": q.price_per_chunk,
                 "mints": q.mints,
                 "window": q.window,
+                "served": q.served,
+                "accepted_upto": q.accepted_upto,
+                "spent_total": q.spent_total,
             }),
             Self::Pay(p) => json!({"t": "pay", "upto_chunk": p.upto_chunk, "token": p.token}),
             Self::Ack(a) => {
@@ -329,12 +431,7 @@ impl Message {
             },
         }
         .to_string();
-        let back = Self::parse_with(
-            &line,
-            ParseOptions {
-                allow_loopback_http: true,
-            },
-        )?;
+        let back = Self::parse_with(&line, opts)?;
         if &back != self {
             return Err(bad("the message does not survive its own reader"));
         }
