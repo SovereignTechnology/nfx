@@ -8,9 +8,8 @@ Updated 2026-09-23 · branch `main` · plan: ADR 0008 + `spec/` · A0 + A1 close
 ## Where things stand
 
 **Phases A0 and A1 are complete. A2, the Rust M1 data plane, is in progress**
-(ADR 0008 §5): `nfx-media` is done and `nfx-node` has its first layer; still to come are
-beacons/manifests over Nostr, the pull-through origin, `nfxd`, the scoped relay and a
-test player page.
+(ADR 0008 §5): `nfx-media` is done, and `nfx-node` has its iroh and Nostr layers. Still
+to come are the pull-through origin, `nfxd`, the scoped relay and a test player page.
 
 - **`nfx-media` (A2, 2026-09-23):**
   - the demo's L8 planning (probe, ladder, argv, storyboard) ported to Rust, with
@@ -42,6 +41,21 @@ test player page.
   - `cargo deny` with iroh's tree: CDLA-Permissive-2.0 and Unlicense are allowed; MPL-2.0
     is excepted for `attohttpc` only; two "unmaintained" proc-macro notices
     (`paste`, `proc-macro-error`) are ignored by ID with reasons.
+- **`nfx-node` layer 2, manifests and beacons over Nostr (A2, 2026-09-23):**
+  - `nfx-proto` gained the publisher side: `Manifest::tags()` and `beacon::tags()`.
+    Both reproduce the vectors' tags exactly, so a vector re-signs byte for byte.
+  - `nfx-node::nostr` on nostr-sdk 0.45:
+    - signing goes through any nostr-sdk async signer (a local key now, NIP-46 later),
+      and every event is parsed back through `nfx-proto` before it is sent;
+    - `Relays::manifests` returns the current revision per address (NIP-01), dropping
+      whatever fails NFX-02 or falls outside the query, whichever relay sent it;
+    - `watch_beacons` keeps a live table: newest per (seeder, manifest), expired
+      entries pruned, capped at 4096 with the soonest-to-expire evicted;
+    - `announce` publishes with TTL 120.
+  - Integration test against nostr-sdk's in-process relay (4/4 runs, ~0.5 s): a
+    revision replaces its predecessor, a creator-signed manifest with no `root` is
+    dropped, an older beacon is skipped, and a newer one is delivered.
+  - `cargo deny`: CC0-1.0 is allowed (rust-bitcoin via nostr, and CDK later).
 
 - **Repository:** the private GitLab project. Every push
   was a fast-forward of `main` with sovtech's OK. The demo history, the spec commit
@@ -125,9 +139,9 @@ test player page.
 
 1. **A2 — the Rust M1 data plane**, per ADR 0008 §5:
    - ~~`nfx-media`~~ done;
-   - `nfx-node`: ~~store trait, iroh seed/fetch, gossip~~ done; next come beacons and
-     manifests via nostr-sdk, the pull-through origin, and the per-member window gate
-     (M2);
+   - `nfx-node`: ~~store trait, iroh seed/fetch, gossip, Nostr manifests and
+     beacons~~ done; next comes the pull-through origin, then the per-member window
+     gate (M2);
    - `nfxd`;
    - a scoped relay;
    - a test player page, which can grow out of the S3/S4 spike pages.

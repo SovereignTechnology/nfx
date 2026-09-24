@@ -295,6 +295,24 @@ impl Beacon {
     }
 }
 
+/// The NFX-03 §1 tags for a beacon serving `manifest_a` (a [`Manifest::a_tag`]), emitted at
+/// `created_at` with lifetime `ttl` seconds. The namespace is taken from the `a` tag, so the
+/// `n`/`a` agreement rule holds by construction.
+pub fn tags(manifest_a: &str, created_at: u64, ttl: u64) -> Result<Vec<Vec<String>>> {
+    let (_, addr) = parse_a_tag(manifest_a)?;
+    if !TTL_RANGE.contains(&ttl) {
+        return Err(bad("TTL outside [60,120] s"));
+    }
+    let expiration = created_at
+        .checked_add(ttl)
+        .ok_or_else(|| bad("`expiration` overflows"))?;
+    Ok(vec![
+        vec!["n".into(), addr.namespace().to_string()],
+        vec!["a".into(), manifest_a.to_owned()],
+        vec!["expiration".into(), expiration.to_string()],
+    ])
+}
+
 /// The single value of a required tag.
 fn tag<'a>(event: &'a Event, name: &str) -> Result<&'a str> {
     match event.single_tag(name).map_err(Error::Beacon)? {

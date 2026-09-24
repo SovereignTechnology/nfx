@@ -16,6 +16,9 @@ pub enum NodeError {
     Collection(String),
     #[error("transport: {0}")]
     Transport(String),
+    /// A Nostr relay operation failed (connect, publish, fetch).
+    #[error("relay: {0}")]
+    Relay(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -23,6 +26,10 @@ pub enum NodeError {
 impl NodeError {
     pub(crate) fn transport(e: impl std::fmt::Display) -> Self {
         Self::Transport(e.to_string())
+    }
+
+    pub(crate) fn relay(e: impl std::fmt::Display) -> Self {
+        Self::Relay(e.to_string())
     }
 }
 

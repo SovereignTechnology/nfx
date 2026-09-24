@@ -76,6 +76,18 @@ fn manifest_licensed_parses_and_is_reproduced() {
     let again = resign(&ev, &secret(&v, "creator"));
     assert_eq!(again, ev, "id and sig reproduced byte for byte");
     assert_eq!(serde_json::to_value(&again).unwrap(), v["event"]);
+
+    // The publisher side: `tags()` is the vector's tag list, so re-signing reproduces it.
+    assert_eq!(m.tags(), ev.tags);
+    let built = Event::sign(
+        &secret(&v, "creator"),
+        ev.created_at,
+        KIND_MANIFEST,
+        m.tags(),
+        m.description.clone(),
+    )
+    .unwrap();
+    assert_eq!(built, ev);
 }
 
 #[test]
@@ -86,6 +98,24 @@ fn manifest_open_parses_ignores_unknown_tags_and_is_reproduced() {
     assert_eq!(m.license, License::Open);
     assert_eq!(m.price_hint, Some(0));
     assert_eq!(resign(&ev, &secret(&v, "creator")), ev);
+
+    // `tags()` emits every tag it understands, in order, and nothing else.
+    let known: Vec<_> = ev
+        .tags
+        .iter()
+        .filter(|t| t[0] != "x-future-tag")
+        .cloned()
+        .collect();
+    assert_eq!(m.tags(), known);
+    let rebuilt = Event::sign(
+        &secret(&v, "creator"),
+        ev.created_at,
+        KIND_MANIFEST,
+        m.tags(),
+        m.description.clone(),
+    )
+    .unwrap();
+    assert_eq!(Manifest::from_event(&rebuilt).unwrap(), m);
 }
 
 #[test]
@@ -139,9 +169,18 @@ fn beacon_parses_all_endpoint_types_and_is_reproduced() {
     assert_eq!(webrtc, Some(vec!["720p".to_string()]));
     assert!(b.content.skipped.is_empty());
 
-    // The publisher side renders the exact content string, and the event re-signs identically.
+    // The publisher side renders the exact content string and tags, and the event re-signs
+    // identically.
     assert_eq!(b.content.to_content(), ev.content);
+    assert_eq!(
+        nfx_proto::beacon::tags(&manifest.a_tag(), ev.created_at, 120).unwrap(),
+        ev.tags
+    );
     assert_eq!(resign(&ev, &secret(&v, "seeder")), ev);
+    for bad_ttl in [59, 121] {
+        assert!(nfx_proto::beacon::tags(&manifest.a_tag(), ev.created_at, bad_ttl).is_err());
+    }
+    assert!(nfx_proto::beacon::tags("30023:ab:nfx:mainnet:1:x", ev.created_at, 120).is_err());
 }
 
 #[test]

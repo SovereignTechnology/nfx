@@ -179,6 +179,59 @@ impl Manifest {
     pub fn a_tag(&self) -> String {
         format!("{KIND_MANIFEST}:{}:{}", self.author, self.addr)
     }
+
+    /// The NFX-02 §3 tags, in the table's order: the publisher side of [`Self::from_event`].
+    /// A kind-38504 event with these tags and `description` as its content parses back to
+    /// an equal manifest (up to `author` and `created_at`, which come from the signing).
+    #[must_use]
+    pub fn tags(&self) -> Vec<Vec<String>> {
+        fn t(name: &str, values: &[&str]) -> Vec<String> {
+            std::iter::once(name)
+                .chain(values.iter().copied())
+                .map(str::to_owned)
+                .collect()
+        }
+        let mut tags = vec![
+            t("d", &[&self.addr.to_string()]),
+            t("n", &[&self.addr.namespace().to_string()]),
+            t("title", &[&self.title]),
+            t("published_at", &[&self.published_at.to_string()]),
+            t(
+                "license",
+                &[match self.license {
+                    License::Open => "open",
+                    License::Licensed(_) => "licensed",
+                }],
+            ),
+            t("root", &[&self.root_hex()]),
+            t("segs", &[&self.segs.to_string()]),
+        ];
+        if let Some(duration) = self.duration {
+            tags.push(t("duration", &[&duration.to_string()]));
+        }
+        if let Some(thumb) = &self.thumb {
+            tags.push(t("thumb", &[&thumb.sha256, &thumb.mime]));
+        }
+        if let Some(price_hint) = self.price_hint {
+            tags.push(t("price_hint", &[&price_hint.to_string()]));
+        }
+        if let License::Licensed(terms) = &self.license {
+            tags.push(t("key_price", &[&terms.key_price.to_string()]));
+            tags.push(t("split", &[&terms.split_bps.to_string()]));
+            tags.push(t("mint", &[&terms.mint]));
+            tags.push(t("cashu_key", &[&hex::encode(terms.cashu_key)]));
+            for seeder in &terms.free_seeders {
+                tags.push(t("free_seeder", &[seeder]));
+            }
+        }
+        for hashtag in &self.hashtags {
+            tags.push(t("t", &[hashtag]));
+        }
+        if let Some(alt) = &self.alt {
+            tags.push(t("alt", &[alt]));
+        }
+        tags
+    }
 }
 
 fn one<'a>(event: &'a Event, name: &str) -> Result<Option<&'a str>> {
