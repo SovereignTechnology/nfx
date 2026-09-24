@@ -10,6 +10,10 @@
  *   B must receive segment bytes over WebRTC, reject exactly the tampered segment (from
  *   the peer), and play past it. nfxd's tracker must refuse a swarm it does not hold.
  *
+ *   Then the bridge: a second nfxd with `--bridge` (a native WebRTC peer, str0m). A viewer
+ *   plays through a gate that, once playback has started, refuses every segment: the rest
+ *   of the video can only come from the bridge, over WebRTC, from nfxd's verified store.
+ *
  * Usage: npm run build && npm run e2e:mesh
  * Every process it starts runs in its own process group, and only those are killed.
  */
@@ -104,6 +108,27 @@ async function liar(upstream: string, victim: string): Promise<string> {
     }),
   );
   return `http://127.0.0.1:${port}`;
+}
+
+/** The honest origin behind a switch: once `block` is on, every segment is refused. */
+async function gate(upstream: string): Promise<{ url: string; block: () => void; refused: () => number }> {
+  let blocked = false;
+  let refused = 0;
+  const port = await listen(
+    createServer((req, res) => {
+      if (blocked && (req.url ?? '').endsWith('.m4s')) {
+        refused += 1;
+        return res.writeHead(503, { 'cache-control': 'no-store' }).end();
+      }
+      const up = httpRequest(`${upstream}${req.url}`, { method: req.method }, (r) => {
+        res.writeHead(r.statusCode ?? 502, r.headers);
+        r.pipe(res);
+      });
+      up.on('error', () => res.writeHead(502).end());
+      up.end();
+    }),
+  );
+  return { url: `http://127.0.0.1:${port}`, block: () => (blocked = true), refused: () => refused };
 }
 
 /** One announce to the tracker; its reply. */
@@ -206,6 +231,49 @@ async function main(): Promise<void> {
       (viewer.mesh?.swarms ?? []).some((s: { swarm: string }) => !s.swarm.startsWith(`nfx/1/web/${meta.video}/`)) ? 'a stream joined a non-NFX swarm' : '',
     ].filter(Boolean);
     if (problems.length > 0) throw new Error(`${problems.join('; ')}: ${JSON.stringify(results)}`);
+
+    // The bridge: a second node over the same package (its own state), with a native
+    // WebRTC peer in its tracker's swarms.
+    const bridged = await start(
+      bin('nfxd'),
+      ['run', '--key', key, '--store', store, '--state', join(work, 'state-bridge'), '--seed', a, '--embed-relay', '127.0.0.1:0', '--origin', '127.0.0.1:0', '--embed-tracker', '127.0.0.1:0', '--bridge', '127.0.0.1:0'],
+      [/embedded relay: (ws:\/\/\S+)/, /origin: (http:\/\/\S+?)\/?\s/, /embedded tracker: (ws:\/\/\S+)/, /bridge: udp (\S+)/],
+    );
+    const relay2 = bridged.matches[0]![1]!;
+    const origin2 = bridged.matches[1]![1]!.replace(/\/$/, '');
+    const tracker2 = bridged.matches[2]![1]!;
+    run(bin('nfxd'), ['publish', '--key', key, '--relay', relay2, '--package', pkg, '--title', 'Mesh e2e']);
+    const until = Date.now() + 60_000;
+    while (!bridged.text().includes(`${a}: Seeding`)) {
+      if (Date.now() > until) throw new Error(`bridge never seeding:\n${bridged.text()}`);
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const g = await gate(origin2);
+    const v = await (await browser.newContext()).newPage();
+    await v.goto(`${pages}/?origin=${encodeURIComponent(g.url)}&root=${meta.root}&tracker=${encodeURIComponent(tracker2)}&httpWindow=2&level=0`);
+    await v.waitForFunction(() => (window as any).__nfx.playing && (document.querySelector('video') as HTMLVideoElement).currentTime > 3, null, { timeout: 60_000 });
+    g.block();
+    const t0 = await v.evaluate(() => (document.querySelector('video') as HTMLVideoElement).currentTime);
+    await v.waitForFunction(
+      (t0: number) => {
+        const s = (window as any).__nfx;
+        return s.errors.length > 0 || (document.querySelector('video') as HTMLVideoElement).currentTime > t0 + 15;
+      },
+      t0,
+      { timeout: 120_000 },
+    );
+    const viaBridge = await v.evaluate(() => {
+      const s = (window as any).__nfx;
+      return { t: (document.querySelector('video') as HTMLVideoElement).currentTime, errors: s.errors, mesh: s.mesh };
+    });
+    results.bridge = { ...viaBridge, blockedAt: t0, originRefused: g.refused() };
+    const bridgeProblems = [
+      viaBridge.errors.length !== 0 ? `errors ${JSON.stringify(viaBridge.errors)}` : '',
+      !(viaBridge.t > t0 + 15) ? 'playback stopped when the origin went away' : '',
+      !(viaBridge.mesh?.bytes?.p2p > 0) ? 'nothing came from the bridge' : '',
+      (viaBridge.mesh?.rejected ?? []).length !== 0 ? `rejected ${JSON.stringify(viaBridge.mesh.rejected)}` : '',
+    ].filter(Boolean);
+    if (bridgeProblems.length > 0) throw new Error(`bridge: ${bridgeProblems.join('; ')}: ${JSON.stringify(results.bridge)}`);
   } finally {
     await browser.close();
   }

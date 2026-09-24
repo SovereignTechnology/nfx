@@ -8,7 +8,7 @@
 //! nfxd delete --key <file> --relay <url>… --a <a>…   withdraw your own videos (NFX-02 §6)
 //! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--relay-only]
 //!          [--seed <a>]… [--fetch <a>]… [--pull <a>]… [--origin <addr:port>]
-//!          [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port>] [--namespace <ns>]…
+//!          [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--tracker-url <wss url>]]] [--namespace <ns>]…
 //!          [--allow-creator <hex>]… [--gossip [--gossip-peer <id>@<ip:port|relay-url>]…]
 //! ```
 //!
@@ -38,7 +38,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port>] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...]";
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...]";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -198,6 +198,8 @@ async fn run(args: &[String]) -> Result<()> {
             "https-url",
             "embed-relay",
             "embed-tracker",
+            "bridge",
+            "tracker-url",
             "namespace",
             "allow-creator",
             "gossip-peer",
@@ -233,6 +235,8 @@ async fn run(args: &[String]) -> Result<()> {
         https_url: one(&f, "https-url")?,
         embed_relay: addr("embed-relay")?,
         embed_tracker: addr("embed-tracker")?,
+        bridge: addr("bridge")?,
+        tracker_public_url: one(&f, "tracker-url")?,
         namespaces: all(&f, "namespace")
             .iter()
             .map(|n| Namespace::parse(n).map_err(Error::from))
@@ -252,6 +256,9 @@ async fn run(args: &[String]) -> Result<()> {
     }
     if let Some(url) = &daemon.tracker_url {
         eprintln!("embedded tracker: {url}");
+    }
+    if let Some(addr) = daemon.bridge_addr {
+        eprintln!("bridge: udp {addr}");
     }
     if gossip {
         let me = daemon.node().addr();

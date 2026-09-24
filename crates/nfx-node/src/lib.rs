@@ -7,6 +7,7 @@
 //! before it is stored (NFX-05 §4). A peer that serves bytes the hash list does not name
 //! is reported as [`NodeError::Poisoned`].
 
+pub mod bridge;
 mod error;
 pub mod fetch;
 pub mod gossip;
@@ -14,6 +15,7 @@ pub mod limit;
 pub mod node;
 pub mod nostr;
 pub mod origin;
+pub mod p2pml;
 pub mod relay;
 pub mod seed;
 pub mod store;

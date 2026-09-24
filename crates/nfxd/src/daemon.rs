@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use iroh::RelayUrl;
+use nfx_node::bridge::Bridge;
 use nfx_node::gossip::{Announcer, Listener, envelope_wire};
 use nfx_node::node::{Node, NodeConfig};
 use nfx_node::nostr::{BEACON_TTL, ManifestQuery, Relays};
@@ -77,6 +78,13 @@ pub struct Config {
     /// Embed a WebTorrent tracker for the browser mesh (NFX-10 §2) listening here. It
     /// admits exactly the per-rendition swarms of the videos this node seeds or holds.
     pub embed_tracker: Option<SocketAddr>,
+    /// Be a bridge seeder (NFX-10 §2): join those swarms as a WebRTC peer and serve the
+    /// stored segments to browsers. UDP on this address, a specific one browsers can reach.
+    /// Needs `embed_tracker`.
+    pub bridge: Option<SocketAddr>,
+    /// The embedded tracker's public URL (`wss://`, behind TLS), announced in beacons as the
+    /// bridge's `webrtc` endpoint. Needs `bridge`.
+    pub tracker_public_url: Option<String>,
     /// Namespaces the embedded relay serves; by default those of the videos above.
     pub namespaces: Vec<Namespace>,
     /// When non-empty, the embedded relay admits only these creators (x-only pubkey, 64
@@ -123,6 +131,8 @@ pub struct Daemon {
     pub relay_url: Option<String>,
     /// The embedded tracker's URL, as this host reaches it.
     pub tracker_url: Option<String>,
+    /// The bridge's UDP address.
+    pub bridge_addr: Option<SocketAddr>,
     pub origin_addr: Option<SocketAddr>,
     state: Arc<Mutex<BTreeMap<String, VideoState>>>,
     shared: Arc<Shared>,
@@ -147,6 +157,10 @@ struct Shared {
     gossip: bool,
     gossip_peers: Vec<iroh::EndpointAddr>,
     tracker: Option<Arc<Tracker>>,
+    bridge: Option<Arc<Bridge>>,
+    tracker_public_url: Option<String>,
+    /// Renditions the bridge serves, by `a` tag, for the `webrtc` beacon endpoint.
+    bridged: Mutex<BTreeMap<String, Vec<String>>>,
     /// This node's own pubkey: its own beacons and envelopes are never learned.
     own: Option<String>,
     state: Arc<Mutex<BTreeMap<String, VideoState>>>,
@@ -213,21 +227,37 @@ async fn gossip_send(
 impl Shared {
     /// Open `manifest`'s browser-mesh swarms on the embedded tracker, from its hash list in
     /// the store (verified against the manifest again here).
-    fn admit_swarms(&self, manifest: &Verified<Manifest>) {
+    /// With a bridge, it also joins them.
+    async fn admit_swarms(&self, manifest: &Verified<Manifest>) {
         if let Some(tracker) = &self.tracker
             && let Ok(bytes) = self.store.get(&manifest.root_hex())
             && let Ok(list) = HashList::verify_for(&bytes, manifest)
         {
             let _ = tracker.admit(&list);
+            if let Some(bridge) = &self.bridge
+                && let Ok(renditions) = bridge.serve(&list, &*self.store).await
+            {
+                self.bridged
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(manifest.a_tag(), renditions);
+            }
         }
     }
 
     /// Close them again (the creator deleted the video, NFX-02 §6).
-    fn forget_swarms(&self, manifest: &Verified<Manifest>) {
+    async fn forget_swarms(&self, manifest: &Verified<Manifest>) {
         if let Some(tracker) = &self.tracker
             && let Ok(bytes) = self.store.get(&manifest.root_hex())
             && let Ok(list) = HashList::verify_for(&bytes, manifest)
         {
+            if let Some(bridge) = &self.bridge {
+                let _ = bridge.forget(&list).await;
+                self.bridged
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&manifest.a_tag());
+            }
             let _ = tracker.forget(&list);
         }
     }
@@ -330,7 +360,7 @@ impl Shared {
         if let Some(origin) = &self.origin {
             origin.hold(manifest).await?;
         }
-        self.admit_swarms(manifest);
+        self.admit_swarms(manifest).await;
         self.set(a, VideoState::Seeding);
         // The video's gossip swarm, when on: announce into it, and learn from it.
         let secret = keys.secret_key().to_secret_bytes();
@@ -372,7 +402,7 @@ impl Shared {
                             let content = self.beacon(&seeded, manifest);
                             gossip_send(announcer, Op::Bye, &pubkey, content, &secret).await;
                         }
-                        self.forget_swarms(manifest);
+                        self.forget_swarms(manifest).await;
                         self.set(a, VideoState::Deleted);
                         return Ok(());
                     }
@@ -385,6 +415,18 @@ impl Shared {
         let mut endpoints = vec![self.node.beacon_endpoint(seeded)];
         if let Some(url) = &self.https_url {
             endpoints.push(Endpoint::Https { url: url.clone() });
+        }
+        if let Some(url) = &self.tracker_public_url
+            && let Some(renditions) = self
+                .bridged
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&manifest.a_tag())
+        {
+            endpoints.push(Endpoint::Webrtc {
+                tracker_urls: vec![url.clone()],
+                renditions: renditions.clone(),
+            });
         }
         BeaconContent {
             v: 1,
@@ -427,7 +469,7 @@ impl Shared {
         while origin.hold(&manifest).await.is_err() {
             tokio::time::sleep(RETRY).await;
         }
-        self.admit_swarms(&manifest);
+        self.admit_swarms(&manifest).await;
         self.set(&a, VideoState::Serving);
         Ok(())
     }
@@ -463,6 +505,23 @@ impl Daemon {
             return Err(Error::Config(
                 "--gossip, --gossip-peer: a relay-only node does not gossip".into(),
             ));
+        }
+        if cfg.bridge.is_some() && cfg.embed_tracker.is_none() {
+            return Err(Error::Config("--bridge needs --embed-tracker".into()));
+        }
+        if let Some(url) = &cfg.tracker_public_url {
+            if cfg.bridge.is_none() {
+                return Err(Error::Config("--tracker-url needs --bridge".into()));
+            }
+            // Browsers dial it: wss://, or ws:// on loopback for tests (as the player).
+            let loopback = ["ws://localhost", "ws://127.0.0.1", "ws://[::1]"]
+                .iter()
+                .any(|p| url.starts_with(p) && url[p.len()..].starts_with([':', '/']));
+            if !(url.starts_with("wss://") || loopback) || url.contains(['?', '#', '@', ' ']) {
+                return Err(Error::Config(format!(
+                    "--tracker-url {url}: not a wss:// URL"
+                )));
+            }
         }
         if !cfg.gossip && !cfg.gossip_peers.is_empty() {
             return Err(Error::Config("--gossip-peer needs --gossip".into()));
@@ -572,6 +631,15 @@ impl Daemon {
         let relays = Arc::new(Relays::connect(&relays, CONNECT_TIMEOUT).await?);
         let store = Arc::new(FsStore::open(&cfg.store)?);
         let pull = Arc::new(SwarmPull::new(node.clone()));
+        let bridge = match (cfg.bridge, &tracker) {
+            (Some(addr), Some(tracker)) => Some(Arc::new(
+                Bridge::start(tracker, store.clone(), addr)
+                    .await
+                    .map_err(|e| Error::Config(format!("--bridge: {e}")))?,
+            )),
+            _ => None,
+        };
+        let bridge_addr = bridge.as_ref().map(|b| b.local_addr());
 
         let (origin, origin_addr) = match cfg.origin {
             None if cfg.internal_origin => (
@@ -597,6 +665,9 @@ impl Daemon {
             pull: pull.clone(),
             origin,
             https_url: cfg.https_url.clone(),
+            bridge,
+            tracker_public_url: cfg.tracker_public_url.clone(),
+            bridged: Mutex::new(BTreeMap::new()),
             deletion_check_every: cfg
                 .deletion_check_every
                 .unwrap_or(Duration::from_secs(BEACON_TTL / 2))
@@ -656,6 +727,7 @@ impl Daemon {
             embedded,
             relay_url,
             tracker_url,
+            bridge_addr,
             origin_addr,
             state,
             shared,
@@ -744,7 +816,7 @@ impl Daemon {
             while origin.hold(&manifest).await.is_err() {
                 tokio::time::sleep(RETRY).await;
             }
-            shared.admit_swarms(&manifest);
+            shared.admit_swarms(&manifest).await;
             Ok::<_, Error>(manifest)
         };
         let manifest = tokio::time::timeout(timeout, hold)

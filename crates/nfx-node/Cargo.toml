@@ -22,6 +22,7 @@ nfx-proto.workspace = true
 nostr-memory.workspace = true
 nostr-sdk = { workspace = true, features = ["local-relay"] }
 serde_json.workspace = true
+str0m.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tungstenite.workspace = true

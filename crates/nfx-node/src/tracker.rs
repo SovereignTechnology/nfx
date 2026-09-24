@@ -88,10 +88,27 @@ struct Socket {
     joined: HashSet<String>,
     tokens: f64,
     refilled: Instant,
+    /// An in-process peer (the node's own bridge): no rate or swarm-count limit.
+    trusted: bool,
 }
 
 impl Socket {
+    fn new(id: u64, outbox: mpsc::Sender<String>, trusted: bool) -> Self {
+        Self {
+            id,
+            outbox,
+            peer_id: None,
+            joined: HashSet::new(),
+            tokens: RATE_BURST,
+            refilled: Instant::now(),
+            trusted,
+        }
+    }
+
     fn allow(&mut self) -> bool {
+        if self.trusted {
+            return true;
+        }
         let now = Instant::now();
         let elapsed = now.duration_since(self.refilled).as_secs_f64();
         self.tokens = (self.tokens + elapsed * RATE_PER_SEC).min(RATE_BURST);
@@ -336,7 +353,10 @@ impl Tracker {
         info_hash: &str,
         peer_id: &str,
     ) -> core::result::Result<(), &'static str> {
-        if !socket.joined.contains(info_hash) && socket.joined.len() >= MAX_SWARMS_PER_SOCKET {
+        if !socket.trusted
+            && !socket.joined.contains(info_hash)
+            && socket.joined.len() >= MAX_SWARMS_PER_SOCKET
+        {
             return Err("too many swarms on one socket");
         }
         let mut swarms = self.swarms.lock().unwrap_or_else(PoisonError::into_inner);
@@ -409,14 +429,11 @@ impl Tracker {
         let mut ws =
             WebSocketStream::from_raw_socket(TokioIo::new(io), Role::Server, Some(config)).await;
         let (outbox, mut inbox) = mpsc::channel::<String>(OUTBOX);
-        let mut socket = Socket {
-            id: self.next_socket.fetch_add(1, Ordering::Relaxed),
+        let mut socket = Socket::new(
+            self.next_socket.fetch_add(1, Ordering::Relaxed),
             outbox,
-            peer_id: None,
-            joined: HashSet::new(),
-            tokens: RATE_BURST,
-            refilled: Instant::now(),
-        };
+            false,
+        );
         let mut ping = tokio::time::interval(PING_EVERY);
         let mut heard = Instant::now();
         loop {
@@ -462,6 +479,26 @@ impl Tracker {
         for info_hash in socket.joined.clone() {
             self.leave_swarm(&mut socket, &info_hash);
         }
+    }
+
+    /// A socket for an in-process peer, the node's own bridge: the same protocol,
+    /// admission and relay as a WebSocket client, without the WebSocket. Messages the
+    /// tracker sends it arrive on the receiver.
+    #[must_use]
+    pub fn local(self: &Arc<Self>) -> (LocalSocket, mpsc::Receiver<String>) {
+        let (outbox, inbox) = mpsc::channel(OUTBOX * 4);
+        let socket = Socket::new(
+            self.next_socket.fetch_add(1, Ordering::Relaxed),
+            outbox,
+            true,
+        );
+        (
+            LocalSocket {
+                tracker: self.clone(),
+                socket,
+            },
+            inbox,
+        )
     }
 
     /// `guard` is the connection's admission slot; an upgraded WebSocket keeps it.
@@ -558,4 +595,28 @@ fn plain(status: StatusCode, text: &'static str) -> Response<Full<Bytes>> {
         HeaderValue::from_static("text/plain; charset=utf-8"),
     );
     r
+}
+
+/// See [`Tracker::local`]. Dropping it leaves every swarm it joined.
+pub struct LocalSocket {
+    tracker: Arc<Tracker>,
+    socket: Socket,
+}
+
+impl LocalSocket {
+    /// Send one client message; the tracker's direct reply, if any.
+    pub fn send(&mut self, text: &str) -> Option<String> {
+        match self.tracker.handle(&mut self.socket, text) {
+            Reply::Send(reply) => Some(reply),
+            Reply::None | Reply::Close => None,
+        }
+    }
+}
+
+impl Drop for LocalSocket {
+    fn drop(&mut self) {
+        for info_hash in self.socket.joined.clone() {
+            self.tracker.leave_swarm(&mut self.socket, &info_hash);
+        }
+    }
 }

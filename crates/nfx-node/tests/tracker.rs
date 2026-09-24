@@ -205,3 +205,74 @@ async fn a_flood_of_messages_closes_the_socket() {
     assert!(replies <= 61, "at most the burst was answered: {replies}");
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_socket_is_a_peer_like_any_other() {
+    let tracker = Arc::new(Tracker::new());
+    tracker.admit(&list()).unwrap();
+    let ih = VideoAddr::parse(&list().video)
+        .unwrap()
+        .web_tracker_infohash("720p");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(tracker.clone().serve(listener));
+
+    // The in-process peer (the bridge) joins; a browser then offers, and it answers.
+    let (mut local, mut inbox) = tracker.local();
+    let bridge = "-NX0100-bridgebridge";
+    let joined: Value = serde_json::from_str(
+        &local
+            .send(&announce(&ih, bridge, 0, Some("started")).to_string())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(joined["incomplete"], 1);
+    let (mut browser, _) = connect_async(url.as_str()).await.unwrap();
+    let pb = "-PM0400-browserbrows";
+    send(&mut browser, &announce(&ih, pb, 1, Some("started"))).await;
+    assert_eq!(recv(&mut browser).await["incomplete"], 2);
+    let offer: Value = serde_json::from_str(
+        &tokio::time::timeout(WAIT, inbox.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(offer["peer_id"], pb);
+    let answer = json!({
+        "action": "announce", "info_hash": ih, "peer_id": bridge,
+        "to_peer_id": pb, "offer_id": offer["offer_id"], "answer": sdp("answer"),
+    });
+    assert!(
+        local.send(&answer.to_string()).is_none(),
+        "no reply to an answer"
+    );
+    assert_eq!(recv(&mut browser).await["peer_id"], bridge);
+
+    // A foreign swarm is refused to it as to anyone; dropping it leaves the swarm.
+    let refused: Value = serde_json::from_str(
+        &local
+            .send(
+                &announce(
+                    &VideoAddr::parse(&list().video)
+                        .unwrap()
+                        .web_tracker_infohash("1080p"),
+                    bridge,
+                    0,
+                    None,
+                )
+                .to_string(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        refused["failure reason"]
+            .as_str()
+            .unwrap()
+            .contains("not an NFX swarm")
+    );
+    drop(local);
+    assert_eq!(tracker.peers(&ih), 1);
+    server.abort();
+}
