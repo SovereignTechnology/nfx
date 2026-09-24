@@ -2,7 +2,7 @@
   "name": "@nfx/test-player",
   "private": true,
   "type": "module",
-  "description": "A2 test player: hls.js over an NFX-05 \u00a76 origin, every file verified by nfx-proto (WASM) before hls.js sees it",
+  "description": "A2 test player: hls.js over an NFX-05 §6 origin, every file verified by nfx-proto (WASM) before hls.js sees it",
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "wasm": "wasm-pack build --target web --release --no-opt --out-dir ../../web/player/out/wasm --out-name nfx_wasm ../../crates/nfx-wasm",
@@ -10,12 +10,15 @@
     "serve": "npm run wasm && esbuild src/player.ts --bundle --format=esm --target=es2022 --outdir=out --servedir=. --serve=0.0.0.0:3471",
     "typecheck": "tsc -p .",
     "e2e": "tsx e2e.ts",
-    "unit": "tsx unit.ts"
+    "unit": "tsx unit.ts",
+    "e2e:mesh": "esbuild e2e-peer.ts --bundle --format=esm --target=es2022 --outfile=out/e2e-peer.js && tsx e2e-mesh.ts"
   },
   "devDependencies": {
     "@types/node": "22.18.0",
     "esbuild": "0.25.10",
     "hls.js": "1.7.3",
+    "p2p-media-loader-core": "4.0.0",
+    "p2p-media-loader-hlsjs": "4.0.0",
     "playwright": "1.63.0",
     "tsx": "4.23.15",
     "typescript": "5.9.3"

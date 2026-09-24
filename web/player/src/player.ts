@@ -9,6 +9,14 @@
  *
  * A loader wrapper checks every playlist, init and segment with nfx-proto (WASM,
  * ./verify.ts) before hls.js sees a byte: a mismatch is a load error, never data.
+ *
+ * With `&tracker=<wss URL>` (repeatable) the player also joins the NFX-10 browser mesh
+ * (./mesh.ts): segments may then come from other viewers, checked by the same verifier.
+ * `&stun=<stun: URL>` adds an ICE server; there is none by default, so no third party
+ * learns who watches. Test knobs, which change where bytes come from and never whether
+ * they are checked: `&httpWindow=<s>` (seconds ahead fetched over HTTP) and `&level=<n>`
+ * (pin a rendition).
+ *
  * `window.__nfx` exposes state for automation.
  */
 import Hls, {
@@ -19,6 +27,9 @@ import Hls, {
   type LoaderContext,
 } from 'hls.js';
 
+import { HlsJsP2PEngine } from 'p2p-media-loader-hlsjs';
+
+import { MAX_TRACKERS, type MeshStats, meshConfig, trackerUrl } from './mesh';
 import { resolveManifest, watchOrigins } from './resolve';
 import { Anchor, type ManifestBinding } from './verify';
 
@@ -37,6 +48,7 @@ interface State {
   levels: { height: number; bitrate: number }[];
   playing: boolean;
   errors: string[];
+  mesh: MeshStats | null;
 }
 
 const st: State = {
@@ -51,6 +63,7 @@ const st: State = {
   levels: [],
   playing: false,
   errors: [],
+  mesh: null,
 };
 (window as unknown as { __nfx: State }).__nfx = st;
 
@@ -119,9 +132,22 @@ async function start(origin: string, root: string, manifest?: ManifestBinding): 
     // Native HLS would fetch unverified bytes; this player refuses rather than degrade.
     throw new Error('MediaSource unavailable: this player only plays verified bytes');
   }
-  st.engine = `hls.js ${Hls.version}`;
-  const hls = new Hls({ loader: verifyingLoader(anchor), progressive: false });
+  const base = { loader: verifyingLoader(anchor), progressive: false };
+  let hls: Hls;
+  if (trackers.length > 0) {
+    const mesh: MeshStats = { trackers: [], swarms: [], bytes: { http: 0, p2p: 0 }, uploaded: 0, peers: 0, rejected: [] };
+    st.mesh = mesh;
+    const HlsWithP2P = HlsJsP2PEngine.injectMixin(Hls);
+    const tuning = httpWindow === null ? {} : { httpWindow };
+    hls = new HlsWithP2P({ ...base, ...meshConfig(anchor, trackers, iceServers, mesh, log, tuning) } as never);
+    st.engine = `hls.js ${Hls.version} + p2p-media-loader 4.0.0`;
+    log(`mesh: trackers ${trackers.join(' ')}`);
+  } else {
+    hls = new Hls(base);
+    st.engine = `hls.js ${Hls.version}`;
+  }
   hls.on(Hls.Events.MANIFEST_PARSED, (_, d) => {
+    if (level !== null && level < d.levels.length) hls.currentLevel = level;
     st.levels = d.levels.map((l) => ({ height: l.height, bitrate: l.bitrate }));
     log(`levels: ${st.levels.map((l) => `${l.height}p`).join(' ')}`);
     video.play().catch((e: unknown) => st.errors.push(`play: ${String(e)}`));
@@ -192,6 +218,20 @@ const origin = (params.get('origin') ?? '').replace(/\/+$/, '');
 const root = params.get('root') ?? '';
 const video = params.get('video');
 const segs = Number(params.get('segs'));
+const trackers = [
+  ...new Set(params.getAll('tracker').map(trackerUrl).filter((t): t is string => t !== null)),
+].slice(0, MAX_TRACKERS);
+const iceServers: RTCIceServer[] = params
+  .getAll('stun')
+  .filter((u) => /^stuns?:[A-Za-z0-9.-]+(:\d{1,5})?$/.test(u))
+  .slice(0, 2)
+  .map((urls) => ({ urls }));
+const whole = (v: string | null, max: number): number | null => {
+  const n = Number(v);
+  return v !== null && Number.isSafeInteger(n) && n >= 0 && n <= max ? n : null;
+};
+const httpWindow = whole(params.get('httpWindow'), 600);
+const level = whole(params.get('level'), 16);
 $<HTMLInputElement>('a').value = a;
 $<HTMLInputElement>('relay').value = relays[0] ?? '';
 $<HTMLInputElement>('origin').value = origin;

@@ -18,6 +18,8 @@
   "include": [
     "src",
     "e2e.ts",
-    "unit.ts"
+    "unit.ts",
+    "e2e-mesh.ts",
+    "e2e-peer.ts"
   ]
 }

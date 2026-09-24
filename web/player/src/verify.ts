@@ -54,6 +54,11 @@ export class Anchor {
     return this.list.expected(new URL(url, location.href).pathname);
   }
 
+  /** The NFX-10 §2 stream swarm ID of the stream whose playlist is at `url`, if any. */
+  streamSwarmId(url: string): string | undefined {
+    return this.list.streamSwarmId(new URL(url, location.href).pathname);
+  }
+
   /** The verified sha256 of `bytes` fetched from `url`; throws on any mismatch. */
   check(url: string, bytes: ArrayBuffer): string {
     return this.list.check(new URL(url, location.href).pathname, new Uint8Array(bytes));
