@@ -360,6 +360,15 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    money code: `nfx-wallet`, pay/1 (NFX-07), the mint extension (NFX-09) and the web
    wallet. It gets the locked-directory rule and its own security stage (ADR 0008 §4).
 
+10. **Proposed: a second funding mode, creator-managed** (ADR 0100,
+    `docs/decisions/0100-creator-managed-mode.md`, branch `spec/creator-managed`,
+    2026-09-25). Watchers pay the creator only; seeders bill the creator in batches
+    with watcher-signed receipts (bounded per sale by `delivery_share × key_price`)
+    and optional retainers; the creator's daemon is the one verifier. `mode` is an
+    additive manifest tag, so no frozen document is bumped. Ships with M3; M2 is
+    unchanged and is the seeder-managed mode. Awaiting sovtech's read of the four
+    open questions; then NFX-13.
+
 ## Not verified / known gaps
 
 - **GitLab CI's first real run failed only its last step.** Vectors,
