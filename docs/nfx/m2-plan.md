@@ -25,7 +25,8 @@ audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
 [fourth](reviews/2026-09-24-m2.0-fourth-audit.md),
 [fifth](reviews/2026-09-24-m2.0-fifth-audit.md),
-[sixth](reviews/2026-09-24-m2.0-sixth-audit.md)). sovtech's bar for the push is zero
+[sixth](reviews/2026-09-24-m2.0-sixth-audit.md),
+[seventh](reviews/2026-09-24-m2.0-seventh-audit.md)). sovtech's bar for the push is zero
 findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -54,15 +55,24 @@ findings, confirmed after the sixth:
     responses, outages, dial records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, one of them
-  threaded, and **each of 154 planted defects fails its scenario**, every surviving mutant
-  from all six audits among them.
+  threaded, and **each of 174 planted defects fails its scenario**, every surviving mutant
+  from all seven audits among them.
+- **Since the seventh audit:**
+  - the lock is re-scoped to the money crates, failing closed on any target without
+    dep-info;
+  - `window` is 2 to 64 on the wire;
+  - the watcher waits 180 s;
+  - arrival is the transport's receipt;
+  - bans apply only to peers with an account;
+  - a stopped watcher still reclaims.
 - **Since the sixth audit:**
   - a watcher's window ceiling;
   - three `mint-unavailable` answers a session;
   - answers belong to their session;
   - the standing reclaims a closed session's payment;
   - path crates outside the workspace are refused;
-  - binaries and examples are dep-info checked;
+  - binaries and examples are dep-info checked (in the money crates only since the
+    seventh audit);
   - `bash -p`.
 - **Since the fifth audit:**
   - one lock decides each payment, with its deadline counted from arrival;
