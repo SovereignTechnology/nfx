@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of fourteen
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of fifteen
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -33,7 +33,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [eleventh](reviews/2026-09-24-m2.0-eleventh-audit.md),
 [twelfth](reviews/2026-09-24-m2.0-twelfth-audit.md),
 [thirteenth](reviews/2026-09-24-m2.0-thirteenth-audit.md),
-[fourteenth](reviews/2026-09-24-m2.0-fourteenth-audit.md)). sovtech's bar for the push is zero
+[fourteenth](reviews/2026-09-24-m2.0-fourteenth-audit.md),
+[fifteenth](reviews/2026-09-24-m2.0-fifteenth-audit.md)). sovtech's bar for the push is zero
 findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -67,11 +68,18 @@ findings, confirmed after the sixth:
     reserving their inputs (NUT-07 `PENDING`) and their rollback, NUT-07 checks and
     NUT-09 restores of each swap's own outputs under a per-request limit, partial
     claims, mint, restore and state-check outages, unanswered reads that cost time,
-    dial records;
+    keyset rotation, requests processed or reserved just before the next swap, dial
+    records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, two of them
-  threaded, and **each of 252 planted defects fails its scenario**, every surviving mutant
-  from all fourteen audits among them.
+  threaded, and **each of 264 planted defects fails its scenario**, every surviving mutant
+  from all fifteen audits among them.
+- **Since the fifteenth audit:**
+  - a completion is a retry through the mint's request model: `spent` or refused for
+    good is settled by restore, pending or unanswered stays unknown;
+  - own reads exclude the peer's other videos, follow the ban check, and are at most one
+    a second per account (reused by a `hello`, and by a `pay` of the same proofs);
+  - an unanswered read is not split, and split answers stay with their swaps.
 - **Since the fourteenth audit:**
   - an account's own `hello` and `pay` read only its own unknown swaps; admission reads
     nothing; `SeederEngine::sweep`, a background task in a real engine, reads the rest;
