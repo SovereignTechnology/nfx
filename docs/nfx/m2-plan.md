@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of twenty
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of twenty-one
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -39,8 +39,9 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [seventeenth](reviews/2026-09-24-m2.0-seventeenth-audit.md),
 [eighteenth](reviews/2026-09-24-m2.0-eighteenth-audit.md),
 [nineteenth](reviews/2026-09-24-m2.0-nineteenth-audit.md),
-[twentieth](reviews/2026-09-24-m2.0-twentieth-audit.md)). sovtech's bar for the push is
-zero findings, confirmed after the sixth:
+[twentieth](reviews/2026-09-24-m2.0-twentieth-audit.md),
+[twenty-first](reviews/2026-09-24-m2.0-twenty-first-audit.md)). sovtech's bar for the push
+is zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
   - Bans and the global cap are seeder-wide, and windows are per account. The global cap
@@ -80,9 +81,16 @@ zero findings, confirmed after the sixth:
     answered on the reader's next poll, dial records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, two of them
-  threaded, run twice (the second time with reads as round trips), and **each of 311
-  planted defects fails its scenario**, every surviving mutant from all twenty audits
-  among them.
+  threaded, run twice (the second time with reads as round trips), and **each of 319
+  planted defects fails its scenario**, every surviving mutant from all twenty-one
+  audits among them.
+- **Since the twenty-first audit:**
+  - a read serves only entries whose undecided swaps it covered, fixed as it is sent;
+    reads count against their own account alone; a round-trip read reaches the mint
+    when sent;
+  - the payment side of the read rules is pinned;
+  - a watcher's reclaim refused 12003 is decided per proof, by each keyset's listed
+    expiry against its own clock.
 - **Since the twentieth audit:**
   - each read of a second is under way, back or abandoned: an abandoned read counts;
     an entry waits only for a read that would serve it, and reads itself when its
