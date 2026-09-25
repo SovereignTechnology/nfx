@@ -210,7 +210,7 @@ def test_counts() -> dict[str, int]:
     return {
         "adversary": scenarios,
         "round_trip": scenarios,  # the same suite, the mint answering reads on a later poll
-        "mutants": len(re.findall(r"^\s+[a-z_0-9]+: [sv]\(", mutants, re.M)),
+        "mutants": len(re.findall(r"^\s+[a-z_0-9]+: [svr]\(", mutants, re.M)),
         "pay1": len(re.findall(r"^#\[test\]$", pay1, re.M)),
     }
 

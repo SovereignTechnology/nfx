@@ -1291,7 +1291,7 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
         .await
         .expect("so is the same peer's on another video");
     h.restore_outage(false);
-    h.advance(SECOND); // the account's own reads are at most one a second
+    h.advance(SECOND); // not a read made this second, which would be reused
     let q = open(h, &e, 1).await.quote().clone();
     assert_eq!(
         (q.accepted_upto, q.spent_total),
@@ -1564,31 +1564,66 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
     // A first attempt refused because a keyset expired (CDK 12003): the payer's inputs'
     // or the seeder's own outputs', which the answer does not say. `mint-unavailable`,
     // never a ban, and nothing left unknown: the next payment is swapped at once.
-    let e = h.engine(1, 4, 1000);
-    let mut s = open(h, &e, 1).await;
-    serve(h, &mut s, 0, 4);
-    let expired = h.token(4).await;
-    h.before_next_swap(MintEvent::ExpireKeyset);
-    let r = s
-        .pay(&Pay {
-            upto_chunk: 4,
-            token: expired,
-        })
-        .await;
-    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
-    assert!(!s.banned(), "an expired keyset bans nobody");
-    let ack = s
-        .pay(&Pay {
+    for event in [MintEvent::ExpireInputKeyset, MintEvent::ExpireKeyset] {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        let expired = h.token(4).await;
+        h.before_next_swap(event);
+        let r = s
+            .pay(&Pay {
+                upto_chunk: 4,
+                token: expired,
+            })
+            .await;
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+        assert!(!s.banned(), "an expired keyset bans nobody ({event:?})");
+        let ack = s
+            .pay(&Pay {
+                upto_chunk: 4,
+                token: h.token(4).await,
+            })
+            .await
+            .expect("nothing is left unknown: the next payment is swapped");
+        assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
+    }
+    // A retry refused because the payer's keyset expired: the first attempt, its inputs
+    // reserved by the mint before the expiry, may still sign. While an input is pending the
+    // outcome stays unknown; once the mint finishes that request, the claim is learnt and
+    // credited. So too when the NUT-07 check goes unanswered: no input is shown not
+    // pending, and nothing is settled.
+    for state_down in [false, true] {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        h.hold_next_swap_reserving();
+        h.time_out_next_swap();
+        h.before_next_swap(MintEvent::ExpireInputKeyset);
+        h.state_check_outage(state_down);
+        let reserved = Pay {
             upto_chunk: 4,
             token: h.token(4).await,
-        })
-        .await
-        .expect("nothing is left unknown: the next payment is swapped");
-    assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
-    // A retry refused because a keyset expired: the first attempt, its inputs reserved by
-    // the mint before the expiry, may still sign. While an input is pending the outcome
-    // stays unknown; once the mint finishes that request, the claim is learnt and
-    // credited.
+        };
+        let r = s.pay(&reserved).await;
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+        assert!(!s.banned(), "an expired keyset bans nobody");
+        h.state_check_outage(false);
+        h.release_swaps().await;
+        assert!(
+            h.claimed_all(&reserved.token).await,
+            "the reserved request signed"
+        );
+        h.advance(SECOND);
+        let q = open(h, &e, 1).await.quote().clone();
+        assert_eq!(
+            (q.accepted_upto, q.spent_total),
+            (4, 4),
+            "learnt once the mint finished it, and credited (NUT-07 down {state_down})"
+        );
+    }
+    // The mint's own keyset expiring while it holds the first request reserved: that
+    // request cannot sign now (its outputs' keyset expired too), so nothing, and the
+    // account pays again with other proofs.
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     serve(h, &mut s, 0, 4);
@@ -1601,18 +1636,83 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
     };
     let r = s.pay(&reserved).await;
     assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
-    assert!(!s.banned(), "an expired keyset bans nobody");
     h.release_swaps().await;
-    assert!(
-        h.claimed_all(&reserved.token).await,
-        "the reserved request signed"
-    );
+    assert!(!h.claimed_any(&reserved.token).await, "it could not sign");
+    h.advance(SECOND);
+    let ack = s
+        .pay(&Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        })
+        .await
+        .expect("nothing is left unknown: the account pays again");
+    assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
+    // A retry refused because the mint's keyset expired after its first attempt went
+    // through: a restore no longer shows the outputs, so the inputs decide, and spent they
+    // are the claim. Acknowledged in time; and so, through the late read, when the mint
+    // was down for the retry and the keyset expired meanwhile.
+    for late in [false, true] {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        h.hold_swap_responses();
+        h.lose_next_swap_response();
+        let first = Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        };
+        let (r, ()) = both(s.pay(&first), async {
+            yield_once().await;
+            if late {
+                h.mint_outage(true);
+            } else {
+                h.before_next_swap(MintEvent::ExpireKeyset);
+            }
+            h.release_swaps().await;
+        })
+        .await;
+        if late {
+            assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+            h.expire_keyset();
+            h.mint_outage(false);
+            h.advance(SECOND);
+            let q = open(h, &e, 1).await.quote().clone();
+            assert_eq!(
+                (q.accepted_upto, q.spent_total),
+                (4, 4),
+                "the late read takes the spent inputs as the claim"
+            );
+        } else {
+            let ack = r.expect("the spent inputs are the claim");
+            assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
+        }
+    }
+    // With the payer's keyset expired instead, the restore still answers; unanswered, the
+    // outcome stays unknown, and is learnt once restores answer.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    h.hold_swap_responses();
+    h.lose_next_swap_response();
+    let first = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    let (r, ()) = both(s.pay(&first), async {
+        yield_once().await;
+        h.before_next_swap(MintEvent::ExpireInputKeyset);
+        h.restore_outage(true);
+        h.release_swaps().await;
+    })
+    .await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    h.restore_outage(false);
     h.advance(SECOND);
     let q = open(h, &e, 1).await.quote().clone();
     assert_eq!(
         (q.accepted_upto, q.spent_total),
         (4, 4),
-        "learnt once the mint finished it, and credited"
+        "learnt once restores answer, and credited"
     );
 
     // A retry refused as invalid (the first attempt's answer lost): validity is the proofs'
@@ -2004,7 +2104,8 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
     }
 
     // A `hello` waiting for a payment in progress reads after it: the payment's claim,
-    // knowable at its deadline, is in the hello's quote.
+    // knowable at its deadline, is in the hello's quote. Two hellos waiting share one
+    // read, and its result: both quote the claim.
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     serve(h, &mut s, 0, 4);
@@ -2013,20 +2114,25 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
         upto_chunk: 4,
         token: h.token(4).await,
     };
-    let (peer, hello) = (h.peer(1), h.hello());
-    let ((r, quoted), ()) = both(both(s.pay(&p), e.hello(&peer, &hello)), async {
-        yield_once().await;
-        h.advance(Duration::from_secs(60));
-        yield_once().await;
-    })
+    let (peer, one, two) = (h.peer(1), h.hello(), h.hello());
+    let ((r, (a, b)), ()) = both(
+        both(s.pay(&p), both(e.hello(&peer, &one), e.hello(&peer, &two))),
+        async {
+            yield_once().await;
+            h.advance(Duration::from_secs(60));
+            yield_once().await;
+        },
+    )
     .await;
     assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
-    let q = quoted.expect("a hello").quote().clone();
-    assert_eq!(
-        (q.accepted_upto, q.spent_total),
-        (4, 4),
-        "the waiting hello read after the payment, and quotes its claim"
-    );
+    for (n, quoted) in [a, b].into_iter().enumerate() {
+        let q = quoted.expect("a hello").quote().clone();
+        assert_eq!(
+            (q.accepted_upto, q.spent_total),
+            (4, 4),
+            "each waiting hello read after the payment, and quotes its claim (hello {n})"
+        );
+    }
     h.release_swaps().await;
 }
 
@@ -2055,8 +2161,8 @@ pub async fn the_deadline_frees_the_account<H: Harness>(h: &H) {
         yield_once().await;
         assert!(!is_set(&done), "a hello waits for the payment in progress");
         h.advance(SECOND);
-        // Freed, it reads the abandoned swap first: a round trip is a few polls, no time.
-        for _ in 0..8 {
+        // Freed, it reads the abandoned swap first: round trips take polls, not time.
+        for _ in 0..10_000 {
             yield_once().await;
             if is_set(&done) {
                 break;
@@ -2959,11 +3065,13 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
     // 5. held by the mint, unanswered: unknown, and learnt once processed;
     // 6. never reaching the mint: unknown, and completed again later;
     // 7. answered `spent` with restores down: unknown, and learnt once they answer;
-    // 8. refused because a keyset expired, while the given-up request holds the inputs
-    //    reserved: unknown until the mint finishes that request, then its claim;
-    // 9. refused because a keyset expired, no input pending: nothing, and the account pays
-    //    again.
-    for case in 0..10 {
+    // 8. refused because the payer's keyset expired, while the given-up request holds the
+    //    inputs reserved: unknown until the mint finishes that request, then its claim;
+    // 9. refused because the mint's keyset expired, no input pending: nothing, and the
+    //    account pays again;
+    // 10. refused because the mint's keyset expired, the given-up request processed just
+    //    before: a restore cannot show the outputs, and the spent inputs are the claim.
+    for case in 0..11 {
         let e = h.engine(1, 4, 1000);
         let mut s = open(h, &e, 1).await;
         assert_eq!(serve(h, &mut s, 0, 1), 1);
@@ -2994,9 +3102,13 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
             }
             8 => {
                 h.before_next_swap(MintEvent::ReserveTimedOut);
-                h.before_next_swap(MintEvent::ExpireKeyset);
+                h.before_next_swap(MintEvent::ExpireInputKeyset);
             }
             9 => h.before_next_swap(MintEvent::ExpireKeyset),
+            10 => {
+                h.before_next_swap(MintEvent::ProcessTimedOut);
+                h.before_next_swap(MintEvent::ExpireKeyset);
+            }
             _ => {}
         }
         e.sweep().await;
@@ -3132,6 +3244,122 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
         "answered at its deadline, the held completion abandoned"
     );
     h.unanswered_reads_take(Duration::ZERO);
+    h.release_swaps().await;
+    // A completion refused for good (its outputs' keyset rotated out) whose settling restore
+    // goes unanswered: that restore ends at the deadline too.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let parked = Pay {
+        upto_chunk: 1,
+        token: h.token(1).await,
+    };
+    h.time_out_next_swap();
+    h.mint_outage(true);
+    assert!(is_rej(&s.pay(&parked).await, &RejCode::MintUnavailable));
+    h.mint_outage(false);
+    h.advance(h.account_ttl());
+    h.unanswered_reads_take(Duration::from_secs(90));
+    h.before_next_swap(MintEvent::RotateKeyset);
+    h.before_next_swap(MintEvent::RestoresDown);
+    let arrived = h.clock_secs();
+    let r = s
+        .pay(&Pay {
+            upto_chunk: 1,
+            token: h.token(1).await,
+        })
+        .await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    assert_eq!(
+        h.clock_secs() - arrived,
+        60,
+        "answered at its deadline, the completion's restore abandoned"
+    );
+    h.unanswered_reads_take(Duration::ZERO);
+    h.restore_outage(false);
+    h.release_swaps().await;
+    // So does a retry's: the first attempt's answer lost, the retry's outputs refused for
+    // good, and the restore that would settle it unanswered.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    h.unanswered_reads_take(Duration::from_secs(90));
+    h.hold_swap_responses();
+    h.lose_next_swap_response();
+    let p = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    let arrived = h.clock_secs();
+    let ((r, answered), ()) = both(
+        async {
+            let r = s.pay(&p).await;
+            (r, h.clock_secs())
+        },
+        async {
+            yield_once().await;
+            h.rotate_keyset();
+            h.restore_outage(true);
+            h.release_swaps().await;
+        },
+    )
+    .await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    assert!(
+        answered - arrived <= 60,
+        "answered within 60 s, the retry's restore abandoned: {} s",
+        answered - arrived
+    );
+    h.unanswered_reads_take(Duration::ZERO);
+    h.restore_outage(false);
+    // And a payment that waited for its account's turn: its reads end 60 s from its own
+    // arrival, not 60 s from its turn.
+    let e = h.engine(1, 4, 1000);
+    let mut first = open(h, &e, 1).await;
+    let mut second = open(h, &e, 1).await;
+    let (p1, p2) = (
+        Pay {
+            upto_chunk: 1,
+            token: h.token(1).await,
+        },
+        Pay {
+            upto_chunk: 1,
+            token: h.token(1).await,
+        },
+    );
+    h.hold_next_swap(); // the first payment's swap, never answered
+    h.state_check_outage(true);
+    h.restore_outage(true);
+    h.unanswered_reads_take(Duration::from_secs(40));
+    let t0 = h.clock_secs();
+    let ((r1, (r2, arrived, answered)), ()) = both(
+        both(first.pay(&p1), async {
+            while h.clock_secs() < t0 + 30 {
+                yield_once().await;
+            }
+            let arrived = h.clock_secs();
+            let r = second.pay(&p2).await;
+            (r, arrived, h.clock_secs())
+        }),
+        async {
+            yield_once().await;
+            h.advance(Duration::from_secs(30));
+            yield_once().await;
+            yield_once().await;
+            h.advance(Duration::from_secs(30));
+            yield_once().await;
+        },
+    )
+    .await;
+    assert!(is_rej(&r1, &RejCode::MintUnavailable), "{r1:?}");
+    assert!(is_rej(&r2, &RejCode::MintUnavailable), "{r2:?}");
+    assert_eq!(
+        answered - arrived,
+        60,
+        "the second answered 60 s from its arrival, its wait for the turn included"
+    );
+    h.unanswered_reads_take(Duration::ZERO);
+    h.state_check_outage(false);
+    h.restore_outage(false);
     h.release_swaps().await;
 
     // After a split read, each answer stays with its own swap: one account's claim (its
@@ -4254,6 +4482,34 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     assert!(
         v.due().await.unwrap().is_none() && v.awaiting_quote(),
         "then it awaits a quote"
+    );
+    // A reclaim refused because the proofs' keyset expired (CDK 12003) is decided by a
+    // NUT-07 check. Every proof unspent: they are lost to the expiry, not taken by the
+    // seeder, so the reclaim is complete and the watcher pays again.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).unwrap();
+    for i in 0..2 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    let pay = v.due().await.unwrap().expect("due");
+    h.before_next_swap(MintEvent::ExpireKeyset);
+    let rej = s
+        .pay(&pay)
+        .await
+        .expect_err("its proofs' keyset has expired");
+    assert_eq!(rej.code, RejCode::MintUnavailable);
+    v.rej(&rej).await;
+    assert!(!v.stopped(), "the seeder took nothing");
+    for i in 2..4 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    assert!(
+        v.due().await.unwrap().is_some(),
+        "the proofs lost to the expiry, it pays again"
     );
 }
 
@@ -5718,7 +5974,7 @@ pub async fn an_honest_pair_survives_a_late_mint<H: Harness>(h: &H) {
     h.restore_outage(false);
     drop(s);
     v.end();
-    h.advance(SECOND); // the account's own reads are at most one a second
+    h.advance(SECOND); // not a read made this second, which would be reused
     let mut s = open(h, &e, 1).await;
     v.quote(s.quote())
         .expect("a restore showed the claim, credited late: settled");

@@ -36,6 +36,12 @@ fn v(flaw: V) -> MockHarness {
     MockHarness::with_viewer_flaw(flaw)
 }
 
+/// A flawed seeder whose mint answers reads on a later poll: for defects only an engine
+/// whose reads yield can have.
+fn r(flaw: S) -> MockHarness {
+    MockHarness::with_seeder_flaw_round_trip(flaw)
+}
+
 catches!(
     overpay_accepted: s(S::AcceptsOverpay) => overpaid_is_refused_and_credits_nothing,
     foreign_mint_accepted: s(S::AcceptsForeignMint) => foreign_and_lookalike_mints_are_refused,
@@ -324,6 +330,15 @@ catches!(
     completion_expired_at_once: s(S::CompleteExpiredAtOnce) => bans_expire_and_state_stays_bounded,
     first_expired_bans: s(S::FirstExpiredBans) => a_late_outcome_is_credited_never_banned,
     first_expired_unknown: s(S::FirstExpiredUnknown) => a_late_outcome_is_credited_never_banned,
+    expired_outputs_by_restore: s(S::ExpiredOutputsByRestore) => a_late_outcome_is_credited_never_banned,
+    expired_restore_on_state_down: s(S::ExpiredRestoreOnStateDown) => a_late_outcome_is_credited_never_banned,
+    expired_restore_down_known: s(S::ExpiredRestoreDownKnown) => a_late_outcome_is_credited_never_banned,
+    retry_expired_stays_unknown: s(S::RetryExpiredStaysUnknown) => a_late_outcome_is_credited_never_banned,
+    retry_restore_uncapped: s(S::RetryRestoreUncapped) => bans_expire_and_state_stays_bounded,
+    completion_restore_uncapped: s(S::CompleteRestoreUncapped) => bans_expire_and_state_stays_bounded,
+    read_deadline_from_the_turn: s(S::ReadDeadlineFromTurn) => bans_expire_and_state_stays_bounded,
+    reuse_without_waiting: r(S::ReuseWithoutWaiting) => a_late_outcome_is_credited_never_banned,
+    viewer_expired_reclaim_retried: v(V::ExpiredReclaimRetried) => a_viewer_reclaims_a_refused_payment,
     viewer_unanswered_restore_is_back: v(V::ReclaimRestoreDownIsBack) => a_viewer_reclaims_a_refused_payment,
     viewer_unanswered_restore_is_spent: v(V::ReclaimRestoreDownIsSpent) => a_viewer_reclaims_a_refused_payment,
 );

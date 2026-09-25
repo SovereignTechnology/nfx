@@ -208,10 +208,17 @@ pub enum MintEvent {
     /// It rotates its keyset, as [`Harness::rotate_keyset`]: after the seeder derived the
     /// request's outputs from the old one, as a seeder with stale keys does.
     RotateKeyset,
-    /// The keyset of every proof issued so far expires (NUT-02 `final_expiry`). A request
-    /// spending one is refused (CDK 12003), except one whose inputs the mint had already
-    /// reserved: that one still signs.
+    /// The mint's keyset expires (NUT-02 `final_expiry`): every proof issued and every
+    /// output set derived so far, the seeder's included. A request spending such a proof,
+    /// or with such outputs, is refused (CDK 12003); a request whose inputs the mint had
+    /// reserved is refused too, when it signs, if its outputs' keyset has expired; and a
+    /// restore no longer shows such outputs.
     ExpireKeyset,
+    /// The keyset of the next request's inputs expires: an older one, the payer's, while
+    /// the mint's current keyset (the seeder's outputs) does not. A request spending them
+    /// is refused (12003), except one whose inputs the mint had already reserved: that one
+    /// still signs.
+    ExpireInputKeyset,
 }
 
 /// Token shapes a seeder must refuse as `bad-token` (NFX-07 §3).
@@ -402,6 +409,8 @@ pub trait Harness {
     /// old one, and a swap to one of them is refused for good (CDK 12002), whatever its
     /// inputs.
     fn rotate_keyset(&self);
+    /// The mint's keyset expires now, as [`MintEvent::ExpireKeyset`] does before a swap.
+    fn expire_keyset(&self);
     /// `event` happens at the mint just before the next swap request reaches it: a
     /// seeder's first attempt, retry or completion alike. Several happen in the order
     /// given.

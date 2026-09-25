@@ -160,12 +160,13 @@ payment-enforced after release, so no mechanism pretends otherwise.
   is completed again later. Refused for good, in a way that also stops the first
   request from ever signing, it is settled by a restore of its outputs too: signed, the
   claim; unsigned, nothing, since no request can sign those outputs any more. With CDK
-  that is an inactive keyset for its outputs (12002) or invalid inputs (10001, 12001).
-  An expired keyset (12003) is one too, but CDK sends the same code and detail whether
-  the inputs' keyset expired or the outputs', and an inputs' expiry does not stop a
-  first request the mint reserved before it: every 12003 is therefore settled so only
-  once a NUT-07 check shows no input pending, and leaves the swap unknown while one is.
-  Any other answer leaves the swap unknown.
+  that is an inactive keyset for its outputs (12002), a keyset the mint does not know
+  (12001: the inputs' or the outputs', with the same code and detail), or invalid
+  inputs (10001). An expired keyset (12003) is one too, but CDK sends the same code and
+  detail whether the inputs' keyset expired or the outputs', and an inputs' expiry does
+  not stop a first request the mint reserved before it: every 12003 is therefore
+  settled so only once a NUT-07 check shows no input pending, and leaves the swap
+  unknown while one is. Any other answer leaves the swap unknown.
   Undecided swaps therefore end, and cost a payer who parks them its proofs.
 - A seeder SHOULD keep a bounded cache of proofs it has seen spent. It then refuses a
   replayed one (`spent`, with a ban) without asking the mint.
@@ -243,9 +244,15 @@ checks run in this order:
      `mint-unavailable` with nothing to learn, since its inputs are spent. A retry's
      `spent` is never a ban. A retry refused as pending (below) may be refused because
      of the first attempt, still being processed: the outcome stays unknown. A retry
-     refused as invalid (CDK 10001, 12001) is answered as a first attempt refused so
-     is, `bad-token` and a ban: validity is the proofs' own, so the first attempt was
-     refused the same way.
+     refused as invalid (CDK 10001) is answered as a first attempt refused so is,
+     `bad-token` and a ban: validity is the proofs' own, so the first attempt was
+     refused the same way. 12001 (a keyset the mint does not know) is not invalid: it
+     may name the seeder's own outputs, and the seeder checked the inputs' DLEQs
+     against that keyset's keys.
+   - **The outputs' keyset.** The seeder derives a swap's outputs only from an active
+     keyset whose `final_expiry` (NUT-02) is absent, or at least twice `account_ttl`
+     away. With none, it does not swap: `mint-unavailable`, its own keyset error
+     (below). So a swap it cannot yet decide keeps outputs a restore can show.
 
    - **Pending.** A mint may reserve a request's inputs before it signs (NUT-07
      `PENDING`; CDK does). A swap of reserved inputs is refused as pending (CDK 11002).
@@ -254,11 +261,11 @@ checks run in this order:
    - **Other errors.** Any other swap error, a fee or keyset error of the seeder's own
      making included (outputs derived from a keyset since rotated out, say), is
      `mint-unavailable`, never a ban, and leaves nothing unknown: the request did
-     nothing. So is a first attempt refused because a keyset expired (12003): the
-     payer's inputs' or the seeder's own outputs', which the code does not say. A retry
-     refused for good otherwise is settled by a restore of its outputs, as a completion
-     is, a 12003 only once no input is pending (bounded state, above); a retry left
-     unanswered leaves the outcome unknown.
+     nothing. So is a first attempt refused because a keyset expired (12003) or is not
+     known (12001): the payer's inputs' or the seeder's own outputs', which the code does
+     not say. A retry refused for good otherwise is settled by a restore of its outputs,
+     as a completion is, a 12003 only once no input is pending (bounded state, above); a
+     retry left unanswered leaves the outcome unknown.
    - **The deadline.** The seeder answers every `pay` within **60 s of its arrival**,
      that is of the transport receiving it, not of the engine reading it: the wait for
      the account's turn, the key fetch and the swap all count. A payment
@@ -267,9 +274,11 @@ checks run in this order:
      swap request for those proofs), and releases the account's turn to its next
      payment. That payment is answered at once, and while the abandoned swap's outcome
      is unknown, `mint-unavailable` without a swap (bounded state, above). A payment's
-     own reads and completions (below) count too, and end at its deadline, however late
-     they start (after a slow key fetch, say): one still unanswered then is abandoned,
-     proves nothing, and the payment is answered `mint-unavailable` at the deadline.
+     own reads and completions (below) count too, and so do the reads and requests that
+     settle a retry or a completion: all end at its deadline, however late they start
+     (after a wait for the account's turn, or a slow key fetch). One still unanswered
+     then is abandoned, proves nothing, and the payment is answered `mint-unavailable` at
+     the deadline.
    - **Late outcomes.** A swap the seeder has answered `mint-unavailable` for, at the
      deadline or earlier, is still settled when its outcome becomes known. The seeder
      MUST learn it: from a late response, or, when none comes, by reading the swap's
@@ -280,6 +289,13 @@ checks run in this order:
      - Outputs signed: a claim, whatever the first read said.
      - Outputs unsigned with an input spent: nothing. The swap is atomic, so it can no
        longer go through.
+     - Outputs of a keyset that has expired: a restore no longer shows them (CDK skips an
+       expired keyset's signatures, signed or not), so the NUT-07 check alone decides. An
+       input spent is the claim: the seeder's own request is the one known to have
+       reached the mint, an honest watcher reclaims only after its answer (§3a), and no
+       peer can make a keyset expire. Every input unspent is nothing: no request can sign
+       those outputs now. This applies wherever a restore would settle a swap, a retry's
+       or a completion's included.
      - Anything else proves nothing, and the swap is read again later: every input
        unspent (the request may yet be processed), an input pending (reserved by a
        request the mint is still processing, which may yet go through or be rolled
@@ -301,7 +317,8 @@ checks run in this order:
        account made that second; a `pay` reuses one made for the same proofs; past two
        reads that second, every entry reuses them. A read counts from when it is sent,
        in the second it is sent, an entry that waited into a new second included, so two
-       entries at once share one read. A flood of hellos, or of payments
+       entries at once share one read, and its result: an entry reusing a read still
+       under way waits for it. A flood of hellos, or of payments
        whatever their proofs, costs the mint two reads a second, while a watcher paying
        again after its reclaim, with other proofs, reads afresh.
      - A background sweep reads every account's, periodically, in as few requests as the
@@ -397,6 +414,11 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   - A reclaim refused as pending (the mint is still processing a request that reserved
     the proofs, §3) has neither taken them back nor found them spent: it is incomplete,
     and retried.
+  - A reclaim refused because the proofs' keyset has expired (CDK 12003, checked before
+    anything else) is decided by a NUT-07 check. An input spent is as a reclaim that
+    found proofs spent (above); an input pending, incomplete. Every input unspent, it is
+    complete: the proofs are lost to the expiry, not taken by the seeder, and the watcher
+    pays again.
   - Until the reclaim completes (the mint may be down), the watcher pays that seeder
     nothing more. A quote showing the ledger plus that payment, both fields, settles it
     as accepted in the meantime, and the reclaim is dropped: the seeder has the proofs.
@@ -665,3 +687,14 @@ therefore loses nothing:
     - the watermark is read again after a payment's own read; its reads end at its
       deadline however late they start; a `stale` payment reads nothing;
     - a read counts from when it is sent, so two entries at once share one.
+- Draft 2026-09-25 (M2.0 eighteenth audit, `docs/nfx/reviews/2026-09-24-m2.0-eighteenth-audit.md`).
+  - §3:
+    - a restore does not show outputs of an expired keyset: the NUT-07 check alone then
+      decides, an input spent being the claim; the seeder derives outputs only from a
+      keyset at least twice `account_ttl` from its `final_expiry`;
+    - 12001 does not say whose keyset either: never a ban; invalid inputs are 10001;
+    - the reads and requests that settle a retry or a completion end at the payment's
+      deadline too, as do reads after a wait for the account's turn;
+    - an entry reusing a read still under way waits for its result.
+  - §3a: a reclaim refused because the proofs' keyset expired is decided by a NUT-07
+    check; every input unspent, the watcher pays again.
