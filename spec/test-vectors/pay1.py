@@ -167,8 +167,8 @@ def pay1_parse(wire: str, allow_loopback_http: bool = False) -> dict:
             out[name] = integer(name)
         if out["price_per_chunk"] < 1:
             raise Pay1Error("price_per_chunk is at least 1")
-        if out["window"] < 2:
-            raise Pay1Error("window is at least 2")
+        if not 2 <= out["window"] <= 64:
+            raise Pay1Error("window is 2 to 64")
         mints = obj.get("mints")
         if not isinstance(mints, list) or not 1 <= len(mints) <= PAY1_MAX_MINTS:
             raise Pay1Error("mints is 1 to 16 URLs")
@@ -242,6 +242,7 @@ def pay1_vectors() -> dict:
         ("hello-specver-max-u64", hello_at(MAX_U64)),
         ("quote", q1("https://mint.example")),
         ("quote-window-two", line(quote(["https://mint.example"], window=2))),
+        ("quote-window-sixty-four", line(quote(["https://mint.example"], window=64))),
         ("quote-resumed-account", line(quote(["https://mint.example"], served=40, accepted_upto=36, spent_total=36))),
         ("quote-ipv6-host", q1("https://[2001:db8::1]:3338")),
         ("quote-port-and-path", q1("https://mint.example:3338/cashu/api?x=1#y")),
@@ -301,8 +302,9 @@ def pay1_vectors() -> dict:
         ("mint-loopback-lookalike", q1("http://127.0.0.1.evil.example"), "not loopback"),
         ("mint-loopback-ipv6-junk", q1("http://[::1]x"), "after the host: a port, a path or nothing"),
         ("quote-price-zero", line(quote(["https://mint.example"], price_per_chunk=0)), "price_per_chunk >= 1"),
-        ("quote-window-zero", line(quote(["https://mint.example"], window=0)), "window >= 2"),
-        ("quote-window-one", line(quote(["https://mint.example"], window=1)), "window >= 2"),
+        ("quote-window-zero", line(quote(["https://mint.example"], window=0)), "window is 2 to 64"),
+        ("quote-window-one", line(quote(["https://mint.example"], window=1)), "window is 2 to 64"),
+        ("quote-window-sixty-five", line(quote(["https://mint.example"], window=65)), "window is 2 to 64"),
         ("quote-fraction", line(quote(["https://mint.example"])).replace('"price_per_chunk":1', '"price_per_chunk":17.0'), "integers only"),
         ("quote-exponent", line(quote(["https://mint.example"])).replace('"price_per_chunk":1', '"price_per_chunk":1e3'), "integers only"),
         ("quote-minus-zero", line(quote(["https://mint.example"])).replace('"price_per_chunk":1', '"price_per_chunk":-0'), "integers only"),

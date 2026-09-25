@@ -23,7 +23,9 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use nfx_proto::namespace::VideoAddr;
-use nfx_proto::pay::{Ack, Hello, MAX_INT, Message, Pay, Quote, Rej, RejCode};
+use nfx_proto::pay::{
+    Ack, Hello, MAX_INT, MAX_WINDOW, Message, ParseOptions, Pay, Quote, Rej, RejCode,
+};
 
 use crate::session::{
     BadToken, EngineParams, Harness, PeerId, SeederEngine, SeederSession, Viewer,
@@ -41,15 +43,21 @@ pub const ACCOUNT_TTL: Duration = Duration::from_secs(24 * 3600);
 pub const BAN_TTL: Duration = Duration::from_secs(24 * 3600);
 /// The largest global cap a seeder accepts: beyond it the cap bounds nothing (NFX-07 §3).
 pub const MAX_GLOBAL_CAP: u64 = 1_000_000;
-/// The largest `window` the mock viewer accepts in a quote (NFX-07 §3a: 64 recommended).
-pub const WINDOW_CEILING: u64 = 64;
+/// The largest `window` the mock viewer accepts in a quote: the wire's own ceiling
+/// (NFX-07 §2).
+pub const WINDOW_CEILING: u64 = MAX_WINDOW;
 /// `mint-unavailable` answers in a row after which the viewer pays that seeder nothing
 /// more until a new session (NFX-07 §3a).
 pub const UNAVAILABLE_BUDGET: u32 = 3;
 /// The seeder answers every `pay` within this (NFX-07 §3).
 pub const SEEDER_DEADLINE: Duration = Duration::from_secs(60);
-/// How long a watcher waits for an answer before reclaiming (NFX-07 §3a).
-pub const ANSWER_WAIT: Duration = Duration::from_secs(120);
+/// How long a watcher waits for an answer before reclaiming (NFX-07 §3a): the `pay`'s
+/// delivery, the seeder's deadline and the answer's delivery, 60 s each.
+pub const ANSWER_WAIT: Duration = Duration::from_secs(180);
+/// The longest `debt_ttl` a seeder accepts (NFX-07 §3).
+pub const MAX_DEBT_TTL: Duration = Duration::from_secs(24 * 3600);
+/// The longest `account_ttl` and `ban_ttl` a seeder accepts (NFX-07 §3).
+pub const MAX_STATE_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
 /// The most proofs one payment may hold (NFX-07 §3).
 pub const MAX_PROOFS: usize = 64;
 
@@ -548,6 +556,16 @@ pub enum SeederFlaw {
     LandKeepsFinished,
     /// Forgets a peer's accounts when its ban expires.
     BanExpiryResetsAccounts,
+    /// Records a ban for a peer with no account.
+    BansWithoutAccount,
+    /// Leaves an empty waiter list behind for every account that ever had one.
+    WaitingKeptEmpty,
+    /// Ages debt out of the global count but never trims its log.
+    DebtLogUntrimmed,
+    /// Accepts any `debt_ttl`, `account_ttl` or `ban_ttl` above the minimums.
+    NoTtlCeiling,
+    /// Validates mint URLs as a test deployment's writer would (loopback http allowed).
+    ValidateAllowsLoopback,
     /// Keeps bans for ever.
     BansNeverExpire,
     /// Lets a ban expire after `debt_ttl`, not `ban_ttl`.
@@ -575,6 +593,8 @@ pub enum SeederFlaw {
     /// Checks the watermark and the amount only before the key fetch, not again as the
     /// swap is sent.
     NoRecheckAtSend,
+    /// Re-checks only the watermark as the swap is sent, not the amount.
+    RecheckStaleOnly,
     /// Answers `mint-unavailable` at the deadline even when the outcome is already known.
     DeadlineBeatsSettled,
     /// Treats a swap as late only once something has marked it abandoned, not by the
@@ -688,10 +708,39 @@ pub enum ViewerFlaw {
     /// Checks its price cap on the first quote only.
     SkipsCapOnResume,
     KeepsPayingAfterTimeout,
-    /// Reclaims an unanswered payment before 120 s.
+    /// Reclaims an unanswered payment before 180 s.
     TimeoutEarly,
-    /// Reclaims an unanswered payment at 119 s.
-    TimeoutAt119,
+    /// Reclaims an unanswered payment a second before the wait is over.
+    TimeoutAt179,
+    /// Checks its window ceiling on the first quote only.
+    SkipsCeilingOnResume,
+    /// Frees the standing's slot when a `hello` is refused.
+    HelloRefusedFreesSlot,
+    /// Settles a closed session's payment on another video's quote.
+    SettleUnsettledAnyLedger,
+    /// Resets the `mint-unavailable` count on a refusal.
+    RefusalResetsUnavailable,
+    /// Pays ahead after a refusal whatever the `mint-unavailable` count.
+    PayAheadSkipsBudget,
+    /// Files a closed session's payment found spent under the ledger that caught up.
+    CatchUpFilesUnderSelf,
+    /// Stops on any refused `hello` but `bad-session`.
+    HelloRefusalStops,
+    /// Keeps the `mint-unavailable` count across an ack.
+    AckKeepsUnavailable,
+    /// Counts `mint-unavailable` answers per video, not per seeder.
+    UnavailablePerLedger,
+    /// Pays the last payment whatever the `mint-unavailable` count.
+    LastPayIgnoresBudget,
+    /// Ignores a `hello` refused `banned`.
+    BannedHelloIgnored,
+    /// On a `rej` with no payment in flight, reclaims a closed session's payment at once
+    /// and carries on.
+    UnsolicitedRejReclaimsUnsettled,
+    /// Finishes no reclaim once stopped.
+    StoppedSkipsReclaim,
+    /// Gives no sign that its tries are used up.
+    BudgetNotSignalled,
     /// Reclaims a payment left unsettled by a dropped connection at once.
     CatchUpIgnoresWait,
     /// Reclaims a payment in flight the moment its connection closes.
@@ -811,8 +860,8 @@ impl EngineConfig {
         if self.mints.is_empty() || self.mints.len() > 16 {
             return Err("quote 1 to 16 mints".into());
         }
-        if self.window < 2 || self.window > MAX_INT {
-            return Err("window is 2 to 2^53-1".into());
+        if self.window < 2 || self.window > MAX_WINDOW {
+            return Err("window is 2 to 64".into());
         }
         let ceiling = flaw != Some(SeederFlaw::NoCapCeiling);
         if self.global_cap == 0 || (ceiling && self.global_cap > MAX_GLOBAL_CAP) {
@@ -820,6 +869,14 @@ impl EngineConfig {
         }
         if self.debt_ttl < MIN_DEBT_TTL {
             return Err("debt_ttl is at least 10 minutes".into());
+        }
+        let ceilings = flaw != Some(SeederFlaw::NoTtlCeiling);
+        if ceilings
+            && (self.debt_ttl > MAX_DEBT_TTL
+                || self.account_ttl > MAX_STATE_TTL
+                || self.ban_ttl > MAX_STATE_TTL)
+        {
+            return Err("debt_ttl is at most 24 h; account_ttl and ban_ttl at most 30 days".into());
         }
         let short = if flaw == Some(SeederFlaw::EqualTtlRefused) {
             self.account_ttl <= self.debt_ttl
@@ -841,8 +898,11 @@ impl EngineConfig {
             accepted_upto: 0,
             spent_total: 0,
         });
+        let opts = ParseOptions {
+            allow_loopback_http: flaw == Some(SeederFlaw::ValidateAllowsLoopback),
+        };
         quote
-            .to_line()
+            .to_line_with(opts)
             .map_err(|e| format!("its quote is not valid pay/1: {e}"))?;
         Ok(())
     }
@@ -909,13 +969,25 @@ impl Inner {
             } else {
                 secs(self.config.debt_ttl)
             };
-            while let Some(&(debt, t)) = st.debt.front() {
-                if t.saturating_add(ttl) > now {
-                    break;
+            if self.has(SeederFlaw::DebtLogUntrimmed) {
+                let aged: Vec<Debt> = st
+                    .debt
+                    .iter()
+                    .filter(|(_, t)| t.saturating_add(ttl) <= now)
+                    .map(|(d, _)| *d)
+                    .collect();
+                for d in aged {
+                    st.live.remove(&d);
                 }
-                st.debt.pop_front();
-                st.live.remove(&debt);
-                self.free_flawed(st, 1);
+            } else {
+                while let Some(&(debt, t)) = st.debt.front() {
+                    if t.saturating_add(ttl) > now {
+                        break;
+                    }
+                    st.debt.pop_front();
+                    st.live.remove(&debt);
+                    self.free_flawed(st, 1);
+                }
             }
         }
         if !self.has(SeederFlaw::BansNeverExpire) {
@@ -992,6 +1064,11 @@ impl Inner {
     }
 
     fn ban(&self, st: &mut State, key: Key) {
+        // A peer with no account has been served nothing and owes nothing: nothing is kept.
+        let has_account = st.accounts.keys().any(|k| k.0 == key.0);
+        if !has_account && !self.has(SeederFlaw::BansWithoutAccount) {
+            return;
+        }
         if self.has(SeederFlaw::BanPerVideo) {
             self.account(st, key).banned = true;
         } else {
@@ -1173,6 +1250,9 @@ impl Inner {
         if ours {
             st.paying.remove(&key);
         }
+        if self.has(SeederFlaw::WaitingKeptEmpty) {
+            return std::mem::take(st.waiting.entry(key).or_default());
+        }
         st.waiting.remove(&key).unwrap_or_default()
     }
 
@@ -1349,6 +1429,7 @@ impl Inner {
             + st.paying.len()
             + st.waiting.len()
             + st.pays.len()
+            + st.debt.len()
     }
 }
 
@@ -1776,10 +1857,11 @@ impl MockSession {
                 let due_now = (pay.upto_chunk - acked_now)
                     .checked_mul(e.config.price_per_chunk)
                     .filter(|d| *d <= MAX_INT);
-                if due_now.is_none_or(|d| amount < d) {
+                let by_amount = !e.has(SeederFlaw::RecheckStaleOnly);
+                if by_amount && due_now.is_none_or(|d| amount < d) {
                     return Err(rej(RejCode::Underpaid, "short of the chunks claimed"));
                 }
-                if due_now.is_some_and(|d| amount > d) {
+                if by_amount && due_now.is_some_and(|d| amount > d) {
                     return Err(rej(RejCode::Overpaid, "more than the chunks claimed"));
                 }
             }
@@ -1960,6 +2042,8 @@ pub struct MockViewer {
     pending: Option<Pending>,
     /// A refusal since the last payment: the next one may pay ahead.
     pay_ahead: bool,
+    /// `mint-unavailable` answers counted here ([`ViewerFlaw::UnavailablePerLedger`] only).
+    unavailable_here: u32,
 }
 
 impl MockViewer {
@@ -2006,6 +2090,7 @@ impl MockViewer {
             spent: 0,
             pending: None,
             pay_ahead: false,
+            unavailable_here: 0,
         }
     }
 
@@ -2104,7 +2189,7 @@ impl MockViewer {
     }
 
     fn waited(&self, p: &Pending) -> bool {
-        let wait = if self.has(ViewerFlaw::TimeoutAt119) {
+        let wait = if self.has(ViewerFlaw::TimeoutAt179) {
             ANSWER_WAIT.as_secs() - 1
         } else {
             ANSWER_WAIT.as_secs()
@@ -2113,7 +2198,7 @@ impl MockViewer {
     }
 
     /// Finish incomplete reclaims, and reclaim payments closed sessions left unsettled
-    /// once they are 120 s old, whichever of the standing's ledgers they belong to.
+    /// once they are 180 s old, whichever of the standing's ledgers they belong to.
     fn catch_up(&mut self) {
         let own = self.has(ViewerFlaw::ReclaimPerVideo);
         let retry: Vec<(u64, Pending)> = {
@@ -2144,8 +2229,23 @@ impl MockViewer {
         };
         for (ledger, p) in old {
             self.free_slot(ledger);
-            self.reclaim(ledger, p, false);
+            let owner = if self.has(ViewerFlaw::CatchUpFilesUnderSelf) {
+                self.id
+            } else {
+                ledger
+            };
+            self.reclaim(owner, p, false);
         }
+    }
+
+    /// Whether the standing has used its `mint-unavailable` tries for this session.
+    fn out_of_tries(&self) -> bool {
+        let used = if self.has(ViewerFlaw::UnavailablePerLedger) {
+            self.unavailable_here
+        } else {
+            self.standing().unavailable
+        };
+        used >= UNAVAILABLE_BUDGET && !self.has(ViewerFlaw::NoUnavailableBudget)
     }
 
     fn pay_when(&mut self, threshold: u64, last: bool) -> Result<Option<Pay>, String> {
@@ -2153,9 +2253,10 @@ impl MockViewer {
             return Ok(None);
         };
         let stop_holds = !(last && self.has(ViewerFlaw::LastPayIgnoresStop));
-        if self.halted() && stop_holds {
+        if self.halted() && stop_holds && self.has(ViewerFlaw::StoppedSkipsReclaim) {
             return Ok(None);
         }
+        // Reclaiming is not paying: a stopped viewer still catches up.
         self.catch_up();
         let may_ahead = self.pay_ahead && !last && !self.has(ViewerFlaw::NoPayAhead);
         let reclaim_blocks = self.reclaim_incomplete()
@@ -2172,8 +2273,9 @@ impl MockViewer {
         let pending_blocks = (own_blocks || other_blocks)
             && !(may_ahead && self.has(ViewerFlaw::PayAheadIgnoresPending));
         let awaiting = self.awaiting(self.has(ViewerFlaw::StopPerVideo));
-        let out_of_tries = self.standing().unavailable >= UNAVAILABLE_BUDGET
-            && !self.has(ViewerFlaw::NoUnavailableBudget);
+        let out_of_tries = self.out_of_tries()
+            && !(may_ahead && self.has(ViewerFlaw::PayAheadSkipsBudget))
+            && !(last && self.has(ViewerFlaw::LastPayIgnoresBudget));
         if (self.halted() && stop_holds) || awaiting || reclaim_blocks || pending_blocks {
             return Ok(None);
         }
@@ -2286,7 +2388,9 @@ impl Viewer for MockViewer {
         if quote.price_per_chunk > self.max_price && !skip_cap {
             return Err("price above this viewer's cap".into());
         }
-        if quote.window > WINDOW_CEILING && !self.has(ViewerFlaw::NoWindowCeiling) {
+        let skip_ceiling = resumed && self.has(ViewerFlaw::SkipsCeilingOnResume);
+        if quote.window > WINDOW_CEILING && !self.has(ViewerFlaw::NoWindowCeiling) && !skip_ceiling
+        {
             return Err("window above this viewer's ceiling".into());
         }
         if !quote.mints.contains(&self.mint) {
@@ -2298,7 +2402,7 @@ impl Viewer for MockViewer {
             |st| &mut st.unsettled,
             self.has(ViewerFlaw::SettleOnUptoOnly),
             self.has(ViewerFlaw::SettleOnSpentOnly),
-            false,
+            self.has(ViewerFlaw::SettleUnsettledAnyLedger),
         ) {
             self.free_slot(self.id);
         }
@@ -2332,6 +2436,7 @@ impl Viewer for MockViewer {
         }
         // A new session: `mint-unavailable` answers are counted afresh.
         self.standing().unavailable = 0;
+        self.unavailable_here = 0;
         self.quote = Some(quote.clone());
         Ok(())
     }
@@ -2352,7 +2457,15 @@ impl Viewer for MockViewer {
                 self.reclaim(ledger, p, false);
             }
         }
-        if rej.code == RejCode::Banned {
+        if self.has(ViewerFlaw::HelloRefusedFreesSlot) {
+            self.standing().in_flight = None;
+        }
+        let stops = if self.has(ViewerFlaw::HelloRefusalStops) {
+            rej.code != RejCode::BadSession
+        } else {
+            rej.code == RejCode::Banned && !self.has(ViewerFlaw::BannedHelloIgnored)
+        };
+        if stops {
             self.halt();
         }
     }
@@ -2375,6 +2488,9 @@ impl Viewer for MockViewer {
             self.requested = self.requested.saturating_sub(1);
         }
         self.pay_ahead = true;
+        if self.has(ViewerFlaw::RefusalResetsUnavailable) {
+            self.standing().unavailable = 0;
+        }
     }
 
     async fn due(&mut self) -> Result<Option<Pay>, String> {
@@ -2412,7 +2528,10 @@ impl Viewer for MockViewer {
             if let Some(p) = expected {
                 self.spent += p.amount;
             }
-            self.standing().unavailable = 0;
+            if !self.has(ViewerFlaw::AckKeepsUnavailable) {
+                self.standing().unavailable = 0;
+                self.unavailable_here = 0;
+            }
             return Ok(());
         }
         self.halt();
@@ -2427,6 +2546,22 @@ impl Viewer for MockViewer {
         }
         let Some(p) = self.take_pending() else {
             // It answers no payment of this session: unsolicited.
+            if self.has(ViewerFlaw::UnsolicitedRejReclaimsUnsettled) {
+                let id = self.id;
+                let mine: Vec<(u64, Pending)> = {
+                    let mut st = self.standing();
+                    let (mine, keep) = std::mem::take(&mut st.unsettled)
+                        .into_iter()
+                        .partition(|(l, _)| *l == id);
+                    st.unsettled = keep;
+                    mine
+                };
+                for (ledger, p) in mine {
+                    self.free_slot(ledger);
+                    self.reclaim(ledger, p, false);
+                }
+                return;
+            }
             if !self.has(ViewerFlaw::UnsolicitedRejIgnored) {
                 self.halt();
             }
@@ -2435,6 +2570,8 @@ impl Viewer for MockViewer {
         self.reclaim(self.id, p, false);
         if rej.code != RejCode::MintUnavailable || self.has(ViewerFlaw::StopsOnOutage) {
             self.halt();
+        } else if self.has(ViewerFlaw::UnavailablePerLedger) {
+            self.unavailable_here += 1;
         } else {
             self.standing().unavailable += 1;
         }
@@ -2492,7 +2629,9 @@ impl Viewer for MockViewer {
     }
 
     fn awaiting_quote(&self) -> bool {
-        !self.halted() && self.awaiting(!self.has(ViewerFlaw::AwaitingQuoteAnyLedger))
+        let tries_used = self.out_of_tries() && !self.has(ViewerFlaw::BudgetNotSignalled);
+        !self.halted()
+            && (self.awaiting(!self.has(ViewerFlaw::AwaitingQuoteAnyLedger)) || tries_used)
     }
 }
 

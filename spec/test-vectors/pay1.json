@@ -52,6 +52,21 @@
       }
     },
     {
+      "name": "quote-window-sixty-four",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example\"],\"window\":64,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "message": {
+        "t": "quote",
+        "price_per_chunk": 1,
+        "window": 64,
+        "served": 0,
+        "accepted_upto": 0,
+        "spent_total": 0,
+        "mints": [
+          "https://mint.example"
+        ]
+      }
+    },
+    {
       "name": "quote-resumed-account",
       "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example\"],\"window\":8,\"served\":40,\"accepted_upto\":36,\"spent_total\":36}",
       "message": {
@@ -467,12 +482,17 @@
     {
       "name": "quote-window-zero",
       "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example\"],\"window\":0,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
-      "why": "window >= 2"
+      "why": "window is 2 to 64"
     },
     {
       "name": "quote-window-one",
       "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example\"],\"window\":1,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
-      "why": "window >= 2"
+      "why": "window is 2 to 64"
+    },
+    {
+      "name": "quote-window-sixty-five",
+      "wire": "{\"t\":\"quote\",\"price_per_chunk\":1,\"mints\":[\"https://mint.example\"],\"window\":65,\"served\":0,\"accepted_upto\":0,\"spent_total\":0}",
+      "why": "window is 2 to 64"
     },
     {
       "name": "quote-fraction",

@@ -36,8 +36,9 @@ payment-enforced after release, so no mechanism pretends otherwise.
   would refuse.
 - **`session`** is exactly 32 lowercase hex characters (128 bits).
 - **`video`** is an NFX video address (NFX-01).
-- **`price_per_chunk`** (in **sat**) is at least 1, and **`window`** at least 2, so a
-  watcher paying at half the window never stalls the seeder. A seeder that serves for
+- **`price_per_chunk`** (in **sat**) is at least 1, and **`window`** is 2 to 64: at
+  least 2, so a watcher paying at half the window never stalls the seeder, and at most
+  64, so one refusal makes a watcher pay ahead at most 32 chunks (§3a). A seeder that serves for
   free does not quote; it serves without pay/1.
 - **`mints`** holds 1 to 16 URLs. A mint URL is:
   - printable ASCII without space, `\` or `@`;
@@ -59,9 +60,9 @@ payment-enforced after release, so no mechanism pretends otherwise.
   screens, and ASCII has no invisible or reordering characters to hide in. Unknown codes
   MUST be tolerated (NFX-11 §6).
 - **Delivery.** A transport carrying pay/1 closes a connection on which a message it
-  sent has gone unacknowledged for 60 s. So a `pay` reaches the seeder within 60 s of
-  being sent, or never, and the watcher's 120 s wait (§3a) outlasts both that and the
-  seeder's 60 s deadline.
+  sent has gone unacknowledged for 60 s. So a message reaches its peer within 60 s of
+  being sent, or never. The watcher's 180 s wait (§3a) covers the three legs of a
+  payment: the `pay`'s delivery, the seeder's 60 s deadline, and the answer's delivery.
 - **Vectors:** `test-vectors/pay1.json`.
 
 **Messages.**
@@ -120,13 +121,15 @@ payment-enforced after release, so no mechanism pretends otherwise.
 **Configuration.** A seeder refuses to start outside these:
 - `price_per_chunk` 1 to 2^53−1, and 1 to 16 mints, each a valid mint URL (§2): its quote
   must be one the pay/1 writer emits;
-- `window` 2 to 2^53−1;
+- `window` 2 to 64 (§2);
 - a global cap of 1 to 1,000,000 unpaid chunks. A larger one bounds nothing (size it as
   below);
-- `debt_ttl` ≥ 10 min (recommended 1 h). A zero one would switch the cap off;
-- `account_ttl` ≥ `debt_ttl` (recommended 24 h). A shorter one would let an account be
-  forgotten, and start afresh, while its debt still counted;
-- `ban_ttl` ≥ `debt_ttl` (recommended 24 h).
+- `debt_ttl` 10 min to 24 h (recommended 1 h). A zero one would switch the cap off, and a
+  longer one would let a cap filled once lock out new watchers for that long;
+- `account_ttl` from `debt_ttl` to 30 days (recommended 24 h). A shorter one would let an
+  account be forgotten, and start afresh, while its debt still counted; a longer one
+  would void the bound on state below;
+- `ban_ttl` from `debt_ttl` to 30 days (recommended 24 h).
 
 **Bounded state.** Identities are free, so everything kept per identity is bounded:
 - An account whose `accepted_upto` is 0 (nothing ever paid) may be forgotten once it has
@@ -135,7 +138,9 @@ payment-enforced after release, so no mechanism pretends otherwise.
   are lost, within the bounds below.
 - An account with payments is kept. Forgetting it would contradict the watcher's ledger
   (§3a), which would then stop paying.
-- A ban expires after `ban_ttl`.
+- A ban expires after `ban_ttl`, and is recorded only for a peer with an account. A
+  peer with none has been served nothing and owes nothing, so a ban would protect
+  nothing: its refused `pay` is answered, and nothing is kept for it.
 - Hellos waiting for a payment count toward the session cap.
 - A seeder SHOULD keep a bounded cache of proofs it has seen spent. It then refuses a
   replayed one (`spent`, with a ban) without asking the mint.
@@ -208,15 +213,17 @@ checks run in this order:
 
    - **Other errors.** Any other swap error, a fee or keyset error of the seeder's own
      making included, is `mint-unavailable`, never a ban.
-   - **The deadline.** The seeder answers every `pay` within **60 s of its arrival**:
-     the wait for the account's turn, the key fetch and the swap all count. A payment
+   - **The deadline.** The seeder answers every `pay` within **60 s of its arrival**,
+     that is of the transport receiving it, not of the engine reading it: the wait for
+     the account's turn, the key fetch and the swap all count. A payment
      whose outcome the seeder has by then is answered with it, even at the deadline.
      Otherwise it answers `mint-unavailable`, abandons the swap (it sends no further
      swap request for those proofs), and releases the account for its next payment.
    - **Late outcomes.** A swap the seeder has answered `mint-unavailable` for, at the
-     deadline or earlier, is still settled when its outcome becomes known. The outcome
-     is known from a late response, or from NUT-09 restore of the seeder's own outputs,
-     which the seeder SHOULD attempt while the mint is reachable.
+     deadline or earlier, is still settled when its outcome becomes known. The seeder
+     MUST learn it: from a late response, or, when none comes, by NUT-09 restore of its
+     own outputs, which it derives deterministically (NUT-13) for this, retried while the
+     mint is reachable. A watcher waiting on that payment (§3a) waits on this.
      - A claim is credited to the account, and the watcher's next quote shows it (§3a).
      - A spent or invalid outcome bans nobody.
      - A late outcome is never an `ack`: the payment was already answered.
@@ -245,7 +252,7 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   - how many `mint-unavailable` answers came in a row.
 
   Every rule below that says "pays that seeder nothing" holds for all its videos, and any
-  of its videos' ledgers does the standing's catching up (the 120 s reclaim below).
+  of its videos' ledgers does the standing's catching up (the 180 s reclaim below).
 - **Take a quote only if it is honest about the account:**
   - its `served` is at most the chunks requested;
   - its `accepted_upto` and `spent_total` equal the ledger, or the ledger plus the
@@ -253,9 +260,8 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   - a quote **below** the ledger is refused, and the watcher never resyncs down to it;
   - a quote above the watcher's price cap is refused, on every session, a resumed one
     included, and so is one naming no mint it holds tokens from;
-  - so is a quote whose `window` is above the watcher's own ceiling (recommended 64):
-    `window` bounds what one refusal makes it pay ahead, and a seeder may quote any
-    `window` up to 2^53−1.
+  - so is a quote whose `window` is above the watcher's own ceiling, at most 64 (§2):
+    `window` bounds what one refusal makes it pay ahead.
 - **Owe every request sent,** except one the seeder answers with `refuse`. A refused
   request is always un-owed; if it was already paid for, that payment becomes credit. A
   request the watcher abandons stays owed; if the seeder never saw it, the payment
@@ -271,12 +277,14 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   - Keep one payment in flight toward a seeder at a time, across its videos.
   - After three `mint-unavailable` answers in a row, pay that seeder nothing more until a
     new session's quote. Each answer costs the watcher a reclaim and a new token at the
-    mint, whose input fees are the watcher's; an `ack` resets the count.
+    mint, whose input fees are the watcher's; an `ack` resets the count, and nothing else
+    does. A watcher SHOULD back off before reopening sessions with a seeder whose
+    sessions keep ending so, since each new session restores the three tries.
 - **Answers belong to their session.** A `rej` answers the payment sent on its session.
   One that answers no payment is unsolicited, and stops the watcher paying that seeder,
   as an unsolicited `ack` does. A refused `hello` opens no session and answers no
   payment: `banned` stops the watcher, and any other code changes nothing. A payment an
-  earlier session left unsettled is settled only by a quote or by the 120 s reclaim
+  earlier session left unsettled is settled only by a quote or by the 180 s reclaim
   below.
 - **Check every `ack`.** `accepted_upto` must equal the payment's `upto_chunk`, and
   `spent_total` the ledger plus its face value. An inconsistent or unsolicited ack stops
@@ -297,19 +305,21 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   - After `mint-unavailable` the watcher pays again once every proof is confirmed
     reclaimed, or the payment is settled by a quote. After any other code it stops paying
     that seeder.
-- **Wait 120 s from sending before reclaiming an unanswered payment**, twice the
-  seeder's limit.
+- **Wait 180 s from sending before reclaiming an unanswered payment**: a leg each for
+  the `pay`'s delivery, the seeder's 60 s deadline and the answer's delivery (§2).
   - On a live connection, for the payment sent on it, the seeder was unresponsive: after
-    120 s the watcher reclaims and stops.
+    180 s the watcher reclaims and stops.
   - A dropped connection does not shorten the wait. A quote for the payment's video
     settles it as accepted only if its `accepted_upto` **and** `spent_total` both equal
-    the ledger plus the payment. Otherwise the watcher reclaims it after 120 s, from
+    the ledger plus the payment. Otherwise the watcher reclaims it after 180 s, from
     whichever of the seeder's videos it is still watching, and carries on if every proof
     came back. Until then it is the standing's payment in flight.
   - Either way, a reclaim that finds proofs spent leaves the payment awaiting a quote,
     as above. A `pay` still buffered on a dropped connection can reach the seeder after
     the watcher's next `hello`, and be credited after that session's quote.
-- **Pay nothing after stopping,** at the end of a session included.
+- **Pay nothing after stopping,** at the end of a session included. Reclaiming is not
+  paying: a stopped watcher still finishes its incomplete reclaims, and reclaims a
+  closed session's unsettled payment after the wait.
 
 ## 4. HTTPS (origin) payment surface
 
@@ -466,3 +476,15 @@ therefore loses nothing:
     - three `mint-unavailable` answers in a row end paying for the session;
     - answers belong to their session, and a refused `hello` is not a payment's answer;
     - any ledger of a standing reclaims a closed session's payment after 120 s.
+- Draft 2026-09-24 (M2.0 seventh audit, `docs/nfx/reviews/2026-09-24-m2.0-seventh-audit.md`).
+  - §2: `window` is 2 to 64; the delivery rule covers the answer's leg too, so the
+    watcher waits 180 s.
+  - §3:
+    - arrival is the transport's receipt;
+    - late outcomes MUST be learnt (NUT-09 restore of NUT-13 outputs);
+    - ceilings on `debt_ttl`, `account_ttl` and `ban_ttl`;
+    - bans only for peers with an account.
+  - §3a:
+    - reclaiming continues after a stop;
+    - only an `ack` resets the `mint-unavailable` count;
+    - back off from a seeder whose sessions keep ending in it.

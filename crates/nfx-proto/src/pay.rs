@@ -27,6 +27,9 @@ pub const MAX_CODE_BYTES: usize = 64;
 pub const MAX_INT: u64 = (1 << 53) - 1;
 /// The deepest nesting; the message object is level 1.
 pub const MAX_DEPTH: usize = 16;
+/// The largest `window` a quote may carry (NFX-07 §2): it bounds what one refusal makes
+/// a watcher pay ahead.
+pub const MAX_WINDOW: u64 = 64;
 
 /// What a deployment permits beyond the default rules.
 #[derive(Debug, Clone, Copy, Default)]
@@ -322,8 +325,8 @@ impl Message {
                 if price_per_chunk == 0 {
                     return Err(bad("price_per_chunk >= 1"));
                 }
-                if window < 2 {
-                    return Err(bad("window >= 2"));
+                if !(2..=MAX_WINDOW).contains(&window) {
+                    return Err(bad("window is 2 to 64"));
                 }
                 let Some(Value::Array(mints)) = obj.get("mints") else {
                     return Err(bad("mints is 1 to 16 URLs"));

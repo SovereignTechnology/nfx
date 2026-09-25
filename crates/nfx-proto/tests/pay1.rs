@@ -94,6 +94,8 @@ fn pay1_writers_refuse_what_their_readers_would() {
     assert!(quote(0, 8, vec!["https://m.example"]).to_line().is_err());
     assert!(quote(1, 0, vec!["https://m.example"]).to_line().is_err());
     assert!(quote(1, 1, vec!["https://m.example"]).to_line().is_err());
+    assert!(quote(1, 65, vec!["https://m.example"]).to_line().is_err());
+    assert!(quote(1, 64, vec!["https://m.example"]).to_line().is_ok());
     assert!(quote(1, 8, vec![]).to_line().is_err());
     assert!(quote(1, 8, vec!["https://m.example"]).to_line().is_ok());
     let ack = |n| {

@@ -58,5 +58,5 @@ if [ "${NFX_SKIP_WASM:-0}" != 1 ]; then
 fi
 # Last, after everything else has run: the files again, then what was compiled.
 step "locked paths: unchanged, and nfx-pay built only from pinned files and dependencies"
-PYTHON="$py" ../crates/ci/check-locked.sh --compiled-workspace
+PYTHON="$py" ../crates/ci/check-locked.sh --compiled
 printf '\nall checks passed\n'

@@ -6,11 +6,10 @@
     locked.py facts               what the money crates are built from, from cargo
                                   metadata alone (nothing is compiled), against
                                   crates/ci/locked-compiled.txt
-    locked.py compiled --money|--workspace [--pin]
-                                  the facts, then a build: nfx-pay and nfx-proto alone
-                                  (the lock job), or the workspace (the check job). Check
-                                  what the compiler actually read, and that the money tests
-                                  really ran; --pin rewrites the facts file.
+    locked.py compiled [--pin]    the facts, then a build of nfx-pay and nfx-proto alone:
+                                  check what the compiler read for every one of their
+                                  targets, and that the money tests really ran; --pin
+                                  rewrites the facts file.
 
 The facts, one per line:
 - `build-script <crate>` and `proc-macro <crate>`: workspace crates that run code at build
@@ -29,9 +28,14 @@ The facts, one per line:
 Every path package must be a workspace member: a crate outside the workspace, wired in
 by path, would escape every check here.
 
-`compiled` also checks, without pins, on the build it runs:
-- every file a library or binary compiles is a tracked file inside its own crate; nfx-pay's
-  tests read only nfx-pay's tracked files; other tests read tracked files only;
+`compiled` also checks, without pins, on the money crates' own build: every target of
+nfx-pay and nfx-proto yields rustc's dep-info (a target without it fails), and every file
+it lists is tracked; nfx-pay's targets and nfx-proto's library read only their own
+crate's files, and nfx-proto's tests tracked files only (the vectors).
+
+Out of scope, and why: code in other crates. It may compile a pinned file (by
+`#[path]`, say), but it cannot change one, and a copy of money logic written anywhere is
+a code change this lock was never able to see (check-locked.sh, "Limits").
 - no file outside nfx-pay and nfx-node's locked paths names `nfx_pay`;
 - the suite, the mutants and the pay/1 vector tests each ran, and reported exactly the
   number of tests their pinned sources declare. A test runner that runs nothing fails.
@@ -73,10 +77,10 @@ def manifest() -> None:
         ws = tomllib.load(f)
     w = ws.get("workspace", {})
     sections = {k: ws.get(k) for k in ("profile", "patch", "replace")}
-    sections.update({f"workspace.{k}": w.get(k) for k in ("lints", "resolver", "members")})
+    sections.update({f"workspace.{k}": w.get(k) for k in ("lints", "resolver", "members", "package")})
     text = json.dumps(sections, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(text.encode()).hexdigest()
-    print(f"derived {digest} crates/Cargo.toml#profile,patch,replace,workspace.lints,resolver,members")
+    print(f"derived {digest} crates/Cargo.toml#profile,patch,replace,workspace.lints,resolver,members,package")
 
 
 def member_names() -> set[str]:
@@ -163,29 +167,30 @@ def sources_read(dep_file: pathlib.Path) -> set[pathlib.Path]:
     return out
 
 
-def dep_info(filenames: list[str]) -> list[pathlib.Path]:
-    """rustc's dep-info for each artefact. Libraries and tests sit in deps/ under their
-    hashed names. A binary or an example is listed at its uplifted name (target/debug/x,
-    target/debug/examples/x), a hard link to the hashed file in deps/ or examples/:
-    that file's own dep-info is the one read, never the uplifted copy, which lists the
-    dependencies' files too."""
-    found = []
+def dep_info(filenames: list[str]) -> pathlib.Path | None:
+    """rustc's own dep-info for one target, from its artefacts. A library or a test sits
+    in deps/ under a hashed name (`<stem>-<16 hex>`), with its dep-info beside it; a
+    cdylib or dylib sits there unhashed, with its own `<stem>.d`. A binary or an example
+    is listed at its uplifted name (target/debug/x, examples/x), a hard link to a hashed
+    twin in deps/ or examples/ whose name has `-` turned to `_`: that twin's dep-info is
+    read, never the uplifted copy, which lists the dependencies' files too."""
     for f in filenames:
         p = pathlib.Path(f)
-        if not re.search(r"-[0-9a-f]{16}$", p.name.split(".")[0]):
-            # An uplifted name: find the hashed file it links to.
-            dirs = [p.parent / "deps", p.parent] if p.parent.name != "examples" else [p.parent]
-            twins = [c for d in dirs if d.is_dir() for c in d.glob(f"{p.name}-*")
+        stem = p.name.split(".")[0]
+        if not re.search(r"-[0-9a-f]{16}$", stem) and p.parent.name != "deps":
+            dirs = [p.parent] if p.parent.name == "examples" else [p.parent / "deps", p.parent]
+            names = {p.name, p.name.replace("-", "_")}
+            twins = [c for d in dirs if d.is_dir() for n in names for c in d.glob(f"{n}-*")
                      if c.suffix != ".d" and p.exists() and c.exists() and c.samefile(p)]
             if not twins:
                 continue
             p = twins[0]
-        stem = p.name.split(".")[0]
-        stem = stem[3:] if stem.startswith("lib") and p.suffix in (".rlib", ".rmeta", ".so") else stem
+            stem = p.name.split(".")[0]
+        stem = stem[3:] if stem.startswith("lib") and p.suffix in (".rlib", ".rmeta", ".so", ".a") else stem
         d = p.parent / f"{stem}.d"
         if d.exists():
-            found.append(d)
-    return found
+            return d
+    return None
 
 
 def test_counts() -> dict[str, int]:
@@ -260,40 +265,43 @@ def package_of(package_id: str) -> tuple[str, str]:
     return name, version
 
 
-def compiled(scope: str, pin: bool) -> None:
+def compiled(pin: bool) -> None:
     found, meta, members = facts_now()
     if not pin:
         check_facts(found)
 
-    # What the build actually compiled: the money crates alone, or the workspace.
+    # What the money crates' own build compiled, target by target, failing closed.
     tracked = {(REPO / f).resolve() for f in run("git", "ls-files", "-z", cwd=REPO).split("\0") if f}
-    crate_dirs = {p["manifest_path"]: pathlib.Path(p["manifest_path"]).parent.resolve() for p in members}
+    money = {p["manifest_path"]: pathlib.Path(p["manifest_path"]).parent.resolve()
+             for p in members if p["name"] in MONEY_CRATES}
     pay_dir = (CRATES / "nfx-pay").resolve()
-    select = ["--workspace"] if scope == "workspace" else ["-p", "nfx-pay", "-p", "nfx-proto"]
-    out = run("cargo", "test", *select, "--no-run", "--locked", "--offline", "--message-format=json")
+    out = run("cargo", "test", "-p", "nfx-pay", "-p", "nfx-proto", "--all-targets", "--no-run",
+              "--locked", "--offline", "--message-format=json")
     seen_targets = 0
     built = set()
     for line in out.splitlines():
         msg = json.loads(line)
-        if msg.get("reason") == "compiler-artifact":
-            name, version = package_of(msg["package_id"])
-            built.add(f"{BUILD}{name} {version} {','.join(sorted(msg.get('features', []))) or '-'}")
-        if msg.get("reason") != "compiler-artifact" or msg["manifest_path"] not in crate_dirs:
+        if msg.get("reason") != "compiler-artifact":
             continue
-        crate = crate_dirs[msg["manifest_path"]]
+        name, version = package_of(msg["package_id"])
+        built.add(f"{BUILD}{name} {version} {','.join(sorted(msg.get('features', []))) or '-'}")
+        if msg["manifest_path"] not in money:
+            continue
+        crate = money[msg["manifest_path"]]
+        target = f"{crate.name} {'/'.join(msg['target']['kind'])} {msg['target']['name']}"
+        d = dep_info(msg["filenames"] + ([msg["executable"]] if msg.get("executable") else []))
+        if d is None:
+            fail(f"no dep-info for {target}: every money target must show what it compiled")
+        seen_targets += 1
         is_test = msg["profile"].get("test", False)
-        for d in dep_info(msg["filenames"] + ([msg["executable"]] if msg.get("executable") else [])):
-            seen_targets += 1
-            for src in sources_read(d):
-                if src not in tracked:
-                    fail(f"{crate.name} compiled {src}, which is not a tracked file ({d.name})")
-                own = crate in src.parents
-                if crate == pay_dir and not own:
-                    fail(f"nfx-pay compiled {src}, from outside crates/nfx-pay ({d.name})")
-                if not is_test and not own:
-                    fail(f"{crate.name}'s library or binary compiled {src}, from outside its crate ({d.name})")
+        for src in sources_read(d):
+            if src not in tracked:
+                fail(f"{target} compiled {src}, which is not a tracked file ({d.name})")
+            own = crate in src.parents
+            if not own and (crate == pay_dir or not is_test):
+                fail(f"{target} compiled {src}, from outside its crate ({d.name})")
     if seen_targets == 0:
-        fail(f"found no dep-info for the {scope} build")
+        fail("found no dep-info for the money crates' build")
 
     named = subprocess.run(["git", "grep", "-nw", "nfx_pay", "--", "*.rs", *MONEY_USERS],
                            cwd=REPO, capture_output=True, text=True)
@@ -323,20 +331,17 @@ def compiled(scope: str, pin: bool) -> None:
         if ran.get(name) != n:
             fail(f"tests/{name}.rs: {n} tests declared, {ran.get(name)} ran and passed")
 
-    if scope == "money":
-        if pin:
-            found = sorted(found + list(built))
-        else:
-            check_facts(sorted(built), build=True)
     if pin:
-        if scope != "money":
-            fail("--pin pins the money build: use compiled --money --pin")
+        found = sorted(found + list(built))
+    else:
+        check_facts(sorted(built), build=True)
+    if pin:
         PINS.write_text("".join(f + "\n" for f in found))
         print(f"pinned {len(found)} facts in {PINS.relative_to(REPO)}")
         return
     counts = ", ".join(f"{k} {v}" for k, v in want.items())
-    print(f"locked paths: {len(found)} facts match their pins; every file the {scope} build "
-          f"compiled is tracked and in its crate; the money tests ran ({counts})")
+    print(f"locked paths: {len(found)} facts match their pins; every money target's compiled "
+          f"files are tracked and its own; the money tests ran ({counts})")
 
 
 def main() -> None:
@@ -347,9 +352,8 @@ def main() -> None:
         sources()
     elif args == ["facts"]:
         facts()
-    elif (args[:1] == ["compiled"] and len(args) in (2, 3) and args[1] in ("--money", "--workspace")
-          and args[2:] in ([], ["--pin"])):
-        compiled(args[1][2:], "--pin" in args)
+    elif args[:1] == ["compiled"] and args[1:] in ([], ["--pin"]):
+        compiled("--pin" in args)
     else:
         fail(__doc__.strip().splitlines()[2].strip())
 

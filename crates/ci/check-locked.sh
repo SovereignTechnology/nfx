@@ -1,5 +1,11 @@
 #!/bin/bash -p
-# -p: no BASH_ENV, and no shell functions imported from the environment.
+# -p: no BASH_ENV, and no shell functions imported from the environment. Run through its
+# shebang (or `bash -p`) only: through plain `bash`, BASH_ENV runs first and could make it
+# say anything, so it refuses.
+if [[ $- != *p* ]]; then
+  builtin echo "locked paths: run this as crates/ci/check-locked.sh, not through plain bash" >&2
+  builtin exit 1
+fi
 if [[ -n $(builtin declare -F) ]]; then
   builtin echo "locked paths: shell functions are defined before the check runs" >&2
   builtin exit 1
@@ -14,13 +20,12 @@ fi
 #                                from verified archives). check.sh runs this before cargo.
 #   check-locked.sh --facts      the same, then what nfx-pay is built from, read from cargo
 #                                metadata without compiling anything (locked.py facts).
-#   check-locked.sh --compiled   the same, then builds nfx-pay and nfx-proto alone, checks
-#                                what the compiler read and that the money tests ran, and
-#                                checks the pinned files again (locked.py). The lock job
-#                                runs --facts, then this.
-#   check-locked.sh --compiled-workspace
-#                                --compiled over the whole workspace build: every crate's
-#                                compiled files too. check.sh runs this last.
+#   check-locked.sh --compiled   the same, then builds every target of nfx-pay and
+#                                nfx-proto alone, checks what the compiler read for each
+#                                (failing closed on a target without dep-info) and that the
+#                                money tests ran, and checks the pinned files again
+#                                (locked.py). The lock job runs --facts, then this;
+#                                check.sh runs it last.
 #   LOCKED_DIRS_UNLOCKED=1 check-locked.sh --pin
 #                                the security stage, after sovtech has read the diff:
 #                                re-pin both, the compiled facts first (their file is one
@@ -32,7 +37,7 @@ fi
 #     crates/nfx-pay (manifest, contracts, mock, suite, tests); the pay/1 parser, the
 #     modules it rests on, nfx-proto's lib.rs and manifest, its vector tests, the vectors
 #     and their reference reader; the workspace manifest's profile, patch, replace, lints,
-#     resolver and members;
+#     resolver, members and package;
 #   - this check, its helpers, the CI that runs them, and locked-compiled.txt.
 # crates/ci/locked-compiled.txt pins the money crates' resolved dependency closure with
 # its features (nfx-pay's and nfx-proto's, test dependencies included), the workspace
@@ -48,9 +53,10 @@ fi
 #     the environment can make `cargo test` run nothing and still pass), and any variable
 #     whose name is not a plain identifier (an exported bash function, say); in CI, any
 #     variable outside the allow-list at all;
-#   - any compiled file that is untracked, or outside its own crate (a library or binary),
-#     or outside nfx-pay (nfx-pay's tests): this is what catches #[path], include! and
-#     every spelling of them;
+#   - for any target of nfx-pay or nfx-proto: no dep-info, a compiled file that is
+#     untracked, or one outside its own crate (nfx-pay's targets and nfx-proto's library;
+#     nfx-proto's tests may read the tracked vectors). This catches #[path], include! and
+#     every spelling of them in the money crates, on the host build CI tests;
 #   - `nfx_pay` named in any Rust file outside nfx-pay and nfx-node's locked paths;
 #   - a path package that is not a workspace member;
 #   - the money tests not all running.
@@ -58,12 +64,20 @@ fi
 # CI is recognised by CI, GITLAB_CI or CI_JOB_ID, and the pinned gitlab-ci.yml runs this
 # with CI=true and LOCKED_DIRS_UNLOCKED emptied, so a pipeline variable cannot unset CI.
 #
-# Limits: whoever can push can also re-pin, and the CI configuration lives in the branch
-# it checks. This makes money-code changes loud and reviewable; the control is sovtech's
-# review of every change to the pins. The lock job runs no unpinned repository code; the
-# check job does (generators, other crates' build scripts), so its lock steps are a second
-# look, not the verdict. Pipeline variables and `[skip ci]` are the project's settings to
-# close (gitlab-ci.yml).
+# What it guarantees: the money code (every pinned file) and what it is built and tested
+# with cannot change without a re-pin, and its tests ran in full. What it does not:
+#   - code outside the money crates is out of scope. Another crate may compile a pinned
+#     file (by #[path], on any target), but cannot change it, and money logic written
+#     afresh anywhere is a change no lock can tell from other code; nfx-proto's other
+#     modules and target-gated code are in that position too;
+#   - whoever can push can also re-pin, and the CI configuration lives in the branch it
+#     checks. This makes money-code changes loud and reviewable; the control is sovtech's
+#     review of every change to the pins;
+#   - the verdict is the CI lock job's (env -i, bash -p, no unpinned code before it). A
+#     local run, or the check job's lock steps after unpinned code has run, is a second
+#     look;
+#   - pipeline variables and `[skip ci]` are the project's settings to close
+#     (gitlab-ci.yml).
 set -euo pipefail
 shopt -s inherit_errexit   # a failure inside $(...) fails the script, not just the subshell
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
@@ -102,8 +116,8 @@ mode=${1:-}
 fail() { printf 'locked paths: %s\n' "$*" >&2; exit 1; }
 
 case $mode in
-  '' | --pin | --sources | --facts | --compiled | --compiled-workspace) ;;
-  *) fail "usage: check-locked.sh [--sources | --facts | --compiled | --compiled-workspace | --pin]" ;;
+  '' | --pin | --sources | --facts | --compiled) ;;
+  *) fail "usage: check-locked.sh [--sources | --facts | --compiled | --pin]" ;;
 esac
 in_ci=${CI:-}${GITLAB_CI:-}${CI_JOB_ID:-}
 if [ -n "$in_ci" ] && { [ "${LOCKED_DIRS_UNLOCKED:-0}" = 1 ] || [ "$mode" = --pin ]; }; then
@@ -177,7 +191,7 @@ for f in "$home"/config "$home"/config.toml; do
 done
 
 if [ "$mode" = --pin ]; then
-  $py crates/ci/locked.py compiled --money --pin
+  $py crates/ci/locked.py compiled --pin
   manifest > "$pins"
   echo "pinned $(wc -l < "$pins") guarded files and sections in $pins"
   exit 0
@@ -202,10 +216,8 @@ case $mode in
     fi
     ;;
   --facts) $py crates/ci/locked.py facts ;;
-  --compiled | --compiled-workspace)
-    scope=money
-    [ "$mode" = --compiled ] || scope=workspace
-    $py crates/ci/locked.py compiled "--$scope"
+  --compiled)
+    $py crates/ci/locked.py compiled
     # The tests ran code: the pinned files must still be the pinned files.
     [ "$(manifest)" = "$(cat "$pins")" ] || fail "guarded files changed during the build or the tests"
     echo "locked paths: the guarded files still match their pins"

@@ -67,8 +67,11 @@ pub trait SeederSession {
     ///
     /// A refusal changes no accounting and claims nothing.
     ///
-    /// **The deadline:** answered within 60 s of its arrival, the wait for the account's
-    /// turn and any key fetch included. A payment whose outcome is known by then is
+    /// Before the swap, the account's watermark is read again: a payment it no longer fits
+    /// (a late outcome moved it) is refused, `stale` or by amount, and nothing is swapped.
+    ///
+    /// **The deadline:** answered within 60 s of its arrival (the transport's receipt, not
+    /// this call's), the wait for the account's turn and any key fetch included. A payment whose outcome is known by then is
     /// answered with it; otherwise with `mint-unavailable`, and its swap is abandoned: no
     /// further request is sent for those proofs, and the account is released.
     ///
@@ -128,7 +131,8 @@ pub trait Viewer {
     /// - after three `mint-unavailable` answers in a row, until a new session's quote.
     ///
     /// It first finishes incomplete reclaims, and reclaims a payment a closed session left
-    /// unsettled once it is 120 s old, whichever of the seeder's videos it was for.
+    /// unsettled once it is 180 s old, whichever of the seeder's videos it was for. It
+    /// does so even when the viewer has stopped: reclaiming is not paying.
     async fn due(&mut self) -> Result<Option<Pay>, String>;
 
     /// The payment for every chunk still owed, when the session ends.
@@ -150,7 +154,7 @@ pub trait Viewer {
     /// A reclaim the mint cannot serve yet blocks every payment until it completes.
     async fn rej(&mut self, rej: &Rej);
 
-    /// No answer has come on this live session to the payment sent on it. Before 120 s
+    /// No answer has come on this live session to the payment sent on it. Before 180 s
     /// from sending this does nothing. From then, the viewer reclaims the proofs and stops.
     /// A payment an earlier session left unsettled is not this call's.
     async fn timeout(&mut self);
@@ -158,16 +162,18 @@ pub trait Viewer {
     /// The session ended (its connection closed). The ledger stays, and a payment in
     /// flight stays unsettled, still the standing's one payment in flight. This ledger's
     /// quote settles it if both its fields match. Failing that, any ledger of the standing
-    /// reclaims it once it is 120 s old, and proofs found spent leave it awaiting a quote.
+    /// reclaims it once it is 180 s old, and proofs found spent leave it awaiting a quote.
     fn end(&mut self);
 
     /// Whether the viewer pays this seeder nothing: it has stopped, or a payment awaits a
     /// quote.
     fn stopped(&self) -> bool;
 
-    /// Whether this ledger holds a payment whose proofs were found spent, awaiting a quote
-    /// that shows it accepted. The watcher opens a new session for its video to settle it.
-    /// A quote equal to the ledger leaves it waiting, and the watcher paying nothing.
+    /// Whether paying waits for a new session: this ledger holds a payment whose proofs
+    /// were found spent, awaiting a quote that shows it accepted (the watcher opens a new
+    /// session for this video), or the standing has used its three `mint-unavailable`
+    /// tries (any new session's quote restores them). A quote equal to the ledger leaves a
+    /// payment waiting, and the watcher paying nothing.
     fn awaiting_quote(&self) -> bool;
 }
 
@@ -222,9 +228,10 @@ pub trait Harness {
     /// A seeder with exactly `params`, or its refusal to start (NFX-07 §3 configuration).
     fn engine_checked(&self, params: EngineParams) -> Result<Self::Engine, String>;
     /// How many per-identity records `engine` holds: what a flood of free identities costs
-    /// it. It counts **every** record the engine keeps for a peer identity: accounts,
-    /// bans, open and waiting sessions, their ids and their counters, turns held,
-    /// payments whose swaps are unsettled, and any cache keyed by peer. A count that leaves a kind out
+    /// it. It counts **every** record the engine keeps for a peer identity or its
+    /// accounts: accounts, bans, open and waiting sessions, their ids and their counters,
+    /// turns held and their waiters, payments whose swaps are unsettled, the global
+    /// count's entries for unpaid chunks, and any cache keyed by peer. A count that leaves a kind out
     /// hides exactly the growth the suite looks for.
     fn identities_held(&self, engine: &Self::Engine) -> usize;
     /// A `hello` for video `v` (0 or 1), under a fresh session id.
