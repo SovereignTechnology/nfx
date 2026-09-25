@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of eighteen
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of nineteen
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -37,7 +37,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [fifteenth](reviews/2026-09-24-m2.0-fifteenth-audit.md),
 [sixteenth](reviews/2026-09-24-m2.0-sixteenth-audit.md),
 [seventeenth](reviews/2026-09-24-m2.0-seventeenth-audit.md),
-[eighteenth](reviews/2026-09-24-m2.0-eighteenth-audit.md)). sovtech's bar for the push is
+[eighteenth](reviews/2026-09-24-m2.0-eighteenth-audit.md),
+[nineteenth](reviews/2026-09-24-m2.0-nineteenth-audit.md)). sovtech's bar for the push is
 zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -78,9 +79,17 @@ zero findings, confirmed after the sixth:
     answered on the reader's next poll, dial records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, two of them
-  threaded, run twice (the second time with reads as round trips), and **each of 298
-  planted defects fails its scenario**, every surviving mutant from all eighteen audits
+  threaded, run twice (the second time with reads as round trips), and **each of 304
+  planted defects fails its scenario**, every surviving mutant from all nineteen audits
   among them.
+- **Since the nineteenth audit:**
+  - withdrawn: "an input spent is the claim" for expired outputs. A claim not learnt
+    before its outputs' keyset expires is nothing, a stated concession that keeps the
+    seeder's loss bound; the watcher's counterpart is stated in §3a;
+  - the outputs' keyset rule is pinned (`Harness::keyset_expires_in`); nothing decides
+    by the mint's own expiry state;
+  - a reused read's wait ends with its second and at the entry's deadline, and an
+    abandoned read leaves its waiters to read themselves.
 - **Since the eighteenth audit:**
   - a swap whose outputs' keyset has expired is decided by its inputs alone (a restore
     cannot show it): spent is the claim; the seeder derives outputs only from a keyset
