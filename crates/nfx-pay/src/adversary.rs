@@ -18,7 +18,9 @@ use std::time::Duration;
 
 use nfx_pay_wire::pay::{Ack, Pay, Quote, Rej, RejCode};
 
-use crate::session::{BadToken, EngineParams, Harness, SeederEngine, SeederSession, Viewer};
+use crate::session::{
+    BadToken, EngineParams, Harness, MintEvent, SeederEngine, SeederSession, Viewer,
+};
 
 /// Every scenario, one `#[tokio::test]` each, against the harness `$h` builds.
 #[macro_export]
@@ -1460,6 +1462,105 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
     let ack = r.expect("a restore shows the first attempt's claim");
     assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
 
+    // A retry refused for good whose restore goes unanswered leaves the outcome unknown:
+    // the first attempt's claim is learnt once restores answer.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    h.hold_swap_responses();
+    h.lose_next_swap_response();
+    let p = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    let (r, ()) = both(s.pay(&p), async {
+        yield_once().await;
+        h.rotate_keyset();
+        h.restore_outage(true);
+        h.release_swaps().await;
+    })
+    .await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    h.restore_outage(false);
+    h.advance(SECOND);
+    let q = open(h, &e, 1).await.quote().clone();
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (4, 4),
+        "learnt, and credited"
+    );
+    // A retry refused for good when the first attempt never went through (the mint rolled
+    // it back): nothing, and no credit.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    h.hold_next_swap_reserving();
+    let p = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    let (r, ()) = both(s.pay(&p), async {
+        yield_once().await;
+        h.rotate_keyset();
+        h.roll_back_reserved();
+    })
+    .await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    assert!(!h.claimed_any(&p.token).await, "nothing was claimed");
+    let q = open(h, &e, 1).await.quote().clone();
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (0, 0),
+        "and nothing credited"
+    );
+    // A retry that gets no answer either leaves the outcome unknown: learnt later.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    h.hold_swap_responses();
+    h.lose_next_swap_response();
+    let p = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    let (r, ()) = both(s.pay(&p), async {
+        yield_once().await;
+        h.lose_next_swap_response();
+        h.release_swaps().await;
+    })
+    .await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    h.advance(SECOND);
+    let q = open(h, &e, 1).await.quote().clone();
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (4, 4),
+        "learnt, and credited"
+    );
+    // A first attempt the mint refuses because the seeder derived its outputs from a
+    // keyset since rotated out (its own stale keys): `mint-unavailable`, never a ban, and
+    // nothing left unknown, so the next payment is swapped at once.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    h.before_next_swap(MintEvent::RotateKeyset);
+    let r = s
+        .pay(&Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        })
+        .await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    assert!(!s.banned(), "the seeder's own keyset error bans nobody");
+    let ack = s
+        .pay(&Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        })
+        .await
+        .expect("nothing is left unknown: the next payment is swapped");
+    assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
+
     // Two learners at once (the sweep, run during another's read) credit a claim once.
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
@@ -2695,15 +2796,23 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
     assert_eq!(h.state_reads(), before, "nothing is undecided any more");
     h.release_swaps().await;
 
-    // A completion is a retry, sent with the swap's own outputs. Its answer lost, a later
-    // read learns it; answered `spent` (the given-up request processed just before it),
-    // a restore shows the claim; refused as pending (that request started just before
-    // it), the swap stays unknown until the mint finishes it. Refused for good, because
-    // its outputs' keyset was rotated out or its inputs are invalid, it leaves nothing:
-    // the account pays again.
-    for case in 0..5 {
+    // A completion is a retry, sent with the swap's own outputs, and settled as its
+    // answer says:
+    // 0. its answer lost: a later read learns the claim;
+    // 1. answered `spent` (the given-up request processed just before it): a restore
+    //    shows the claim;
+    // 2. refused as pending (that request started just before it): unknown until the mint
+    //    finishes it;
+    // 3. refused for good, its outputs' keyset rotated out: nothing, and the account pays
+    //    again;
+    // 4. refused as invalid: nothing, and nobody banned;
+    // 5. held by the mint, unanswered: unknown, and learnt once processed;
+    // 6. never reaching the mint: unknown, and completed again later;
+    // 7. answered `spent` with restores down: unknown, and learnt once they answer.
+    for case in 0..8 {
         let e = h.engine(1, 4, 1000);
         let mut s = open(h, &e, 1).await;
+        assert_eq!(serve(h, &mut s, 0, 1), 1);
         let p = Pay {
             upto_chunk: 1,
             token: if case == 4 {
@@ -2720,24 +2829,38 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
         h.advance(h.account_ttl());
         match case {
             0 => h.lose_next_swap_response(),
-            1 => h.process_timed_out_before_next_swap(),
-            2 => h.reserve_timed_out_before_next_swap(),
+            1 => h.before_next_swap(MintEvent::ProcessTimedOut),
+            2 => h.before_next_swap(MintEvent::ReserveTimedOut),
             3 => h.rotate_keyset(),
+            5 => h.hold_swaps(),
+            6 => h.before_next_swap(MintEvent::Down),
+            7 => {
+                h.before_next_swap(MintEvent::ProcessTimedOut);
+                h.before_next_swap(MintEvent::RestoresDown);
+            }
             _ => {}
         }
         e.sweep().await;
-        if case == 2 {
-            h.release_swaps().await;
+        match case {
+            2 | 5 => h.release_swaps().await,
+            6 => h.mint_outage(false),
+            7 => h.restore_outage(false),
+            _ => {}
         }
         e.sweep().await;
         let mut s = open(h, &e, 1).await;
-        let want = if case >= 3 { (0, 0) } else { (1, 1) };
+        let want = if case == 3 || case == 4 {
+            (0, 0)
+        } else {
+            (1, 1)
+        };
         assert_eq!(
             (s.quote().accepted_upto, s.quote().spent_total),
             want,
             "the completion settled as its answer says (case {case})"
         );
-        if case >= 3 {
+        assert!(!s.banned(), "a late outcome bans nobody (case {case})");
+        if want == (0, 0) {
             let ack = s
                 .pay(&Pay {
                     upto_chunk: 1,
@@ -2749,6 +2872,36 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
         }
         h.release_swaps().await;
     }
+
+    // A payment's own reads and completions end at its deadline: with the mint's read
+    // endpoints hanging (40 s each), a payment of an account holding an unknown swap is
+    // answered `mint-unavailable` at 60 s, not later.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let parked = Pay {
+        upto_chunk: 1,
+        token: h.token(1).await,
+    };
+    h.time_out_next_swap();
+    h.mint_outage(true);
+    assert!(is_rej(&s.pay(&parked).await, &RejCode::MintUnavailable));
+    h.mint_outage(false);
+    h.state_check_outage(true);
+    h.restore_outage(true);
+    h.unanswered_reads_take(Duration::from_secs(40));
+    let arrived = h.clock_secs();
+    let r = s
+        .pay(&Pay {
+            upto_chunk: 1,
+            token: h.token(1).await,
+        })
+        .await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    assert_eq!(h.clock_secs() - arrived, 60, "answered at its deadline");
+    h.unanswered_reads_take(Duration::ZERO);
+    h.state_check_outage(false);
+    h.restore_outage(false);
+    h.release_swaps().await;
 
     // After a split read, each answer stays with its own swap: one account's claim (its
     // answer lost) and another's request the mint never processed, read one at a time.
@@ -2835,6 +2988,21 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
         2,
         "a hundred payments of one token: one read"
     );
+    let before = h.state_reads();
+    for _ in 0..100 {
+        let r = s
+            .pay(&Pay {
+                upto_chunk: 1,
+                token: h.token(1).await,
+            })
+            .await;
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    }
+    assert_eq!(
+        h.state_reads() - before,
+        0,
+        "nor a hundred of new proofs: two reads a second at most"
+    );
     let mut elsewhere = open_on(h, &e, 1, 1).await;
     assert_eq!(serve_on(h, &mut elsewhere, 1, 0, 2), 2);
     let spent = h.token(2).await;
@@ -2861,6 +3029,37 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
         "a banned peer's payment reads nothing"
     );
     h.release_swaps().await;
+
+    // A read is reused only by its own account: two claims whose answers were lost, one on
+    // each of a peer's videos, and each video's hello in the same second learns its own.
+    let e = h.engine(1, 4, 1000);
+    for video in [0, 1] {
+        let mut s = open_on(h, &e, 1, video).await;
+        assert_eq!(serve_on(h, &mut s, video, 0, 1), 1);
+        h.hold_swap_responses();
+        h.lose_next_swap_response();
+        let p = Pay {
+            upto_chunk: 1,
+            token: h.token(1).await,
+        };
+        let (r, ()) = both(s.pay(&p), async {
+            yield_once().await;
+            h.mint_outage(true);
+            h.release_swaps().await;
+        })
+        .await;
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+        h.mint_outage(false);
+    }
+    h.advance(SECOND);
+    for video in [0, 1] {
+        let q = open_on(h, &e, 1, video).await.quote().clone();
+        assert_eq!(
+            (q.accepted_upto, q.spent_total),
+            (1, 1),
+            "each account learns its own claim (video {video})"
+        );
+    }
 
     // So are a new peer's pre-payments, before its account exists.
     let e = h.engine(1, 4, 1000);

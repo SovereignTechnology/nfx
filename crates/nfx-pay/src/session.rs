@@ -78,13 +78,16 @@ pub trait SeederSession {
     ///
     /// A refusal changes no accounting and claims nothing.
     ///
-    /// Before the swap, the account's watermark is read again: a payment it no longer fits
-    /// (a late outcome moved it) is refused, `stale` or by amount, and nothing is swapped.
+    /// Once its checks pass, and just before its swap, it reads its account's own unknown
+    /// swaps (NFX-07 §3), and the account's watermark is read again: a payment it no
+    /// longer fits (a late outcome moved it) is refused, `stale` or by amount, and nothing
+    /// is swapped; while an earlier outcome stays unknown, it is refused `mint-unavailable`.
     ///
     /// **The deadline:** answered within 60 s of its arrival (the transport's receipt, not
-    /// this call's), the wait for the account's turn and any key fetch included. A payment whose outcome is known by then is
-    /// answered with it; otherwise with `mint-unavailable`, and its swap is abandoned: no
-    /// further request is sent for those proofs, and the account is released.
+    /// this call's), the wait for the account's turn, any key fetch and its own reads
+    /// included. A payment whose outcome is known by then is answered with it; otherwise
+    /// with `mint-unavailable`, and its swap is abandoned: no further request is sent for
+    /// those proofs, and the account is released.
     ///
     /// **Late outcomes:** an abandoned swap is settled when its outcome comes. A claim is
     /// credited (the next quote shows it); a spent or invalid outcome bans nobody.
@@ -187,6 +190,24 @@ pub trait Viewer {
     /// tries (any new session's quote restores them). A quote equal to the ledger leaves a
     /// payment waiting, and the watcher paying nothing.
     fn awaiting_quote(&self) -> bool;
+}
+
+/// What can happen at the mint just before a swap request reaches it
+/// ([`Harness::before_next_swap`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MintEvent {
+    /// The requests whose client gave up are processed.
+    ProcessTimedOut,
+    /// The requests whose client gave up start processing: their inputs are reserved
+    /// (`PENDING`) until [`Harness::release_swaps`] finishes them.
+    ReserveTimedOut,
+    /// The mint goes down ([`Harness::mint_outage`] brings it back).
+    Down,
+    /// Its restores stop answering ([`Harness::restore_outage`] brings them back).
+    RestoresDown,
+    /// It rotates its keyset, as [`Harness::rotate_keyset`]: after the seeder derived the
+    /// request's outputs from the old one, as a seeder with stale keys does.
+    RotateKeyset,
 }
 
 /// Token shapes a seeder must refuse as `bad-token` (NFX-07 §3).
@@ -376,13 +397,12 @@ pub trait Harness {
     /// old one, and a swap to one of them is refused for good (CDK 12002), whatever its
     /// inputs.
     fn rotate_keyset(&self);
-    /// Just before the next swap request reaches the mint, it processes the requests whose
-    /// client gave up.
-    fn process_timed_out_before_next_swap(&self);
-    /// Just before the next swap request reaches the mint, the requests whose client gave
-    /// up start processing: their inputs are reserved (`PENDING`) until
-    /// [`Harness::release_swaps`] finishes them.
-    fn reserve_timed_out_before_next_swap(&self);
+    /// `event` happens at the mint just before the next swap request reaches it: a
+    /// seeder's first attempt, retry or completion alike. Several happen in the order
+    /// given.
+    fn before_next_swap(&self, event: MintEvent);
+    /// The harness's clock, in whole seconds.
+    fn clock_secs(&self) -> u64;
 
     /// Move the clock the seeder and the viewers keep forward.
     fn advance(&self, by: Duration);

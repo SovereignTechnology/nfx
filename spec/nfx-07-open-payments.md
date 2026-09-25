@@ -156,11 +156,14 @@ payment-enforced after release, so no mechanism pretends otherwise.
   them, so the payment goes through after all, and is credited late (below); an away
   watcher's next quote shows it. A completion is a retry: answered `spent`, a restore of
   its outputs settles it; refused as pending, or unanswered, the swap stays unknown and
-  is completed again later. Refused for good, because its outputs' keyset is no longer
-  active (CDK 12002, after a rotation) or its inputs are invalid, it is settled by a
-  restore of its outputs too: signed, the claim; unsigned, nothing, since no request can
-  sign those outputs any more. Undecided swaps therefore end, and cost a payer who parks
-  them its proofs.
+  is completed again later. Refused for good, in a way that also stops the first
+  request from ever signing, it is settled by a restore of its outputs too: signed, the
+  claim; unsigned, nothing, since no request can sign those outputs any more. With CDK
+  that is an inactive or expired keyset for its outputs (12002, 12003) or invalid inputs
+  (10003, 12001). An expired keyset for its inputs (12003 on the inputs) does not stop a
+  first request the mint reserved before the expiry, so it is settled so only once a
+  NUT-07 check shows no input pending. Any other answer leaves the swap unknown.
+  Undecided swaps therefore end, and cost a payer who parks them its proofs.
 - A seeder SHOULD keep a bounded cache of proofs it has seen spent. It then refuses a
   replayed one (`spent`, with a ban) without asking the mint.
 
@@ -242,7 +245,11 @@ checks run in this order:
      A first attempt refused so did nothing, and another request holds the inputs,
      possibly the payer's own other payment: `mint-unavailable`, never a ban.
    - **Other errors.** Any other swap error, a fee or keyset error of the seeder's own
-     making included, is `mint-unavailable`, never a ban.
+     making included (outputs derived from a keyset since rotated out, say), is
+     `mint-unavailable`, never a ban, and leaves nothing unknown: the request did
+     nothing. A retry refused for good is settled by a restore of its outputs, as a
+     completion is (bounded state, above); a retry left unanswered leaves the outcome
+     unknown.
    - **The deadline.** The seeder answers every `pay` within **60 s of its arrival**,
      that is of the transport receiving it, not of the engine reading it: the wait for
      the account's turn, the key fetch and the swap all count. A payment
@@ -250,7 +257,10 @@ checks run in this order:
      Otherwise it answers `mint-unavailable`, abandons the swap (it sends no further
      swap request for those proofs), and releases the account's turn to its next
      payment. That payment is answered at once, and while the abandoned swap's outcome
-     is unknown, `mint-unavailable` without a swap (bounded state, above).
+     is unknown, `mint-unavailable` without a swap (bounded state, above). A payment's
+     own reads and completions (below) count too, and end at its deadline: one still
+     unanswered then is abandoned, proves nothing, and the payment is answered
+     `mint-unavailable` at the deadline.
    - **Late outcomes.** A swap the seeder has answered `mint-unavailable` for, at the
      deadline or earlier, is still settled when its outcome becomes known. The seeder
      MUST learn it: from a late response, or, when none comes, by reading the swap's
@@ -273,12 +283,15 @@ checks run in this order:
      - Each unknown swap is decided on its own: one still unknown delays no other.
      - An account's own `hello` and `pay` read that account's unknown swaps, and no other
        account's, not even the same peer's on another video: a read left unanswered costs
-       a payment's deadline only for its own account. A `pay` reads nothing before its
-       peer's ban is checked. Admission and the other synchronous checks read nothing.
-     - An account's own reads are at most one a second: a `hello` reuses a read of its
-       account made that second, and so does a `pay` of the same proofs. A flood of
-       hellos, or of payments sending one token again, costs the mint one read a second;
-       a watcher paying again after its reclaim pays with other proofs, and reads afresh.
+       only its own account's payments, and never past their deadline. A `pay` reads
+       once, after its checks (structure, mint, DLEQ, amount, and its peer's ban), just
+       before its swap: a payment the seeder refuses anyway costs the mint nothing.
+       Admission and the other synchronous checks read nothing.
+     - An account's own reads are at most two a second. A `hello` reuses any read of its
+       account made that second; a `pay` reuses one made for the same proofs; past two
+       reads that second, every entry reuses them. A flood of hellos, or of payments
+       whatever their proofs, costs the mint two reads a second, while a watcher paying
+       again after its reclaim, with other proofs, reads afresh.
      - A background sweep reads every account's, periodically, in as few requests as the
        mint's limits allow: a read the mint refuses as too large (CDK 11014 for a NUT-07
        check, 11015 for a restore; its `max_inputs` and `max_outputs`) is split, and
@@ -612,10 +625,21 @@ therefore loses nothing:
     - an unknown swap whose inputs read unspent `account_ttl` after it became unknown is
       completed (sent again, with the same outputs), not dropped.
 - Draft 2026-09-25 (M2.0 fifteenth audit, `docs/nfx/reviews/2026-09-24-m2.0-fifteenth-audit.md`).
-  - §2: a `hello`'s answer may come later than a payment's deadline by its own reads.
+  - §3 (identity and scope): a `hello`'s answer may come later than a payment's
+    deadline by its own reads.
   - §3:
     - a completion is a retry: `spent` is settled by restore, pending or unanswered
       leaves the swap unknown, and outputs refused for good are settled by restore;
     - own reads exclude the same peer's other videos, come after the ban check, and are
       at most one a second, reused by a `hello` and by a `pay` of the same proofs;
     - an oversized restore is CDK 11015; an unanswered read is not split.
+- Draft 2026-09-25 (M2.0 sixteenth audit, `docs/nfx/reviews/2026-09-24-m2.0-sixteenth-audit.md`).
+  - §3:
+    - a payment's own reads and completions end at its deadline;
+    - a `pay` reads once, after its checks; an account's own reads are at most two a
+      second, whatever the proofs;
+    - a completion refused for good is so only if the first request can never sign
+      either, and the CDK codes are listed; any other answer leaves the swap unknown;
+    - a retry refused for good is settled by restore; a retry left unanswered, or a
+      first attempt refused for the seeder's own stale keyset, is not a ban and leaves
+      nothing wrongly known.
