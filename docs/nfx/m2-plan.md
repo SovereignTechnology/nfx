@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of fifteen
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of sixteen
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -34,7 +34,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [twelfth](reviews/2026-09-24-m2.0-twelfth-audit.md),
 [thirteenth](reviews/2026-09-24-m2.0-thirteenth-audit.md),
 [fourteenth](reviews/2026-09-24-m2.0-fourteenth-audit.md),
-[fifteenth](reviews/2026-09-24-m2.0-fifteenth-audit.md)). sovtech's bar for the push is zero
+[fifteenth](reviews/2026-09-24-m2.0-fifteenth-audit.md),
+[sixteenth](reviews/2026-09-24-m2.0-sixteenth-audit.md)). sovtech's bar for the push is zero
 findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -68,12 +69,19 @@ findings, confirmed after the sixth:
     reserving their inputs (NUT-07 `PENDING`) and their rollback, NUT-07 checks and
     NUT-09 restores of each swap's own outputs under a per-request limit, partial
     claims, mint, restore and state-check outages, unanswered reads that cost time,
-    keyset rotation, requests processed or reserved just before the next swap, dial
-    records;
+    keyset rotation, events just before the next swap (given-up requests processed or
+    starting, the mint or its restores going down, a rotation after the outputs were
+    derived), dial records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, two of them
-  threaded, and **each of 264 planted defects fails its scenario**, every surviving mutant
-  from all fifteen audits among them.
+  threaded, and **each of 275 planted defects fails its scenario**, every surviving mutant
+  from all sixteen audits among them.
+- **Since the sixteenth audit:**
+  - a `pay` reads its account's unknown swaps once, after its checks, and its reads and
+    completions end at its deadline;
+  - an account's own reads are at most two a second, whatever the proofs;
+  - the in-deadline retry goes through the mint's request model, and a retry or first
+    attempt refused for good is settled as NFX-07 §3 now lists.
 - **Since the fifteenth audit:**
   - a completion is a retry through the mint's request model: `spent` or refused for
     good is settled by restore, pending or unanswered stays unknown;
