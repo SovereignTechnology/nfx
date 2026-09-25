@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of seventeen
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of eighteen
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -36,7 +36,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [fourteenth](reviews/2026-09-24-m2.0-fourteenth-audit.md),
 [fifteenth](reviews/2026-09-24-m2.0-fifteenth-audit.md),
 [sixteenth](reviews/2026-09-24-m2.0-sixteenth-audit.md),
-[seventeenth](reviews/2026-09-24-m2.0-seventeenth-audit.md)). sovtech's bar for the push is
+[seventeenth](reviews/2026-09-24-m2.0-seventeenth-audit.md),
+[eighteenth](reviews/2026-09-24-m2.0-eighteenth-audit.md)). sovtech's bar for the push is
 zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -70,15 +71,24 @@ zero findings, confirmed after the sixth:
     reserving their inputs (NUT-07 `PENDING`) and their rollback, NUT-07 checks and
     NUT-09 restores of each swap's own outputs under a per-request limit, partial
     claims, mint, restore and state-check outages, unanswered reads that cost time,
-    keyset rotation and expiry, events just before the next swap (given-up requests
-    processed or starting, the mint or its restores going down, a rotation after the
-    outputs were derived, an expiry), reads answered on the reader's next poll, dial
-    records;
+    keyset rotation and expiry as CDK has it (the mint's keyset, outputs included, or
+    an older one of the payer's; restores blind to an expired keyset), events just
+    before the next swap (given-up requests processed or starting, the mint or its
+    restores going down, a rotation after the outputs were derived, an expiry), reads
+    answered on the reader's next poll, dial records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, two of them
-  threaded, run twice (the second time with reads as round trips), and **each of 289
-  planted defects fails its scenario**, every surviving mutant from all seventeen audits
+  threaded, run twice (the second time with reads as round trips), and **each of 298
+  planted defects fails its scenario**, every surviving mutant from all eighteen audits
   among them.
+- **Since the eighteenth audit:**
+  - a swap whose outputs' keyset has expired is decided by its inputs alone (a restore
+    cannot show it): spent is the claim; the seeder derives outputs only from a keyset
+    at least twice `account_ttl` from expiry;
+  - 12001 is never a ban; a retry's and a completion's settling reads end at the
+    deadline, as do reads after a wait for the turn; a reused read's result is waited
+    for;
+  - a watcher's reclaim of expired proofs is decided by NUT-07: unspent, it pays again.
 - **Since the seventeenth audit:**
   - a payment's reads and completions end 60 s from its arrival however late they
     start, and the watermark is read again after its own read;
