@@ -88,8 +88,9 @@ payment-enforced after release, so no mechanism pretends otherwise.
 - **`ack`** means the payment's swap has **completed** (§3). `accepted_upto` is the new
   watermark, and `spent_total` is the face value accepted so far on the account.
 - **`rej` `mint-unavailable`**: the seeder could not complete the swap in time, and its
-  outcome may be unknown. It is not a ban, and nothing was credited by then; a swap that
-  lands later is credited if it claimed the proofs (§3).
+  outcome may be unknown; or it did not swap at all, because an earlier payment's
+  outcome on the account is still unknown. It is not a ban, and nothing was credited by
+  then; a swap that lands later is credited if it claimed the proofs (§3).
 - **`refuse`** (seeder→watcher): the seeder refused the watcher's request for `file`
   under this session, and served not one byte of it. That is how a refusal is told apart
   from a transfer the watcher aborted, which gets no `refuse`. One `refuse` answers one
@@ -148,7 +149,9 @@ payment-enforced after release, so no mechanism pretends otherwise.
   While one is unknown, the account's further payments are answered `mint-unavailable`
   without a swap, a new peer's pre-payments included. That account alone: other
   accounts, the same peer's included, pay as usual. An account holding one is not
-  forgotten.
+  forgotten. One whose inputs still read unspent `account_ttl` after it became unknown
+  is dropped: its payer has had the inputs back all that time, and an honest watcher
+  reclaims them within minutes of the mint answering (§3a).
 - A seeder SHOULD keep a bounded cache of proofs it has seen spent. It then refuses a
   replayed one (`spent`, with a ban) without asking the mint.
 
@@ -222,8 +225,13 @@ checks run in this order:
      answered `spent` may be its own earlier attempt that succeeded unseen: a restore
      that finds the outputs signed settles it as a claim, and one that does not makes it
      `mint-unavailable` with nothing to learn, since its inputs are spent. A retry's
-     `spent` is never a ban.
+     `spent` is never a ban. A retry refused as pending (below) may be refused because
+     of the first attempt, still being processed: the outcome stays unknown.
 
+   - **Pending.** A mint may reserve a request's inputs before it signs (NUT-07
+     `PENDING`; CDK does). A swap of reserved inputs is refused as pending (CDK 11002).
+     A first attempt refused so did nothing, and another request holds the inputs,
+     possibly the payer's own other payment: `mint-unavailable`, never a ban.
    - **Other errors.** Any other swap error, a fee or keyset error of the seeder's own
      making included, is `mint-unavailable`, never a ban.
    - **The deadline.** The seeder answers every `pay` within **60 s of its arrival**,
@@ -241,15 +249,24 @@ checks run in this order:
      (NUT-09 restore), which it derives deterministically (NUT-13) for this. In that
      order, a swap processed between the two reads shows as signed. A watcher waiting
      on that payment (§3a) waits on this.
-     - Outputs signed: a claim.
+     - Outputs signed: a claim, whatever the first read said.
      - Outputs unsigned with an input spent: nothing. The swap is atomic, so it can no
        longer go through.
-     - Outputs unsigned with every input unspent: still unknown. The request may yet be
-       processed, so it is read again later.
+     - Anything else proves nothing, and the swap is read again later: every input
+       unspent (the request may yet be processed), an input pending (reserved by a
+       request the mint is still processing, which may yet go through or be rolled
+       back), or either read unanswered.
      - An honest watcher reclaims a payment answered `mint-unavailable` (§3a), and so
-       spends its inputs: even a request the mint holds unprocessed is then learnt as
-       nothing, and the account pays again at once.
+       spends its inputs: a request the mint holds before reserving them is then learnt
+       as nothing, and the account pays again at once. One whose inputs the mint has
+       reserved refuses the reclaim as pending until the mint finishes it (a claim) or
+       rolls it back (the reclaim then goes through).
+     - Each unknown swap is decided on its own: one still unknown delays no other. A
+       seeder SHOULD read them all in one NUT-07 and one NUT-09 request, so that a read
+       costs the same however many there are.
      - Once learnt, an outcome is final: a response that comes later changes nothing.
+       The converse holds too: the reads are round trips, and a response that lands
+       while they are made has settled the swap, so their result then changes nothing.
      - A claim is credited to the account, whether or not its peer has been banned
        since, and the watcher's next quote shows it (§3a).
      - A spent or invalid outcome bans nobody.
@@ -331,6 +348,9 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     and gets nothing more. This holds whether it refuses and then claims, or answers
     `mint-unavailable` after a swap that went through. A seeder that credits it late (§3)
     loses the watcher nothing.
+  - A reclaim refused as pending (the mint is still processing a request that reserved
+    the proofs, §3) has neither taken them back nor found them spent: it is incomplete,
+    and retried.
   - Until the reclaim completes (the mint may be down), the watcher pays that seeder
     nothing more. A quote showing the ledger plus that payment, both fields, settles it
     as accepted in the meantime, and the reclaim is dropped: the seeder has the proofs.
@@ -540,6 +560,20 @@ therefore loses nothing:
   - §3: a swap abandoned at the deadline while still in flight is of unknown outcome:
     it counts toward the one-per-account bound, and the account's next payment is
     answered at once, without a swap, until it is learnt.
+- Draft 2026-09-25 (M2.0 thirteenth audit, `docs/nfx/reviews/2026-09-24-m2.0-thirteenth-audit.md`).
+  - §2: `mint-unavailable` also answers a payment refused without a swap while an
+    earlier outcome on the account is unknown.
+  - §3:
+    - a pending input (NUT-07 `PENDING`) is not spent; a first attempt refused as
+      pending did nothing and bans nobody, and a retry refused so leaves the outcome
+      unknown;
+    - an unanswered read proves nothing, and signed outputs are a claim whatever the
+      first read said;
+    - each unknown swap is decided on its own, and SHOULD be read in one batch;
+    - a response that lands while the state is read has settled the swap;
+    - an unknown swap whose inputs read unspent `account_ttl` after it became unknown is
+      dropped.
+  - §3a: a reclaim refused as pending is incomplete, and retried.
 - Draft 2026-09-25 (M2.0 twelfth audit, `docs/nfx/reviews/2026-09-24-m2.0-twelfth-audit.md`).
   - §3:
     - a late outcome is learnt by reading the inputs (NUT-07), then the outputs (NUT-09);

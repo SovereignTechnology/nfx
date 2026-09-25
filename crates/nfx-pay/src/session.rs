@@ -333,6 +333,24 @@ pub trait Harness {
     /// next read of a swap's state (a NUT-07 check or a NUT-09 restore): between the
     /// seeder's two reads of that swap.
     fn process_timed_out_mid_read(&self);
+    /// The mint delivers the swap responses [`Harness::hold_swap_responses`] held right
+    /// after the next read of a swap's state: an answer that lands while the seeder reads.
+    fn deliver_responses_mid_read(&self);
+    /// The mint answers swaps and restores but no NUT-07 state check (`true`), or checks
+    /// again.
+    fn state_check_outage(&self, down: bool);
+    /// The mint accepts the next swap and reserves its inputs (NUT-07 `PENDING`, as CDK
+    /// does before it signs) without finishing it: [`Harness::release_swaps`] finishes
+    /// it. Meanwhile any other swap of those proofs, a retry or a reclaim, is refused as
+    /// pending (CDK 11002).
+    fn hold_next_swap_reserving(&self);
+    /// The mint abandons every request that reserved inputs (CDK's recovery at startup):
+    /// the inputs are unspent again, those requests are never processed, and a client
+    /// still waiting for one gets no answer.
+    fn roll_back_reserved(&self);
+    /// Reads of swap state the mint has served (NUT-07 checks and NUT-09 restores), one
+    /// per request, however many swaps it covers.
+    fn state_reads(&self) -> u64;
 
     /// Move the clock the seeder and the viewers keep forward.
     fn advance(&self, by: Duration);

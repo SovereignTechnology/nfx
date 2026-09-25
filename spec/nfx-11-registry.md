@@ -93,7 +93,7 @@ them.
 | `stale` | `pay.upto_chunk` ≤ last acked watermark | NFX-07 §2 |
 | `bad-token` | token unreadable, not unit `sat`, of more than one mint, with more than 64 proofs, with locked proofs, with a missing or invalid DLEQ, or with proofs the mint refuses as invalid (the last is also a ban) | NFX-07 §3 |
 | `banned` | the peer is banned by this seeder (a spent or invalid proof), until `ban_ttl` | NFX-07 §3 |
-| `mint-unavailable` | the seeder could not complete the swap: the mint could not be reached, the seeder's own swap failed, or no answer came within 60 s of the `pay`'s arrival. Not a ban, and nothing credited by then (a late claim is credited later) | NFX-07 §3 |
+| `mint-unavailable` | the seeder could not complete the swap: the mint could not be reached, the seeder's own swap failed or was refused as pending, or no answer came within 60 s of the `pay`'s arrival; or it did not swap, because an earlier payment's outcome on the account is still unknown. Not a ban, and nothing credited by then (a late claim is credited later) | NFX-07 §3 |
 | `bad-session` | the session id names a session that is open, or the peer holds too many open or waiting sessions | NFX-07 §3 |
 | `payment-required` | license requested without payment/voucher | NFX-09 §2 |
 | `bad-voucher` | voucher signature, presenter (NIP-98 ≠ `seeder`), whitelist or expiry failed | NFX-08 §5, NFX-09 §2 |
@@ -216,3 +216,6 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   credited; `bad-session` counts waiting sessions (NFX-07 §3).
 - 2026-09-24 (M2.0 seventh audit) — `mint-unavailable` lists every case NFX-07 §3 answers
   it for: an unreachable mint, the seeder's own swap error, and the 60 s deadline.
+- 2026-09-25 (M2.0 thirteenth audit) — `mint-unavailable` also lists a swap refused as
+  pending, and a payment refused without a swap while an earlier outcome on the account
+  is unknown (NFX-07 §3).
