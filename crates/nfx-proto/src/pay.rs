@@ -42,6 +42,7 @@ pub enum Message {
     Pay(Pay),
     Ack(Ack),
     Rej(Rej),
+    Refuse(Refuse),
 }
 
 /// Watcher → seeder: open a session for `video`.
@@ -82,6 +83,14 @@ pub struct Pay {
 pub struct Ack {
     pub accepted_upto: u64,
     pub spent_total: u64,
+}
+
+/// Seeder → watcher: the request for `file` under this session was refused, and not one
+/// byte of it was served (NFX-07 §2). An aborted transfer gets no `refuse`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refuse {
+    /// The file's sha256, 64 lowercase hex characters.
+    pub file: String,
 }
 
 /// Seeder → watcher: a payment or request refused.
@@ -373,6 +382,15 @@ impl Message {
                     detail,
                 }))
             }
+            "refuse" => {
+                let file = string(&obj, "file")?;
+                if !is_lower_hex(file, 64) {
+                    return Err(bad("file is 64 lowercase hex"));
+                }
+                Ok(Self::Refuse(Refuse {
+                    file: file.to_owned(),
+                }))
+            }
             _ => Err(bad("unknown t")),
         }
     }
@@ -402,6 +420,7 @@ impl Message {
             Self::Ack(a) => {
                 json!({"t": "ack", "accepted_upto": a.accepted_upto, "spent_total": a.spent_total})
             }
+            Self::Refuse(r) => json!({"t": "refuse", "file": r.file}),
             Self::Rej(r) => match &r.detail {
                 Some(d) => json!({"t": "rej", "code": r.code.as_str(), "detail": d}),
                 None => json!({"t": "rej", "code": r.code.as_str()}),

@@ -19,10 +19,12 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after three independent
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after four independent
 audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
-[third](reviews/2026-09-24-m2.0-third-audit.md)):
+[third](reviews/2026-09-24-m2.0-third-audit.md),
+[fourth](reviews/2026-09-24-m2.0-fourth-audit.md)). sovtech's bar for the push is zero
+findings:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
   - Bounds and bans are seeder-wide. The global cap is a rate (`debt_ttl`) that refuses
@@ -49,8 +51,17 @@ audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
   - a proof-based mock mint: multi-proof tokens, atomic swaps, held swaps or held
     responses, outages, dial records;
   - honest seeder and viewer engines, with a validated configuration.
-- **Suite:** `nfx_pay::adversary` has 43 scenarios, and **each of 83 planted defects
-  fails its scenario**, every surviving mutant from all three audits among them.
+- **Suite:** `nfx_pay::adversary` has 52 scenarios, each under a timeout, and **each of
+  102 planted defects fails its scenario**, every surviving mutant from all four audits
+  among them.
+- **Since the fourth audit:**
+  - a `refuse` message;
+  - windows per account;
+  - a `hello` that waits for a payment in flight;
+  - the seeder's 60 s deadline, which abandons a swap;
+  - pay-ahead capped by the credit held;
+  - `account_ttl`;
+  - a separate CI lock job under `env -i`.
 - **Locked paths:** `crates/ci/check-locked.sh` runs first, before the build
   (`--sources`) and last (`--compiled`). It pins:
   - the locked stubs;

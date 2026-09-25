@@ -62,3 +62,4 @@ nfx-pay-dep wnaf 0.14.1 registry+https://github.com/rust-lang/crates.io-index 79
 nfx-pay-dep zeroize 1.9.0 registry+https://github.com/rust-lang/crates.io-index e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e alloc,default,derive,std,zeroize_derive
 nfx-pay-dep zeroize_derive 1.5.0 registry+https://github.com/rust-lang/crates.io-index 3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328 -
 nfx-pay-dep zmij 1.0.23 registry+https://github.com/rust-lang/crates.io-index 29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b -
+toolchain rustc 1.98.0 88d9e12ae178fab0fb5cc050a94da85685d449ea

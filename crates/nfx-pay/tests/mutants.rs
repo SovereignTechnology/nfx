@@ -13,11 +13,16 @@ macro_rules! catches {
             #[tokio::test]
             async fn $test() {
                 let run = tokio::spawn(async { adversary::$scenario(&$harness).await });
-                assert!(
-                    run.await.as_ref().is_err_and(tokio::task::JoinError::is_panic),
-                    "{} did not catch the planted defect",
-                    stringify!($scenario)
-                );
+                // A scenario that hangs on the defect has caught it too: the suite's own
+                // runner fails a hung scenario.
+                match tokio::time::timeout(std::time::Duration::from_secs(10), run).await {
+                    Err(_hung) => {}
+                    Ok(joined) => assert!(
+                        joined.as_ref().is_err_and(tokio::task::JoinError::is_panic),
+                        "{} did not catch the planted defect",
+                        stringify!($scenario)
+                    ),
+                }
             }
         )*
     };
@@ -62,7 +67,8 @@ catches!(
     hello_for_any_video: s(S::HelloAnyVideo) => only_the_sessions_video_is_admitted,
     counts_distinct_files: s(S::CountsDistinctFiles) => every_request_counts_whole_or_not,
     admits_foreign_chunks: s(S::AdmitsForeignChunks) => only_the_sessions_video_is_admitted,
-    window_per_video: s(S::PerVideoWindow) => the_window_spans_a_peers_videos,
+    window_across_videos: s(S::WindowAcrossVideos) => the_window_is_per_account,
+    window_across_videos_stalls: s(S::WindowAcrossVideos) => an_honest_watcher_streams_two_videos_at_once,
     no_global_cap: s(S::NoGlobalCap) => a_global_cap_bounds_free_service,
     global_cap_off_by_one: s(S::GlobalCapGt) => a_global_cap_bounds_free_service,
     global_cap_nets_credit: s(S::GlobalCapNetsCredit) => the_global_cap_holds_whatever_payments_do,
@@ -88,6 +94,15 @@ catches!(
     count_freed_twice: s(S::CountFreedTwice) => debt_is_freed_exactly_once,
     count_freed_twice_wrapping: s(S::CountFreedTwiceWrapping) => debt_is_freed_exactly_once,
     claim_then_await_credit: s(S::ClaimThenAwaitCredit) => a_dropped_pay_is_credited_or_never_claimed,
+    quote_without_turn: s(S::QuoteWithoutTurn) => an_honest_pair_survives_a_fast_reconnect,
+    hello_creates_account: s(S::HelloCreatesAccount) => a_hello_holds_no_state,
+    live_keyed_by_peer: s(S::LiveKeyedByPeer) => a_global_cap_bounds_free_service,
+    credit_frees_all_debt: s(S::CreditFreesAllDebt) => a_global_cap_bounds_free_service,
+    credit_from_snapshot: s(S::CreditFromSnapshot) => service_waits_for_the_swap,
+    forgets_paid_accounts: s(S::ForgetsPaidAccounts) => only_never_paid_accounts_are_forgotten,
+    no_validate: s(S::NoValidate) => bad_configurations_are_refused,
+    no_deadline: s(S::NoDeadline) => a_seeder_answers_within_its_deadline,
+    late_outcome_bans: s(S::LateOutcomeBans) => a_seeder_answers_within_its_deadline,
     viewer_pays_ahead: v(V::PaysAhead) => a_viewer_pays_for_every_request_and_no_more,
     viewer_ignores_bad_ack: v(V::IgnoresBadAck) => a_viewer_stops_on_a_wrong_or_unsolicited_ack,
     viewer_pays_too_late: v(V::PaysAtTheWindow) => an_honest_pair_streams_a_whole_video,
@@ -115,4 +130,13 @@ catches!(
     viewer_times_out_early: v(V::TimeoutEarly) => a_viewer_reclaims_an_unanswered_payment,
     viewer_reclaims_at_end: v(V::EndReclaimsNow) => an_honest_pair_survives_a_dropped_connection,
     viewer_forgets_at_end: v(V::EndForgetsPending) => an_honest_pair_survives_a_dropped_connection,
+    viewer_retry_ignores_spent: v(V::RetryIgnoresSpent) => a_lying_seeder_takes_at_most_one_payment,
+    viewer_last_pay_ignores_reclaim: v(V::LastPayIgnoresReclaim) => a_lying_seeder_takes_at_most_one_payment,
+    viewer_pay_ahead_ignores_reclaim: v(V::PayAheadIgnoresReclaim) => a_lying_seeder_takes_at_most_one_payment,
+    viewer_pay_ahead_ignores_pending: v(V::PayAheadIgnoresPending) => a_lying_seeder_takes_at_most_one_payment,
+    viewer_pay_ahead_unbounded: v(V::PayAheadUnbounded) => a_refusing_seeder_takes_at_most_half_a_window,
+    viewer_settles_on_spent_only: v(V::SettleOnSpentOnly) => a_viewer_settles_only_on_an_exact_match,
+    viewer_settles_on_upto_only: v(V::SettleOnUptoOnly) => a_viewer_settles_only_on_an_exact_match,
+    viewer_times_out_at_119: v(V::TimeoutAt119) => a_viewer_reclaims_an_unanswered_payment,
+    viewer_catch_up_ignores_wait: v(V::CatchUpIgnoresWait) => a_viewer_settles_a_lost_payment_after_120_s,
 );

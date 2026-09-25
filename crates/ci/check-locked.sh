@@ -47,8 +47,9 @@
 # crates' build steps) could in principle alter files between the two checks; its own
 # diff is where that would show.
 set -euo pipefail
+shopt -s inherit_errexit   # a failure inside $(...) fails the script, not just the subshell
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
-py=${PYTHON:-python3}
+py="${PYTHON:-python3} -I"   # isolated: PYTHONPATH and the like are ignored
 pins=crates/ci/locked.sha256
 locked=(
   crates/nfx-pay/src/engine
@@ -70,6 +71,7 @@ guarded=(
   spec/test-vectors/pay1.py
   spec/test-vectors/pay1.json
   crates/ci/check-locked.sh
+  crates/ci/lock-job.sh
   crates/ci/locked.py
   crates/ci/check.sh
   crates/ci/gitlab-ci.yml
@@ -109,21 +111,35 @@ manifest() {
     [ -f "$path" ] && [ ! -L "$path" ] || fail "missing or not a regular file: $path"
     printf '%s %s %s\n' "$mode" "$(sha256sum < "$path" | cut -d' ' -f1)" "$path"
   done
-  "$py" crates/ci/locked.py manifest
+  $py crates/ci/locked.py manifest
 }
 
 for p in "${must_be_absent[@]}"; do
   [ ! -e "$p" ] && [ ! -L "$p" ] || fail "$p must not exist"
 done
 
-# The build environment: nothing may redirect what cargo runs or compiles.
+# The build environment: nothing may redirect what cargo runs or compiles. In CI the lock
+# job runs under `env -i` (gitlab-ci.yml), and every variable must be on the list below.
 allowed='CARGO_HOME CARGO_TERM_COLOR CARGO_BUILD_JOBS CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG CARGO_INCREMENTAL CARGO_DENY_VERSION CARGO_DENY_SHA256 RUSTUP_HOME RUST_VERSION'
+ci_allowed="$allowed PATH HOME CI PYTHON PWD OLDPWD SHLVL _ LOCKED_DIRS_UNLOCKED"
+names=$(env | cut -d= -f1 | grep -E '^[A-Za-z_][A-Za-z0-9_]*$' || true)
 while IFS= read -r name; do
-  case " $allowed " in
-    *" $name "*) ;;
-    *) fail "a build variable outside the allow-list is set: $name" ;;
-  esac
-done < <(env | cut -d= -f1 | grep -E '^(CARGO|RUST)' || true)
+  [ -n "$name" ] || continue
+  if [ -n "$in_ci" ]; then
+    case " $ci_allowed " in
+      *" $name "*) ;;
+      *) fail "in CI, a variable outside the allow-list is set: $name" ;;
+    esac
+  elif [[ $name =~ ^(__)?(CARGO|RUST) ]]; then
+    case " $allowed " in
+      *" $name "*) ;;
+      *) fail "a build variable outside the allow-list is set: $name" ;;
+    esac
+  fi
+done <<<"$names"
+if [ -n "$in_ci" ] && [ -n "${LOCKED_DIRS_UNLOCKED:-}" ]; then
+  fail "LOCKED_DIRS_UNLOCKED is set in CI"
+fi
 dir=$PWD/crates
 while :; do
   for f in "$dir/.cargo/config" "$dir/.cargo/config.toml" "$dir/rust-toolchain" "$dir/rust-toolchain.toml"; do
@@ -145,7 +161,7 @@ current=$(manifest)
 if [ "$mode" = --pin ]; then
   printf '%s\n' "$current" > "$pins"
   echo "pinned $(wc -l < "$pins") guarded files and sections in $pins"
-  "$py" crates/ci/locked.py compiled --pin
+  $py crates/ci/locked.py compiled --pin
   exit 0
 fi
 if [ "${LOCKED_DIRS_UNLOCKED:-0}" = 1 ]; then
@@ -160,11 +176,11 @@ fi
 echo "locked paths: $(wc -l < "$pins") guarded files and sections match their pins"
 case $mode in
   --sources)
-    "$py" crates/ci/locked.py sources
+    $py crates/ci/locked.py sources
     if [ -n "$in_ci" ]; then
       rm -rf "${home:?}/registry/src"
       echo "locked paths: extracted sources removed; cargo re-extracts from verified archives"
     fi
     ;;
-  --compiled) "$py" crates/ci/locked.py compiled ;;
+  --compiled) $py crates/ci/locked.py compiled ;;
 esac

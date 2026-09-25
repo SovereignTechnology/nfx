@@ -22,18 +22,21 @@ pub type PeerId = [u8; 32];
 
 /// A seeder's payment engine. Implementations: the real engine (locked until the M2
 /// security stage) and [`crate::mock::MockEngine`].
+#[allow(async_fn_in_trait)]
 pub trait SeederEngine {
     type Session: SeederSession + Send;
 
     /// A `hello` from `peer`. The session continues the peer's account for the video, and
-    /// its quote carries the account's position. A `hello` creates no account.
+    /// its quote carries the account's position. A `hello` creates no account, and waits
+    /// for a payment in progress on the account (at most the seeder's 60 s), so its quote
+    /// never misses one.
     ///
     /// Refused with:
     /// - `banned` for a banned peer;
     /// - `unknown-video` for a video this seeder does not serve;
     /// - `bad-session` for a session id that is open, or beyond the per-peer cap on open
     ///   sessions, counted across all videos.
-    fn hello(&self, peer: &PeerId, hello: &Hello) -> Result<Self::Session, Rej>;
+    async fn hello(&self, peer: &PeerId, hello: &Hello) -> Result<Self::Session, Rej>;
 }
 
 /// One open session: one peer, one video. **Dropping it closes it.**
@@ -43,11 +46,11 @@ pub trait SeederSession {
     fn quote(&self) -> &Quote;
 
     /// Admit one request for the file `sha256`, counting it at once, whole, ranged or
-    /// aborted alike. `false` means refuse it on the transport and serve not one byte.
+    /// aborted alike. `false` means answer it with `refuse` and serve not one byte.
     /// That happens when:
     /// - the peer is banned;
     /// - the file is not this video's;
-    /// - the chunk is not pre-paid and the peer's window or the global cap is full.
+    /// - the chunk is not pre-paid and the account's window or the global cap is full.
     fn admit(&mut self, sha256: &str) -> bool;
 
     /// Handle a `pay` (NFX-07 §3), one at a time per account; bans are checked when its
@@ -63,7 +66,8 @@ pub trait SeederSession {
     ///
     /// **Cancel-safe:** once the swap is sent it completes, and is credited or banned on,
     /// even if this future is dropped (the connection closed). The account's turn is held
-    /// until then.
+    /// until then, or until the 60 s deadline: then the swap is abandoned, and a late
+    /// outcome is neither credited nor banned on.
     async fn pay(&mut self, pay: &Pay) -> Result<Ack, Rej>;
 
     /// Whether this session's peer is banned.
@@ -88,9 +92,9 @@ pub trait Viewer {
     /// A request was sent. It is owed unless the seeder refuses it.
     fn requested(&mut self);
 
-    /// The seeder refused a request on its transport. It is not owed, and if it was
-    /// already paid for, that payment becomes credit. The next [`Viewer::due`] may pay
-    /// ahead.
+    /// The seeder answered a request with `refuse`. It is not owed, and if it was already
+    /// paid for, that payment becomes credit. The next [`Viewer::due`] may pay ahead, up
+    /// to half a window less the credit already held.
     fn refused(&mut self);
 
     /// The payment due now, if any. It covers requested chunks at the quoted price, made
@@ -114,13 +118,14 @@ pub trait Viewer {
     /// A reclaim the mint cannot serve yet blocks every payment until it completes.
     async fn rej(&mut self, rej: &Rej);
 
-    /// No answer has come. Before 120 s from sending this does nothing. After that, the
-    /// viewer reclaims the proofs and stops; proofs found spent mean the payment is lost,
-    /// never paid again.
+    /// No answer has come on a live connection. Before 120 s from sending this does
+    /// nothing. From then, the viewer reclaims the proofs and stops; proofs found spent
+    /// mean the payment is lost, never paid again.
     async fn timeout(&mut self);
 
     /// The session ended (its connection closed). The ledger stays, and a payment in
-    /// flight stays unsettled: the next quote, or a reclaim after 120 s, settles it.
+    /// flight stays unsettled. The next quote settles it if both its fields match; failing
+    /// that, a reclaim after 120 s does.
     fn end(&mut self);
 
     /// Whether the viewer has stopped paying this seeder.
@@ -149,6 +154,16 @@ pub enum BadToken {
     Forged,
 }
 
+/// A seeder's configuration, as the suite asks for one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineParams {
+    pub price: u64,
+    pub window: u64,
+    pub global_cap: u64,
+    pub debt_ttl: Duration,
+    pub account_ttl: Duration,
+}
+
 /// What the adversary suite needs from an engine under test: the mock now, and the real
 /// engine with an in-process mint in the M2 security stage.
 #[allow(async_fn_in_trait)]
@@ -160,6 +175,11 @@ pub trait Harness {
     /// harness's mint only, with a global cap of `global_cap` unpaid chunks per
     /// [`Harness::debt_ttl`].
     fn engine(&self, price: u64, window: u64, global_cap: u64) -> Self::Engine;
+    /// A seeder with exactly `params`, or its refusal to start (NFX-07 §3 configuration).
+    fn engine_checked(&self, params: EngineParams) -> Result<Self::Engine, String>;
+    /// How many per-identity records `engine` holds (accounts, open sessions and the
+    /// like): what a flood of free identities costs it.
+    fn identities_held(&self, engine: &Self::Engine) -> usize;
     /// A `hello` for video `v` (0 or 1), under a fresh session id.
     fn hello_for(&self, v: u8) -> Hello;
     /// A `hello` for video 0.
@@ -224,4 +244,6 @@ pub trait Harness {
     fn advance(&self, by: Duration);
     /// How long an unpaid chunk counts toward the global cap.
     fn debt_ttl(&self) -> Duration;
+    /// How long a never-paid account with no open session is kept.
+    fn account_ttl(&self) -> Duration;
 }

@@ -101,7 +101,9 @@ mesh, and it is NFX-07's:
   it is admitted, whole or aborted, and the payer pays for every chunk it requested
   and was not refused. Counting only whole deliveries would let a peer abort each
   transfer at 99% and never owe anything. An uploader serves under NFX-07 §3's service
-  limit: `window` per peer across its videos, and a global cap per `debt_ttl`.
+  limit: `window` per account, and a global cap per `debt_ttl`. A refused upload request
+  is answered with pay/1 `refuse` on the data channel, so the requester can tell it from
+  an aborted transfer.
 - **Identity.** A mesh peer's id is self-chosen, so a ban on the mesh holds only until
   the peer takes a new id. The global cap is what bounds an uploader's loss here, as on
   every transport (NFX-07 §3).
@@ -172,3 +174,5 @@ NFX-05 byte formats.
   limit is per peer across videos, plus the global cap. Refused requests are not owed,
   and earnings are written through after the ack, which now follows the swap. Mesh
   identities are self-chosen, so the global cap is the bound.
+- Draft 2026-09-24 (M2.0 fourth audit): §3.2 follows NFX-07 as revised. The window is
+  per account, and a refused upload request is answered with pay/1 `refuse`.

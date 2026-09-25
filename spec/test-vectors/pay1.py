@@ -198,6 +198,11 @@ def pay1_parse(wire: str, allow_loopback_http: bool = False) -> dict:
                 raise Pay1Error("detail is at most 1 KiB of printable ASCII")
             out["detail"] = detail
         return out
+    if t == "refuse":
+        file = string("file")
+        if len(file) != 64 or not set(file) <= set("0123456789abcdef"):
+            raise Pay1Error("file is 64 lowercase hex")
+        return {"t": t, "file": file}
     raise Pay1Error("unknown t")
 
 
@@ -246,6 +251,7 @@ def pay1_vectors() -> dict:
         ("ack", line({"t": "ack", "accepted_upto": 17, "spent_total": 17})),
         ("rej", line({"t": "rej", "code": "underpaid", "detail": "short by 2 sat"})),
         ("rej-mint-unavailable", line({"t": "rej", "code": "mint-unavailable"})),
+        ("refuse", line({"t": "refuse", "file": "ab" * 32})),
         ("rej-unknown-code-no-detail", line({"t": "rej", "code": "some-future-code"})),
         ("rej-detail-1024-ascii", rej("x" * 1024)),
         ("rej-detail-printable-ascii", rej(" !\"#$%&'()*+,-./09:;<=>?@AZ[\\]^_`az{|}~")),
@@ -311,6 +317,10 @@ def pay1_vectors() -> dict:
         ("ack-missing", line({"t": "ack", "accepted_upto": 3}), "missing spent_total"),
         ("ack-bool", line({"t": "ack", "accepted_upto": True, "spent_total": 1}), "integers only"),
         ("rej-no-code", line({"t": "rej", "detail": "x"}), "missing code"),
+        ("refuse-no-file", line({"t": "refuse"}), "missing file"),
+        ("refuse-short-file", line({"t": "refuse", "file": "ab" * 31}), "file is 64 lowercase hex"),
+        ("refuse-uppercase-file", line({"t": "refuse", "file": "AB" * 32}), "file is 64 lowercase hex"),
+        ("refuse-file-number", line({"t": "refuse", "file": 7}), "file is a string"),
         ("rej-empty-code", line({"t": "rej", "code": ""}), "code is 1 to 64 of [a-z0-9-]"),
         ("rej-code-uppercase", line({"t": "rej", "code": "Underpaid"}), "code is 1 to 64 of [a-z0-9-]"),
         ("rej-code-65", line({"t": "rej", "code": "a" * 65}), "code is 1 to 64 of [a-z0-9-]"),

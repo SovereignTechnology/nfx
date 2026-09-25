@@ -77,8 +77,11 @@ def sources() -> None:
     caches = list((home / "registry" / "cache").glob("*"))
     checked = 0
     for p in lock.get("package", []):
-        if "checksum" not in p or not str(p.get("source", "")).startswith("registry+"):
-            continue
+        source = p.get("source")
+        if source is None:
+            continue  # a workspace crate
+        if source != "registry+https://github.com/rust-lang/crates.io-index" or "checksum" not in p:
+            fail(f"{p['name']} {p['version']} comes from {source}: only crates.io, checksummed")
         for cache in caches:
             f = cache / f"{p['name']}-{p['version']}.crate"
             if not f.exists():
@@ -172,6 +175,12 @@ def compiled(pin: bool) -> None:
         if p["name"] != "nfx-pay" and any(d["name"] == "nfx-pay" for d in p["dependencies"]):
             facts.append(f"depends-on-nfx-pay {p['name']}")
     facts += closure(meta, lock)
+    version = run("rustc", "-vV")
+    release = re.search(r"^release: (\S+)$", version, re.M)
+    commit = re.search(r"^commit-hash: (\S+)$", version, re.M)
+    if not (release and commit):
+        fail("cannot read the toolchain's release and commit")
+    facts.append(f"toolchain rustc {release.group(1)} {commit.group(1)}")
     facts = sorted(facts)
 
     # What the workspace build CI runs actually compiled.
@@ -206,7 +215,7 @@ def compiled(pin: bool) -> None:
 
     # The money tests ran, all of them. `cargo test` exits 0 when a runner skips them.
     want = test_counts()
-    out = subprocess.run(["cargo", "test", "--workspace", "--locked", "--offline",
+    out = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "nfx-pay", "-p", "nfx-proto",
                           "--test", "adversary", "--test", "mutants", "--test", "pay1"],
                          cwd=CRATES, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if out.returncode != 0:
@@ -214,9 +223,11 @@ def compiled(pin: bool) -> None:
     ran = {}
     current = None
     for line in out.stdout.splitlines():  # one stream, so each result follows its binary
-        m = re.search(r"Running tests/(\w+)\.rs", line)
+        m = re.search(r"Running tests/(\w+)\.rs \((.+?)\)$", line)
         if m:
-            current = m.group(1)
+            # Keyed by the binary cargo actually ran, not by the file name alone.
+            exe = pathlib.Path(m.group(2)).name
+            current = m.group(1) if exe.startswith(f"{m.group(1)}-") else None
         m = re.match(r"test result: ok\. (\d+) passed; 0 failed", line)
         if m and current:
             ran[current] = int(m.group(1))

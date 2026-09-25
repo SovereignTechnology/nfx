@@ -171,6 +171,14 @@
       }
     },
     {
+      "name": "refuse",
+      "wire": "{\"t\":\"refuse\",\"file\":\"abababababababababababababababababababababababababababababababab\"}",
+      "message": {
+        "t": "refuse",
+        "file": "abababababababababababababababababababababababababababababababab"
+      }
+    },
+    {
       "name": "rej-unknown-code-no-detail",
       "wire": "{\"t\":\"rej\",\"code\":\"some-future-code\"}",
       "message": {
@@ -535,6 +543,26 @@
       "name": "rej-no-code",
       "wire": "{\"t\":\"rej\",\"detail\":\"x\"}",
       "why": "missing code"
+    },
+    {
+      "name": "refuse-no-file",
+      "wire": "{\"t\":\"refuse\"}",
+      "why": "missing file"
+    },
+    {
+      "name": "refuse-short-file",
+      "wire": "{\"t\":\"refuse\",\"file\":\"ababababababababababababababababababababababababababababababab\"}",
+      "why": "file is 64 lowercase hex"
+    },
+    {
+      "name": "refuse-uppercase-file",
+      "wire": "{\"t\":\"refuse\",\"file\":\"ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB\"}",
+      "why": "file is 64 lowercase hex"
+    },
+    {
+      "name": "refuse-file-number",
+      "wire": "{\"t\":\"refuse\",\"file\":7}",
+      "why": "file is a string"
     },
     {
       "name": "rej-empty-code",
