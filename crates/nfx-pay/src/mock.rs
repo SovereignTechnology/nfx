@@ -168,6 +168,14 @@ struct Ledger {
     lose_reclaim: bool,
     /// Restores go unanswered while swaps do not.
     restore_down: bool,
+    /// The swapper's client gives up on the next swap at once (no answer), while the
+    /// request stays queued at the mint, to be processed at release with no answer.
+    time_out_next: bool,
+    /// Queued requests whose client gave up: processed at release, answered to no one.
+    gave_up: HashSet<u64>,
+    /// Those requests are processed right after the next read of a swap's state (a
+    /// NUT-07 check or a restore): between a seeder's two reads of it.
+    mid_read: bool,
     /// The output sets the mint signed, one per swap request and its retries (NUT-13):
     /// what a restore (NUT-09) finds.
     signed: HashSet<u64>,
@@ -286,14 +294,45 @@ impl MockNetwork {
     /// NUT-09 restore of the output set `outputs`: whether the mint signed it, that is
     /// processed that swap, or `None` while the mint cannot be reached.
     fn restore_swap(&self, outputs: u64) -> Option<bool> {
-        let l = self.ledger();
-        (!l.down && !l.restore_down).then(|| l.signed.contains(&outputs))
+        let read = {
+            let l = self.ledger();
+            (!l.down && !l.restore_down).then(|| l.signed.contains(&outputs))
+        };
+        self.after_read();
+        read
     }
 
     /// The mistake of restoring by token: any swap of these proofs counts as this one.
     fn restore_by_token(&self, token: &str) -> Option<bool> {
-        let l = self.ledger();
-        (!l.down && !l.restore_down).then(|| l.swapped_tokens.contains(token))
+        let read = {
+            let l = self.ledger();
+            (!l.down && !l.restore_down).then(|| l.swapped_tokens.contains(token))
+        };
+        self.after_read();
+        read
+    }
+
+    /// After a read of a swap's state: process the requests whose client gave up, if the
+    /// harness asked for that now. Their completions answer no one, so nothing re-enters
+    /// the engine that is reading.
+    fn after_read(&self) {
+        let now = {
+            let mut l = self.ledger();
+            if !std::mem::take(&mut l.mid_read) {
+                return;
+            }
+            let (now, rest) = std::mem::take(&mut l.queued)
+                .into_iter()
+                .partition::<Vec<_>, _>(|q| l.gave_up.contains(&q.0));
+            l.queued = rest;
+            for q in &now {
+                l.gave_up.remove(&q.0);
+            }
+            now
+        };
+        for (_, token, outputs, done) in now {
+            done(self.swap_for(&token, outputs));
+        }
     }
 
     /// A response the harness loses: only a request that reached the mint has one.
@@ -324,6 +363,21 @@ impl MockNetwork {
         }))
     }
 
+    /// NUT-07: whether any proof of `token` is spent, or `None` while the mint cannot be
+    /// reached.
+    fn any_input_spent(&self, token: &str) -> Option<bool> {
+        let read = {
+            let l = self.ledger();
+            (!l.down).then(|| {
+                l.tokens
+                    .get(token)
+                    .is_some_and(|i| i.proofs.iter().any(|p| l.claimed.contains(p)))
+            })
+        };
+        self.after_read();
+        read
+    }
+
     /// A third party claiming one unclaimed proof of `token`: whether it got one.
     fn steal_one(&self, token: &str) -> bool {
         let mut l = self.ledger();
@@ -350,6 +404,16 @@ impl MockNetwork {
             let mut l = self.ledger();
             l.next += 1;
             let id = l.next;
+            if l.time_out_next {
+                l.time_out_next = false;
+                l.queued
+                    .push((id, token.to_owned(), outputs, Box::new(|_| {})));
+                l.gave_up.insert(id);
+                drop(l);
+                done(Swap::Lost);
+                self.deliver(id, Swap::Lost);
+                return id;
+            }
             if l.hold || l.hold_next {
                 l.hold_next = false;
                 l.queued.push((id, token.to_owned(), outputs, done));
@@ -534,7 +598,9 @@ impl MockNetwork {
         for (id, token, outputs, done) in queued {
             let outcome = self.lose(self.swap_for(&token, outputs));
             done(outcome);
-            self.deliver(id, outcome);
+            if !self.ledger().gave_up.remove(&id) {
+                self.deliver(id, outcome);
+            }
         }
         for (id, outcome, done) in responses {
             done(outcome);
@@ -743,6 +809,31 @@ pub enum SeederFlaw {
     ForgetsUnknownAccount,
     /// Credits a late claim only to an account that already exists.
     LateCreditNeedsAccount,
+    /// Takes unsigned outputs as nothing, whether or not an input is spent.
+    NotSignedFinal,
+    /// Never takes unsigned outputs as nothing, even with an input spent.
+    NotSignedStaysUnknown,
+    /// Leaves a swap abandoned in flight unknown until its answer comes, whatever a
+    /// NUT-07 check and a restore could show.
+    InFlightNeverDecided,
+    /// Refuses every account's payments while any account has a swap in flight.
+    InFlightGlobal,
+    /// Refuses a peer's payments on every video while one of its swaps is in flight.
+    InFlightPeerWide,
+    /// Applies the one-unknown bound only to a key that has an account.
+    UnknownNeedsAccount,
+    /// Counts a swap in flight only once its `pay` future has answered.
+    InFlightFinishedOnly,
+    /// Credits no late claim to a peer banned since.
+    LateClaimSkipsBanned,
+    /// Takes a lost answer as unknown even once its payment's outcome was decided, so a
+    /// claim a restore showed is learnt, and credited, again.
+    DecidedLostRelearnt,
+    /// Restores a swap's outputs before checking its inputs, so a swap processed between
+    /// the two reads looks like one that can no longer go through.
+    RestoreBeforeInputs,
+    /// Drops a decided payment's record but leaves the account's turn held by it.
+    DecidedKeepsTurn,
     /// Never takes over a turn held past its deadline.
     NoTakeover,
     /// Lets hellos take over a turn held past its deadline, but not payments.
@@ -986,6 +1077,8 @@ struct PayRecord {
     /// The future has answered, or is gone.
     finished: bool,
     waker: Option<Waker>,
+    /// The swap once sent: what settles it, its token and its output set.
+    swap: Option<(Settle, String, u64)>,
 }
 
 #[derive(Default)]
@@ -1148,22 +1241,67 @@ impl Inner {
         };
     }
 
-    /// Housekeeping, on every entry: age out unpaid admissions older than `debt_ttl`
-    /// from the global count, expire bans after `ban_ttl`, and forget never-paid accounts
-    /// that have had no open session for `account_ttl`.
-    /// Learn the outcome of swaps left unknown, by NUT-09 restore of their outputs, while
-    /// the mint can be reached: a claim is credited as a late one, and a swap the mint
-    /// never processed leaves nothing to credit.
+    /// Learn the outcome of swaps left unknown (an answer lost, or a swap abandoned in
+    /// flight) while the mint can be reached, by [`Inner::decide`]: a claim is credited as
+    /// a late one, and a swap that can no longer go through leaves nothing to credit.
     fn learn(&self, st: &mut State) {
-        if self.has(SeederFlaw::NeverRestores) || st.unknown.is_empty() {
+        if self.has(SeederFlaw::NeverRestores) {
             return;
         }
         for (pay, token, outputs) in std::mem::take(&mut st.unknown) {
-            match self.restore(&token, outputs) {
+            match self.decide(&token, outputs) {
                 Some(true) => self.settle_late(st, &pay, Swap::Claimed),
                 Some(false) => {}
                 None => st.unknown.push((pay, token, outputs)),
             }
+        }
+        // Swaps abandoned in flight are learnt the same way. Once decided, their record
+        // goes, so an answer that comes later changes nothing, and so does a turn it still
+        // holds: its deadline has passed, so whatever waited for the turn was woken then
+        // (the clock wakes every wait at each step), and nothing else would release it.
+        if self.has(SeederFlaw::InFlightNeverDecided) {
+            return;
+        }
+        let now = self.clock.now();
+        let open: Vec<(u64, Settle, String, u64)> = st
+            .pays
+            .iter()
+            .filter(|(_, r)| r.sent && !r.landed && (r.abandoned || now >= r.deadline))
+            .filter_map(|(id, r)| r.swap.clone().map(|(p, t, o)| (*id, p, t, o)))
+            .collect();
+        for (id, pay, token, outputs) in open {
+            let Some(claimed) = self.decide(&token, outputs) else {
+                continue;
+            };
+            if claimed {
+                self.settle_late(st, &pay, Swap::Claimed);
+            }
+            st.pays.remove(&id);
+            let holds = st.paying.get(&pay.key).is_some_and(|h| h.pay == id);
+            if holds && !self.has(SeederFlaw::DecidedKeepsTurn) {
+                st.paying.remove(&pay.key);
+            }
+        }
+    }
+
+    /// A swap's outcome, if it can be known now: its outputs signed (a claim), or an input
+    /// spent with its outputs unsigned (nothing: the swap is atomic, so it can no longer go
+    /// through). Unsigned outputs with every input unspent prove nothing: the request may
+    /// still be processed. The inputs are read first (NUT-07), so a swap processed between
+    /// the two reads is seen as signed.
+    fn decide(&self, token: &str, outputs: u64) -> Option<bool> {
+        let (spent, signed) = if self.has(SeederFlaw::RestoreBeforeInputs) {
+            let signed = self.restore(token, outputs);
+            (self.net.any_input_spent(token)?, signed)
+        } else {
+            let spent = self.net.any_input_spent(token)?;
+            (spent, self.restore(token, outputs))
+        };
+        match signed? {
+            true => Some(true),
+            false if self.has(SeederFlaw::NotSignedStaysUnknown) => None,
+            false if spent || self.has(SeederFlaw::NotSignedFinal) => Some(false),
+            false => None,
         }
     }
 
@@ -1180,12 +1318,27 @@ impl Inner {
                 k == key
             }
         };
+        let in_flight_same = |k: Key| {
+            if self.has(SeederFlaw::InFlightGlobal) {
+                true
+            } else if self.has(SeederFlaw::InFlightPeerWide) {
+                k.0 == key.0
+            } else {
+                same(k)
+            }
+        };
+        if self.has(SeederFlaw::UnknownNeedsAccount) && !st.accounts.contains_key(&key) {
+            return false;
+        }
         st.unknown.iter().any(|(p, _, _)| same(p.key))
             || (!self.has(SeederFlaw::InFlightNotUnknown)
-                && st
-                    .pays
-                    .iter()
-                    .any(|(id, r)| *id != except && same(r.key) && r.sent && !r.landed))
+                && st.pays.iter().any(|(id, r)| {
+                    *id != except
+                        && in_flight_same(r.key)
+                        && r.sent
+                        && !r.landed
+                        && (r.finished || !self.has(SeederFlaw::InFlightFinishedOnly))
+                }))
     }
 
     /// A restore of this swap's own outputs (NUT-09): they are unique to one swap and its
@@ -1233,6 +1386,9 @@ impl Inner {
         }
     }
 
+    /// Housekeeping, on every entry: learn what can be learnt, age out unpaid admissions
+    /// older than `debt_ttl` from the global count, expire bans after `ban_ttl`, and
+    /// forget never-paid accounts that have had no open session for `account_ttl`.
     fn age(&self, st: &mut State) {
         if !self.has(SeederFlaw::LearnOnHelloOnly) {
             self.learn(st);
@@ -1494,6 +1650,8 @@ impl Inner {
             Swap::Claimed
                 if self.has(SeederFlaw::LateCreditNeedsAccount)
                     && !st.accounts.contains_key(&pay.key) => {}
+            Swap::Claimed
+                if self.has(SeederFlaw::LateClaimSkipsBanned) && self.peer_banned(st, pay.key) => {}
             Swap::Claimed if !self.has(SeederFlaw::LateClaimNotCredited) => {
                 self.credit(st, pay.key, (pay.upto, pay.amount), &pay.snapshot, true);
             }
@@ -1538,6 +1696,7 @@ impl Inner {
                 landed: false,
                 finished: false,
                 waker: None,
+                swap: None,
             },
         );
         id
@@ -1654,11 +1813,16 @@ impl Inner {
     fn land(&self, id: u64, pay: &Settle, token: &str, outputs: u64, outcome: Swap) {
         let wake = {
             let mut st = self.state();
-            let record = st.pays.get(&id).is_none_or(|r| {
-                let in_time = !r.abandoned && self.clock.now() < r.deadline;
-                (in_time || !self.has(SeederFlaw::UnknownOnlyInTime))
-                    && (!r.finished || !self.has(SeederFlaw::UnknownOnlyWhileAwaited))
-            });
+            // A payment whose outcome was decided has no record left: its answer, lost or
+            // not, changes nothing.
+            let record = st
+                .pays
+                .get(&id)
+                .map_or(self.has(SeederFlaw::DecidedLostRelearnt), |r| {
+                    let in_time = !r.abandoned && self.clock.now() < r.deadline;
+                    (in_time || !self.has(SeederFlaw::UnknownOnlyInTime))
+                        && (!r.finished || !self.has(SeederFlaw::UnknownOnlyWhileAwaited))
+                });
             if outcome == Swap::Lost && record && !self.has(SeederFlaw::NeverRestores) {
                 st.unknown.push((pay.clone(), token.to_owned(), outputs));
             }
@@ -1772,7 +1936,9 @@ impl Drop for PayGuard {
             r.waker = None;
             let (key, sent, landed) = (r.key, r.sent, r.landed);
             if sent && !landed {
-                Vec::new() // the swap's completion settles it, and releases the turn
+                // The swap's completion, or a read of its state past the deadline, settles
+                // it and releases the turn.
+                Vec::new()
             } else {
                 st.pays.remove(&self.id);
                 if sent {
@@ -2161,6 +2327,16 @@ impl MockSession {
             .await;
             return self.settle_now(upto, amount, outcome);
         }
+        let settle = Settle {
+            key: self.key,
+            upto,
+            amount,
+            snapshot,
+            session_spent: self.session_spent.clone(),
+        };
+        // The swap's outputs, derived for it alone (NUT-13): its retries reuse them, and
+        // a restore of them finds this swap and no other.
+        let outputs = e.net.fresh_outputs();
         // Send the swap, unless the deadline has passed: its completion settles it (in
         // time, or late) and releases the turn, whether or not this future still waits.
         // The watermark is read again as it is sent: a late claim may have moved it
@@ -2205,6 +2381,7 @@ impl MockSession {
                 return Err(unavailable("no answer from the mint within 60 s"));
             }
             r.sent = true;
+            r.swap = Some((settle.clone(), pay.token.clone(), outputs));
             if e.has(SeederFlaw::DeadlineFromSwap) {
                 let deadline = now + SEEDER_DEADLINE.as_secs();
                 r.deadline = deadline;
@@ -2215,18 +2392,8 @@ impl MockSession {
                 }
             }
         }
-        let settle = Settle {
-            key: self.key,
-            upto,
-            amount,
-            snapshot,
-            session_spent: self.session_spent.clone(),
-        };
         let e2 = e.clone();
         let token = pay.token.clone();
-        // The swap's outputs, derived for it alone (NUT-13): its retries reuse them, and
-        // a restore of them finds this swap and no other.
-        let outputs = e.net.fresh_outputs();
         e.net.submit(
             &pay.token,
             outputs,
@@ -3359,6 +3526,14 @@ impl Harness for MockHarness {
 
     fn restore_outage(&self, down: bool) {
         self.net.ledger().restore_down = down;
+    }
+
+    fn time_out_next_swap(&self) {
+        self.net.ledger().time_out_next = true;
+    }
+
+    fn process_timed_out_mid_read(&self) {
+        self.net.ledger().mid_read = true;
     }
 
     fn advance(&self, by: Duration) {

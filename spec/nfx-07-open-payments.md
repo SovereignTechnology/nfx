@@ -143,9 +143,10 @@ payment-enforced after release, so no mechanism pretends otherwise.
   nothing: its refused `pay` is answered, and nothing is kept for it.
 - Hellos waiting for a payment count toward the session cap.
 - A swap whose outcome is unknown is kept until it is learnt, at most one per account.
-  Unknown means sent with no answer: abandoned at the deadline while still in flight,
-  or answered and the answer lost (below). While one is unknown, the account's further
-  payments are answered `mint-unavailable` without a swap. That account alone: other
+  Unknown means sent with no answer: abandoned at the deadline while still in flight
+  (whether or not its `pay` is still awaited), or answered and the answer lost (below).
+  While one is unknown, the account's further payments are answered `mint-unavailable`
+  without a swap, a new peer's pre-payments included. That account alone: other
   accounts, the same peer's included, pay as usual. An account holding one is not
   forgotten.
 - A seeder SHOULD keep a bounded cache of proofs it has seen spent. It then refuses a
@@ -220,7 +221,8 @@ checks run in this order:
      (NUT-13), so a NUT-09 restore of them finds this swap and no other. A retry
      answered `spent` may be its own earlier attempt that succeeded unseen: a restore
      that finds the outputs signed settles it as a claim, and one that does not makes it
-     `mint-unavailable`. A retry's `spent` is never a ban.
+     `mint-unavailable` with nothing to learn, since its inputs are spent. A retry's
+     `spent` is never a ban.
 
    - **Other errors.** Any other swap error, a fee or keyset error of the seeder's own
      making included, is `mint-unavailable`, never a ban.
@@ -234,10 +236,22 @@ checks run in this order:
      is unknown, `mint-unavailable` without a swap (bounded state, above).
    - **Late outcomes.** A swap the seeder has answered `mint-unavailable` for, at the
      deadline or earlier, is still settled when its outcome becomes known. The seeder
-     MUST learn it: from a late response, or, when none comes, by NUT-09 restore of its
-     own outputs, which it derives deterministically (NUT-13) for this, retried while the
-     mint is reachable. A watcher waiting on that payment (§3a) waits on this.
-     - A claim is credited to the account, and the watcher's next quote shows it (§3a).
+     MUST learn it: from a late response, or, when none comes, by reading the swap's
+     state while the mint is reachable, first its inputs (NUT-07), then its own outputs
+     (NUT-09 restore), which it derives deterministically (NUT-13) for this. In that
+     order, a swap processed between the two reads shows as signed. A watcher waiting
+     on that payment (§3a) waits on this.
+     - Outputs signed: a claim.
+     - Outputs unsigned with an input spent: nothing. The swap is atomic, so it can no
+       longer go through.
+     - Outputs unsigned with every input unspent: still unknown. The request may yet be
+       processed, so it is read again later.
+     - An honest watcher reclaims a payment answered `mint-unavailable` (§3a), and so
+       spends its inputs: even a request the mint holds unprocessed is then learnt as
+       nothing, and the account pays again at once.
+     - Once learnt, an outcome is final: a response that comes later changes nothing.
+     - A claim is credited to the account, whether or not its peer has been banned
+       since, and the watcher's next quote shows it (§3a).
      - A spent or invalid outcome bans nobody.
      - A late outcome is never an `ack`: the payment was already answered.
 
@@ -526,3 +540,12 @@ therefore loses nothing:
   - §3: a swap abandoned at the deadline while still in flight is of unknown outcome:
     it counts toward the one-per-account bound, and the account's next payment is
     answered at once, without a swap, until it is learnt.
+- Draft 2026-09-25 (M2.0 twelfth audit, `docs/nfx/reviews/2026-09-24-m2.0-twelfth-audit.md`).
+  - §3:
+    - a late outcome is learnt by reading the inputs (NUT-07), then the outputs (NUT-09);
+    - unsigned outputs are nothing only once an input is spent, and still unknown
+      while every input is unspent;
+    - an outcome, once learnt, is final;
+    - a swap abandoned in flight counts whether or not its `pay` is awaited, a new
+      peer's pre-payments included;
+    - a late claim is credited to a peer banned since.

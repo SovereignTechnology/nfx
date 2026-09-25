@@ -324,6 +324,15 @@ pub trait Harness {
     /// The mint answers swaps but no restore (`true`), or restores again: its restore
     /// endpoint alone is unreachable.
     fn restore_outage(&self, down: bool);
+    /// The seeder's client gives up on its next swap at once, with no answer, while the
+    /// request stays queued at the mint: [`Harness::release_swaps`] processes it, and no
+    /// answer ever reaches the seeder. Only a read of the swap's state (NUT-07, NUT-09)
+    /// can show what happened.
+    fn time_out_next_swap(&self);
+    /// The mint processes the requests the seeder's client gave up on right after the
+    /// next read of a swap's state (a NUT-07 check or a NUT-09 restore): between the
+    /// seeder's two reads of that swap.
+    fn process_timed_out_mid_read(&self);
 
     /// Move the clock the seeder and the viewers keep forward.
     fn advance(&self, by: Duration);
