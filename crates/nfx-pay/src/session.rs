@@ -411,6 +411,8 @@ pub trait Harness {
     fn rotate_keyset(&self);
     /// The mint's keyset expires now, as [`MintEvent::ExpireKeyset`] does before a swap.
     fn expire_keyset(&self);
+    /// The mint's active keyset lists a `final_expiry` (NUT-02) `after` from now, or none.
+    fn keyset_expires_in(&self, after: Option<Duration>);
     /// `event` happens at the mint just before the next swap request reaches it: a
     /// seeder's first attempt, retry or completion alike. Several happen in the order
     /// given.

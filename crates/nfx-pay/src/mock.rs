@@ -265,7 +265,9 @@ struct Ledger {
     /// Tokens the mint swapped, whatever the outputs ([`SeederFlaw::RestoreByToken`]).
     swapped_tokens: HashSet<String>,
     /// Proofs a watcher's own reclaims took back: its outputs, restorable.
-    reclaimed: HashSet<u64>,
+    reclaimed: HashMap<u64, u64>,
+    /// The `final_expiry` the mint lists for its active keyset (clock seconds), if any.
+    final_expiry: Option<u64>,
 }
 
 impl Ledger {
@@ -561,8 +563,13 @@ impl MockNetwork {
         )
     }
 
-    /// Whether the keyset of the output set `outputs` has expired, as the mint's keysets
-    /// (NUT-02 `final_expiry`) say.
+    /// The `final_expiry` the mint lists for its active keyset (`/v1/keysets`, NUT-02).
+    fn keyset_final_expiry(&self) -> Option<u64> {
+        self.ledger().final_expiry
+    }
+
+    /// Whether the keyset of the output set `outputs` has expired: the mint's own state,
+    /// which only a planted flaw consults.
     fn outputs_expired(&self, outputs: u64) -> bool {
         self.ledger().outputs_expired(outputs)
     }
@@ -706,7 +713,8 @@ impl MockNetwork {
         if l.down || l.restore_down {
             return None;
         }
-        let mine = |p: &u64| l.reclaimed.contains(p);
+        // Its outputs, unless their keyset has expired: a restore no longer shows them then.
+        let mine = |p: &u64| l.reclaimed.get(p).is_some_and(|o| !l.outputs_expired(*o));
         Some(l.tokens.get(token).is_some_and(|i| {
             if any {
                 i.proofs.iter().any(mine)
@@ -847,7 +855,9 @@ impl MockNetwork {
             .collect();
         let all = fresh.len() == info.proofs.len();
         l.claimed.extend(fresh.iter().copied());
-        l.reclaimed.extend(fresh);
+        l.next += 1;
+        let outputs = l.next; // the reclaim's own outputs (NUT-13), restorable
+        l.reclaimed.extend(fresh.iter().map(|p| (*p, outputs)));
         if l.lose_reclaim {
             l.lose_reclaim = false;
             return Reclaim::Blocked;
@@ -1318,9 +1328,6 @@ pub enum SeederFlaw {
     /// Records a first attempt refused because a keyset expired as a swap of unknown
     /// outcome.
     FirstExpiredUnknown,
-    /// Trusts a restore once its outputs' keyset has expired, though the mint no longer
-    /// shows them: a claim reads as unsigned, and so as nothing.
-    ExpiredOutputsByRestore,
     /// Takes an unanswered NUT-07 check of a retry refused because a keyset expired as no
     /// input pending, and settles it by restore.
     ExpiredRestoreOnStateDown,
@@ -1336,6 +1343,23 @@ pub enum SeederFlaw {
     ReadDeadlineFromTurn,
     /// An entry reusing a read still under way answers without waiting for its result.
     ReuseWithoutWaiting,
+    /// An entry reusing a read still under way waits for it one poll only.
+    ReuseWaitsOnePoll,
+    /// An entry reusing a read waits while any read of its account is under way, whatever
+    /// the second (the eighteenth rework's wait): it can outlive its deadline.
+    WaitsWhileReading,
+    /// A read abandoned before it is back keeps its place in the second's reads, so the
+    /// entries waiting for it answer without its result.
+    AbandonedReadKept,
+    /// Swaps to outputs of a keyset that expires sooner than twice `account_ttl` away.
+    IgnoresKeysetExpiry,
+    /// The eighteenth rework's rule: a swap whose outputs' keyset has expired is decided by
+    /// its inputs alone, spent being the claim (so a reclaim or a double spend is credited).
+    ExpiredSpentIsClaim,
+    /// A retry's resend, unanswered, is waited for past the payment's deadline.
+    RetryResendUncapped,
+    /// The NUT-07 check settling a 12003, unanswered, is waited for past the deadline.
+    ExpiredStateUncapped,
     /// Never takes over a turn held past its deadline.
     NoTakeover,
     /// Lets hellos take over a turn held past its deadline, but not payments.
@@ -1981,37 +2005,54 @@ impl Inner {
     /// When reads are round trips, a read's place is taken before it is sent, so an entry
     /// meanwhile reuses it instead of reading again.
     async fn learn_own(&self, key: Key, proofs: Option<Vec<u64>>, until: Option<u64>) {
-        let now = self.clock.now();
         let slot = if self.has(SeederFlaw::ReuseByPeer) {
             (key.0, 0)
         } else {
             key
         };
-        let reuse = self.state().own_reads.get(&slot).is_some_and(|(at, by)| {
-            *at == now
-                && (proofs.is_none()
-                    || by.contains(&proofs)
-                    || (by.len() >= 2 && !self.has(SeederFlaw::OwnReadsPerProofs)))
-        });
-        if reuse && !self.has(SeederFlaw::OwnReadsUnbounded) {
-            // A read still under way is shared with its result: wait for it.
-            if !self.has(SeederFlaw::ReuseWithoutWaiting) {
-                while self.state().reading.contains_key(&slot) {
-                    next_poll().await;
+        loop {
+            let now = self.clock.now();
+            let reuse = self.state().own_reads.get(&slot).is_some_and(|(at, by)| {
+                *at == now
+                    && (proofs.is_none()
+                        || by.contains(&proofs)
+                        || (by.len() >= 2 && !self.has(SeederFlaw::OwnReadsPerProofs)))
+            });
+            if reuse && !self.has(SeederFlaw::OwnReadsUnbounded) {
+                // A read still under way is shared with its result: wait for it, to this
+                // entry's own deadline at most (then as a read unanswered). One abandoned
+                // meanwhile takes its place back with it, and this entry reads itself.
+                if self.has(SeederFlaw::WaitsWhileReading) {
+                    while self.state().reading.contains_key(&slot) {
+                        next_poll().await;
+                    }
+                    return;
                 }
-            }
-            return;
-        }
-        if self.net.round_trips() {
-            if !self.has_reads(key) {
+                // Each poll looks again: the reuse holds for its second only.
+                let under_way = self.state().reading.contains_key(&slot);
+                let in_time = until.is_none_or(|u| now < u);
+                if under_way && in_time && !self.has(SeederFlaw::ReuseWithoutWaiting) {
+                    next_poll().await;
+                    if self.has(SeederFlaw::ReuseWaitsOnePoll) {
+                        return;
+                    }
+                    continue;
+                }
                 return;
             }
-            self.record_read(slot, now, proofs);
-            let _reading = Reading::start(self, slot);
-            next_poll().await;
-            self.learn(Some(key), until);
-        } else if self.learn(Some(key), until) {
-            self.record_read(slot, now, proofs);
+            if self.net.round_trips() {
+                if !self.has_reads(key) {
+                    return;
+                }
+                self.record_read(slot, now, proofs.clone());
+                let mut reading = Reading::start(self, slot, now, proofs.clone());
+                next_poll().await;
+                self.learn(Some(key), until);
+                reading.done = true;
+            } else if self.learn(Some(key), until) {
+                self.record_read(slot, now, proofs.clone());
+            }
+            return;
         }
     }
 
@@ -2094,8 +2135,8 @@ impl Inner {
         match self.net.input_states(&[token.to_owned()]) {
             Ok(s) if s[0] == InputState::Pending => None,
             Ok(s)
-                if self.net.outputs_expired(outputs)
-                    && !self.has(SeederFlaw::ExpiredOutputsByRestore) =>
+                if self.has(SeederFlaw::ExpiredSpentIsClaim)
+                    && self.net.outputs_expired(outputs) =>
             {
                 Some(s[0] == InputState::Spent)
             }
@@ -2107,7 +2148,7 @@ impl Inner {
                 self.restore(token, outputs, until)
             }
             Err(_) => {
-                self.wait_unanswered(until);
+                self.wait_unanswered(until.filter(|_| !self.has(SeederFlaw::ExpiredStateUncapped)));
                 None
             }
         }
@@ -2212,10 +2253,8 @@ impl Inner {
         };
         (0..n)
             .map(|i| {
-                // Outputs of an expired keyset: the restore cannot show them, so the inputs
-                // decide ([`Inner::by_inputs`]).
-                if self.net.outputs_expired(outputs[i])
-                    && !self.has(SeederFlaw::ExpiredOutputsByRestore)
+                // The eighteenth rework's rule, now a planted flaw ([`Inner::by_inputs`]).
+                if self.has(SeederFlaw::ExpiredSpentIsClaim) && self.net.outputs_expired(outputs[i])
                 {
                     return match states[i] {
                         Some(InputState::Spent) => Read::Claimed,
@@ -2292,9 +2331,10 @@ impl Inner {
     /// retries, so it finds that swap and no other.
     /// Unanswered, it costs its client the wait, to `until` at the latest. Once the
     /// outputs' keyset has expired a restore no longer shows them (CDK skips an expired
-    /// keyset's signatures), so the NUT-07 check alone decides ([`Inner::by_inputs`]).
+    /// keyset's signatures): a claim then reads as unsigned, and is never credited. Nothing
+    /// else can prove it: spent inputs may be the payer's own reclaim or a double spend.
     fn restore(&self, token: &str, outputs: u64, until: Option<u64>) -> Option<bool> {
-        if self.net.outputs_expired(outputs) && !self.has(SeederFlaw::ExpiredOutputsByRestore) {
+        if self.has(SeederFlaw::ExpiredSpentIsClaim) && self.net.outputs_expired(outputs) {
             return self.by_inputs(token, until);
         }
         let signed = if self.has(SeederFlaw::RestoreByToken) {
@@ -2308,11 +2348,9 @@ impl Inner {
         signed
     }
 
-    /// A swap whose outputs a restore cannot show any more: an input spent is its claim
-    /// (its own request is the one known to have reached the mint, a watcher reclaims only
-    /// 180 s after its answer, and no peer can make a keyset expire); every input unspent
-    /// is nothing, since no request can sign expired outputs; pending, or unanswered, is
-    /// not known yet.
+    /// The mistake the eighteenth rework made ([`SeederFlaw::ExpiredSpentIsClaim`]): a swap
+    /// whose outputs a restore cannot show decided by its inputs, an input spent taken as
+    /// the claim, though it may be the payer's reclaim or a double spend.
     fn by_inputs(&self, token: &str, until: Option<u64>) -> Option<bool> {
         match self.net.input_states(&[token.to_owned()]) {
             Ok(s) => match s[0] {
@@ -2349,7 +2387,8 @@ impl Inner {
         let until = (!self.has(SeederFlaw::RetryRestoreUncapped)).then_some(deadline);
         let retried = self.net.resend(token, outputs);
         if retried == Swap::Lost {
-            self.wait_unanswered(Some(deadline)); // its client waited for it
+            // Its client waited for it.
+            self.wait_unanswered((!self.has(SeederFlaw::RetryResendUncapped)).then_some(deadline));
         }
         match retried {
             // No answer to the retry either: the outcome is still unknown.
@@ -2963,15 +3002,26 @@ impl Inner {
 
 /// A read of an account's swaps under way, counted until it is back or dropped: an entry
 /// reusing it waits for its result.
+/// A read abandoned before it is back (its entry dropped) also takes back its place in the
+/// second's reads, so the entries waiting for it read themselves.
 struct Reading<'a> {
     e: &'a Inner,
     slot: Key,
+    at: u64,
+    by: Option<Vec<u64>>,
+    done: bool,
 }
 
 impl<'a> Reading<'a> {
-    fn start(e: &'a Inner, slot: Key) -> Self {
+    fn start(e: &'a Inner, slot: Key, at: u64, by: Option<Vec<u64>>) -> Self {
         *e.state().reading.entry(slot).or_default() += 1;
-        Self { e, slot }
+        Self {
+            e,
+            slot,
+            at,
+            by,
+            done: false,
+        }
     }
 }
 
@@ -2982,6 +3032,19 @@ impl Drop for Reading<'_> {
             *n -= 1;
             if *n == 0 {
                 st.reading.remove(&self.slot);
+            }
+        }
+        if !self.done && !self.e.has(SeederFlaw::AbandonedReadKept) {
+            let emptied = st.own_reads.get_mut(&self.slot).is_some_and(|(at, by)| {
+                if *at == self.at
+                    && let Some(i) = by.iter().position(|b| *b == self.by)
+                {
+                    by.remove(i);
+                }
+                by.is_empty()
+            });
+            if emptied {
+                st.own_reads.remove(&self.slot);
             }
         }
     }
@@ -3447,6 +3510,15 @@ impl MockSession {
             snapshot,
             session_spent: self.session_spent.clone(),
         };
+        // Outputs only from a keyset that outlives any wait to decide this swap: none whose
+        // listed `final_expiry` is sooner than twice `account_ttl` away. With none, no swap:
+        // the seeder's own keyset error, read nothing for.
+        let horizon = e.clock.now() + 2 * e.config.account_ttl.as_secs();
+        if e.net.keyset_final_expiry().is_some_and(|t| t < horizon)
+            && !e.has(SeederFlaw::IgnoresKeysetExpiry)
+        {
+            return Err(unavailable("the mint's keyset expires too soon to swap to"));
+        }
         // The swap's outputs, derived for it alone (NUT-13): its retries reuse them, and
         // a restore of them finds this swap and no other.
         let outputs = e.net.fresh_outputs();
@@ -4730,6 +4802,10 @@ impl Harness for MockHarness {
     fn rotate_keyset(&self) {
         let mut l = self.net.ledger();
         l.retired_outputs = l.next;
+    }
+
+    fn keyset_expires_in(&self, after: Option<Duration>) {
+        self.net.ledger().final_expiry = after.map(|d| self.clock.now() + d.as_secs());
     }
 
     fn expire_keyset(&self) {

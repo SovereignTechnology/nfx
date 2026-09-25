@@ -250,9 +250,10 @@ checks run in this order:
      may name the seeder's own outputs, and the seeder checked the inputs' DLEQs
      against that keyset's keys.
    - **The outputs' keyset.** The seeder derives a swap's outputs only from an active
-     keyset whose `final_expiry` (NUT-02) is absent, or at least twice `account_ttl`
-     away. With none, it does not swap: `mint-unavailable`, its own keyset error
-     (below). So a swap it cannot yet decide keeps outputs a restore can show.
+     keyset whose `final_expiry` (NUT-02), as the mint lists it, is absent or at least
+     twice `account_ttl` away by the seeder's own clock. With none, it does not swap:
+     `mint-unavailable`, its own keyset error (below), and it reads nothing for it. So a
+     swap outlives its outputs only if it stays undecided that long (below).
 
    - **Pending.** A mint may reserve a request's inputs before it signs (NUT-07
      `PENDING`; CDK does). A swap of reserved inputs is refused as pending (CDK 11002).
@@ -290,12 +291,14 @@ checks run in this order:
      - Outputs unsigned with an input spent: nothing. The swap is atomic, so it can no
        longer go through.
      - Outputs of a keyset that has expired: a restore no longer shows them (CDK skips an
-       expired keyset's signatures, signed or not), so the NUT-07 check alone decides. An
-       input spent is the claim: the seeder's own request is the one known to have
-       reached the mint, an honest watcher reclaims only after its answer (§3a), and no
-       peer can make a keyset expire. Every input unspent is nothing: no request can sign
-       those outputs now. This applies wherever a restore would settle a swap, a retry's
-       or a completion's included.
+       expired keyset's signatures), so a claim not learnt before then reads as unsigned,
+       and with its inputs spent as nothing. That is a stated concession: nothing else can
+       prove the claim, since spent inputs may as well be the payer's own reclaim or a
+       double spend, and the seeder never extends credit it cannot prove; its expired
+       outputs are worth nothing to it either. The payer's watcher, finding the proofs
+       spent, awaits a quote that never comes and stops paying that seeder (§3a). Both
+       keep their bounds. The outputs' keyset rule above keeps this to a swap undecided
+       for twice `account_ttl`.
      - Anything else proves nothing, and the swap is read again later: every input
        unspent (the request may yet be processed), an input pending (reserved by a
        request the mint is still processing, which may yet go through or be rolled
@@ -318,7 +321,9 @@ checks run in this order:
        reads that second, every entry reuses them. A read counts from when it is sent,
        in the second it is sent, an entry that waited into a new second included, so two
        entries at once share one read, and its result: an entry reusing a read still
-       under way waits for it. A flood of hellos, or of payments
+       under way waits for it. The reuse holds within its second, so the wait ends with
+       it at the latest, and at the entry's own deadline; a read abandoned before it is
+       back (its entry dropped) leaves the entries waiting for it to read themselves. A flood of hellos, or of payments
        whatever their proofs, costs the mint two reads a second, while a watcher paying
        again after its reclaim, with other proofs, reads afresh.
      - A background sweep reads every account's, periodically, in as few requests as the
@@ -419,6 +424,12 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     found proofs spent (above); an input pending, incomplete. Every input unspent, it is
     complete: the proofs are lost to the expiry, not taken by the seeder, and the watcher
     pays again.
+  - A reclaim whose answer is lost can outlive its outputs' keyset (the watcher cannot
+    refuse to reclaim: its proofs would be lost to the expiry anyway), and a restore then
+    no longer shows its outputs: the watcher cannot tell its own reclaim from the
+    seeder's claim, and treats the proofs as found spent. A stated concession, as the
+    seeder's (§3): it keeps the watcher's bound, and the proofs' value is lost to the
+    expiry either way.
   - Until the reclaim completes (the mint may be down), the watcher pays that seeder
     nothing more. A quote showing the ledger plus that payment, both fields, settles it
     as accepted in the meantime, and the reclaim is dropped: the seeder has the proofs.
@@ -698,3 +709,14 @@ therefore loses nothing:
     - an entry reusing a read still under way waits for its result.
   - §3a: a reclaim refused because the proofs' keyset expired is decided by a NUT-07
     check; every input unspent, the watcher pays again.
+- Draft 2026-09-25 (M2.0 nineteenth audit, `docs/nfx/reviews/2026-09-24-m2.0-nineteenth-audit.md`).
+  - §3:
+    - withdrawn: an input spent is not the claim once the outputs' keyset has expired
+      (it may be the payer's reclaim or a double spend); such a claim reads as nothing,
+      a stated concession that keeps the seeder's loss bound;
+    - the outputs' keyset rule is judged by the mint's listed `final_expiry` and the
+      seeder's own clock, and a refusal under it reads nothing;
+    - a reused read's wait ends with its second, and at the entry's deadline; an
+      abandoned read leaves its waiters to read themselves.
+  - §3a: a reclaim whose outputs' keyset expires before the watcher can restore them is
+    treated as found spent, a stated concession.
