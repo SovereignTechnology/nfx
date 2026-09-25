@@ -3,24 +3,29 @@
 
     locked.py manifest            the derived pin lines for crates/ci/locked.sha256
     locked.py sources             every cached .crate matches its Cargo.lock checksum
-    locked.py compiled [--pin]    after the build: check what the compiler actually read,
-                                  what the money crate is built from, and that its tests
-                                  really ran, against crates/ci/locked-compiled.txt (or
-                                  rewrite it)
+    locked.py facts               what the money crates are built from, from cargo
+                                  metadata alone (nothing is compiled), against
+                                  crates/ci/locked-compiled.txt
+    locked.py compiled --money|--workspace [--pin]
+                                  the facts, then a build: nfx-pay and nfx-proto alone
+                                  (the lock job), or the workspace (the check job). Check
+                                  what the compiler actually read, and that the money tests
+                                  really ran; --pin rewrites the facts file.
 
-`compiled` pins, one fact per line:
+The facts, one per line:
 - `build-script <crate>` and `proc-macro <crate>`: workspace crates that run code at build
   time. Any new one fails.
 - `depends-on-nfx-pay <crate>`: workspace crates that may use the money crate.
-- `nfx-pay-dep <name> <version> <source> <checksum> <features>`: nfx-pay's resolved
-  dependency closure (all kinds for nfx-pay itself, normal and build below it), with the
-  features the workspace build unifies onto each. A version bump, a swapped source, a
-  [patch] or a feature switched on elsewhere fails.
+- `money-dep <name> <version> <source> <checksum> <features>`: the resolved dependency
+  closure of nfx-pay and nfx-proto (every kind for those two, their test dependencies
+  included, and normal and build below them), with the features the workspace unifies
+  onto each. A version bump, a swapped source, a [patch] or a feature switched on
+  elsewhere fails.
+- `toolchain rustc <release> <commit>`.
 
-It also checks, without pins, on the workspace build CI runs (`cargo test --workspace`):
-- every file any workspace library or binary compiles is a tracked file inside its own
-  crate; nfx-pay's tests read only nfx-pay's tracked files; other tests read tracked
-  files only (fixtures);
+`compiled` also checks, without pins, on the build it runs:
+- every file a library or binary compiles is a tracked file inside its own crate; nfx-pay's
+  tests read only nfx-pay's tracked files; other tests read tracked files only;
 - no file outside nfx-pay and nfx-node's locked paths names `nfx_pay`;
 - the suite, the mutants and the pay/1 vector tests each ran, and reported exactly the
   number of tests their pinned sources declare. A test runner that runs nothing fails.
@@ -93,29 +98,34 @@ def sources() -> None:
     print(f"locked paths: {checked} cached crates match Cargo.lock")
 
 
+MONEY_CRATES = ("nfx-pay", "nfx-proto")
+
+
 def closure(meta: dict, lock: dict) -> list[str]:
     pkgs = {p["id"]: p for p in meta["packages"]}
-    root = next(p["id"] for p in meta["packages"] if p["name"] == "nfx-pay" and p["source"] is None)
+    roots = {p["id"] for p in meta["packages"] if p["name"] in MONEY_CRATES and p["source"] is None}
+    if len(roots) != len(MONEY_CRATES):
+        fail("cannot find the money crates in cargo metadata")
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
     checksums = {(p["name"], p["version"], p.get("source")): p.get("checksum", "-")
                  for p in lock.get("package", [])}
-    seen, todo = {root}, [root]
+    seen, todo = set(roots), list(roots)
     while todo:
         cur = todo.pop()
         for dep in nodes[cur]["deps"]:
             kinds = {k["kind"] for k in dep["dep_kinds"]}
-            if cur != root and kinds <= {"dev"}:
+            if cur not in roots and kinds <= {"dev"}:
                 continue
             if dep["pkg"] not in seen:
                 seen.add(dep["pkg"])
                 todo.append(dep["pkg"])
     out = []
-    for pid in seen - {root}:
+    for pid in seen - roots:
         p = pkgs[pid]
         source = p["source"] or "workspace"
         checksum = checksums.get((p["name"], p["version"], p["source"]), "-")
         features = ",".join(sorted(nodes[pid].get("features", []))) or "-"
-        out.append(f"nfx-pay-dep {p['name']} {p['version']} {source} {checksum} {features}")
+        out.append(f"money-dep {p['name']} {p['version']} {source} {checksum} {features}")
     return out
 
 
@@ -160,7 +170,8 @@ def test_counts() -> dict[str, int]:
     }
 
 
-def compiled(pin: bool) -> None:
+def facts_now() -> tuple[list[str], dict, list[dict]]:
+    """The facts, from cargo metadata and rustc alone: nothing is compiled."""
     meta = json.loads(run("cargo", "metadata", "--format-version", "1", "--locked", "--offline"))
     with open(CRATES / "Cargo.lock", "rb") as f:
         lock = tomllib.load(f)
@@ -181,13 +192,35 @@ def compiled(pin: bool) -> None:
     if not (release and commit):
         fail("cannot read the toolchain's release and commit")
     facts.append(f"toolchain rustc {release.group(1)} {commit.group(1)}")
-    facts = sorted(facts)
+    return sorted(facts), meta, members
 
-    # What the workspace build CI runs actually compiled.
+
+def check_facts(facts: list[str]) -> None:
+    text = "".join(f + "\n" for f in facts)
+    if not PINS.exists() or PINS.read_text() != text:
+        old = set(PINS.read_text().splitlines()) if PINS.exists() else set()
+        new = set(facts)
+        diff = [f"- {x}" for x in sorted(old - new)] + [f"+ {x}" for x in sorted(new - old)]
+        fail("what the money crates are built from differs from its pins:\n" + "\n".join(diff))
+
+
+def facts() -> None:
+    found, _, _ = facts_now()
+    check_facts(found)
+    print(f"locked paths: {len(found)} facts match their pins, read before any build")
+
+
+def compiled(scope: str, pin: bool) -> None:
+    found, meta, members = facts_now()
+    if not pin:
+        check_facts(found)
+
+    # What the build actually compiled: the money crates alone, or the workspace.
     tracked = {(REPO / f).resolve() for f in run("git", "ls-files", "-z", cwd=REPO).split("\0") if f}
     crate_dirs = {p["manifest_path"]: pathlib.Path(p["manifest_path"]).parent.resolve() for p in members}
     pay_dir = (CRATES / "nfx-pay").resolve()
-    out = run("cargo", "test", "--workspace", "--no-run", "--locked", "--offline", "--message-format=json")
+    select = ["--workspace"] if scope == "workspace" else ["-p", "nfx-pay", "-p", "nfx-proto"]
+    out = run("cargo", "test", *select, "--no-run", "--locked", "--offline", "--message-format=json")
     seen_targets = 0
     for line in out.splitlines():
         msg = json.loads(line)
@@ -206,7 +239,7 @@ def compiled(pin: bool) -> None:
                 if not is_test and not own:
                     fail(f"{crate.name}'s library or binary compiled {src}, from outside its crate ({d.name})")
     if seen_targets == 0:
-        fail("found no dep-info for the workspace build")
+        fail(f"found no dep-info for the {scope} build")
 
     named = subprocess.run(["git", "grep", "-nw", "nfx_pay", "--", "crates", *MONEY_USERS],
                            cwd=REPO, capture_output=True, text=True)
@@ -236,19 +269,13 @@ def compiled(pin: bool) -> None:
         if ran.get(name) != n:
             fail(f"tests/{name}.rs: {n} tests declared, {ran.get(name)} ran and passed")
 
-    text = "".join(f + "\n" for f in facts)
     if pin:
-        PINS.write_text(text)
-        print(f"pinned {len(facts)} compiled facts in {PINS.relative_to(REPO)}")
+        PINS.write_text("".join(f + "\n" for f in found))
+        print(f"pinned {len(found)} facts in {PINS.relative_to(REPO)}")
         return
-    if not PINS.exists() or PINS.read_text() != text:
-        old = set(PINS.read_text().splitlines()) if PINS.exists() else set()
-        new = set(facts)
-        diff = [f"- {x}" for x in sorted(old - new)] + [f"+ {x}" for x in sorted(new - old)]
-        fail("what nfx-pay is built from differs from its pins:\n" + "\n".join(diff))
     counts = ", ".join(f"{k} {v}" for k, v in want.items())
-    print(f"locked paths: {len(facts)} compiled facts match their pins; every compiled file is "
-          f"tracked and in its crate; the money tests ran ({counts})")
+    print(f"locked paths: {len(found)} facts match their pins; every file the {scope} build "
+          f"compiled is tracked and in its crate; the money tests ran ({counts})")
 
 
 def main() -> None:
@@ -257,8 +284,11 @@ def main() -> None:
         manifest()
     elif args == ["sources"]:
         sources()
-    elif args and args[0] == "compiled" and set(args[1:]) <= {"--pin"}:
-        compiled("--pin" in args)
+    elif args == ["facts"]:
+        facts()
+    elif (args[:1] == ["compiled"] and len(args) in (2, 3) and args[1] in ("--money", "--workspace")
+          and args[2:] in ([], ["--pin"])):
+        compiled(args[1][2:], "--pin" in args)
     else:
         fail(__doc__.strip().splitlines()[2].strip())
 

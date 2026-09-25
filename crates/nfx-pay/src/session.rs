@@ -7,11 +7,13 @@
 //! - **Admission.** Every request for a file of the session's video is admitted, or not,
 //!   as one chunk: whole, ranged or aborted alike, counted at admission. A pre-paid chunk
 //!   is always served.
-//! - **Limits.** Uncovered chunks are admitted only while the peer owes fewer than
-//!   `window` across its videos, and while the unpaid chunks admitted in the last
-//!   `debt_ttl`, across all peers, stay under the global cap.
+//! - **Limits.** Uncovered chunks are admitted only while the account owes fewer than
+//!   `window`, and while the unpaid chunks admitted in the last `debt_ttl`, across all
+//!   peers and videos, stay under the global cap.
 //! - **Payment.** A payment is swapped before it is acknowledged, so an ack is
-//!   confirmation and no mint delay widens either bound.
+//!   confirmation and no mint delay widens either bound. Every `pay` is answered within
+//!   60 s of its arrival; a swap still unanswered then is abandoned, and settled when its
+//!   outcome comes: credited if it claimed the proofs, never banned on.
 
 use std::time::Duration;
 
@@ -27,15 +29,16 @@ pub trait SeederEngine {
     type Session: SeederSession + Send;
 
     /// A `hello` from `peer`. The session continues the peer's account for the video, and
-    /// its quote carries the account's position. A `hello` creates no account, and waits
-    /// for a payment in progress on the account (at most the seeder's 60 s), so its quote
-    /// never misses one.
+    /// its quote carries the account's position. A `hello` creates no account. It waits
+    /// for a payment in progress on the account to be answered (within 60 s of that
+    /// payment's arrival), so its quote never misses an acknowledged one; while it waits
+    /// it counts toward the peer's session cap.
     ///
     /// Refused with:
     /// - `banned` for a banned peer;
     /// - `unknown-video` for a video this seeder does not serve;
     /// - `bad-session` for a session id that is open, or beyond the per-peer cap on open
-    ///   sessions, counted across all videos.
+    ///   and waiting sessions, counted across all videos.
     async fn hello(&self, peer: &PeerId, hello: &Hello) -> Result<Self::Session, Rej>;
 }
 
@@ -64,10 +67,17 @@ pub trait SeederSession {
     ///
     /// A refusal changes no accounting and claims nothing.
     ///
+    /// **The deadline:** answered within 60 s of its arrival, the wait for the account's
+    /// turn and any key fetch included. A payment whose outcome is known by then is
+    /// answered with it; otherwise with `mint-unavailable`, and its swap is abandoned: no
+    /// further request is sent for those proofs, and the account is released.
+    ///
+    /// **Late outcomes:** an abandoned swap is settled when its outcome comes. A claim is
+    /// credited (the next quote shows it); a spent or invalid outcome bans nobody.
+    ///
     /// **Cancel-safe:** once the swap is sent it completes, and is credited or banned on,
     /// even if this future is dropped (the connection closed). The account's turn is held
-    /// until then, or until the 60 s deadline: then the swap is abandoned, and a late
-    /// outcome is neither credited nor banned on.
+    /// until then, or until the deadline.
     async fn pay(&mut self, pay: &Pay) -> Result<Ack, Rej>;
 
     /// Whether this session's peer is banned.
@@ -75,13 +85,21 @@ pub trait SeederSession {
 }
 
 /// The watcher's side, for one seeder and one video: its ledger lasts across sessions.
-/// Implementations: the real wallet-backed viewer (locked until the M2 security stage)
-/// and [`crate::mock::MockViewer`]. It keeps time on the harness's clock.
+/// Its **standing** with the seeder is shared with every [`Viewer::sibling`], its ledgers
+/// for the seeder's other videos: whether the watcher has stopped paying the seeder, a
+/// reclaim not yet complete, a payment awaiting a quote, and the one payment in flight
+/// toward the seeder. Implementations: the real wallet-backed viewer (locked until the M2
+/// security stage) and [`crate::mock::MockViewer`]. It keeps time on the harness's clock.
 #[allow(async_fn_in_trait)]
 pub trait Viewer {
+    /// A ledger for another video of the same seeder, sharing this one's standing.
+    fn sibling(&self) -> Self
+    where
+        Self: Sized;
+
     /// Start a session on its quote. A quote whose position equals the ledger plus a
-    /// payment still unsettled settles it as accepted. `Err`, and the viewer stops, when
-    /// the quote is not honest about the account:
+    /// payment still unsettled, or plus one awaiting a quote, settles it as accepted. `Err`,
+    /// and the viewer stops, when the quote is not honest about the account:
     /// - it claims more chunks than were requested;
     /// - its `accepted_upto` or `spent_total` is anything else, below the ledger included.
     ///
@@ -99,8 +117,9 @@ pub trait Viewer {
 
     /// The payment due now, if any. It covers requested chunks at the quoted price, made
     /// before the unpaid count reaches the window, or pays ahead after a refusal. One is
-    /// in flight at a time, and none while a reclaim is incomplete. It first settles an
-    /// unanswered payment older than 120 s by reclaiming it.
+    /// in flight toward the seeder at a time, across its videos, and none while a reclaim
+    /// is incomplete or a payment awaits a quote. It first finishes an incomplete reclaim,
+    /// and settles an unanswered payment older than 120 s by reclaiming it.
     async fn due(&mut self) -> Result<Option<Pay>, String>;
 
     /// The payment for every chunk still owed, when the session ends.
@@ -111,7 +130,8 @@ pub trait Viewer {
     fn ack(&mut self, ack: &Ack) -> Result<(), String>;
 
     /// The seeder's `rej`, whatever its code: the viewer reclaims the payment's proofs.
-    /// - If any proof is found spent, the payment is lost, and the viewer stops.
+    /// - If any proof is found spent, the payment **awaits a quote**: nothing more is paid
+    ///   to the seeder until a quote shows it accepted ([`Viewer::awaiting_quote`]).
     /// - After `mint-unavailable` with every proof reclaimed, it may pay again.
     /// - After any other code, it stops.
     ///
@@ -119,17 +139,22 @@ pub trait Viewer {
     async fn rej(&mut self, rej: &Rej);
 
     /// No answer has come on a live connection. Before 120 s from sending this does
-    /// nothing. From then, the viewer reclaims the proofs and stops; proofs found spent
-    /// mean the payment is lost, never paid again.
+    /// nothing. From then, the viewer reclaims the proofs and stops.
     async fn timeout(&mut self);
 
     /// The session ended (its connection closed). The ledger stays, and a payment in
-    /// flight stays unsettled. The next quote settles it if both its fields match; failing
-    /// that, a reclaim after 120 s does.
+    /// flight stays unsettled. A quote settles it if both its fields match; failing that,
+    /// a reclaim after 120 s does, and proofs found spent leave it awaiting a quote.
     fn end(&mut self);
 
-    /// Whether the viewer has stopped paying this seeder.
+    /// Whether the viewer pays this seeder nothing: it has stopped, or a payment awaits a
+    /// quote.
     fn stopped(&self) -> bool;
+
+    /// Whether this ledger holds a payment whose proofs were found spent, awaiting a quote
+    /// that shows it accepted. The watcher opens a new session for its video to settle it.
+    /// A quote equal to the ledger leaves it waiting, and the watcher paying nothing.
+    fn awaiting_quote(&self) -> bool;
 }
 
 /// Token shapes a seeder must refuse as `bad-token` (NFX-07 §3).
@@ -162,6 +187,9 @@ pub struct EngineParams {
     pub global_cap: u64,
     pub debt_ttl: Duration,
     pub account_ttl: Duration,
+    pub ban_ttl: Duration,
+    /// How many mints it quotes: the harness's own first, then made-up ones.
+    pub mints: usize,
 }
 
 /// What the adversary suite needs from an engine under test: the mock now, and the real
@@ -177,8 +205,11 @@ pub trait Harness {
     fn engine(&self, price: u64, window: u64, global_cap: u64) -> Self::Engine;
     /// A seeder with exactly `params`, or its refusal to start (NFX-07 §3 configuration).
     fn engine_checked(&self, params: EngineParams) -> Result<Self::Engine, String>;
-    /// How many per-identity records `engine` holds (accounts, open sessions and the
-    /// like): what a flood of free identities costs it.
+    /// How many per-identity records `engine` holds: what a flood of free identities costs
+    /// it. It counts **every** record the engine keeps for a peer identity: accounts,
+    /// bans, open and waiting sessions and their counters, turns held, payments whose
+    /// swaps are unsettled, and any cache keyed by peer. A count that leaves a kind out
+    /// hides exactly the growth the suite looks for.
     fn identities_held(&self, engine: &Self::Engine) -> usize;
     /// A `hello` for video `v` (0 or 1), under a fresh session id.
     fn hello_for(&self, v: u8) -> Hello;
@@ -201,8 +232,9 @@ pub trait Harness {
     /// A file of no video the seeder serves.
     fn foreign_chunk(&self) -> String;
 
-    /// A viewer's ledger for one seeder and video. It holds tokens from this harness's
-    /// mint and pays at most `max_price`.
+    /// A viewer's ledger for one seeder and video, with a standing of its own (a seeder
+    /// not met before). It holds tokens from this harness's mint and pays at most
+    /// `max_price`.
     fn viewer(&self, max_price: u64) -> Self::Viewer;
 
     /// The quoted mint's URL.
@@ -235,7 +267,14 @@ pub trait Harness {
     /// The mint processes swaps at once, but holds their responses until
     /// [`Harness::release_swaps`]: processed, and not yet answered.
     fn hold_swap_responses(&self);
-    /// Run the held swaps and deliver the held responses, and hold no more.
+    /// The mint answers no key request until [`Harness::release_swaps`] (keys it has
+    /// already served may be cached by the engine).
+    fn hold_key_fetches(&self);
+    /// Run the oldest held swap, or deliver the oldest held response, and keep holding
+    /// the rest.
+    async fn release_oldest_swap(&self);
+    /// Run the held swaps, deliver the held responses and answer held key requests, in
+    /// order, and hold no more.
     async fn release_swaps(&self);
     /// Make the mint unreachable (`true`) or reachable again.
     fn mint_outage(&self, down: bool);
@@ -246,4 +285,6 @@ pub trait Harness {
     fn debt_ttl(&self) -> Duration;
     /// How long a never-paid account with no open session is kept.
     fn account_ttl(&self) -> Duration;
+    /// How long a ban lasts.
+    fn ban_ttl(&self) -> Duration;
 }

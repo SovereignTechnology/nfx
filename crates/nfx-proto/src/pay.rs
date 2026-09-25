@@ -54,8 +54,8 @@ pub struct Hello {
 }
 
 /// Seeder → watcher: the binding price (sat per chunk), the only mints it takes, the
-/// unpaid chunks it tolerates from one peer, and the account's position (NFX-07 §3), so
-/// a watcher can resume.
+/// unpaid chunks it tolerates on one account (one peer, one video), and the account's
+/// position (NFX-07 §3), so a watcher can resume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Quote {
     pub price_per_chunk: u64,

@@ -91,10 +91,10 @@ them.
 | `spent` | a proof of the token is already spent (the peer is banned) | NFX-07 §3 |
 | `bad-lock` | licensed chunk proof not P2PK-locked to the mint's `redeem_pubkey`, locktime too near, or no valid DLEQ | NFX-08 §4.1, NFX-09 §2 |
 | `stale` | `pay.upto_chunk` ≤ last acked watermark | NFX-07 §2 |
-| `bad-token` | token unreadable, not unit `sat`, of more than one mint, with locked proofs, with a missing or invalid DLEQ, or with proofs the mint refuses as invalid (the last is also a ban) | NFX-07 §3 |
-| `banned` | the peer is banned by this seeder (a spent or invalid proof) | NFX-07 §3 |
-| `mint-unavailable` | the seeder could not complete the swap; not a ban, nothing credited | NFX-07 §3 |
-| `bad-session` | the session id names a session that is open, or the peer holds too many open sessions | NFX-07 §3 |
+| `bad-token` | token unreadable, not unit `sat`, of more than one mint, with more than 64 proofs, with locked proofs, with a missing or invalid DLEQ, or with proofs the mint refuses as invalid (the last is also a ban) | NFX-07 §3 |
+| `banned` | the peer is banned by this seeder (a spent or invalid proof), until `ban_ttl` | NFX-07 §3 |
+| `mint-unavailable` | the seeder could not complete the swap within 60 s of the `pay`'s arrival; not a ban, nothing credited by then (a late claim is credited later) | NFX-07 §3 |
+| `bad-session` | the session id names a session that is open, or the peer holds too many open or waiting sessions | NFX-07 §3 |
 | `payment-required` | license requested without payment/voucher | NFX-09 §2 |
 | `bad-voucher` | voucher signature, presenter (NIP-98 ≠ `seeder`), whitelist or expiry failed | NFX-08 §5, NFX-09 §2 |
 | `unknown-video` | the mint has no escrow for that manifest address `a`; or the seeder does not serve the video named in a pay/1 `hello` | NFX-09 §2, NFX-07 §2 |
@@ -211,3 +211,6 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   also answers a pay/1 `hello`. `spent`, `bad-token`, `banned` and `bad-session` are
   reworded to NFX-07 §3 as reworked. The HTTP surface loses `X-NFX-Accepted` and
   `X-NFX-Session` and gains `503` (NFX-07 §4: one payment per request).
+- 2026-09-24 (M2.0 fifth audit) — `bad-token` lists more than 64 proofs; `banned` lasts
+  `ban_ttl`; `mint-unavailable` is answered within 60 s of arrival, and a late claim is
+  credited; `bad-session` counts waiting sessions (NFX-07 §3).
