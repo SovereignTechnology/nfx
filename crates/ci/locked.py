@@ -151,7 +151,8 @@ def closure(meta: dict, lock: dict) -> list[str]:
 
 
 def sources_read(dep_file: pathlib.Path) -> set[pathlib.Path]:
-    """The files a dep-info file says the compiler read (each is listed as `path:`)."""
+    """The files rustc's dep-info file says it read for one target (each is listed as
+    `path:`; a name's spaces are escaped as `\\ `)."""
     out = set()
     for line in dep_file.read_text().splitlines():
         if line.startswith("#") or not line.endswith(":") or line == ":":
@@ -163,11 +164,22 @@ def sources_read(dep_file: pathlib.Path) -> set[pathlib.Path]:
 
 
 def dep_info(filenames: list[str]) -> list[pathlib.Path]:
+    """rustc's dep-info for each artefact. Libraries and tests sit in deps/ under their
+    hashed names. A binary or an example is listed at its uplifted name (target/debug/x,
+    target/debug/examples/x), a hard link to the hashed file in deps/ or examples/:
+    that file's own dep-info is the one read, never the uplifted copy, which lists the
+    dependencies' files too."""
     found = []
     for f in filenames:
         p = pathlib.Path(f)
-        if p.parent.name not in ("deps", "examples"):
-            continue
+        if not re.search(r"-[0-9a-f]{16}$", p.name.split(".")[0]):
+            # An uplifted name: find the hashed file it links to.
+            dirs = [p.parent / "deps", p.parent] if p.parent.name != "examples" else [p.parent]
+            twins = [c for d in dirs if d.is_dir() for c in d.glob(f"{p.name}-*")
+                     if c.suffix != ".d" and p.exists() and c.exists() and c.samefile(p)]
+            if not twins:
+                continue
+            p = twins[0]
         stem = p.name.split(".")[0]
         stem = stem[3:] if stem.startswith("lib") and p.suffix in (".rlib", ".rmeta", ".so") else stem
         d = p.parent / f"{stem}.d"
