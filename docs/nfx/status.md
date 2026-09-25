@@ -361,11 +361,11 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    wallet. It gets the locked-directory rule and its own security stage (ADR 0008 §4).
    Plan and decisions: [`m2-plan.md`](m2-plan.md). sovtech chose the demo's staging, and a
    persistent testnet mint.
-   - **M2.0 is built and reworked eleven times** on branch `m2/contracts`, not yet
+   - **M2.0 is built and reworked twelve times** on branch `m2/contracts`, not yet
      pushed. It holds the pay/1 wire and vectors, the session contracts, the mock, and
-     the adversary suite. Eleven independent audits found 19, 30, 28, 20, 19, 22, 23,
-     8, 12, 17 and 9 gaps; the resolutions are recorded in each audit's file, and the next audit
-     checks them
+     the adversary suite. Twelve independent audits found 19, 30, 28, 20, 19, 22, 23,
+     8, 12, 17, 9 and 7 gaps; the resolutions are recorded in each audit's file, and the
+     next audit checks them
      ([first](reviews/2026-09-24-m2.0-independent-audit.md),
      [second](reviews/2026-09-24-m2.0-second-audit.md),
      [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -376,7 +376,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
      [eighth](reviews/2026-09-24-m2.0-eighth-audit.md),
      [ninth](reviews/2026-09-24-m2.0-ninth-audit.md),
      [tenth](reviews/2026-09-24-m2.0-tenth-audit.md),
-     [eleventh](reviews/2026-09-24-m2.0-eleventh-audit.md)). **sovtech's bar for the push
+     [eleventh](reviews/2026-09-24-m2.0-eleventh-audit.md),
+     [twelfth](reviews/2026-09-24-m2.0-twelfth-audit.md)). **sovtech's bar for the push
      is zero findings** (re-confirmed after the sixth). The lock's guarantee is now
      stated in `crates/ci/check-locked.sh`: the money crates' files and build inputs, and
      every target of theirs, failing closed; other crates are out of scope. With sovtech's OK, the minimum role for GitLab pipeline variables on
@@ -390,7 +391,10 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
          cap is a rate (`debt_ttl`).
        - `quote` carries the account's position, so a watcher can resume.
        - HTTPS origins take one payment per request.
-     - The suite has 62 scenarios and catches each of 220 planted defects.
+     - The suite has 62 scenarios and catches each of 233 planted defects.
+     - A swap with no answer is decided by reading its inputs (NUT-07), then its outputs
+       (NUT-09): unsigned outputs are nothing only once an input is spent, so a request
+       the mint holds cannot stall an honest pair past the watcher's reclaim.
      - The pay/1 wire is its own crate, `nfx-pay-wire` (re-exported by nfx-proto).
      - The lock pins both money crates whole, nfx-pay and nfx-pay-wire, and their
        dependency closure, and refuses build-environment tricks. After the build it
@@ -398,7 +402,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        dep-info), and that the money tests all ran. Code in other crates is out of its
        scope, as the check itself states.
    - **Next:**
-     - a twelfth independent audit, until one reports nothing;
+     - a thirteenth independent audit, until one reports nothing;
      - sovtech's OK to push M2.0 (given, once the audits are clean);
      - the testnet mint: sovtech approved its deployment once its runbook's checks
        are clean (a private record);

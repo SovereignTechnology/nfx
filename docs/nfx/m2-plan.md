@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of eleven
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of twelve
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -30,7 +30,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [eighth](reviews/2026-09-24-m2.0-eighth-audit.md),
 [ninth](reviews/2026-09-24-m2.0-ninth-audit.md),
 [tenth](reviews/2026-09-24-m2.0-tenth-audit.md),
-[eleventh](reviews/2026-09-24-m2.0-eleventh-audit.md)). sovtech's bar for the push is zero
+[eleventh](reviews/2026-09-24-m2.0-eleventh-audit.md),
+[twelfth](reviews/2026-09-24-m2.0-twelfth-audit.md)). sovtech's bar for the push is zero
 findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -60,12 +61,24 @@ findings, confirmed after the sixth:
   - `Harness`.
 - **Mock:** `nfx_pay::mock` has:
   - a proof-based mock mint: multi-proof tokens, atomic swaps, held swaps or held
-    responses, lost responses and NUT-09 restore of each swap's own outputs, partial
-    claims, mint and restore outages, dial records;
+    responses, lost responses, requests the swapper gave up on, NUT-07 input checks and
+    NUT-09 restore of each swap's own outputs, partial claims, mint and restore outages,
+    dial records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, two of them
-  threaded, and **each of 220 planted defects fails its scenario**, every surviving mutant
-  from all eleven audits among them.
+  threaded, and **each of 233 planted defects fails its scenario**, every surviving mutant
+  from all twelve audits among them.
+- **Since the twelfth audit:**
+  - a swap with no answer, lost or abandoned in flight, is decided by reading its inputs
+    (NUT-07), then its outputs (NUT-09): signed is a claim, unsigned with an input spent
+    is nothing, and unsigned with every input unspent stays unknown. An honest watcher's
+    reclaim spends the inputs, so a request the mint holds no longer stalls the pair;
+  - a decided swap's record goes, with any turn it holds, and a later answer changes
+    nothing;
+  - the harness can have the seeder's client give up on a request that stays queued at
+    the mint, and have the mint process it between the seeder's two reads;
+  - the refusal's scope for a swap in flight, a new peer's pre-payments, a takeover from
+    an unpolled holder and a late claim for a peer banned since are pinned.
 - **Since the eleventh audit:**
   - a swap abandoned at the deadline while in flight is of unknown outcome: it counts
     toward the bound and keeps its account, and the next payment is answered at once,
