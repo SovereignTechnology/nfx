@@ -208,6 +208,10 @@ pub enum MintEvent {
     /// It rotates its keyset, as [`Harness::rotate_keyset`]: after the seeder derived the
     /// request's outputs from the old one, as a seeder with stale keys does.
     RotateKeyset,
+    /// The keyset of every proof issued so far expires (NUT-02 `final_expiry`). A request
+    /// spending one is refused (CDK 12003), except one whose inputs the mint had already
+    /// reserved: that one still signs.
+    ExpireKeyset,
 }
 
 /// Token shapes a seeder must refuse as `bad-token` (NFX-07 §3).
@@ -264,8 +268,9 @@ pub trait Harness {
     /// it. It counts **every** record the engine keeps for a peer identity or its
     /// accounts: accounts, bans, open and waiting sessions, their ids and their counters,
     /// turns held and their waiters, payments whose swaps are unsettled, the global
-    /// count's entries for unpaid chunks, and any cache keyed by peer. A count that leaves a kind out
-    /// hides exactly the growth the suite looks for.
+    /// count's entries for unpaid chunks, the record of an account's recent reads of its
+    /// swaps, and any cache keyed by peer. A count that leaves a kind out hides exactly the
+    /// growth the suite looks for.
     fn identities_held(&self, engine: &Self::Engine) -> usize;
     /// A `hello` for video `v` (0 or 1), under a fresh session id.
     fn hello_for(&self, v: u8) -> Hello;

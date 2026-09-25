@@ -206,8 +206,10 @@ def test_counts() -> dict[str, int]:
         fail("cannot find the adversary_suite! list")
     mutants = (CRATES / "nfx-pay" / "tests" / "mutants.rs").read_text()
     pay1 = (CRATES / "nfx-pay-wire" / "tests" / "pay1.rs").read_text()
+    scenarios = len(re.findall(r"^\s+[a-z_0-9]+,$", listed.group(1), re.M))
     return {
-        "adversary": len(re.findall(r"^\s+[a-z_0-9]+,$", listed.group(1), re.M)),
+        "adversary": scenarios,
+        "round_trip": scenarios,  # the same suite, the mint answering reads on a later poll
         "mutants": len(re.findall(r"^\s+[a-z_0-9]+: [sv]\(", mutants, re.M)),
         "pay1": len(re.findall(r"^#\[test\]$", pay1, re.M)),
     }
@@ -320,7 +322,8 @@ def compiled(pin: bool) -> None:
     want = test_counts()
     out = subprocess.run(["cargo", "test", "--color", "never", "--locked", "--offline",
                           "-p", "nfx-pay", "-p", "nfx-pay-wire",
-                          "--test", "adversary", "--test", "mutants", "--test", "pay1"],
+                          "--test", "adversary", "--test", "round_trip", "--test", "mutants",
+                          "--test", "pay1"],
                          cwd=CRATES, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if out.returncode != 0:
         fail(f"the money tests failed:\n{out.stdout[-4000:]}")
