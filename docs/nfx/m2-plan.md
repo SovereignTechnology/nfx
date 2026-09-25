@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of ten
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of eleven
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -29,7 +29,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [seventh](reviews/2026-09-24-m2.0-seventh-audit.md),
 [eighth](reviews/2026-09-24-m2.0-eighth-audit.md),
 [ninth](reviews/2026-09-24-m2.0-ninth-audit.md),
-[tenth](reviews/2026-09-24-m2.0-tenth-audit.md)). sovtech's bar for the push is zero
+[tenth](reviews/2026-09-24-m2.0-tenth-audit.md),
+[eleventh](reviews/2026-09-24-m2.0-eleventh-audit.md)). sovtech's bar for the push is zero
 findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -63,8 +64,14 @@ findings, confirmed after the sixth:
     claims, mint and restore outages, dial records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, two of them
-  threaded, and **each of 207 planted defects fails its scenario**, every surviving mutant
-  from all ten audits among them.
+  threaded, and **each of 220 planted defects fails its scenario**, every surviving mutant
+  from all eleven audits among them.
+- **Since the eleventh audit:**
+  - a swap abandoned at the deadline while in flight is of unknown outcome: it counts
+    toward the bound and keeps its account, and the next payment is answered at once,
+    without a swap;
+  - the refusal's scope, unanswered restores on both sides, and a quote settling an
+    incomplete reclaim only on both fields and its own video, are pinned.
 - **Since the tenth audit:**
   - a request that never reached the mint has a known outcome, and at most one swap per
     account is of unknown outcome;
