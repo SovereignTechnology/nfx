@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of nineteen
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of twenty
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -38,7 +38,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [sixteenth](reviews/2026-09-24-m2.0-sixteenth-audit.md),
 [seventeenth](reviews/2026-09-24-m2.0-seventeenth-audit.md),
 [eighteenth](reviews/2026-09-24-m2.0-eighteenth-audit.md),
-[nineteenth](reviews/2026-09-24-m2.0-nineteenth-audit.md)). sovtech's bar for the push is
+[nineteenth](reviews/2026-09-24-m2.0-nineteenth-audit.md),
+[twentieth](reviews/2026-09-24-m2.0-twentieth-audit.md)). sovtech's bar for the push is
 zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -79,9 +80,16 @@ zero findings, confirmed after the sixth:
     answered on the reader's next poll, dial records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, two of them
-  threaded, run twice (the second time with reads as round trips), and **each of 304
-  planted defects fails its scenario**, every surviving mutant from all nineteen audits
+  threaded, run twice (the second time with reads as round trips), and **each of 311
+  planted defects fails its scenario**, every surviving mutant from all twenty audits
   among them.
+- **Since the twentieth audit:**
+  - each read of a second is under way, back or abandoned: an abandoned read counts;
+    an entry waits only for a read that would serve it, and reads itself when its
+    second ends;
+  - a watcher's reclaim refused 12003 is lost to the expiry only if the mint lists the
+    proofs' own keyset as expired;
+  - the outputs' keyset rule is pinned at its exact margin, before the read, in step 5.
 - **Since the nineteenth audit:**
   - withdrawn: "an input spent is the claim" for expired outputs. A claim not learnt
     before its outputs' keyset expires is nothing, a stated concession that keeps the
