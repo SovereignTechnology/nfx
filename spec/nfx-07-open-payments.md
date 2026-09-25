@@ -142,6 +142,9 @@ payment-enforced after release, so no mechanism pretends otherwise.
   peer with none has been served nothing and owes nothing, so a ban would protect
   nothing: its refused `pay` is answered, and nothing is kept for it.
 - Hellos waiting for a payment count toward the session cap.
+- A swap whose outcome is unknown (below) is kept until it is learnt, at most one per
+  account: while one is unknown, the account's further payments are answered
+  `mint-unavailable` without a swap. An account holding one is not forgotten.
 - A seeder SHOULD keep a bounded cache of proofs it has seen spent. It then refuses a
   replayed one (`spent`, with a ban) without asking the mint.
 
@@ -206,10 +209,15 @@ checks run in this order:
        and spend detection is by proof, not by token string;
      - if the mint refuses the proofs as invalid, `rej` `bad-token` and ban the peer;
      - if the mint cannot be reached, or the outcome stays unknown, `rej`
-       `mint-unavailable`. That is not a ban, and nothing is credited.
-   - **Retries.** The seeder retries the same swap request (NUT-19) while it still has
-     time. A retry answered `spent` may be its own earlier attempt that succeeded
-     unseen. The seeder settles that with NUT-09 restore and never bans on it.
+       `mint-unavailable`. That is not a ban, and nothing is credited. A request that
+       never reached the mint has a known outcome, nothing; one that reached it and got
+       no answer has an unknown one.
+   - **Retries.** The seeder retries the same swap request (NUT-19), with the same
+     outputs, while it still has time. Those outputs are derived for this swap alone
+     (NUT-13), so a NUT-09 restore of them finds this swap and no other. A retry
+     answered `spent` may be its own earlier attempt that succeeded unseen: a restore
+     that finds the outputs signed settles it as a claim, and one that does not makes it
+     `mint-unavailable`. A retry's `spent` is never a ban.
 
    - **Other errors.** Any other swap error, a fee or keyset error of the seeder's own
      making included, is `mint-unavailable`, never a ban.
@@ -270,7 +278,7 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   - Pay before the account's unpaid count reaches `window`, so the seeder need not
     stall.
   - Never pay ahead of need, except right after a refusal. Then pay ahead up to half of
-    `window`, less any credit the video's ledger already holds, which the seeder serves
+    `window`, rounded down, less any credit the video's ledger already holds, which the seeder serves
     whatever its cap. Credit on a video never grows beyond half its window, so a seeder
     that refuses everything takes at most half the watcher's ceiling, for each video the
     watcher asks it for.
@@ -305,7 +313,8 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     `mint-unavailable` after a swap that went through. A seeder that credits it late (§3)
     loses the watcher nothing.
   - Until the reclaim completes (the mint may be down), the watcher pays that seeder
-    nothing more.
+    nothing more. A quote showing the ledger plus that payment, both fields, settles it
+    as accepted in the meantime, and the reclaim is dropped: the seeder has the proofs.
   - After `mint-unavailable` the watcher pays again once every proof is confirmed
     reclaimed, or the payment is settled by a quote. After any other code it stops paying
     that seeder.
@@ -500,3 +509,11 @@ therefore loses nothing:
     - reclaims use NUT-13 outputs, and a watcher restores them (NUT-09) before calling a
       proof spent;
     - a stopped watcher still reclaims a live session's refused or unanswered payment.
+- Draft 2026-09-25 (M2.0 tenth audit, `docs/nfx/reviews/2026-09-24-m2.0-tenth-audit.md`).
+  - §3:
+    - a swap request that never reached the mint has a known outcome;
+    - retries reuse the swap's own outputs, and a restore finds that swap alone;
+    - at most one swap of unknown outcome per account.
+  - §3a:
+    - pay-ahead is half the window, rounded down;
+    - a quote settles a payment whose reclaim is incomplete.

@@ -8,10 +8,20 @@ repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 cd "$repo"
 py=${PYTHON:-python3}
 step() { printf '\n== %s\n' "$*"; }
+# The lock's steps run as the lock job runs them: under `env -i`, with only the variables
+# the lock's allow-list names. The job's own (GitLab's CI_*, the tool pins, a coloured
+# cargo) are none of its business, and in CI mode it refuses any it does not know.
+locked() {
+  local keep=() v
+  for v in PATH HOME CI CARGO_HOME RUSTUP_HOME LOCKED_DIRS_UNLOCKED; do
+    [ -z "${!v+x}" ] || keep+=("$v=${!v}")
+  done
+  /usr/bin/env -i "${keep[@]}" PYTHON="$py" /bin/bash -p crates/ci/check-locked.sh "$@"
+}
 
 # First, before any unpinned code runs.
 step "locked paths: money code only as reviewed (docs/nfx/m2-plan.md)"
-PYTHON="$py" crates/ci/check-locked.sh
+locked
 
 step "spec: test vectors regenerate byte for byte"
 "$py" spec/test-vectors/generate.py --verify
@@ -32,7 +42,7 @@ else
 fi
 
 step "locked paths: cached crates match Cargo.lock, then fetch"
-PYTHON="$py" crates/ci/check-locked.sh --sources
+locked --sources
 (cd crates && cargo fetch --locked)
 
 cd crates
@@ -59,5 +69,5 @@ if [ "${NFX_SKIP_WASM:-0}" != 1 ]; then
 fi
 # Last, after everything else has run: the files again, then what was compiled.
 step "locked paths: unchanged, and nfx-pay built only from pinned files and dependencies"
-PYTHON="$py" ../crates/ci/check-locked.sh --compiled
+(cd .. && locked --compiled)
 printf '\nall checks passed\n'

@@ -5,9 +5,9 @@
 # runs it under `env -i` with literal paths, so no pipeline or project variable reaches it.
 # The `check` job runs everything else.
 #
-# Order: the pinned files and the environment; the cached archives; then what nfx-pay is
-# built from, read from cargo metadata before anything is compiled; then the build and the
-# money tests; then the pinned files again.
+# Order: the pinned files and the environment; the cached archives; then what the money
+# crates are built from, read from cargo metadata before anything is compiled; then the
+# build and the money tests; then the pinned files again.
 set -euo pipefail
 shopt -s inherit_errexit
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"

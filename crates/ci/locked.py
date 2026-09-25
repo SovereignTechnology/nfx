@@ -318,7 +318,8 @@ def compiled(pin: bool) -> None:
 
     # The money tests ran, all of them. `cargo test` exits 0 when a runner skips them.
     want = test_counts()
-    out = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "nfx-pay", "-p", "nfx-pay-wire",
+    out = subprocess.run(["cargo", "test", "--color", "never", "--locked", "--offline",
+                          "-p", "nfx-pay", "-p", "nfx-pay-wire",
                           "--test", "adversary", "--test", "mutants", "--test", "pay1"],
                          cwd=CRATES, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if out.returncode != 0:

@@ -20,8 +20,9 @@ fi
 #                                from verified archives: only from the job's own CARGO_HOME
 #                                inside the checkout, and a CI-mode run with a shared one
 #                                refuses). check.sh runs this before cargo.
-#   check-locked.sh --facts      the same, then what nfx-pay is built from, read from cargo
-#                                metadata without compiling anything (locked.py facts).
+#   check-locked.sh --facts      the same, then what the money crates are built from, read
+#                                from cargo metadata without compiling anything (locked.py
+#                                facts).
 #   check-locked.sh --compiled   the same, then builds every target of nfx-pay and
 #                                nfx-pay-wire alone, checks what the compiler read for each
 #                                (failing closed on a target without dep-info) and that the
@@ -77,6 +78,13 @@ fi
 #     method shadowing a derived one), which is why the money crates are pinned whole and
 #     depend on no other workspace crate. nfx-proto re-exports nfx-pay-wire and is not a
 #     money crate;
+#   - nfx-node's locked paths (below) sit inside nfx-node, which is not pinned, so an
+#     nfx-node module could shadow a macro they use or add a method to a type they use.
+#     They hold no code, and cannot gain any without a re-pin: before M2.1 writes code
+#     there, they move into a money crate of their own (docs/nfx/m2-plan.md);
+#   - other Cargo workspaces (crates/desktop, crates/spikes) build the money crates with
+#     their own dependency resolution. The lock checks the main workspace's, which CI
+#     tests;
 #   - whoever can push can also re-pin, and the CI configuration lives in the branch it
 #     checks. This makes money-code changes loud and reviewable; the control is sovtech's
 #     review of every change to the pins;
@@ -211,12 +219,14 @@ case $mode in
   --sources)
     $py crates/ci/locked.py sources
     if [ -n "$in_ci" ]; then
-      # Only the job's own CARGO_HOME, inside the checkout: never a shared one.
-      case $(realpath -m -- "$home") in
+      # Only the job's own extracted sources, inside the checkout: never a shared one,
+      # whether CARGO_HOME or any directory below it is a link to one.
+      src=$(realpath -m -- "$home/registry/src")
+      case $src in
         "$(pwd -P)"/?*) ;;
-        *) fail "in CI, CARGO_HOME must be the job's own, inside the checkout (gitlab-ci.yml), not $home" ;;
+        *) fail "in CI, the extracted sources must be the job's own, inside the checkout (gitlab-ci.yml), not $src" ;;
       esac
-      rm -rf "${home:?}/registry/src"
+      rm -rf -- "${src:?}"
       echo "locked paths: extracted sources removed; cargo re-extracts from verified archives"
     fi
     ;;

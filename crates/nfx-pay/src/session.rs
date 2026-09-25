@@ -102,7 +102,8 @@ pub trait Viewer {
         Self: Sized;
 
     /// Start a session on its quote. A quote whose position equals the ledger plus a
-    /// payment still unsettled, or plus one awaiting a quote, settles it as accepted. `Err`,
+    /// payment still unsettled, one awaiting a quote, or one whose reclaim is incomplete,
+    /// settles it as accepted (and cancels that reclaim). `Err`,
     /// and the viewer stops, when the quote is not honest about the account:
     /// - it claims more chunks than were requested;
     /// - its `accepted_upto` or `spent_total` is anything else, below the ledger included.
@@ -284,6 +285,9 @@ pub trait Harness {
     /// A third party (a seeder keeping a refused payment, say) claims whatever of
     /// `token`'s proofs are still unclaimed: whether it got any.
     async fn steal(&self, token: &str) -> bool;
+    /// The same for one unclaimed proof of `token` only (a seeder keeping part of a
+    /// payment): whether it got one.
+    async fn steal_one(&self, token: &str) -> bool;
     /// Whether anything (keys, a swap) has been fetched from the mint at `url`.
     fn dialled(&self, url: &str) -> bool;
 
@@ -307,14 +311,19 @@ pub trait Harness {
     async fn release_swaps(&self);
     /// Make the mint unreachable (`true`) or reachable again.
     fn mint_outage(&self, down: bool);
-    /// The mint processes the next swap, and its response is lost on the way back: the
-    /// seeder sees no answer, though the proofs are now its own. A retry is answered by
-    /// the mint as usual, and the swap's outputs can be restored (NUT-09).
+    /// The mint processes the next swap that reaches it (held or not), and its response
+    /// is lost on the way back: the seeder sees no answer, though the proofs are now its
+    /// own. A retry is answered by the mint as usual, and the swap's outputs can be
+    /// restored (NUT-09). A swap sent while the mint is down never reaches it, and loses
+    /// nothing.
     fn lose_next_swap_response(&self);
     /// The mint processes a watcher's next reclaim, and its response is lost: the watcher
     /// sees no answer, though it has its proofs back. A retry finds them spent, by the
     /// watcher itself, which a restore of its outputs (NUT-09) shows.
     fn lose_next_reclaim_response(&self);
+    /// The mint answers swaps but no restore (`true`), or restores again: its restore
+    /// endpoint alone is unreachable.
+    fn restore_outage(&self, down: bool);
 
     /// Move the clock the seeder and the viewers keep forward.
     fn advance(&self, by: Duration);
