@@ -48,7 +48,7 @@ lock:
     GIT_STRATEGY: clone
     GIT_CHECKOUT: "true"
   script:
-    - /usr/bin/env -i PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root RUSTUP_HOME=/usr/local/rustup CARGO_HOME="$(pwd -P)/.cargo-home" CI=true CI_COMMIT_SHA="$CI_COMMIT_SHA" PYTHON=/usr/bin/python3 /bin/bash crates/ci/lock-job.sh
+    - /usr/bin/env -i PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root RUSTUP_HOME=/usr/local/rustup CARGO_HOME="$(pwd -P)/.cargo-home" CI=true CI_COMMIT_SHA="$CI_COMMIT_SHA" PYTHON=/usr/bin/python3 /bin/bash -p crates/ci/lock-job.sh
   cache:
     key:
       prefix: lock-$CI_COMMIT_REF_SLUG

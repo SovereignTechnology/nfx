@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Every master-plan check (ADR 0008), in the order CI runs them. Run from anywhere:
 #   crates/ci/check.sh
 # Env: PYTHON (needs coincurve; default python3), NFX_SKIP_WASM=1 to skip the wasm run.

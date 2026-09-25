@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # The lock's verdict as its own CI job (gitlab-ci.yml `lock`). It runs no unpinned
 # repository code: only this script, check-locked.sh and locked.py (all pinned), cargo,
 # and the money crates' own build and tests, whose every input is pinned. gitlab-ci.yml

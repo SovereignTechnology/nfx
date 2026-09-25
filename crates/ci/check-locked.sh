@@ -1,4 +1,9 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
+# -p: no BASH_ENV, and no shell functions imported from the environment.
+if [[ -n $(builtin declare -F) ]]; then
+  builtin echo "locked paths: shell functions are defined before the check runs" >&2
+  builtin exit 1
+fi
 # The locked paths (docs/nfx/m2-plan.md; ADR 0008 §4). Money code is written only in the M2
 # security stage, and sovtech reads every change to it.
 #
@@ -46,7 +51,8 @@
 #   - any compiled file that is untracked, or outside its own crate (a library or binary),
 #     or outside nfx-pay (nfx-pay's tests): this is what catches #[path], include! and
 #     every spelling of them;
-#   - `nfx_pay` named outside nfx-pay and nfx-node's locked paths;
+#   - `nfx_pay` named in any Rust file outside nfx-pay and nfx-node's locked paths;
+#   - a path package that is not a workspace member;
 #   - the money tests not all running.
 #
 # CI is recognised by CI, GITLAB_CI or CI_JOB_ID, and the pinned gitlab-ci.yml runs this
@@ -112,7 +118,7 @@ manifest() {
   local untracked
   untracked=$(git ls-files -o -z -- "${paths[@]}" | tr '\0' '\n')
   [ -z "$untracked" ] || fail "untracked files in guarded paths: $untracked"
-  git ls-files -s -z -- "${paths[@]}" | while IFS= read -r -d '' entry; do
+  git ls-files -s -z -- "${paths[@]}" | while IFS= builtin read -r -d '' entry; do
     mode=${entry%% *}
     path=${entry#*$'\t'}
     case $path in
@@ -137,7 +143,7 @@ allowed='CARGO_HOME CARGO_TERM_COLOR CARGO_BUILD_JOBS CARGO_PROFILE_DEV_DEBUG CA
 ci_allowed="$allowed PATH HOME CI CI_COMMIT_SHA PYTHON PWD OLDPWD SHLVL _ LOCKED_DIRS_UNLOCKED"
 # Names from `env -0`, so no value can forge a line. A name that is not a plain
 # identifier (BASH_FUNC_git%%, an exported function standing in for a command) fails.
-while IFS= read -r -d '' entry; do
+while IFS= builtin read -r -d '' entry; do
   name=${entry%%=*}
   [[ $name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || fail "a variable that is not a plain name is set: ${name@Q}"
   if [ -n "$in_ci" ]; then
@@ -151,7 +157,7 @@ while IFS= read -r -d '' entry; do
       *) fail "a build variable outside the allow-list is set: $name" ;;
     esac
   fi
-done < <(env -0)
+done < <(/usr/bin/env -0)
 if [ -n "$in_ci" ] && [ -n "${LOCKED_DIRS_UNLOCKED:-}" ]; then
   fail "LOCKED_DIRS_UNLOCKED is set in CI"
 fi
@@ -171,7 +177,7 @@ for f in "$home"/config "$home"/config.toml; do
 done
 
 if [ "$mode" = --pin ]; then
-  $py crates/ci/locked.py compiled --workspace --pin
+  $py crates/ci/locked.py compiled --money --pin
   manifest > "$pins"
   echo "pinned $(wc -l < "$pins") guarded files and sections in $pins"
   exit 0

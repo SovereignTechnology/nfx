@@ -23,7 +23,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use nfx_proto::namespace::VideoAddr;
-use nfx_proto::pay::{Ack, Hello, MAX_INT, Pay, Quote, Rej, RejCode};
+use nfx_proto::pay::{Ack, Hello, MAX_INT, Message, Pay, Quote, Rej, RejCode};
 
 use crate::session::{
     BadToken, EngineParams, Harness, PeerId, SeederEngine, SeederSession, Viewer,
@@ -41,6 +41,11 @@ pub const ACCOUNT_TTL: Duration = Duration::from_secs(24 * 3600);
 pub const BAN_TTL: Duration = Duration::from_secs(24 * 3600);
 /// The largest global cap a seeder accepts: beyond it the cap bounds nothing (NFX-07 §3).
 pub const MAX_GLOBAL_CAP: u64 = 1_000_000;
+/// The largest `window` the mock viewer accepts in a quote (NFX-07 §3a: 64 recommended).
+pub const WINDOW_CEILING: u64 = 64;
+/// `mint-unavailable` answers in a row after which the viewer pays that seeder nothing
+/// more until a new session (NFX-07 §3a).
+pub const UNAVAILABLE_BUDGET: u32 = 3;
 /// The seeder answers every `pay` within this (NFX-07 §3).
 pub const SEEDER_DEADLINE: Duration = Duration::from_secs(60);
 /// How long a watcher waits for an answer before reclaiming (NFX-07 §3a).
@@ -130,6 +135,8 @@ struct Ledger {
     forged: HashSet<u64>,
     next: u64,
     hold: bool,
+    /// Hold only the next swap submitted.
+    hold_next: bool,
     hold_responses: bool,
     hold_keys: bool,
     down: bool,
@@ -243,7 +250,8 @@ impl MockNetwork {
             let mut l = self.ledger();
             l.next += 1;
             let id = l.next;
-            if l.hold {
+            if l.hold || l.hold_next {
+                l.hold_next = false;
                 l.queued.push((id, token.to_owned(), done));
                 return id;
             }
@@ -405,6 +413,7 @@ impl MockNetwork {
         let (queued, responses, deferred, waiting) = {
             let mut l = self.ledger();
             l.hold = false;
+            l.hold_next = false;
             l.hold_responses = false;
             l.hold_keys = false;
             (
@@ -473,6 +482,8 @@ pub enum SeederFlaw {
     HelloCreatesAccount,
     /// Does not count waiting hellos toward the session cap.
     HelloWaitUncapped,
+    /// A hello dropped while it waits keeps counting toward the session cap.
+    HelloWaitLeaksOnDrop,
     /// Quotes `spent_total` summed across the peer's videos.
     QuoteSpentPeerWide,
     /// Quotes `served` summed across the peer's videos.
@@ -527,6 +538,16 @@ pub enum SeederFlaw {
     ForgetsAtDebtTtl,
     /// Counts an account idle from its last admission, not its last session's close.
     ForgetsFromLastAdmission,
+    /// Forgets accounts never served, not accounts never paid: a paid-ahead one is lost.
+    ForgetsUnserved,
+    /// Counts an account's sessions as closed when the first of them closes.
+    ForgetsOnFirstClose,
+    /// Keeps a closed session's id.
+    SessionIdLeaks,
+    /// Keeps the record of a payment dropped mid-swap after its swap lands.
+    LandKeepsFinished,
+    /// Forgets a peer's accounts when its ban expires.
+    BanExpiryResetsAccounts,
     /// Keeps bans for ever.
     BansNeverExpire,
     /// Lets a ban expire after `debt_ttl`, not `ban_ttl`.
@@ -547,6 +568,13 @@ pub enum SeederFlaw {
     NoDeadline,
     /// Counts the deadline from the swap's sending, not the payment's arrival.
     DeadlineFromSwap,
+    /// Waits for keys without registering with the clock.
+    FetchNoClockWatch,
+    /// Sends the swap after the payment's deadline, if nothing marked it abandoned.
+    SendIgnoresDeadline,
+    /// Checks the watermark and the amount only before the key fetch, not again as the
+    /// swap is sent.
+    NoRecheckAtSend,
     /// Answers `mint-unavailable` at the deadline even when the outcome is already known.
     DeadlineBeatsSettled,
     /// Treats a swap as late only once something has marked it abandoned, not by the
@@ -558,6 +586,8 @@ pub enum SeederFlaw {
     LateClaimNotCredited,
     /// Never takes over a turn held past its deadline.
     NoTakeover,
+    /// Lets hellos take over a turn held past its deadline, but not payments.
+    PayNoTakeover,
     /// Takes over a turn only a second after its deadline.
     TakeoverAt61,
     /// Waits for a turn without registering with the clock.
@@ -619,6 +649,32 @@ pub enum ViewerFlaw {
     SettleOnUptoOnly,
     /// Settles a payment awaiting a quote when `accepted_upto` alone matches.
     SettleLostOnUpto,
+    /// Settles a payment awaiting a quote when `spent_total` alone matches.
+    SettleLostOnSpentOnly,
+    /// Settles a payment awaiting a quote on another video's quote.
+    SettleLostAnyLedger,
+    /// Reports a payment awaiting a quote on every ledger of the standing.
+    AwaitingQuoteAnyLedger,
+    /// Files a lost payment a sibling's retried reclaim found under the sibling.
+    RetryAsSelf,
+    /// Reclaims a closed session's unsettled payment only from its own ledger.
+    CatchUpOwnOnly,
+    /// Frees the standing's in-flight slot when a session ends.
+    EndClearsInFlight,
+    /// Pays the last payment over another video's payment in flight.
+    LastPayIgnoresOtherInFlight,
+    /// Pays the last payment over its own payment in flight.
+    LastPayIgnoresOwnPending,
+    /// Takes any quoted `window`, however large.
+    NoWindowCeiling,
+    /// Keeps paying after any number of `mint-unavailable` answers in a row.
+    NoUnavailableBudget,
+    /// Treats a refused `hello` as a refused payment, and reclaims at once.
+    HelloRefusalReclaims,
+    /// Lets `timeout` act on a payment an earlier session left unsettled.
+    TimeoutTouchesUnsettled,
+    /// Ignores a `rej` that answers no payment.
+    UnsolicitedRejIgnored,
     /// Stops for good when a reclaim finds proofs spent, whatever a later quote shows.
     LostIsFinal,
     /// Resumes paying on a quote that does not show the payment it awaits.
@@ -776,6 +832,18 @@ impl EngineConfig {
         if self.ban_ttl < self.debt_ttl && flaw != Some(SeederFlaw::NoBanTtlCheck) {
             return Err("ban_ttl is at least debt_ttl".into());
         }
+        // Its quote must be one the pay/1 writer emits: every mint URL valid.
+        let quote = Message::Quote(Quote {
+            price_per_chunk: self.price_per_chunk,
+            mints: self.mints.clone(),
+            window: self.window,
+            served: 0,
+            accepted_upto: 0,
+            spent_total: 0,
+        });
+        quote
+            .to_line()
+            .map_err(|e| format!("its quote is not valid pay/1: {e}"))?;
         Ok(())
     }
 }
@@ -856,7 +924,17 @@ impl Inner {
             } else {
                 self.config.ban_ttl
             });
-            st.banned.retain(|_, at| at.saturating_add(ttl) > now);
+            let mut expired = Vec::new();
+            st.banned.retain(|peer, at| {
+                let keep = at.saturating_add(ttl) > now;
+                if !keep {
+                    expired.push(*peer);
+                }
+                keep
+            });
+            if self.has(SeederFlaw::BanExpiryResetsAccounts) {
+                st.accounts.retain(|k, _| !expired.contains(&k.0));
+            }
         }
         if !self.has(SeederFlaw::NeverForgets) {
             let ttl = secs(if self.has(SeederFlaw::ForgetsAtDebtTtl) {
@@ -866,6 +944,7 @@ impl Inner {
             });
             let forget_paid = self.has(SeederFlaw::ForgetsPaidAccounts);
             let forget_open = self.has(SeederFlaw::ForgetsOpenAccounts);
+            let unserved = self.has(SeederFlaw::ForgetsUnserved);
             let State {
                 accounts,
                 open_accounts,
@@ -874,7 +953,12 @@ impl Inner {
             accounts.retain(|k, a| {
                 let open = open_accounts.contains_key(k) && !forget_open;
                 let idle = !open && a.last_active.saturating_add(ttl) <= now;
-                !(idle && (a.acked == 0 || forget_paid))
+                let never_paid = if unserved {
+                    a.admitted == 0
+                } else {
+                    a.acked == 0
+                };
+                !(idle && (never_paid || forget_paid))
             });
         }
     }
@@ -1113,6 +1197,7 @@ impl Inner {
                 let mut st = self.state();
                 let now = self.clock.now();
                 let mut done = None;
+                // A turn held past its deadline is taken over: its payment is abandoned.
                 if let Some(h) = st.paying.get(&key) {
                     let (holder, deadline) = (h.pay, h.deadline);
                     let expired = if self.has(SeederFlaw::TakeoverAt61) {
@@ -1122,24 +1207,27 @@ impl Inner {
                     };
                     let takeover = expired
                         && !self.has(SeederFlaw::NoTakeover)
-                        && !self.has(SeederFlaw::NoDeadline);
+                        && !self.has(SeederFlaw::NoDeadline)
+                        && !(claim.is_some() && self.has(SeederFlaw::PayNoTakeover));
                     if takeover {
                         wake = self.abandon(&mut st, key, holder);
                         st.paying.remove(&key);
-                    } else {
-                        let over = claim
-                            .and_then(|id| st.pays.get(&id))
-                            .is_some_and(|r| r.abandoned || now >= r.deadline);
-                        if over && !self.has(SeederFlaw::NoDeadline) {
-                            done = Some(false);
-                        } else {
-                            st.waiting.entry(key).or_default().push(cx.waker().clone());
-                            if !self.has(SeederFlaw::TurnNoClockWatch) {
-                                self.clock.watch(cx.waker());
-                            }
-                            return Poll::Pending;
-                        }
                     }
+                }
+                // A payment whose own deadline has passed takes no turn.
+                let over = claim
+                    .and_then(|id| st.pays.get(&id))
+                    .is_some_and(|r| r.abandoned || now >= r.deadline);
+                if over && !self.has(SeederFlaw::NoDeadline) {
+                    done = Some(false);
+                } else if st.paying.contains_key(&key) {
+                    st.waiting.entry(key).or_default().push(cx.waker().clone());
+                    if !self.has(SeederFlaw::TurnNoClockWatch) {
+                        self.clock.watch(cx.waker());
+                    }
+                    drop(st);
+                    wake_all(wake);
+                    return Poll::Pending;
                 }
                 if done.is_none() {
                     if let Some(id) = claim {
@@ -1172,7 +1260,9 @@ impl Inner {
             if over && !self.has(SeederFlaw::NoDeadline) {
                 return Poll::Ready(false);
             }
-            self.clock.watch(cx.waker());
+            if !self.has(SeederFlaw::FetchNoClockWatch) {
+                self.clock.watch(cx.waker());
+            }
             Poll::Pending
         })
         .await
@@ -1203,7 +1293,7 @@ impl Inner {
                 }
             }
             wake.extend(self.release_turn(&mut st, pay.key, id));
-            if finished {
+            if finished && !self.has(SeederFlaw::LandKeepsFinished) {
                 st.pays.remove(&id);
             }
             wake
@@ -1251,6 +1341,7 @@ impl Inner {
         let st = self.state();
         st.accounts.len()
             + st.banned.len()
+            + st.open.len()
             + st.open_count.len()
             + st.open_accounts.len()
             + st.hellos_waiting.len()
@@ -1326,7 +1417,7 @@ impl HelloWait {
 
 impl Drop for HelloWait {
     fn drop(&mut self) {
-        if self.counted {
+        if self.counted && !self.e.has(SeederFlaw::HelloWaitLeaksOnDrop) {
             let e = self.e.clone();
             let mut st = e.state();
             self.done(&mut st);
@@ -1502,7 +1593,8 @@ impl Drop for MockSession {
         let now = self.e.clock.now();
         let from_close = !self.e.has(SeederFlaw::ForgetsFromLastAdmission);
         let mut st = self.e.state();
-        if st.open.get(&self.session) == Some(&self.key) {
+        if st.open.get(&self.session) == Some(&self.key) && !self.e.has(SeederFlaw::SessionIdLeaks)
+        {
             st.open.remove(&self.session);
         }
         if let Some(n) = st.open_count.get_mut(&self.count_key) {
@@ -1513,7 +1605,7 @@ impl Drop for MockSession {
         }
         if let Some(n) = st.open_accounts.get_mut(&self.key) {
             *n = n.saturating_sub(1);
-            if *n == 0 {
+            if *n == 0 || self.e.has(SeederFlaw::ForgetsOnFirstClose) {
                 st.open_accounts.remove(&self.key);
             }
         }
@@ -1671,13 +1763,33 @@ impl MockSession {
         }
         // Send the swap, unless the deadline has passed: its completion settles it (in
         // time, or late) and releases the turn, whether or not this future still waits.
+        // The watermark is read again as it is sent: a late claim may have moved it
+        // during the key fetch.
         {
             let mut st = e.state();
             let now = e.clock.now();
+            let acked_now = st.accounts.get(&self.key).map_or(0, |a| a.acked);
+            if acked_now != acked && !e.has(SeederFlaw::NoRecheckAtSend) {
+                if pay.upto_chunk <= acked_now {
+                    return Err(rej(RejCode::Stale, "already paid up to there"));
+                }
+                let due_now = (pay.upto_chunk - acked_now)
+                    .checked_mul(e.config.price_per_chunk)
+                    .filter(|d| *d <= MAX_INT);
+                if due_now.is_none_or(|d| amount < d) {
+                    return Err(rej(RejCode::Underpaid, "short of the chunks claimed"));
+                }
+                if due_now.is_some_and(|d| amount > d) {
+                    return Err(rej(RejCode::Overpaid, "more than the chunks claimed"));
+                }
+            }
             let Some(r) = st.pays.get_mut(&id) else {
                 return Err(unavailable("no record of this payment"));
             };
-            if r.abandoned || (now >= r.deadline && !e.has(SeederFlaw::NoDeadline)) {
+            let expired = now >= r.deadline
+                && !e.has(SeederFlaw::NoDeadline)
+                && !e.has(SeederFlaw::SendIgnoresDeadline);
+            if r.abandoned || expired {
                 let wake = e.abandon(&mut st, self.key, id);
                 drop(st);
                 wake_all(wake);
@@ -1807,17 +1919,21 @@ struct Pending {
 }
 
 /// A watcher's standing with one seeder, shared by its ledgers for that seeder's videos
-/// (NFX-07 §3a).
+/// (NFX-07 §3a). Entries name the ledger they belong to.
 #[derive(Default)]
 struct Standing {
     /// The watcher has stopped paying this seeder.
     stopped: bool,
-    /// The ledger with a payment in flight or unsettled: one at a time toward a seeder.
+    /// The ledger with the payment in flight toward the seeder, unsettled ones included.
     in_flight: Option<u64>,
-    /// Payments whose reclaim the mint could not serve yet, by ledger.
+    /// Payments closed sessions left unsettled.
+    unsettled: Vec<(u64, Pending)>,
+    /// Payments whose reclaim the mint could not serve yet.
     reclaiming: Vec<(u64, Pending)>,
     /// Payments whose proofs were found spent, each awaiting a quote on its ledger.
     lost: Vec<(u64, Pending)>,
+    /// `mint-unavailable` answers in a row since the last ack or quote.
+    unavailable: u32,
     next_ledger: u64,
 }
 
@@ -1840,9 +1956,8 @@ pub struct MockViewer {
     requested: u64,
     acked: u64,
     spent: u64,
+    /// The payment in flight on this session.
     pending: Option<Pending>,
-    /// The pending payment outlived its session: a quote or a reclaim settles it.
-    unsettled: bool,
     /// A refusal since the last payment: the next one may pay ahead.
     pay_ahead: bool,
 }
@@ -1890,7 +2005,6 @@ impl MockViewer {
             acked: 0,
             spent: 0,
             pending: None,
-            unsettled: false,
             pay_ahead: false,
         }
     }
@@ -1920,29 +2034,20 @@ impl MockViewer {
         }
     }
 
-    /// Whether an entry for `ledger` holds this ledger back.
-    fn concerns(&self, ledger: u64, own_only: bool) -> bool {
-        !own_only || ledger == self.id
-    }
-
     fn reclaim_incomplete(&self) -> bool {
         let own = self.has(ViewerFlaw::ReclaimPerVideo);
         self.standing()
             .reclaiming
             .iter()
-            .any(|(l, _)| self.concerns(*l, own))
+            .any(|(l, _)| !own || *l == self.id)
     }
 
+    /// Whether a payment awaits a quote: any of the standing's, or this ledger's only.
     fn awaiting(&self, own_only: bool) -> bool {
         self.standing()
             .lost
             .iter()
-            .any(|(l, _)| self.concerns(*l, own_only))
-    }
-
-    fn other_in_flight(&self) -> bool {
-        !self.has(ViewerFlaw::InFlightPerVideo)
-            && self.standing().in_flight.is_some_and(|l| l != self.id)
+            .any(|(l, _)| !own_only || *l == self.id)
     }
 
     fn set_pending(&mut self, p: Pending) {
@@ -1950,11 +2055,18 @@ impl MockViewer {
         self.standing().in_flight = Some(self.id);
     }
 
+    /// Free the standing's in-flight slot if `ledger` holds it.
+    fn free_slot(&self, ledger: u64) {
+        let mut st = self.standing();
+        if st.in_flight == Some(ledger) {
+            st.in_flight = None;
+        }
+    }
+
     fn take_pending(&mut self) -> Option<Pending> {
         let p = self.pending.take();
-        let mut st = self.standing();
-        if st.in_flight == Some(self.id) {
-            st.in_flight = None;
+        if p.is_some() {
+            self.free_slot(self.id);
         }
         p
     }
@@ -1979,9 +2091,9 @@ impl MockViewer {
         }
     }
 
-    /// Reclaim payment `p` of `ledger`. Proofs found spent leave it awaiting a quote; a
-    /// mint that is down leaves the reclaim to finish later. Either way nothing is paid to
-    /// the seeder until then.
+    /// Reclaim payment `p` of `ledger`. Proofs found spent leave it awaiting a quote on
+    /// that ledger; a mint that is down leaves the reclaim to finish later. Either way
+    /// nothing is paid to the seeder until then.
     fn reclaim(&mut self, ledger: u64, p: Pending, retry: bool) {
         match self.take_back(&p.token, retry) {
             Reclaim::All => {}
@@ -2000,8 +2112,8 @@ impl MockViewer {
         self.clock.now() >= p.sent_at + wait
     }
 
-    /// Finish incomplete reclaims, and settle a payment that outlived its session and has
-    /// gone unanswered for 120 s.
+    /// Finish incomplete reclaims, and reclaim payments closed sessions left unsettled
+    /// once they are 120 s old, whichever of the standing's ledgers they belong to.
     fn catch_up(&mut self) {
         let own = self.has(ViewerFlaw::ReclaimPerVideo);
         let retry: Vec<(u64, Pending)> = {
@@ -2013,16 +2125,26 @@ impl MockViewer {
             retry
         };
         for (ledger, p) in retry {
+            let ledger = if self.has(ViewerFlaw::RetryAsSelf) {
+                self.id
+            } else {
+                ledger
+            };
             self.reclaim(ledger, p, true);
         }
-        let old = self.unsettled
-            && self
-                .pending
-                .as_ref()
-                .is_some_and(|p| self.has(ViewerFlaw::CatchUpIgnoresWait) || self.waited(p));
-        if old && let Some(p) = self.take_pending() {
-            self.unsettled = false;
-            self.reclaim(self.id, p, false);
+        let own = self.has(ViewerFlaw::CatchUpOwnOnly);
+        let early = self.has(ViewerFlaw::CatchUpIgnoresWait);
+        let old: Vec<(u64, Pending)> = {
+            let mut st = self.standing();
+            let (old, keep) = std::mem::take(&mut st.unsettled)
+                .into_iter()
+                .partition(|(l, p)| (!own || *l == self.id) && (early || self.waited(p)));
+            st.unsettled = keep;
+            old
+        };
+        for (ledger, p) in old {
+            self.free_slot(ledger);
+            self.reclaim(ledger, p, false);
         }
     }
 
@@ -2039,10 +2161,23 @@ impl MockViewer {
         let reclaim_blocks = self.reclaim_incomplete()
             && !(may_ahead && self.has(ViewerFlaw::PayAheadIgnoresReclaim))
             && !(last && self.has(ViewerFlaw::LastPayIgnoresReclaim));
-        let pending_blocks = (self.pending.is_some() || self.other_in_flight())
+        // The standing's one slot: this ledger's payment in flight or left unsettled, or
+        // another video's.
+        let slot = self.standing().in_flight;
+        let own = slot == Some(self.id) || self.pending.is_some();
+        let own_blocks = own && !(last && self.has(ViewerFlaw::LastPayIgnoresOwnPending));
+        let other_blocks = slot.is_some_and(|l| l != self.id)
+            && !self.has(ViewerFlaw::InFlightPerVideo)
+            && !(last && self.has(ViewerFlaw::LastPayIgnoresOtherInFlight));
+        let pending_blocks = (own_blocks || other_blocks)
             && !(may_ahead && self.has(ViewerFlaw::PayAheadIgnoresPending));
         let awaiting = self.awaiting(self.has(ViewerFlaw::StopPerVideo));
+        let out_of_tries = self.standing().unavailable >= UNAVAILABLE_BUDGET
+            && !self.has(ViewerFlaw::NoUnavailableBudget);
         if (self.halted() && stop_holds) || awaiting || reclaim_blocks || pending_blocks {
+            return Ok(None);
+        }
+        if out_of_tries {
             return Ok(None);
         }
         let unpaid = self.requested.saturating_sub(self.acked);
@@ -2077,7 +2212,6 @@ impl MockViewer {
             token: token.clone(),
             sent_at: self.clock.now(),
         });
-        self.unsettled = false;
         if !self.has(ViewerFlaw::PayAheadSticky) {
             self.pay_ahead = false;
         }
@@ -2085,6 +2219,43 @@ impl MockViewer {
             upto_chunk: upto,
             token,
         }))
+    }
+
+    /// Settle this ledger's entry in `list` (of the standing) if `quote` shows it exactly.
+    fn settle_by_quote(
+        &mut self,
+        quote: &Quote,
+        pick: fn(&mut Standing) -> &mut Vec<(u64, Pending)>,
+        upto_alone: bool,
+        spent_alone: bool,
+        any_ledger: bool,
+    ) -> bool {
+        let found = {
+            let mut st = self.standing();
+            pick(&mut st)
+                .iter()
+                .find(|(l, _)| any_ledger || *l == self.id)
+                .map(|(l, p)| (*l, p.clone()))
+        };
+        let Some((ledger, p)) = found else {
+            return false;
+        };
+        let upto_ok = quote.accepted_upto == p.upto;
+        let spent_ok = quote.spent_total == self.spent + p.amount;
+        let settles = if upto_alone {
+            upto_ok
+        } else if spent_alone {
+            spent_ok
+        } else {
+            upto_ok && spent_ok
+        };
+        if !settles {
+            return false;
+        }
+        self.acked = quote.accepted_upto;
+        self.spent = quote.spent_total;
+        pick(&mut self.standing()).retain(|(l, _)| *l != ledger);
+        true
     }
 }
 
@@ -2115,49 +2286,31 @@ impl Viewer for MockViewer {
         if quote.price_per_chunk > self.max_price && !skip_cap {
             return Err("price above this viewer's cap".into());
         }
+        if quote.window > WINDOW_CEILING && !self.has(ViewerFlaw::NoWindowCeiling) {
+            return Err("window above this viewer's ceiling".into());
+        }
         if !quote.mints.contains(&self.mint) {
             return Err("no mint this viewer holds tokens from".into());
         }
-        // A quote showing the unsettled payment accepted, both fields, settles it.
-        if self.unsettled
-            && let Some(p) = &self.pending
-        {
-            let upto_ok = quote.accepted_upto == p.upto;
-            let spent_ok = quote.spent_total == self.spent + p.amount;
-            let settles = if self.has(ViewerFlaw::SettleOnSpentOnly) {
-                spent_ok
-            } else if self.has(ViewerFlaw::SettleOnUptoOnly) {
-                upto_ok
-            } else {
-                upto_ok && spent_ok
-            };
-            if settles {
-                self.acked = quote.accepted_upto;
-                self.spent = quote.spent_total;
-                self.unsettled = false;
-                self.take_pending();
-            }
+        // A quote showing an unsettled payment accepted, both fields, settles it.
+        if self.settle_by_quote(
+            quote,
+            |st| &mut st.unsettled,
+            self.has(ViewerFlaw::SettleOnUptoOnly),
+            self.has(ViewerFlaw::SettleOnSpentOnly),
+            false,
+        ) {
+            self.free_slot(self.id);
         }
         // So does one showing a payment that awaits a quote; one equal to the ledger
         // leaves it waiting.
-        let lost = {
-            let st = self.standing();
-            st.lost
-                .iter()
-                .find(|(l, _)| *l == self.id)
-                .map(|(_, p)| p.clone())
-        };
-        if let Some(p) = lost {
-            let upto_ok = quote.accepted_upto == p.upto;
-            let spent_ok = quote.spent_total == self.spent + p.amount;
-            let settles = upto_ok && (spent_ok || self.has(ViewerFlaw::SettleLostOnUpto));
-            if settles {
-                self.acked = quote.accepted_upto;
-                self.spent = quote.spent_total;
-                let id = self.id;
-                self.standing().lost.retain(|(l, _)| *l != id);
-            }
-        }
+        self.settle_by_quote(
+            quote,
+            |st| &mut st.lost,
+            self.has(ViewerFlaw::SettleLostOnUpto),
+            self.has(ViewerFlaw::SettleLostOnSpentOnly),
+            self.has(ViewerFlaw::SettleLostAnyLedger),
+        );
         let mut honest = quote.served <= self.requested
             && quote.accepted_upto == self.acked
             && quote.spent_total == self.spent;
@@ -2177,8 +2330,31 @@ impl Viewer for MockViewer {
             let id = self.id;
             self.standing().lost.retain(|(l, _)| *l != id);
         }
+        // A new session: `mint-unavailable` answers are counted afresh.
+        self.standing().unavailable = 0;
         self.quote = Some(quote.clone());
         Ok(())
+    }
+
+    fn hello_refused(&mut self, rej: &Rej) {
+        if self.has(ViewerFlaw::HelloRefusalReclaims) {
+            let id = self.id;
+            let mine: Vec<(u64, Pending)> = {
+                let mut st = self.standing();
+                let (mine, keep) = std::mem::take(&mut st.unsettled)
+                    .into_iter()
+                    .partition(|(l, _)| *l == id);
+                st.unsettled = keep;
+                mine
+            };
+            for (ledger, p) in mine {
+                self.free_slot(ledger);
+                self.reclaim(ledger, p, false);
+            }
+        }
+        if rej.code == RejCode::Banned {
+            self.halt();
+        }
     }
 
     fn requested(&mut self) {
@@ -2236,6 +2412,7 @@ impl Viewer for MockViewer {
             if let Some(p) = expected {
                 self.spent += p.amount;
             }
+            self.standing().unavailable = 0;
             return Ok(());
         }
         self.halt();
@@ -2248,16 +2425,33 @@ impl Viewer for MockViewer {
             self.halt();
             return;
         }
-        if let Some(p) = self.take_pending() {
-            self.unsettled = false;
-            self.reclaim(self.id, p, false);
-        }
+        let Some(p) = self.take_pending() else {
+            // It answers no payment of this session: unsolicited.
+            if !self.has(ViewerFlaw::UnsolicitedRejIgnored) {
+                self.halt();
+            }
+            return;
+        };
+        self.reclaim(self.id, p, false);
         if rej.code != RejCode::MintUnavailable || self.has(ViewerFlaw::StopsOnOutage) {
             self.halt();
+        } else {
+            self.standing().unavailable += 1;
         }
     }
 
     async fn timeout(&mut self) {
+        if self.has(ViewerFlaw::TimeoutTouchesUnsettled) && self.pending.is_none() {
+            let id = self.id;
+            let mine = {
+                let st = self.standing();
+                st.unsettled.iter().any(|(l, p)| *l == id && self.waited(p))
+            };
+            if mine {
+                self.halt();
+            }
+            return;
+        }
         let Some(p) = &self.pending else {
             return;
         };
@@ -2265,7 +2459,6 @@ impl Viewer for MockViewer {
             return;
         }
         if let Some(p) = self.take_pending() {
-            self.unsettled = false;
             self.reclaim(self.id, p, false);
         }
         if !self.has(ViewerFlaw::KeepsPayingAfterTimeout) {
@@ -2275,16 +2468,18 @@ impl Viewer for MockViewer {
 
     fn end(&mut self) {
         self.quote = None;
-        if self.pending.is_some() {
+        if let Some(p) = self.pending.take() {
             if self.has(ViewerFlaw::EndReclaimsNow) {
-                if let Some(p) = self.take_pending() {
-                    self.reclaim(self.id, p, false);
-                }
+                self.free_slot(self.id);
+                self.reclaim(self.id, p, false);
                 self.halt();
             } else if self.has(ViewerFlaw::EndForgetsPending) {
-                self.take_pending();
+                self.free_slot(self.id);
             } else {
-                self.unsettled = true;
+                if self.has(ViewerFlaw::EndClearsInFlight) {
+                    self.free_slot(self.id);
+                }
+                self.standing().unsettled.push((self.id, p));
             }
         }
         if self.has(ViewerFlaw::ForgetsLedger) {
@@ -2297,7 +2492,7 @@ impl Viewer for MockViewer {
     }
 
     fn awaiting_quote(&self) -> bool {
-        !self.halted() && self.awaiting(true)
+        !self.halted() && self.awaiting(!self.has(ViewerFlaw::AwaitingQuoteAnyLedger))
     }
 }
 
@@ -2390,6 +2585,7 @@ impl Harness for MockHarness {
             account_ttl: ACCOUNT_TTL,
             ban_ttl: BAN_TTL,
             mints: 1,
+            extra_mint: None,
         })
         .unwrap_or_else(|why| panic!("a seeder refuses this configuration: {why}"))
     }
@@ -2406,6 +2602,7 @@ impl Harness for MockHarness {
                             format!("https://mint{i}.mock.example")
                         }
                     })
+                    .chain(params.extra_mint.map(str::to_owned))
                     .collect(),
                 window: params.window,
                 global_cap: params.global_cap,
@@ -2453,6 +2650,10 @@ impl Harness for MockHarness {
 
     fn foreign_chunk(&self) -> String {
         "f".repeat(64)
+    }
+
+    fn window_ceiling(&self) -> u64 {
+        WINDOW_CEILING
     }
 
     fn viewer(&self, max_price: u64) -> MockViewer {
@@ -2559,6 +2760,10 @@ impl Harness for MockHarness {
 
     fn hold_key_fetches(&self) {
         self.net.ledger().hold_keys = true;
+    }
+
+    fn hold_next_swap(&self) {
+        self.net.ledger().hold_next = true;
     }
 
     async fn release_oldest_swap(&self) {

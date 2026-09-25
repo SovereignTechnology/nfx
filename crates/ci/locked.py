@@ -22,6 +22,12 @@ The facts, one per line:
   onto each. A version bump, a swapped source, a [patch] or a feature switched on
   elsewhere fails.
 - `toolchain rustc <release> <commit>`.
+- `money-build <name> <version> <features>`: the features the lock job's own build of the
+  money crates compiles each package with (a narrower set than the workspace unifies).
+  Checked after that build.
+
+Every path package must be a workspace member: a crate outside the workspace, wired in
+by path, would escape every check here.
 
 `compiled` also checks, without pins, on the build it runs:
 - every file a library or binary compiles is a tracked file inside its own crate; nfx-pay's
@@ -45,8 +51,8 @@ REPO = pathlib.Path(
                    check=True, capture_output=True, text=True).stdout.strip()).resolve()
 CRATES = REPO / "crates"
 PINS = CRATES / "ci" / "locked-compiled.txt"
-MONEY_USERS = [":!crates/nfx-pay", ":!crates/nfx-node/src/pay", ":!crates/nfx-node/src/origin_pay.rs",
-               ":!crates/ci"]
+MONEY_USERS = [":!crates/nfx-pay", ":!crates/nfx-node/src/pay", ":!crates/nfx-node/src/origin_pay.rs"]
+BUILD = "money-build "
 
 
 def fail(msg: str) -> None:
@@ -73,11 +79,26 @@ def manifest() -> None:
     print(f"derived {digest} crates/Cargo.toml#profile,patch,replace,workspace.lints,resolver,members")
 
 
+def member_names() -> set[str]:
+    with open(CRATES / "Cargo.toml", "rb") as f:
+        members = tomllib.load(f)["workspace"]["members"]
+    names = set()
+    for m in members:
+        with open(CRATES / m / "Cargo.toml", "rb") as f:
+            names.add(tomllib.load(f)["package"]["name"])
+    return names
+
+
 def sources() -> None:
     """Every .crate in CARGO_HOME's cache that Cargo.lock names matches its checksum, so
-    sources extracted from the cache are the published ones."""
+    sources extracted from the cache are the published ones. Every package without a
+    source is a workspace member."""
     with open(CRATES / "Cargo.lock", "rb") as f:
         lock = tomllib.load(f)
+    unsourced = {p["name"] for p in lock.get("package", []) if p.get("source") is None}
+    strangers = unsourced - member_names()
+    if strangers:
+        fail(f"path packages outside the workspace: {sorted(strangers)}")
     home = pathlib.Path(os.environ.get("CARGO_HOME", pathlib.Path.home() / ".cargo"))
     caches = list((home / "registry" / "cache").glob("*"))
     checked = 0
@@ -145,7 +166,7 @@ def dep_info(filenames: list[str]) -> list[pathlib.Path]:
     found = []
     for f in filenames:
         p = pathlib.Path(f)
-        if p.parent.name != "deps":
+        if p.parent.name not in ("deps", "examples"):
             continue
         stem = p.name.split(".")[0]
         stem = stem[3:] if stem.startswith("lib") and p.suffix in (".rlib", ".rmeta", ".so") else stem
@@ -176,15 +197,20 @@ def facts_now() -> tuple[list[str], dict, list[dict]]:
     with open(CRATES / "Cargo.lock", "rb") as f:
         lock = tomllib.load(f)
     members = [p for p in meta["packages"] if p["id"] in meta["workspace_members"]]
+    strangers = [p["name"] for p in meta["packages"]
+                 if p["source"] is None and p["id"] not in meta["workspace_members"]]
+    if strangers:
+        fail(f"path packages outside the workspace: {sorted(strangers)}")
     facts = []
+    for p in meta["packages"]:
+        if p["name"] != "nfx-pay" and any(d["name"] == "nfx-pay" for d in p["dependencies"]):
+            facts.append(f"depends-on-nfx-pay {p['name']}")
     for p in members:
         kinds = {k for t in p["targets"] for k in t["kind"]}
         if "custom-build" in kinds:
             facts.append(f"build-script {p['name']}")
         if "proc-macro" in kinds:
             facts.append(f"proc-macro {p['name']}")
-        if p["name"] != "nfx-pay" and any(d["name"] == "nfx-pay" for d in p["dependencies"]):
-            facts.append(f"depends-on-nfx-pay {p['name']}")
     facts += closure(meta, lock)
     version = run("rustc", "-vV")
     release = re.search(r"^release: (\S+)$", version, re.M)
@@ -195,11 +221,12 @@ def facts_now() -> tuple[list[str], dict, list[dict]]:
     return sorted(facts), meta, members
 
 
-def check_facts(facts: list[str]) -> None:
-    text = "".join(f + "\n" for f in facts)
-    if not PINS.exists() or PINS.read_text() != text:
-        old = set(PINS.read_text().splitlines()) if PINS.exists() else set()
-        new = set(facts)
+def check_facts(facts: list[str], build: bool = False) -> None:
+    """The metadata facts (or, with `build`, the money build's) against their pins."""
+    pinned = PINS.read_text().splitlines() if PINS.exists() else []
+    old = {x for x in pinned if x.startswith(BUILD) == build}
+    new = set(facts)
+    if old != new:
         diff = [f"- {x}" for x in sorted(old - new)] + [f"+ {x}" for x in sorted(new - old)]
         fail("what the money crates are built from differs from its pins:\n" + "\n".join(diff))
 
@@ -208,6 +235,17 @@ def facts() -> None:
     found, _, _ = facts_now()
     check_facts(found)
     print(f"locked paths: {len(found)} facts match their pins, read before any build")
+
+
+def package_of(package_id: str) -> tuple[str, str]:
+    """(name, version) from a cargo package id: `source#name@version`, or `source#version`
+    when the name is the path's last component."""
+    base, _, frag = package_id.partition("#")
+    if "@" in frag:
+        name, _, version = frag.partition("@")
+    else:
+        name, version = base.rstrip("/").rsplit("/", 1)[-1], frag
+    return name, version
 
 
 def compiled(scope: str, pin: bool) -> None:
@@ -222,8 +260,12 @@ def compiled(scope: str, pin: bool) -> None:
     select = ["--workspace"] if scope == "workspace" else ["-p", "nfx-pay", "-p", "nfx-proto"]
     out = run("cargo", "test", *select, "--no-run", "--locked", "--offline", "--message-format=json")
     seen_targets = 0
+    built = set()
     for line in out.splitlines():
         msg = json.loads(line)
+        if msg.get("reason") == "compiler-artifact":
+            name, version = package_of(msg["package_id"])
+            built.add(f"{BUILD}{name} {version} {','.join(sorted(msg.get('features', []))) or '-'}")
         if msg.get("reason") != "compiler-artifact" or msg["manifest_path"] not in crate_dirs:
             continue
         crate = crate_dirs[msg["manifest_path"]]
@@ -241,7 +283,7 @@ def compiled(scope: str, pin: bool) -> None:
     if seen_targets == 0:
         fail(f"found no dep-info for the {scope} build")
 
-    named = subprocess.run(["git", "grep", "-nw", "nfx_pay", "--", "crates", *MONEY_USERS],
+    named = subprocess.run(["git", "grep", "-nw", "nfx_pay", "--", "*.rs", *MONEY_USERS],
                            cwd=REPO, capture_output=True, text=True)
     if named.returncode == 0:
         fail("only nfx-pay and nfx-node's locked paths may name nfx_pay:\n" + named.stdout)
@@ -269,7 +311,14 @@ def compiled(scope: str, pin: bool) -> None:
         if ran.get(name) != n:
             fail(f"tests/{name}.rs: {n} tests declared, {ran.get(name)} ran and passed")
 
+    if scope == "money":
+        if pin:
+            found = sorted(found + list(built))
+        else:
+            check_facts(sorted(built), build=True)
     if pin:
+        if scope != "money":
+            fail("--pin pins the money build: use compiled --money --pin")
         PINS.write_text("".join(f + "\n" for f in found))
         print(f"pinned {len(found)} facts in {PINS.relative_to(REPO)}")
         return

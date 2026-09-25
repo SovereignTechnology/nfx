@@ -91,9 +91,11 @@ Browser peers earn sats for serving other browsers. There is one rule set for th
 mesh, and it is NFX-07's:
 
 - **Messages.** The pay/1 messages of NFX-07 §2 (`hello`, `quote`, `pay`, `ack`,
-  `rej`), byte-identical JSON, travel on the WebRTC data channel p2p-media-loader
-  already holds open between two peers. There is one pay session per remote peer and
-  video, as on iroh. A browser↔bridge link is the same (§2).
+  `rej`, `refuse`), byte-identical JSON, travel on the WebRTC data channel
+  p2p-media-loader already holds open between two peers. A peer opens a pay session per
+  remote peer and video it watches, as on iroh, and NFX-07 §3 allows several open at once
+  on one account, up to the per-peer cap. The channel meets NFX-07 §2's delivery rule:
+  a message unacknowledged for 60 s closes it. A browser↔bridge link is the same (§2).
 - **Unit and window.** The mesh accounts in **chunks, where one chunk is one NFX-05
   file**. That is a whole segment or init, never a WebRTC message fragment. `quote.window`
   is the number of chunks a peer will upload unpaid, default 8 (about 16 s of video at
@@ -176,3 +178,5 @@ NFX-05 byte formats.
   identities are self-chosen, so the global cap is the bound.
 - Draft 2026-09-24 (M2.0 fourth audit): §3.2 follows NFX-07 as revised. The window is
   per account, and a refused upload request is answered with pay/1 `refuse`.
+- Draft 2026-09-24 (M2.0 sixth audit): §3.2 lists `refuse`, allows several pay sessions
+  on one account as NFX-07 does, and holds the data channel to NFX-07 §2's delivery rule.
