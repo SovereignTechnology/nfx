@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of twelve
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of thirteen
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -31,7 +31,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [ninth](reviews/2026-09-24-m2.0-ninth-audit.md),
 [tenth](reviews/2026-09-24-m2.0-tenth-audit.md),
 [eleventh](reviews/2026-09-24-m2.0-eleventh-audit.md),
-[twelfth](reviews/2026-09-24-m2.0-twelfth-audit.md)). sovtech's bar for the push is zero
+[twelfth](reviews/2026-09-24-m2.0-twelfth-audit.md),
+[thirteenth](reviews/2026-09-24-m2.0-thirteenth-audit.md)). sovtech's bar for the push is zero
 findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -61,18 +62,30 @@ findings, confirmed after the sixth:
   - `Harness`.
 - **Mock:** `nfx_pay::mock` has:
   - a proof-based mock mint: multi-proof tokens, atomic swaps, held swaps or held
-    responses, lost responses, requests the swapper gave up on, NUT-07 input checks and
-    NUT-09 restore of each swap's own outputs, partial claims, mint and restore outages,
-    dial records;
+    responses, lost responses, requests the swapper gave up on, requests held after
+    reserving their inputs (NUT-07 `PENDING`) and their rollback, batched NUT-07 checks
+    and NUT-09 restores of each swap's own outputs, partial claims, mint, restore and
+    state-check outages, dial records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, two of them
-  threaded, and **each of 233 planted defects fails its scenario**, every surviving mutant
-  from all twelve audits among them.
+  threaded, and **each of 246 planted defects fails its scenario**, every surviving mutant
+  from all thirteen audits among them.
+- **Since the thirteenth audit:**
+  - the mock reads swap state as a real engine must: outside its lock, in one batch,
+    applying each decision only to a swap still undecided, and deciding each on its own;
+  - a `PENDING` input is not spent; a first attempt refused as pending bans nobody, a
+    retry refused so leaves the outcome unknown, and a watcher retries a reclaim refused
+    so;
+  - an unanswered read proves nothing; a decided swap releases only its own turn, and
+    wakes what waits for it;
+  - an undecided swap whose inputs read unspent `account_ttl` after it became unknown is
+    dropped.
 - **Since the twelfth audit:**
   - a swap with no answer, lost or abandoned in flight, is decided by reading its inputs
     (NUT-07), then its outputs (NUT-09): signed is a claim, unsigned with an input spent
     is nothing, and unsigned with every input unspent stays unknown. An honest watcher's
-    reclaim spends the inputs, so a request the mint holds no longer stalls the pair;
+    reclaim spends the inputs, so a request the mint holds (before reserving its inputs,
+    as the thirteenth audit found) no longer stalls the pair;
   - a decided swap's record goes, with any turn it holds, and a later answer changes
     nothing;
   - the harness can have the seeder's client give up on a request that stays queued at
