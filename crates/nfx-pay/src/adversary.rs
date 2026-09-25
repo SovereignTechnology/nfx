@@ -937,7 +937,9 @@ pub async fn a_seeder_answers_within_its_deadline<H: Harness>(h: &H) {
             token: h.token(4).await,
         },
     );
-    h.hold_swaps();
+    // The mint's keys are held, so nothing is sent: each payment waits on its own
+    // deadline, counted from its arrival.
+    h.hold_key_fetches();
     let (a_done, b_arrived, b_done) = (
         AtomicBool::new(false),
         AtomicBool::new(false),
@@ -1227,12 +1229,86 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
         !h.claimed_any(&next.token).await,
         "not swapped while the earlier outcome is unknown"
     );
+    // That account alone: another peer, and the same peer on another video, pay as usual.
+    let mut other = open(h, &e, 2).await;
+    serve(h, &mut other, 0, 4);
+    other
+        .pay(&Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        })
+        .await
+        .expect("another peer's payment is swapped");
+    let mut elsewhere = open_on(h, &e, 1, 1).await;
+    serve_on(h, &mut elsewhere, 1, 0, 4);
+    elsewhere
+        .pay(&Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        })
+        .await
+        .expect("so is the same peer's on another video");
     h.restore_outage(false);
     let q = open(h, &e, 1).await.quote().clone();
     assert_eq!(
         (q.accepted_upto, q.spent_total),
         (4, 4),
         "learnt once restores are answered"
+    );
+
+    // A retry answered `spent` whose restore goes unanswered leaves the outcome unknown,
+    // to be learnt; an honest watcher's next quote then settles the payment.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).unwrap();
+    for i in 0..2 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    let pay = v.due().await.unwrap().expect("due");
+    h.restore_outage(true);
+    h.lose_next_swap_response();
+    let r = s.pay(&pay).await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    assert!(!s.banned());
+    v.rej(&r.expect_err("mint-unavailable")).await;
+    h.restore_outage(false);
+    v.requested();
+    let _ = v.due().await.unwrap();
+    drop(s);
+    v.end();
+    let s = open(h, &e, 1).await;
+    assert_eq!(
+        (s.quote().accepted_upto, s.quote().spent_total),
+        (2, 2),
+        "the claim is learnt once restores are answered"
+    );
+    v.quote(s.quote()).expect("the quote settles the payment");
+    assert!(!v.stopped(), "the honest pair carries on");
+
+    // A late claim is credited when the payment was its account's first act: a
+    // pre-payment by a peer the seeder had admitted nothing for.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    h.hold_swap_responses();
+    let pre = Pay {
+        upto_chunk: 2,
+        token: h.token(2).await,
+    };
+    let (r, ()) = both(s.pay(&pre), async {
+        yield_once().await;
+        h.advance(Duration::from_secs(60));
+    })
+    .await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    h.release_swaps().await;
+    assert!(h.claimed_all(&pre.token).await, "the seeder has the proofs");
+    let q = open(h, &e, 1).await.quote().clone();
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (2, 2),
+        "the late claim is credited, creating the account"
     );
 
     let e = h.engine(1, 4, 1000);
@@ -1349,8 +1425,10 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
 
 /// A turn held past its payment's deadline is taken over, even when nobody awaits that
 /// payment: a `hello` waiting behind a dropped, black-holed payment is answered at
-/// exactly 60 s, on its own task. When the abandoned payment lands later, it releases
-/// nothing it no longer holds. Waiting hellos count toward the session cap.
+/// exactly 60 s, on its own task. While the abandoned swap is in flight its outcome is
+/// unknown, so the next payment is answered at once, with no swap. When the abandoned
+/// payment lands, it releases nothing it no longer holds. Waiting hellos count toward the
+/// session cap.
 pub async fn the_deadline_frees_the_account<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
@@ -1383,12 +1461,24 @@ pub async fn the_deadline_frees_the_account<H: Harness>(h: &H) {
         h.steal(&dropped.token).await,
         "its watcher takes the proofs back"
     );
+    // The abandoned swap is still in flight, its outcome unknown: the next payment gets
+    // its turn, and is answered `mint-unavailable` without a swap.
+    let early = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    assert!(is_rej(&s.pay(&early).await, &RejCode::MintUnavailable));
+    assert!(!h.claimed_any(&early.token).await, "not swapped");
+    // Once it lands, the account pays again. The next payment holds the turn while it
+    // fetches keys, and the abandoned swap landing then releases nothing it no longer
+    // holds.
     let next = Pay {
         upto_chunk: 4,
         token: h.token(4).await,
     };
     let (hello, next_done, hello_done) =
         (h.hello(), AtomicBool::new(false), AtomicBool::new(false));
+    h.hold_key_fetches();
     let ((paid, late), ()) = both(
         both(
             marked(s.pay(&next), &next_done),
@@ -1417,7 +1507,8 @@ pub async fn the_deadline_frees_the_account<H: Harness>(h: &H) {
     );
     assert!(!s.banned(), "the late spent bans nobody");
 
-    // A payment takes over a dead turn too, and its own swap goes through.
+    // A payment takes over a dead turn too: answered at once, with no swap while the dead
+    // one's outcome is unknown, and its own swap goes through once that lands.
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 3).await;
     serve(h, &mut s, 0, 4);
@@ -1429,15 +1520,17 @@ pub async fn the_deadline_frees_the_account<H: Harness>(h: &H) {
     poll_once(s.pay(&dead)).await;
     h.advance(Duration::from_secs(60));
     assert!(h.steal(&dead.token).await, "its watcher takes it back");
-    let ack = s
-        .pay(&Pay {
-            upto_chunk: 4,
-            token: h.token(4).await,
-        })
-        .await
-        .expect("the next payment takes over the dead turn");
-    assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
+    let next = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    assert!(
+        is_rej(&s.pay(&next).await, &RejCode::MintUnavailable),
+        "the next payment takes over the dead turn, and is answered"
+    );
     h.release_swaps().await;
+    let ack = s.pay(&next).await.expect("its swap goes through now");
+    assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
 
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 2).await;
@@ -1861,6 +1954,57 @@ pub async fn only_never_paid_accounts_are_forgotten<H: Harness>(h: &H) {
         q.served, 4,
         "idle from its last session's close, not its last admission"
     );
+
+    // An account holding a swap of unknown outcome is kept until it is learnt: its answer
+    // lost with restores unanswered past account_ttl, or its swap still in flight.
+    for in_flight in [false, true] {
+        let e = h.engine(1, 4, 4);
+        let mut s = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        let unseen = Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        };
+        if in_flight {
+            h.hold_swaps();
+            let (r, ()) = both(s.pay(&unseen), async {
+                yield_once().await;
+                h.advance(Duration::from_secs(60));
+            })
+            .await;
+            assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+        } else {
+            h.hold_swap_responses();
+            h.lose_next_swap_response();
+            let (r, ()) = both(s.pay(&unseen), async {
+                yield_once().await;
+                h.mint_outage(true);
+                h.release_swaps().await;
+            })
+            .await;
+            assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+            h.mint_outage(false);
+            h.restore_outage(true);
+        }
+        drop(s);
+        h.advance(h.account_ttl() + SECOND);
+        // Another peer's entry runs the housekeeping while the outcome is still unknown.
+        let mut other = open(h, &e, 2).await;
+        h.release_swaps().await;
+        h.restore_outage(false);
+        assert_eq!(serve(h, &mut other, 0, 4), 4, "the cap fills again");
+        let mut s = open(h, &e, 1).await;
+        assert_eq!(
+            (s.quote().served, s.quote().accepted_upto),
+            (4, 4),
+            "the account was kept, and its claim credited (in flight: {in_flight})"
+        );
+        assert_eq!(
+            serve(h, &mut s, 100, 4),
+            0,
+            "a full cap serves nothing uncovered (in flight: {in_flight})"
+        );
+    }
 }
 
 /// Bans last `ban_ttl`, then expire. A flood of banned free identities leaves nothing
@@ -1968,6 +2112,41 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
         "replays during an outage leave nothing behind"
     );
     h.mint_outage(false);
+
+    // Swaps left without an answer, in flight or lost, are one per account at most: while
+    // one is, the account's payments are not swapped.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    let before = h.identities_held(&e);
+    h.restore_outage(true);
+    h.hold_swaps();
+    for _ in 0..20 {
+        let p = Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        };
+        let (r, ()) = both(s.pay(&p), async {
+            yield_once().await;
+            h.advance(Duration::from_secs(60));
+        })
+        .await;
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    }
+    assert!(
+        h.identities_held(&e) - before <= 1,
+        "one swap in flight, not twenty"
+    );
+    for _ in 0..20 {
+        h.lose_next_swap_response();
+        h.release_oldest_swap().await;
+    }
+    h.release_swaps().await;
+    assert!(
+        h.identities_held(&e) - before <= 1,
+        "one unknown outcome, not twenty"
+    );
+    h.restore_outage(false);
 }
 
 /// A seeder refuses to start with a configuration NFX-07 §3 forbids, and starts with one
@@ -2678,6 +2857,62 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
         v.due().await.unwrap().is_some() && !v.awaiting_quote(),
         "its own reclaim is not a loss: it pays again"
     );
+    // An unanswered restore says nothing: not that its own reclaim took the proofs...
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).unwrap();
+    for i in 0..2 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    let pay = v.due().await.unwrap().expect("due");
+    h.mint_outage(true);
+    let rej = s.pay(&pay).await.expect_err("mint-unavailable");
+    h.mint_outage(false);
+    h.lose_next_reclaim_response();
+    h.restore_outage(true);
+    v.rej(&rej).await;
+    v.requested();
+    assert!(
+        v.due().await.unwrap().is_none(),
+        "the reclaim is still incomplete"
+    );
+    assert!(
+        !v.stopped() && !v.awaiting_quote(),
+        "nor that someone else spent them"
+    );
+    h.restore_outage(false);
+    let again = v
+        .due()
+        .await
+        .unwrap()
+        .expect("its proofs are back: it pays again");
+    v.ack(&s.pay(&again).await.expect("accepted")).unwrap();
+    // ...nor that they are back, when the seeder kept them.
+    let s = open(h, &h.engine(1, 4, 1000), 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).unwrap();
+    v.requested();
+    v.requested();
+    let pay = v.due().await.unwrap().expect("due");
+    assert!(h.steal(&pay.token).await, "the seeder keeps it");
+    h.restore_outage(true);
+    v.rej(&Rej {
+        code: RejCode::MintUnavailable,
+        detail: None,
+    })
+    .await;
+    v.requested();
+    assert!(
+        v.due().await.unwrap().is_none(),
+        "nothing more is paid while the restore goes unanswered"
+    );
+    h.restore_outage(false);
+    assert!(
+        v.due().await.unwrap().is_none() && v.awaiting_quote(),
+        "then it awaits a quote"
+    );
 }
 
 /// A viewer waits exactly 180 s for an answer on a live connection, then reclaims its
@@ -2823,6 +3058,49 @@ pub async fn a_viewer_settles_only_on_an_exact_match<H: Harness>(h: &H) {
         "spent_total alone does not settle a payment awaiting a quote"
     );
     assert!(v.stopped() && v.due().await.unwrap().is_none());
+
+    // The same for a payment whose reclaim is incomplete: both fields, on its own video.
+    for lie in ["spent only", "upto only", "another video"] {
+        let e = h.engine(1, 4, 1000);
+        let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
+        let mut v0 = h.viewer(1);
+        let mut v1 = v0.sibling();
+        v0.quote(s0.quote()).unwrap();
+        v1.quote(s1.quote()).unwrap();
+        v0.requested();
+        v0.requested();
+        let pay = v0.due().await.unwrap().expect("due");
+        h.mint_outage(true);
+        v0.rej(&Rej {
+            code: RejCode::MintUnavailable,
+            detail: None,
+        })
+        .await;
+        assert!(!v0.stopped(), "a blocked reclaim is not a stop");
+        drop((s0, s1));
+        v0.end();
+        v1.end();
+        let refused = if lie == "another video" {
+            let mut q = open_on(h, &e, 1, 1).await.quote().clone();
+            (q.accepted_upto, q.spent_total) = (pay.upto_chunk, 2);
+            v1.quote(&q).is_err()
+        } else {
+            let mut q = open_on(h, &e, 1, 0).await.quote().clone();
+            if lie == "spent only" {
+                q.spent_total = 2;
+            } else {
+                q.accepted_upto = pay.upto_chunk;
+            }
+            v0.quote(&q).is_err()
+        };
+        assert!(refused, "{lie}: not a settlement");
+        h.mint_outage(false);
+        v0.requested();
+        assert!(
+            v0.due().await.unwrap().is_none(),
+            "{lie}: nothing more is paid"
+        );
+    }
 }
 
 /// A seeder that swaps a payment and then refuses it, `mint-unavailable` included, gets
@@ -3999,8 +4277,17 @@ pub async fn an_honest_pair_survives_a_late_mint<H: Harness>(h: &H) {
     v.quote(s.quote())
         .expect("the quote shows the payment: settled, reclaim and all");
     assert!(!v.stopped());
-    stream(h, &mut s, &mut v, 2, 4).await;
+    stream(h, &mut s, &mut v, 2, 12).await;
     pay_the_tail::<H>(&mut s, &mut v).await;
+    assert!(!v.stopped());
+    drop(s);
+    v.end();
+    let q = open(h, &e, 1).await.quote().clone();
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (14, 14),
+        "every chunk paid, well past a window"
+    );
 }
 
 /// Free identities filling the global cap cannot lock out a paying watcher. Refused, it

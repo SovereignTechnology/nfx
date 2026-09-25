@@ -731,6 +731,18 @@ pub enum SeederFlaw {
     UnknownUnbounded,
     /// Refuses a token of exactly 64 proofs.
     ProofCapOffByOne,
+    /// Counts only lost answers as unknown, not a swap still unanswered in flight.
+    InFlightNotUnknown,
+    /// Refuses every account's payments while any account has an unknown swap.
+    UnknownGlobal,
+    /// Refuses a peer's payments on every video while one account has an unknown swap.
+    UnknownPeerWide,
+    /// Takes a retry's `spent`, with its restore unanswered, as not its own.
+    RetrySpentRestoreDownKnown,
+    /// Forgets an account holding a swap of unknown outcome.
+    ForgetsUnknownAccount,
+    /// Credits a late claim only to an account that already exists.
+    LateCreditNeedsAccount,
     /// Never takes over a turn held past its deadline.
     NoTakeover,
     /// Lets hellos take over a turn held past its deadline, but not payments.
@@ -902,6 +914,18 @@ pub enum ViewerFlaw {
     QuoteIgnoresReclaiming,
     /// Pays ahead half a window rounded up, beyond half on an odd window.
     PayAheadRoundsUp,
+    /// Settles a payment whose reclaim is incomplete when `spent_total` alone matches.
+    SettleReclaimingOnSpentOnly,
+    /// Settles a payment whose reclaim is incomplete when `accepted_upto` alone matches.
+    SettleReclaimingOnUpto,
+    /// Settles a payment whose reclaim is incomplete on another video's quote.
+    SettleReclaimingAnyLedger,
+    /// Settles a payment whose reclaim is incomplete, but keeps retrying the reclaim.
+    ReclaimSettleKeepsEntry,
+    /// Takes an unanswered restore as every proof back.
+    ReclaimRestoreDownIsBack,
+    /// Takes an unanswered restore as proofs spent.
+    ReclaimRestoreDownIsSpent,
     /// Gives no sign that its tries are used up.
     BudgetNotSignalled,
     /// Reclaims a payment left unsettled by a dropped connection at once.
@@ -1143,6 +1167,27 @@ impl Inner {
         }
     }
 
+    /// Whether `key` has a swap of unknown outcome: one whose answer was lost, or one sent
+    /// and still unanswered (abandoned at its deadline while in flight). `except` is the
+    /// payment asking.
+    fn unknown_swap(&self, st: &State, key: Key, except: u64) -> bool {
+        let same = |k: Key| {
+            if self.has(SeederFlaw::UnknownGlobal) {
+                true
+            } else if self.has(SeederFlaw::UnknownPeerWide) {
+                k.0 == key.0
+            } else {
+                k == key
+            }
+        };
+        st.unknown.iter().any(|(p, _, _)| same(p.key))
+            || (!self.has(SeederFlaw::InFlightNotUnknown)
+                && st
+                    .pays
+                    .iter()
+                    .any(|(id, r)| *id != except && same(r.key) && r.sent && !r.landed))
+    }
+
     /// A restore of this swap's own outputs (NUT-09): they are unique to one swap and its
     /// retries, so it finds that swap and no other.
     fn restore(&self, token: &str, outputs: u64) -> Option<bool> {
@@ -1178,6 +1223,7 @@ impl Inner {
                 match self.restore(token, outputs) {
                     Some(true) => Swap::Claimed,
                     Some(false) => Swap::Unreachable,
+                    None if self.has(SeederFlaw::RetrySpentRestoreDownKnown) => Swap::Unreachable,
                     None => Swap::Lost,
                 }
             }
@@ -1247,15 +1293,23 @@ impl Inner {
             let forget_paid = self.has(SeederFlaw::ForgetsPaidAccounts);
             let forget_open = self.has(SeederFlaw::ForgetsOpenAccounts);
             let unserved = self.has(SeederFlaw::ForgetsUnserved);
+            // An account whose swap has an unknown outcome is kept until it is learnt.
+            let held: HashSet<Key> = if self.has(SeederFlaw::ForgetsUnknownAccount) {
+                HashSet::new()
+            } else {
+                st.accounts
+                    .keys()
+                    .copied()
+                    .filter(|k| self.unknown_swap(st, *k, 0))
+                    .collect()
+            };
             let State {
                 accounts,
                 open_accounts,
-                unknown,
                 ..
             } = st;
             accounts.retain(|k, a| {
-                // An account whose swap has an unknown outcome is kept until it is learnt.
-                if unknown.iter().any(|(p, _, _)| p.key == *k) {
+                if held.contains(k) {
                     return true;
                 }
                 let open = open_accounts.contains_key(k) && !forget_open;
@@ -1437,6 +1491,9 @@ impl Inner {
     /// is banned on.
     fn settle_late(&self, st: &mut State, pay: &Settle, outcome: Swap) {
         match outcome {
+            Swap::Claimed
+                if self.has(SeederFlaw::LateCreditNeedsAccount)
+                    && !st.accounts.contains_key(&pay.key) => {}
             Swap::Claimed if !self.has(SeederFlaw::LateClaimNotCredited) => {
                 self.credit(st, pay.key, (pay.upto, pay.amount), &pay.snapshot, true);
             }
@@ -2116,9 +2173,7 @@ impl MockSession {
             if !e.has(SeederFlaw::LearnOnHelloOnly) {
                 e.learn(&mut st);
             }
-            if st.unknown.iter().any(|(p, _, _)| p.key == self.key)
-                && !e.has(SeederFlaw::UnknownUnbounded)
-            {
+            if e.unknown_swap(&st, self.key, id) && !e.has(SeederFlaw::UnknownUnbounded) {
                 return Err(unavailable("an earlier payment's outcome is not known yet"));
             }
             let acked_now = st.accounts.get(&self.key).map_or(0, |a| a.acked);
@@ -2456,6 +2511,8 @@ impl MockViewer {
                 {
                     Some(true) => Reclaim::All,
                     Some(false) => Reclaim::SomeSpent,
+                    None if self.has(ViewerFlaw::ReclaimRestoreDownIsBack) => Reclaim::All,
+                    None if self.has(ViewerFlaw::ReclaimRestoreDownIsSpent) => Reclaim::SomeSpent,
                     None => Reclaim::Blocked,
                 }
             }
@@ -2738,7 +2795,18 @@ impl Viewer for MockViewer {
         // And one showing a payment whose reclaim is incomplete: the seeder has it, and
         // the reclaim is cancelled.
         if !self.has(ViewerFlaw::QuoteIgnoresReclaiming) {
-            self.settle_by_quote(quote, |st| &mut st.reclaiming, false, false, false);
+            let keep = self.has(ViewerFlaw::ReclaimSettleKeepsEntry);
+            let before = keep.then(|| self.standing().reclaiming.clone());
+            self.settle_by_quote(
+                quote,
+                |st| &mut st.reclaiming,
+                self.has(ViewerFlaw::SettleReclaimingOnUpto),
+                self.has(ViewerFlaw::SettleReclaimingOnSpentOnly),
+                self.has(ViewerFlaw::SettleReclaimingAnyLedger),
+            );
+            if let Some(entries) = before {
+                self.standing().reclaiming = entries;
+            }
         }
         let mut honest = quote.served <= self.requested
             && quote.accepted_upto == self.acked

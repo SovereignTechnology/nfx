@@ -142,9 +142,12 @@ payment-enforced after release, so no mechanism pretends otherwise.
   peer with none has been served nothing and owes nothing, so a ban would protect
   nothing: its refused `pay` is answered, and nothing is kept for it.
 - Hellos waiting for a payment count toward the session cap.
-- A swap whose outcome is unknown (below) is kept until it is learnt, at most one per
-  account: while one is unknown, the account's further payments are answered
-  `mint-unavailable` without a swap. An account holding one is not forgotten.
+- A swap whose outcome is unknown is kept until it is learnt, at most one per account.
+  Unknown means sent with no answer: abandoned at the deadline while still in flight,
+  or answered and the answer lost (below). While one is unknown, the account's further
+  payments are answered `mint-unavailable` without a swap. That account alone: other
+  accounts, the same peer's included, pay as usual. An account holding one is not
+  forgotten.
 - A seeder SHOULD keep a bounded cache of proofs it has seen spent. It then refuses a
   replayed one (`spent`, with a ban) without asking the mint.
 
@@ -226,7 +229,9 @@ checks run in this order:
      the account's turn, the key fetch and the swap all count. A payment
      whose outcome the seeder has by then is answered with it, even at the deadline.
      Otherwise it answers `mint-unavailable`, abandons the swap (it sends no further
-     swap request for those proofs), and releases the account for its next payment.
+     swap request for those proofs), and releases the account's turn to its next
+     payment. That payment is answered at once, and while the abandoned swap's outcome
+     is unknown, `mint-unavailable` without a swap (bounded state, above).
    - **Late outcomes.** A swap the seeder has answered `mint-unavailable` for, at the
      deadline or earlier, is still settled when its outcome becomes known. The seeder
      MUST learn it: from a late response, or, when none comes, by NUT-09 restore of its
@@ -517,3 +522,7 @@ therefore loses nothing:
   - §3a:
     - pay-ahead is half the window, rounded down;
     - a quote settles a payment whose reclaim is incomplete.
+- Draft 2026-09-25 (M2.0 eleventh audit, `docs/nfx/reviews/2026-09-24-m2.0-eleventh-audit.md`).
+  - §3: a swap abandoned at the deadline while still in flight is of unknown outcome:
+    it counts toward the one-per-account bound, and the account's next payment is
+    answered at once, without a swap, until it is learnt.
