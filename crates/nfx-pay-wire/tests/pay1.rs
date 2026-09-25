@@ -22,10 +22,10 @@ fn pay1() -> Value {
 
 #[test]
 fn pay1_messages_parse_as_the_vectors_say() {
-    use nfx_proto::pay::{Message, ParseOptions};
+    use nfx_pay_wire::pay::{Message, ParseOptions};
     let v = pay1();
-    assert_eq!(v["max_line_bytes"], nfx_proto::pay::MAX_LINE_BYTES);
-    assert_eq!(v["max_depth"], nfx_proto::pay::MAX_DEPTH);
+    assert_eq!(v["max_line_bytes"], nfx_pay_wire::pay::MAX_LINE_BYTES);
+    assert_eq!(v["max_depth"], nfx_pay_wire::pay::MAX_DEPTH);
     let loopback = ParseOptions {
         allow_loopback_http: true,
     };
@@ -69,7 +69,7 @@ fn pay1_messages_parse_as_the_vectors_say() {
 
 #[test]
 fn pay1_writers_refuse_what_their_readers_would() {
-    use nfx_proto::pay::{Ack, MAX_INT, Message, ParseOptions, Quote, Rej, RejCode};
+    use nfx_pay_wire::pay::{Ack, MAX_INT, Message, ParseOptions, Quote, Rej, RejCode};
     let quote = |price, window, mints: Vec<&str>| {
         Message::Quote(Quote {
             price_per_chunk: price,

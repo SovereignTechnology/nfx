@@ -3072,8 +3072,22 @@ dependencies = [
 name = "nfx-pay"
 version = "0.1.0"
 dependencies = [
- "nfx-proto",
+ "nfx-pay-wire",
  "tokio",
+]
+
+[[package]]
+name = "nfx-pay-wire"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
+ "thiserror 2.0.20",
+ "wasm-bindgen-test",
 ]
 
 [[package]]
@@ -3084,6 +3098,7 @@ dependencies = [
  "chacha20poly1305 0.11.0",
  "hex",
  "k256",
+ "nfx-pay-wire",
  "serde",
  "serde_json",
  "sha1 0.11.0",

@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-nfx-proto.workspace = true
+nfx-pay-wire.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -17,11 +17,13 @@ fi
 #                                this first, before any unpinned code.
 #   check-locked.sh --sources    the same, then every cached .crate against Cargo.lock (in
 #                                CI, extracted sources are then deleted, so cargo re-extracts
-#                                from verified archives). check.sh runs this before cargo.
+#                                from verified archives: only from the job's own CARGO_HOME
+#                                inside the checkout, and a CI-mode run with a shared one
+#                                refuses). check.sh runs this before cargo.
 #   check-locked.sh --facts      the same, then what nfx-pay is built from, read from cargo
 #                                metadata without compiling anything (locked.py facts).
 #   check-locked.sh --compiled   the same, then builds every target of nfx-pay and
-#                                nfx-proto alone, checks what the compiler read for each
+#                                nfx-pay-wire alone, checks what the compiler read for each
 #                                (failing closed on a target without dep-info) and that the
 #                                money tests ran, and checks the pinned files again
 #                                (locked.py). The lock job runs --facts, then this;
@@ -33,14 +35,15 @@ fi
 #
 # crates/ci/locked.sha256 pins, by git mode and content:
 #   - the locked paths (stubs until the security stage);
-#   - everything that decides how the money code is compiled and tested: all of
-#     crates/nfx-pay (manifest, contracts, mock, suite, tests); the pay/1 parser, the
-#     modules it rests on, nfx-proto's lib.rs and manifest, its pay/1 vector test
-#     (tests/pay1.rs), the pay/1 vectors and their reference reader; the workspace
-#     manifest's profile, patch, replace, lints, resolver, members and package;
+#   - everything that decides how the money code is compiled and tested: the two money
+#     crates whole, every tracked file in them and no untracked one: crates/nfx-pay
+#     (manifest, contracts, mock, suite, tests) and crates/nfx-pay-wire (the pay/1 parser,
+#     the modules it rests on, its vector test); the pay/1 vectors and their reference
+#     reader; the workspace manifest's profile, patch, replace, lints, resolver, members
+#     and package;
 #   - this check, its helpers, the CI that runs them, and locked-compiled.txt.
 # crates/ci/locked-compiled.txt pins the money crates' resolved dependency closure with
-# its features (nfx-pay's and nfx-proto's, test dependencies included), the workspace
+# its features (nfx-pay's and nfx-pay-wire's, test dependencies included), the workspace
 # crates that may depend on nfx-pay, the workspace's build scripts and proc-macros, and
 # the toolchain.
 #
@@ -53,11 +56,11 @@ fi
 #     the environment can make `cargo test` run nothing and still pass), and any variable
 #     whose name is not a plain identifier (an exported bash function, say); in CI, any
 #     variable outside the allow-list at all;
-#   - for any target of nfx-pay or nfx-proto: no dep-info, a compiled file that is
-#     untracked, or one outside its own crate (only nfx-proto's integration tests may
-#     read outside it, and only the tracked vectors, spec/test-vectors/*.json). This
-#     catches #[path], include! and every spelling of them in the money crates, on the
-#     host build CI tests;
+#   - for any target of nfx-pay or nfx-pay-wire: no dep-info, a compiled file that is
+#     untracked, or one outside its own crate (only nfx-pay-wire's integration tests may
+#     read outside it, and only spec/test-vectors/pay1.json). This catches #[path],
+#     include! and every spelling of them in the money crates, on the host build CI tests;
+#   - a money crate depending on a workspace crate other than the money crates;
 #   - `nfx_pay` named in any Rust file outside nfx-pay and nfx-node's locked paths;
 #   - a path package that is not a workspace member;
 #   - the money tests not all running.
@@ -69,8 +72,11 @@ fi
 # with cannot change without a re-pin, and its tests ran in full. What it does not:
 #   - code outside the money crates is out of scope. Another crate may compile a pinned
 #     file (by #[path], on any target), but cannot change it, and money logic written
-#     afresh anywhere is a change no lock can tell from other code; nfx-proto's other
-#     modules and target-gated code are in that position too;
+#     afresh anywhere is a change no lock can tell from other code. Inside one crate a
+#     module can change how another compiles (a macro in textual scope, an inherent
+#     method shadowing a derived one), which is why the money crates are pinned whole and
+#     depend on no other workspace crate. nfx-proto re-exports nfx-pay-wire and is not a
+#     money crate;
 #   - whoever can push can also re-pin, and the CI configuration lives in the branch it
 #     checks. This makes money-code changes loud and reviewable; the control is sovtech's
 #     review of every change to the pins;
@@ -93,14 +99,7 @@ locked=(
 )
 guarded=(
   crates/nfx-pay
-  crates/nfx-proto/Cargo.toml
-  crates/nfx-proto/src/lib.rs
-  crates/nfx-proto/src/error.rs
-  crates/nfx-proto/src/pay.rs
-  crates/nfx-proto/src/canon.rs
-  crates/nfx-proto/src/hex32.rs
-  crates/nfx-proto/src/namespace.rs
-  crates/nfx-proto/tests/pay1.rs
+  crates/nfx-pay-wire
   spec/test-vectors/pay1.py
   spec/test-vectors/pay1.json
   crates/ci/check-locked.sh
@@ -110,7 +109,7 @@ guarded=(
   crates/ci/gitlab-ci.yml
   crates/ci/locked-compiled.txt
 )
-must_be_absent=(crates/nfx-pay/build.rs)
+must_be_absent=(crates/nfx-pay/build.rs crates/nfx-pay-wire/build.rs)
 paths=("${locked[@]}" "${guarded[@]}")
 mode=${1:-}
 
@@ -212,6 +211,11 @@ case $mode in
   --sources)
     $py crates/ci/locked.py sources
     if [ -n "$in_ci" ]; then
+      # Only the job's own CARGO_HOME, inside the checkout: never a shared one.
+      case $(realpath -m -- "$home") in
+        "$(pwd -P)"/?*) ;;
+        *) fail "in CI, CARGO_HOME must be the job's own, inside the checkout (gitlab-ci.yml), not $home" ;;
+      esac
       rm -rf "${home:?}/registry/src"
       echo "locked paths: extracted sources removed; cargo re-extracts from verified archives"
     fi

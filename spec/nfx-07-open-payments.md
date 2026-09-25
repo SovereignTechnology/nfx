@@ -276,9 +276,10 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     watcher asks it for.
   - Keep one payment in flight toward a seeder at a time, across its videos.
   - After three `mint-unavailable` answers in a row, pay that seeder nothing more until a
-    new session's quote. Each answer costs the watcher a reclaim and a new token at the
-    mint, whose input fees are the watcher's; an `ack` resets the count, and nothing else
-    does. A watcher SHOULD back off before reopening sessions with a seeder whose
+    new session's accepted quote. Each answer costs the watcher a reclaim and a new token
+    at the mint, whose input fees are the watcher's; an `ack` resets the count, and
+    nothing else does: not a refused quote, a refused `hello`, another video's session
+    ending, or a reclaim completing. A watcher SHOULD back off before reopening sessions with a seeder whose
     sessions keep ending so, since each new session restores the three tries.
 - **Answers belong to their session.** A `rej` answers the payment sent on its session.
   One that answers no payment is unsolicited, and stops the watcher paying that seeder,
@@ -290,7 +291,10 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   `spent_total` the ledger plus its face value. An inconsistent or unsolicited ack stops
   the watcher paying that seeder.
 - **Reclaim the proofs of every refused payment,** whatever the code, known or not, by
-  swapping them back at the mint.
+  swapping them back at the mint, to outputs the watcher derives deterministically
+  (NUT-13). A reclaim left without an answer is retried, and a retry can find the proofs
+  spent by that reclaim itself: before calling any proof spent, the watcher restores its
+  own outputs (NUT-09). Proofs it took back itself are back, not lost.
   - If the reclaim finds any proof already spent, the payment **awaits a quote**. The
     watcher pays that seeder nothing more until a quote, from a new session and at any
     later time, shows it: `accepted_upto` and `spent_total` both equal to the ledger plus
@@ -318,8 +322,9 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     as above. A `pay` still buffered on a dropped connection can reach the seeder after
     the watcher's next `hello`, and be credited after that session's quote.
 - **Pay nothing after stopping,** at the end of a session included. Reclaiming is not
-  paying: a stopped watcher still finishes its incomplete reclaims, and reclaims a
-  closed session's unsettled payment after the wait.
+  paying: a stopped watcher still reclaims a live session's payment that is refused, or
+  unanswered after the wait, finishes its incomplete reclaims, and reclaims a closed
+  session's unsettled payment after the wait.
 
 ## 4. HTTPS (origin) payment surface
 
@@ -488,3 +493,10 @@ therefore loses nothing:
     - reclaiming continues after a stop;
     - only an `ack` resets the `mint-unavailable` count;
     - back off from a seeder whose sessions keep ending in it.
+- Draft 2026-09-25 (M2.0 ninth audit, `docs/nfx/reviews/2026-09-24-m2.0-ninth-audit.md`).
+  - §3a:
+    - a new session's *accepted* quote restarts the `mint-unavailable` count, and the
+      things that do not are named;
+    - reclaims use NUT-13 outputs, and a watcher restores them (NUT-09) before calling a
+      proof spent;
+    - a stopped watcher still reclaims a live session's refused or unanswered payment.

@@ -8,23 +8,19 @@
 //! BIP-340 Schnorr, `sha2`); nothing is hand-rolled.
 
 pub mod beacon;
-pub mod canon;
 pub mod deletion;
-mod error;
 pub mod event;
 pub mod gossip;
 pub mod hashlist;
-mod hex32;
 pub mod manifest;
-pub mod namespace;
-pub mod pay;
 mod verified;
 pub mod voucher;
 
-pub use error::{Error, Result};
+// The pay/1 wire and the modules it rests on live in `nfx-pay-wire`, which the lock
+// pins whole (ADR 0008 §4); they are re-exported here unchanged.
+use nfx_pay_wire::hex32;
+pub use nfx_pay_wire::{Error, Result, canon, namespace, pay, sha256};
 pub use verified::Verified;
-
-use sha2::{Digest, Sha256};
 
 /// Kind of the addressable video manifest (NFX-02).
 pub const KIND_MANIFEST: u16 = 38504;
@@ -34,9 +30,3 @@ pub const KIND_BEACON: u16 = 20464;
 pub const KIND_DELETION: u16 = 5;
 /// Largest `|now - created_at|` accepted for beacons and gossip envelopes, in seconds.
 pub const MAX_CLOCK_SKEW: u64 = 15 * 60;
-
-/// `sha256(bytes)`.
-#[must_use]
-pub fn sha256(bytes: &[u8]) -> [u8; 32] {
-    Sha256::digest(bytes).into()
-}

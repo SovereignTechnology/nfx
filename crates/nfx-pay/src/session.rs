@@ -17,7 +17,7 @@
 
 use std::time::Duration;
 
-use nfx_proto::pay::{Ack, Hello, Pay, Quote, Rej};
+use nfx_pay_wire::pay::{Ack, Hello, Pay, Quote, Rej};
 
 /// A payer's identity as the transport gives it (the iroh endpoint id).
 pub type PeerId = [u8; 32];
@@ -307,6 +307,14 @@ pub trait Harness {
     async fn release_swaps(&self);
     /// Make the mint unreachable (`true`) or reachable again.
     fn mint_outage(&self, down: bool);
+    /// The mint processes the next swap, and its response is lost on the way back: the
+    /// seeder sees no answer, though the proofs are now its own. A retry is answered by
+    /// the mint as usual, and the swap's outputs can be restored (NUT-09).
+    fn lose_next_swap_response(&self);
+    /// The mint processes a watcher's next reclaim, and its response is lost: the watcher
+    /// sees no answer, though it has its proofs back. A retry finds them spent, by the
+    /// watcher itself, which a restore of its outputs (NUT-09) shows.
+    fn lose_next_reclaim_response(&self);
 
     /// Move the clock the seeder and the viewers keep forward.
     fn advance(&self, by: Duration);

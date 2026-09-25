@@ -6,7 +6,7 @@
     locked.py facts               what the money crates are built from, from cargo
                                   metadata alone (nothing is compiled), against
                                   crates/ci/locked-compiled.txt
-    locked.py compiled [--pin]    the facts, then a build of nfx-pay and nfx-proto alone:
+    locked.py compiled [--pin]    the facts, then a build of nfx-pay and nfx-pay-wire alone:
                                   check what the compiler read for every one of their
                                   targets, and that the money tests really ran; --pin
                                   rewrites the facts file.
@@ -16,7 +16,7 @@ The facts, one per line:
   time. Any new one fails.
 - `depends-on-nfx-pay <crate>`: workspace crates that may use the money crate.
 - `money-dep <name> <version> <source> <checksum> <features>`: the resolved dependency
-  closure of nfx-pay and nfx-proto (every kind for those two, their test dependencies
+  closure of nfx-pay and nfx-pay-wire (every kind for those two, their test dependencies
   included, and normal and build below them), with the features the workspace unifies
   onto each. A version bump, a swapped source, a [patch] or a feature switched on
   elsewhere fails.
@@ -26,16 +26,18 @@ The facts, one per line:
   Checked after that build.
 
 Every path package must be a workspace member: a crate outside the workspace, wired in
-by path, would escape every check here.
+by path, would escape every check here. The money crates are locked whole
+(check-locked.sh), and the only workspace crates in their closure are each other: within
+one crate, an unpinned module could change how a pinned one compiles.
 
 `compiled` also checks, without pins, on the money crates' own build: every target of
-nfx-pay and nfx-proto yields rustc's dep-info (a target without it fails), and every file
-it lists is tracked; every target reads only its own crate's files, except nfx-proto's
-integration tests, which may read tracked files elsewhere (the vectors).
+nfx-pay and nfx-pay-wire yields rustc's dep-info (a target without it fails), and every
+file it lists is tracked; every target reads only its own crate's files, except
+nfx-pay-wire's integration tests, which may read the pay/1 vectors.
 
 Out of scope, and why: code in other crates. It may compile a pinned file (by
 `#[path]`, say), but it cannot change one, and a copy of money logic written anywhere is
-a code change this lock was never able to see (check-locked.sh, "Limits").
+a code change this lock was never able to see (check-locked.sh).
 - no file outside nfx-pay and nfx-node's locked paths names `nfx_pay`;
 - the suite, the mutants and the pay/1 vector tests each ran, and reported exactly the
   number of tests their pinned sources declare. A test runner that runs nothing fails.
@@ -54,7 +56,7 @@ REPO = pathlib.Path(
     subprocess.run(["git", "-C", str(pathlib.Path(__file__).parent), "rev-parse", "--show-toplevel"],
                    check=True, capture_output=True, text=True).stdout.strip()).resolve()
 CRATES = REPO / "crates"
-VECTORS = (REPO / "spec" / "test-vectors").resolve()
+PAY1_VECTORS = (REPO / "spec" / "test-vectors" / "pay1.json").resolve()
 PINS = CRATES / "ci" / "locked-compiled.txt"
 MONEY_USERS = [":!crates/nfx-pay", ":!crates/nfx-node/src/pay", ":!crates/nfx-node/src/origin_pay.rs"]
 BUILD = "money-build "
@@ -124,7 +126,7 @@ def sources() -> None:
     print(f"locked paths: {checked} cached crates match Cargo.lock")
 
 
-MONEY_CRATES = ("nfx-pay", "nfx-proto")
+MONEY_CRATES = ("nfx-pay", "nfx-pay-wire")
 
 
 def closure(meta: dict, lock: dict) -> list[str]:
@@ -148,7 +150,9 @@ def closure(meta: dict, lock: dict) -> list[str]:
     out = []
     for pid in seen - roots:
         p = pkgs[pid]
-        source = p["source"] or "workspace"
+        if p["source"] is None:
+            fail(f"a money crate depends on {p['name']}, a workspace crate not locked whole")
+        source = p["source"]
         checksum = checksums.get((p["name"], p["version"], p["source"]), "-")
         features = ",".join(sorted(nodes[pid].get("features", []))) or "-"
         out.append(f"money-dep {p['name']} {p['version']} {source} {checksum} {features}")
@@ -201,7 +205,7 @@ def test_counts() -> dict[str, int]:
     if not listed:
         fail("cannot find the adversary_suite! list")
     mutants = (CRATES / "nfx-pay" / "tests" / "mutants.rs").read_text()
-    pay1 = (CRATES / "nfx-proto" / "tests" / "pay1.rs").read_text()
+    pay1 = (CRATES / "nfx-pay-wire" / "tests" / "pay1.rs").read_text()
     return {
         "adversary": len(re.findall(r"^\s+[a-z_0-9]+,$", listed.group(1), re.M)),
         "mutants": len(re.findall(r"^\s+[a-z_0-9]+: [sv]\(", mutants, re.M)),
@@ -275,8 +279,8 @@ def compiled(pin: bool) -> None:
     tracked = {(REPO / f).resolve() for f in run("git", "ls-files", "-z", cwd=REPO).split("\0") if f}
     money = {p["manifest_path"]: pathlib.Path(p["manifest_path"]).parent.resolve()
              for p in members if p["name"] in MONEY_CRATES}
-    pay_dir = (CRATES / "nfx-pay").resolve()
-    out = run("cargo", "test", "-p", "nfx-pay", "-p", "nfx-proto", "--all-targets", "--no-run",
+    wire_dir = (CRATES / "nfx-pay-wire").resolve()
+    out = run("cargo", "test", "-p", "nfx-pay", "-p", "nfx-pay-wire", "--all-targets", "--no-run",
               "--locked", "--offline", "--message-format=json")
     seen_targets = 0
     built = set()
@@ -294,14 +298,14 @@ def compiled(pin: bool) -> None:
         if d is None:
             fail(f"no dep-info for {target}: every money target must show what it compiled")
         seen_targets += 1
-        # Only nfx-proto's integration tests may read outside their crate, and only the
-        # vectors: spec/test-vectors/*.json, symlinks resolved. An example or a bench is
-        # built in test mode by --all-targets too: that is no exemption.
-        vectors_ok = crate != pay_dir and msg["target"]["kind"] == ["test"]
+        # Only nfx-pay-wire's integration tests may read outside their crate, and only the
+        # pinned pay/1 vectors, symlinks resolved. An example or a bench is built in test
+        # mode by --all-targets too: that is no exemption.
+        vectors_ok = crate == wire_dir and msg["target"]["kind"] == ["test"]
         for src in sources_read(d):
             if src not in tracked:
                 fail(f"{target} compiled {src}, which is not a tracked file ({d.name})")
-            vector = vectors_ok and src.parent == VECTORS and src.suffix == ".json"
+            vector = vectors_ok and src == PAY1_VECTORS
             if crate not in src.parents and not vector:
                 fail(f"{target} compiled {src}, from outside its crate ({d.name})")
     if seen_targets == 0:
@@ -314,7 +318,7 @@ def compiled(pin: bool) -> None:
 
     # The money tests ran, all of them. `cargo test` exits 0 when a runner skips them.
     want = test_counts()
-    out = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "nfx-pay", "-p", "nfx-proto",
+    out = subprocess.run(["cargo", "test", "--locked", "--offline", "-p", "nfx-pay", "-p", "nfx-pay-wire",
                           "--test", "adversary", "--test", "mutants", "--test", "pay1"],
                          cwd=CRATES, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if out.returncode != 0:
