@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of sixteen
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of seventeen
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -35,8 +35,9 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [thirteenth](reviews/2026-09-24-m2.0-thirteenth-audit.md),
 [fourteenth](reviews/2026-09-24-m2.0-fourteenth-audit.md),
 [fifteenth](reviews/2026-09-24-m2.0-fifteenth-audit.md),
-[sixteenth](reviews/2026-09-24-m2.0-sixteenth-audit.md)). sovtech's bar for the push is zero
-findings, confirmed after the sixth:
+[sixteenth](reviews/2026-09-24-m2.0-sixteenth-audit.md),
+[seventeenth](reviews/2026-09-24-m2.0-seventeenth-audit.md)). sovtech's bar for the push is
+zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
   - Bans and the global cap are seeder-wide, and windows are per account. The global cap
@@ -69,13 +70,23 @@ findings, confirmed after the sixth:
     reserving their inputs (NUT-07 `PENDING`) and their rollback, NUT-07 checks and
     NUT-09 restores of each swap's own outputs under a per-request limit, partial
     claims, mint, restore and state-check outages, unanswered reads that cost time,
-    keyset rotation, events just before the next swap (given-up requests processed or
-    starting, the mint or its restores going down, a rotation after the outputs were
-    derived), dial records;
+    keyset rotation and expiry, events just before the next swap (given-up requests
+    processed or starting, the mint or its restores going down, a rotation after the
+    outputs were derived, an expiry), reads answered on the reader's next poll, dial
+    records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, two of them
-  threaded, and **each of 275 planted defects fails its scenario**, every surviving mutant
-  from all sixteen audits among them.
+  threaded, run twice (the second time with reads as round trips), and **each of 289
+  planted defects fails its scenario**, every surviving mutant from all seventeen audits
+  among them.
+- **Since the seventeenth audit:**
+  - a payment's reads and completions end 60 s from its arrival however late they
+    start, and the watermark is read again after its own read;
+  - a read counts in the second it is sent, so two entries at once share one; the
+    record of an account's reads counts as held state;
+  - a retry refused as invalid is `bad-token` and a ban; every 12003 (an expired
+    keyset) is settled only once no input is pending, and CDK's invalid-input code is
+    10001.
 - **Since the sixteenth audit:**
   - a `pay` reads its account's unknown swaps once, after its checks, and its reads and
     completions end at its deadline;
