@@ -24,8 +24,9 @@ audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
 [fourth](reviews/2026-09-24-m2.0-fourth-audit.md),
-[fifth](reviews/2026-09-24-m2.0-fifth-audit.md)). sovtech's bar for the push is zero
-findings:
+[fifth](reviews/2026-09-24-m2.0-fifth-audit.md),
+[sixth](reviews/2026-09-24-m2.0-sixth-audit.md)). sovtech's bar for the push is zero
+findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
   - Bounds and bans are seeder-wide. The global cap is a rate (`debt_ttl`) that refuses
@@ -52,9 +53,17 @@ findings:
   - a proof-based mock mint: multi-proof tokens, atomic swaps, held swaps or held
     responses, outages, dial records;
   - honest seeder and viewer engines, with a validated configuration.
-- **Suite:** `nfx_pay::adversary` has 60 scenarios, each under a timeout, one of them
-  threaded, and **each of 131 planted defects fails its scenario**, every surviving mutant
-  from all five audits among them.
+- **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, one of them
+  threaded, and **each of 154 planted defects fails its scenario**, every surviving mutant
+  from all six audits among them.
+- **Since the sixth audit:**
+  - a watcher's window ceiling;
+  - three `mint-unavailable` answers a session;
+  - answers belong to their session;
+  - the standing reclaims a closed session's payment;
+  - path crates outside the workspace are refused;
+  - binaries and examples are dep-info checked;
+  - `bash -p`.
 - **Since the fifth audit:**
   - one lock decides each payment, with its deadline counted from arrival;
   - a late claim is credited, and a late outcome bans nobody;
