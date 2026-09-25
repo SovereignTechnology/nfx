@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of nine
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of ten
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -28,7 +28,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [sixth](reviews/2026-09-24-m2.0-sixth-audit.md),
 [seventh](reviews/2026-09-24-m2.0-seventh-audit.md),
 [eighth](reviews/2026-09-24-m2.0-eighth-audit.md),
-[ninth](reviews/2026-09-24-m2.0-ninth-audit.md)). sovtech's bar for the push is zero
+[ninth](reviews/2026-09-24-m2.0-ninth-audit.md),
+[tenth](reviews/2026-09-24-m2.0-tenth-audit.md)). sovtech's bar for the push is zero
 findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -58,11 +59,21 @@ findings, confirmed after the sixth:
   - `Harness`.
 - **Mock:** `nfx_pay::mock` has:
   - a proof-based mock mint: multi-proof tokens, atomic swaps, held swaps or held
-    responses, lost responses and NUT-09 restore, outages, dial records;
+    responses, lost responses and NUT-09 restore of each swap's own outputs, partial
+    claims, mint and restore outages, dial records;
   - honest seeder and viewer engines, with a validated configuration.
-- **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, one of them
-  threaded, and **each of 196 planted defects fails its scenario**, every surviving mutant
-  from all nine audits among them.
+- **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, two of them
+  threaded, and **each of 207 planted defects fails its scenario**, every surviving mutant
+  from all ten audits among them.
+- **Since the tenth audit:**
+  - a request that never reached the mint has a known outcome, and at most one swap per
+    account is of unknown outcome;
+  - a restore finds the swap's own outputs and no other swap's;
+  - a quote settles a payment whose reclaim is incomplete;
+  - pay-ahead is half the window, rounded down;
+  - `check.sh` runs the lock's steps under `env -i`, as the lock job does, so the CI
+    `check` job can pass;
+  - the desktop and spike lock files include `nfx-pay-wire`.
 - **Since the ninth audit:**
   - the pay/1 wire is its own crate, `nfx-pay-wire`, pinned whole; `nfx-pay` depends on
     no other workspace crate;
@@ -129,6 +140,12 @@ findings, confirmed after the sixth:
 
   Every bypass route the audits found was re-run against the lock of its time: each is
   refused, or out of scope as the check states.
+
+**Before M2.1 writes code in nfx-node's locked paths** (`crates/nfx-node/src/pay/`,
+`origin_pay.rs`, stubs today): they move into a money crate of their own, pinned whole.
+Inside unpinned nfx-node, any module could change how they compile (tenth audit, #13).
+Their code imports the wire from `nfx_pay_wire` directly, not through nfx-proto's
+re-export.
 
 ## Proposed stages
 
