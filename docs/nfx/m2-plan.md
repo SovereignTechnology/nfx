@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of thirteen
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of fourteen
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -32,7 +32,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [tenth](reviews/2026-09-24-m2.0-tenth-audit.md),
 [eleventh](reviews/2026-09-24-m2.0-eleventh-audit.md),
 [twelfth](reviews/2026-09-24-m2.0-twelfth-audit.md),
-[thirteenth](reviews/2026-09-24-m2.0-thirteenth-audit.md)). sovtech's bar for the push is zero
+[thirteenth](reviews/2026-09-24-m2.0-thirteenth-audit.md),
+[fourteenth](reviews/2026-09-24-m2.0-fourteenth-audit.md)). sovtech's bar for the push is zero
 findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -63,13 +64,20 @@ findings, confirmed after the sixth:
 - **Mock:** `nfx_pay::mock` has:
   - a proof-based mock mint: multi-proof tokens, atomic swaps, held swaps or held
     responses, lost responses, requests the swapper gave up on, requests held after
-    reserving their inputs (NUT-07 `PENDING`) and their rollback, batched NUT-07 checks
-    and NUT-09 restores of each swap's own outputs, partial claims, mint, restore and
-    state-check outages, dial records;
+    reserving their inputs (NUT-07 `PENDING`) and their rollback, NUT-07 checks and
+    NUT-09 restores of each swap's own outputs under a per-request limit, partial
+    claims, mint, restore and state-check outages, unanswered reads that cost time,
+    dial records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, two of them
-  threaded, and **each of 246 planted defects fails its scenario**, every surviving mutant
-  from all thirteen audits among them.
+  threaded, and **each of 252 planted defects fails its scenario**, every surviving mutant
+  from all fourteen audits among them.
+- **Since the fourteenth audit:**
+  - an account's own `hello` and `pay` read only its own unknown swaps; admission reads
+    nothing; `SeederEngine::sweep`, a background task in a real engine, reads the rest;
+  - a read the mint refuses as too large is split;
+  - an unknown swap whose inputs read unspent `account_ttl` after it became unknown is
+    completed (sent again, with the same outputs) and credited, not dropped.
 - **Since the thirteenth audit:**
   - the mock reads swap state as a real engine must: outside its lock, in one batch,
     applying each decision only to a swap still undecided, and deciding each on its own;
