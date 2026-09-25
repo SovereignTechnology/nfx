@@ -211,4 +211,11 @@ catches!(
     viewer_unsolicited_rej_reclaims: v(V::UnsolicitedRejReclaimsUnsettled) => an_honest_pair_survives_a_refused_hello,
     viewer_stopped_skips_reclaim: v(V::StoppedSkipsReclaim) => a_stopped_viewer_pays_nothing,
     viewer_budget_not_signalled: v(V::BudgetNotSignalled) => an_unavailable_seeder_gets_three_tries_a_session,
+    ban_needs_this_videos_account: s(S::BanNeedsThisAccount) => a_double_spend_bans_the_peer,
+    late_claim_keeps_its_debt: s(S::LateClaimKeepsDebt) => a_late_outcome_is_credited_never_banned,
+    viewer_stopped_skips_the_unsettled: v(V::StoppedSkipsUnsettled) => a_stopped_viewer_pays_nothing,
+    viewer_refused_hello_resets_the_budget: v(V::HelloRefusedResetsBudget) => an_unavailable_seeder_gets_three_tries_a_session,
+    viewer_stops_on_an_unknown_hello_code: v(V::UnknownHelloRefusalStops) => an_honest_pair_survives_a_refused_hello,
+    viewer_banned_hello_stops_one_video: v(V::BannedHelloStopsLedger) => an_honest_pair_survives_a_refused_hello,
+    viewer_blocked_catch_up_files_under_itself: v(V::CatchUpBlockedAsSelf) => a_watchers_standing_spans_its_videos,
 );

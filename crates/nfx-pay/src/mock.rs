@@ -558,6 +558,8 @@ pub enum SeederFlaw {
     BanExpiryResetsAccounts,
     /// Records a ban for a peer with no account.
     BansWithoutAccount,
+    /// Bans only a peer with an account on the offending video, not on any video.
+    BanNeedsThisAccount,
     /// Leaves an empty waiter list behind for every account that ever had one.
     WaitingKeptEmpty,
     /// Ages debt out of the global count but never trims its log.
@@ -604,6 +606,8 @@ pub enum SeederFlaw {
     LateOutcomeBans,
     /// Does not credit a late claim from a swap it had abandoned.
     LateClaimNotCredited,
+    /// Credits a late claim but leaves its chunks in the global count.
+    LateClaimKeepsDebt,
     /// Never takes over a turn held past its deadline.
     NoTakeover,
     /// Lets hellos take over a turn held past its deadline, but not payments.
@@ -739,6 +743,18 @@ pub enum ViewerFlaw {
     UnsolicitedRejReclaimsUnsettled,
     /// Finishes no reclaim once stopped.
     StoppedSkipsReclaim,
+    /// Once stopped, finishes incomplete reclaims but leaves closed sessions' payments
+    /// unsettled.
+    StoppedSkipsUnsettled,
+    /// Resets the `mint-unavailable` count when a `hello` is refused.
+    HelloRefusedResetsBudget,
+    /// Stops on a `hello` refused with a code it does not know.
+    UnknownHelloRefusalStops,
+    /// Stops only the video whose `hello` was refused `banned`.
+    BannedHelloStopsLedger,
+    /// Files a closed session's payment whose catch-up reclaim is blocked under the
+    /// ledger that caught up.
+    CatchUpBlockedAsSelf,
     /// Gives no sign that its tries are used up.
     BudgetNotSignalled,
     /// Reclaims a payment left unsettled by a dropped connection at once.
@@ -1065,7 +1081,11 @@ impl Inner {
 
     fn ban(&self, st: &mut State, key: Key) {
         // A peer with no account has been served nothing and owes nothing: nothing is kept.
-        let has_account = st.accounts.keys().any(|k| k.0 == key.0);
+        let has_account = if self.has(SeederFlaw::BanNeedsThisAccount) {
+            st.accounts.contains_key(&key)
+        } else {
+            st.accounts.keys().any(|k| k.0 == key.0)
+        };
         if !has_account && !self.has(SeederFlaw::BansWithoutAccount) {
             return;
         }
@@ -1115,8 +1135,10 @@ impl Inner {
     /// Credit `key` with a payment up to `upto` worth `amount`: its unpaid chunks up to
     /// there leave the global count (unless they had aged out already). `snapshot` is the
     /// debt a flawed engine saw when it checked the payment.
-    fn credit(&self, st: &mut State, key: Key, upto: u64, amount: u64, snapshot: &[u64]) {
-        let paid_stays = self.has(SeederFlaw::PaidDebtStaysCounted);
+    fn credit(&self, st: &mut State, key: Key, pay: (u64, u64), snapshot: &[u64], late: bool) {
+        let (upto, amount) = pay;
+        let paid_stays = self.has(SeederFlaw::PaidDebtStaysCounted)
+            || (late && self.has(SeederFlaw::LateClaimKeepsDebt));
         let all = self.has(SeederFlaw::CreditFreesAllDebt);
         let from_snapshot = self.has(SeederFlaw::CreditFromSnapshot);
         let a = self.account(st, key);
@@ -1193,7 +1215,7 @@ impl Inner {
     fn settle_late(&self, st: &mut State, pay: &Settle, outcome: Swap) {
         match outcome {
             Swap::Claimed if !self.has(SeederFlaw::LateClaimNotCredited) => {
-                self.credit(st, pay.key, pay.upto, pay.amount, &pay.snapshot);
+                self.credit(st, pay.key, (pay.upto, pay.amount), &pay.snapshot, true);
             }
             Swap::Spent | Swap::Invalid if self.has(SeederFlaw::LateOutcomeBans) => {
                 self.ban(st, pay.key);
@@ -1203,7 +1225,7 @@ impl Inner {
     }
 
     fn ack(&self, st: &mut State, pay: &Settle) -> Ack {
-        self.credit(st, pay.key, pay.upto, pay.amount, &pay.snapshot);
+        self.credit(st, pay.key, (pay.upto, pay.amount), &pay.snapshot, false);
         let in_session = pay.session_spent.fetch_add(pay.amount, Ordering::Relaxed) + pay.amount;
         Ack {
             accepted_upto: pay.upto,
@@ -1703,7 +1725,7 @@ impl MockSession {
         let e = self.e.clone();
         let mut st = e.state();
         if e.has(SeederFlaw::RefusalCredits) {
-            e.credit(&mut st, self.key, upto, 0, &[]);
+            e.credit(&mut st, self.key, (upto, 0), &[], false);
         }
         if amount_refusal && e.has(SeederFlaw::RefusalAdvancesAcked) {
             let a = e.account(&mut st, self.key);
@@ -2031,7 +2053,8 @@ pub struct MockViewer {
     /// This ledger, in its standing.
     id: u64,
     standing: Arc<Mutex<Standing>>,
-    /// This ledger's own stop ([`ViewerFlaw::StopPerVideo`] only).
+    /// This ledger's own stop ([`ViewerFlaw::StopPerVideo`] and
+    /// [`ViewerFlaw::BannedHelloStopsLedger`] only).
     halted: bool,
     /// The open session's quote.
     quote: Option<Quote>,
@@ -2115,7 +2138,7 @@ impl MockViewer {
         if self.has(ViewerFlaw::StopPerVideo) {
             self.halted
         } else {
-            self.standing().stopped
+            self.standing().stopped || self.halted
         }
     }
 
@@ -2217,6 +2240,9 @@ impl MockViewer {
             };
             self.reclaim(ledger, p, true);
         }
+        if self.has(ViewerFlaw::StoppedSkipsUnsettled) && self.halted() {
+            return;
+        }
         let own = self.has(ViewerFlaw::CatchUpOwnOnly);
         let early = self.has(ViewerFlaw::CatchUpIgnoresWait);
         let old: Vec<(u64, Pending)> = {
@@ -2234,6 +2260,14 @@ impl MockViewer {
             } else {
                 ledger
             };
+            if self.has(ViewerFlaw::CatchUpBlockedAsSelf) {
+                match self.take_back(&p.token, false) {
+                    Reclaim::All => {}
+                    Reclaim::SomeSpent => self.standing().lost.push((owner, p)),
+                    Reclaim::Blocked => self.standing().reclaiming.push((self.id, p)),
+                }
+                continue;
+            }
             self.reclaim(owner, p, false);
         }
     }
@@ -2460,12 +2494,19 @@ impl Viewer for MockViewer {
         if self.has(ViewerFlaw::HelloRefusedFreesSlot) {
             self.standing().in_flight = None;
         }
+        if self.has(ViewerFlaw::HelloRefusedResetsBudget) {
+            self.standing().unavailable = 0;
+        }
         let stops = if self.has(ViewerFlaw::HelloRefusalStops) {
             rej.code != RejCode::BadSession
+        } else if self.has(ViewerFlaw::UnknownHelloRefusalStops) {
+            matches!(rej.code, RejCode::Banned | RejCode::Other(_))
         } else {
             rej.code == RejCode::Banned && !self.has(ViewerFlaw::BannedHelloIgnored)
         };
-        if stops {
+        if stops && self.has(ViewerFlaw::BannedHelloStopsLedger) {
+            self.halted = true;
+        } else if stops {
             self.halt();
         }
     }

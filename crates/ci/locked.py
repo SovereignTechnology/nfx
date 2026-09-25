@@ -54,6 +54,7 @@ REPO = pathlib.Path(
     subprocess.run(["git", "-C", str(pathlib.Path(__file__).parent), "rev-parse", "--show-toplevel"],
                    check=True, capture_output=True, text=True).stdout.strip()).resolve()
 CRATES = REPO / "crates"
+VECTORS = (REPO / "spec" / "test-vectors").resolve()
 PINS = CRATES / "ci" / "locked-compiled.txt"
 MONEY_USERS = [":!crates/nfx-pay", ":!crates/nfx-node/src/pay", ":!crates/nfx-node/src/origin_pay.rs"]
 BUILD = "money-build "
@@ -293,14 +294,15 @@ def compiled(pin: bool) -> None:
         if d is None:
             fail(f"no dep-info for {target}: every money target must show what it compiled")
         seen_targets += 1
-        # Only nfx-proto's integration tests may read outside their crate (the vectors).
-        # An example or a bench is built in test mode by --all-targets too: that is no
-        # exemption.
+        # Only nfx-proto's integration tests may read outside their crate, and only the
+        # vectors: spec/test-vectors/*.json, symlinks resolved. An example or a bench is
+        # built in test mode by --all-targets too: that is no exemption.
         vectors_ok = crate != pay_dir and msg["target"]["kind"] == ["test"]
         for src in sources_read(d):
             if src not in tracked:
                 fail(f"{target} compiled {src}, which is not a tracked file ({d.name})")
-            if crate not in src.parents and not vectors_ok:
+            vector = vectors_ok and src.parent == VECTORS and src.suffix == ".json"
+            if crate not in src.parents and not vector:
                 fail(f"{target} compiled {src}, from outside its crate ({d.name})")
     if seen_targets == 0:
         fail("found no dep-info for the money crates' build")

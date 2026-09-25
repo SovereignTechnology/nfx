@@ -35,9 +35,9 @@ fi
 #   - the locked paths (stubs until the security stage);
 #   - everything that decides how the money code is compiled and tested: all of
 #     crates/nfx-pay (manifest, contracts, mock, suite, tests); the pay/1 parser, the
-#     modules it rests on, nfx-proto's lib.rs and manifest, its vector tests, the vectors
-#     and their reference reader; the workspace manifest's profile, patch, replace, lints,
-#     resolver, members and package;
+#     modules it rests on, nfx-proto's lib.rs and manifest, its pay/1 vector test
+#     (tests/pay1.rs), the pay/1 vectors and their reference reader; the workspace
+#     manifest's profile, patch, replace, lints, resolver, members and package;
 #   - this check, its helpers, the CI that runs them, and locked-compiled.txt.
 # crates/ci/locked-compiled.txt pins the money crates' resolved dependency closure with
 # its features (nfx-pay's and nfx-proto's, test dependencies included), the workspace
@@ -55,8 +55,9 @@ fi
 #     variable outside the allow-list at all;
 #   - for any target of nfx-pay or nfx-proto: no dep-info, a compiled file that is
 #     untracked, or one outside its own crate (only nfx-proto's integration tests may
-#     read the tracked vectors). This catches #[path], include! and every spelling of
-#     them in the money crates, on the host build CI tests;
+#     read outside it, and only the tracked vectors, spec/test-vectors/*.json). This
+#     catches #[path], include! and every spelling of them in the money crates, on the
+#     host build CI tests;
 #   - `nfx_pay` named in any Rust file outside nfx-pay and nfx-node's locked paths;
 #   - a path package that is not a workspace member;
 #   - the money tests not all running.
