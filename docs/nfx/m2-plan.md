@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of eight
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of nine
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -27,25 +27,30 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [fifth](reviews/2026-09-24-m2.0-fifth-audit.md),
 [sixth](reviews/2026-09-24-m2.0-sixth-audit.md),
 [seventh](reviews/2026-09-24-m2.0-seventh-audit.md),
-[eighth](reviews/2026-09-24-m2.0-eighth-audit.md)). sovtech's bar for the push is zero
+[eighth](reviews/2026-09-24-m2.0-eighth-audit.md),
+[ninth](reviews/2026-09-24-m2.0-ninth-audit.md)). sovtech's bar for the push is zero
 findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
-  - Bounds and bans are seeder-wide. The global cap is a rate (`debt_ttl`) that refuses
-    unpaid service, never paid service: a refused watcher pays ahead.
+  - Bans and the global cap are seeder-wide, and windows are per account. The global cap
+    is a rate (`debt_ttl`) that refuses unpaid service, never paid service: a refused
+    watcher pays ahead.
   - Credit covers only its own video.
   - `quote` carries the account's position. Unsettled payments survive a dropped
-    connection (a 120 s wait, then the next quote or a reclaim settles them).
-  - A reclaim that finds a proof spent loses that payment and stops the watcher, so a
-    lying seeder gets at most one payment.
+    connection (a 180 s wait, then the next quote or a reclaim settles them).
+  - A reclaim that finds a proof spent leaves that payment awaiting a quote, and the
+    watcher pays that seeder nothing until one shows it, so a lying seeder gets at most
+    one payment.
   - Configuration minimums and bounded per-identity state.
-  - At most 64 proofs per payment; `detail` is printable ASCII; `window` ≥ 2.
+  - At most 64 proofs per payment; `detail` is printable ASCII; `window` is 2 to 64.
   - HTTPS origins take one payment per request.
-- **Vectors:** `pay1.json` holds 20 valid lines, 3 loopback-only and 83 invalid, each
+- **Vectors:** `pay1.json` holds 22 valid lines, 3 loopback-only and 74 invalid, each
   checked by the reference reader `spec/test-vectors/pay1.py`. It and the Rust reader
-  agree on 20,141 probe and fuzz cases.
-- **Wire:** `nfx_proto::pay`, pure, with writers that refuse what a reader with the same
-  options would.
+  agreed on every one of 244,149 probe and fuzz cases in the ninth audit.
+- **Wire:** `nfx_pay_wire::pay` (re-exported as `nfx_proto::pay`), pure, with writers that
+  refuse what a reader with the same options would. It lives in its own crate,
+  `nfx-pay-wire`, with the modules it rests on, so that no unpinned module shares its
+  crate.
 - **Contracts:** `nfx_pay::session`:
   - `SeederEngine` (one seeder), with sessions that are `Send`;
   - `SeederSession`, whose `pay` is cancel-safe;
@@ -53,11 +58,20 @@ findings, confirmed after the sixth:
   - `Harness`.
 - **Mock:** `nfx_pay::mock` has:
   - a proof-based mock mint: multi-proof tokens, atomic swaps, held swaps or held
-    responses, outages, dial records;
+    responses, lost responses and NUT-09 restore, outages, dial records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, one of them
-  threaded, and **each of 181 planted defects fails its scenario**, every surviving mutant
-  from all eight audits among them.
+  threaded, and **each of 196 planted defects fails its scenario**, every surviving mutant
+  from all nine audits among them.
+- **Since the ninth audit:**
+  - the pay/1 wire is its own crate, `nfx-pay-wire`, pinned whole; `nfx-pay` depends on
+    no other workspace crate;
+  - the harness can lose a swap's or a reclaim's response: the seeder retries and
+    restores, and never bans on its own swap; the watcher restores before it calls a
+    proof spent;
+  - a stopped watcher reclaims a live session's refused or unanswered payment, and more
+    of what may not restore the `mint-unavailable` tries is tested;
+  - a CI-mode run deletes extracted sources only from the job's own `CARGO_HOME`.
 - **Since the eighth audit:**
   - the suite covers a ban across videos, a late claim freeing the global cap, a stopped
     standing's catch-up, refused hellos and the `mint-unavailable` count, unknown and
@@ -97,23 +111,24 @@ findings, confirmed after the sixth:
 - **Locked paths:** `crates/ci/check-locked.sh` runs first, before the build
   (`--sources`) and last (`--compiled`). It pins:
   - the locked stubs;
-  - all of `crates/nfx-pay`;
-  - the pay/1 parser with nfx-proto's `lib.rs`, `error.rs`, manifest and the modules the
-    parser rests on;
-  - the parser's tests, vectors and reference reader;
+  - all of `crates/nfx-pay`, and all of `crates/nfx-pay-wire` (the pay/1 parser, the
+    modules it rests on, and its vector test): every tracked file, and no untracked one;
+  - the vectors and their reference reader;
   - the workspace manifest's build-shaping sections;
   - the check, its helper `locked.py`, `check.sh` and the CI config.
 
   It refuses a `CARGO_*`/`RUST*` variable outside an allow-list, and any Cargo config
   or toolchain file where cargo reads one. It checks every cached `.crate` against
   `Cargo.lock`. After the build it verifies:
-  - every file every workspace target compiled (tracked, and in its own crate);
-  - nfx-pay's dependency closure with its unified features;
+  - every file each money crate's targets compiled (tracked, and in its own crate);
+  - the money crates' dependency closure with its unified features, holding no workspace
+    crate but themselves;
   - who depends on nfx-pay, and who names it;
   - build scripts and proc-macros;
   - that the money tests ran, all of them.
 
-  37 bypass attempts were refused.
+  Every bypass route the audits found was re-run against the lock of its time: each is
+  refused, or out of scope as the check states.
 
 ## Proposed stages
 
