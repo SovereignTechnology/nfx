@@ -254,6 +254,11 @@ struct Ledger {
     expired_upto: u64,
     /// Proofs of an older keyset that has expired, while the mint's own is still current.
     expired_inputs: HashSet<u64>,
+    /// The mint's active keyset has expired and stays active: proofs and output sets after
+    /// this id belong to it.
+    active_expired_since: Option<u64>,
+    /// Ids of keysets that expired while active, since rotated out.
+    expired_ranges: Vec<(u64, u64)>,
     /// Reads of swap state are round trips: an engine's read answers on its next poll
     /// ([`MockHarness::with_round_trip_reads`]).
     round_trips: bool,
@@ -271,12 +276,21 @@ struct Ledger {
 }
 
 impl Ledger {
+    fn in_expired_keyset(&self, id: u64) -> bool {
+        id <= self.expired_upto
+            || self.active_expired_since.is_some_and(|x| id > x)
+            || self
+                .expired_ranges
+                .iter()
+                .any(|(a, b)| (*a..=*b).contains(&id))
+    }
+
     fn proof_expired(&self, p: u64) -> bool {
-        p <= self.expired_upto || self.expired_inputs.contains(&p)
+        self.in_expired_keyset(p) || self.expired_inputs.contains(&p)
     }
 
     fn outputs_expired(&self, outputs: u64) -> bool {
-        outputs != 0 && outputs <= self.expired_upto
+        outputs != 0 && self.in_expired_keyset(outputs)
     }
 }
 
@@ -568,6 +582,14 @@ impl MockNetwork {
         self.ledger().final_expiry
     }
 
+    /// Whether the mint lists the keyset of `token`'s proofs as expired (`/v1/keysets`).
+    fn proofs_listed_expired(&self, token: &str) -> bool {
+        let l = self.ledger();
+        l.tokens
+            .get(token)
+            .is_some_and(|i| i.proofs.iter().any(|p| l.proof_expired(*p)))
+    }
+
     /// Whether the keyset of the output set `outputs` has expired: the mint's own state,
     /// which only a planted flaw consults.
     fn outputs_expired(&self, outputs: u64) -> bool {
@@ -833,9 +855,10 @@ impl MockNetwork {
         let Some(info) = l.tokens.get(token).cloned() else {
             return Reclaim::SomeSpent;
         };
-        // Refused because the proofs' keyset expired (12003, before any other check): a
-        // NUT-07 check then says what happened to them.
-        if info.proofs.iter().any(|p| l.proof_expired(*p)) {
+        // Refused because a keyset expired (12003, before any other check): the proofs', or
+        // the reclaim's outputs' (the mint's active keyset); a NUT-07 check then says what
+        // happened to the proofs.
+        if info.proofs.iter().any(|p| l.proof_expired(*p)) || l.outputs_expired(l.next + 1) {
             return if info.proofs.iter().any(|p| l.claimed.contains(p)) {
                 Reclaim::SomeSpent
             } else if info.proofs.iter().any(|p| l.reserved.contains(p)) {
@@ -1348,11 +1371,24 @@ pub enum SeederFlaw {
     /// An entry reusing a read waits while any read of its account is under way, whatever
     /// the second (the eighteenth rework's wait): it can outlive its deadline.
     WaitsWhileReading,
-    /// A read abandoned before it is back keeps its place in the second's reads, so the
-    /// entries waiting for it answer without its result.
-    AbandonedReadKept,
+    /// Takes a read abandoned before it was back as a result to reuse, so the entries
+    /// waiting for it answer without one.
+    AbandonedReadReused,
+    /// A read abandoned before it is back gives its place in the second back (the
+    /// nineteenth rework's), so dropped entries send reads without bound.
+    AbandonedFreesItsPlace,
+    /// An entry waiting for a read whose second ends first answers without reading.
+    SecondEndReturns,
     /// Swaps to outputs of a keyset that expires sooner than twice `account_ttl` away.
     IgnoresKeysetExpiry,
+    /// Measures the outputs' keyset margin by `ban_ttl`, not `account_ttl`.
+    KeysetMarginBanTtl,
+    /// Refuses a keyset exactly twice `account_ttl` away too.
+    KeysetMarginInclusive,
+    /// Applies the outputs' keyset rule after the payment's own read, not before it.
+    KeysetAfterRead,
+    /// Applies the outputs' keyset rule before every other check.
+    KeysetFirst,
     /// The eighteenth rework's rule: a swap whose outputs' keyset has expired is decided by
     /// its inputs alone, spent being the claim (so a reclaim or a double spend is credited).
     ExpiredSpentIsClaim,
@@ -1546,6 +1582,9 @@ pub enum ViewerFlaw {
     /// Keeps retrying a reclaim refused because the proofs' keyset expired, though a NUT-07
     /// check shows them unspent: it never completes.
     ExpiredReclaimRetried,
+    /// Takes every reclaim refused 12003 with its proofs unspent as lost to the expiry,
+    /// though the 12003 may be the reclaim's outputs' keyset, and the proofs still good.
+    ExpiredByCodeAlone,
     /// Gives no sign that its tries are used up.
     BudgetNotSignalled,
     /// Reclaims a payment left unsettled by a dropped connection at once.
@@ -1648,16 +1687,31 @@ struct State {
     /// reached. With the swaps abandoned in flight, at most one per account: while one is
     /// unknown, the account's payments are not swapped.
     unknown: Vec<Unknown>,
-    /// The second each account's own entries last read its swaps, and the proofs of each
-    /// payment that read that second (`None` for a `hello`): kept for that second.
+    /// The second each account's own entries last read its swaps, and each read sent in it:
+    /// kept for that second.
     own_reads: HashMap<Key, OwnReads>,
-    /// Reads of an account's swaps still under way (round trips), by account.
-    reading: HashMap<Key, usize>,
 }
 
-/// An account's own reads in one second: the second, and the proofs of each payment
-/// that read in it (`None` for a `hello`).
-type OwnReads = (u64, Vec<Option<Vec<u64>>>);
+/// An account's own reads in one second: the second, and each read sent in it.
+type OwnReads = (u64, Vec<OwnRead>);
+
+/// One read of an account's swaps, sent by a payment of `by` (`None`: a `hello`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnRead {
+    by: Option<Vec<u64>>,
+    state: ReadState,
+}
+
+/// Where a read sent is: a read counts from when it is sent, whatever becomes of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadState {
+    /// Sent, and not back yet (a round trip).
+    UnderWay,
+    /// Back: its result is applied.
+    Back,
+    /// Its entry was dropped before it came back: it counts, and has no result.
+    Abandoned,
+}
 
 /// A swap sent and past its payment's deadline, unanswered: the payment, its parameters,
 /// its token, its outputs and its deadline.
@@ -1978,6 +2032,27 @@ impl Inner {
         (lost, flight)
     }
 
+    /// Whether the mint's active keyset, as it lists its `final_expiry`, expires sooner than
+    /// twice `account_ttl` away by this seeder's clock: then it is not swapped to.
+    fn keyset_too_soon(&self) -> bool {
+        if self.has(SeederFlaw::IgnoresKeysetExpiry) {
+            return false;
+        }
+        let ttl = if self.has(SeederFlaw::KeysetMarginBanTtl) {
+            self.config.ban_ttl
+        } else {
+            self.config.account_ttl
+        };
+        let horizon = self.clock.now() + 2 * ttl.as_secs();
+        self.net.keyset_final_expiry().is_some_and(|t| {
+            if self.has(SeederFlaw::KeysetMarginInclusive) {
+                t <= horizon
+            } else {
+                t < horizon
+            }
+        })
+    }
+
     /// Whether `key` has swaps of its own to read now.
     fn has_reads(&self, key: Key) -> bool {
         if self.has(SeederFlaw::NeverRestores) {
@@ -2010,61 +2085,107 @@ impl Inner {
         } else {
             key
         };
+        let mut waited_in = None;
         loop {
             let now = self.clock.now();
-            let reuse = self.state().own_reads.get(&slot).is_some_and(|(at, by)| {
-                *at == now
-                    && (proofs.is_none()
-                        || by.contains(&proofs)
-                        || (by.len() >= 2 && !self.has(SeederFlaw::OwnReadsPerProofs)))
-            });
-            if reuse && !self.has(SeederFlaw::OwnReadsUnbounded) {
-                // A read still under way is shared with its result: wait for it, to this
-                // entry's own deadline at most (then as a read unanswered). One abandoned
-                // meanwhile takes its place back with it, and this entry reads itself.
-                if self.has(SeederFlaw::WaitsWhileReading) {
-                    while self.state().reading.contains_key(&slot) {
-                        next_poll().await;
+            if self.has(SeederFlaw::SecondEndReturns) && waited_in.is_some_and(|w| w != now) {
+                return;
+            }
+            // This second's reads: one that covers this entry and is back is reused; one
+            // under way is waited for; past two sent, every entry reuses them.
+            let (back, under_way, sent) = {
+                let st = self.state();
+                match st.own_reads.get(&slot).filter(|(at, _)| *at == now) {
+                    None => (false, false, 0),
+                    Some((_, reads)) => {
+                        let past_two = reads.len() >= 2 && !self.has(SeederFlaw::OwnReadsPerProofs);
+                        let covers = |r: &OwnRead| past_two || proofs.is_none() || r.by == proofs;
+                        let back = |r: &OwnRead| {
+                            r.state == ReadState::Back
+                                || (r.state == ReadState::Abandoned
+                                    && self.has(SeederFlaw::AbandonedReadReused))
+                        };
+                        (
+                            reads.iter().any(|r| covers(r) && back(r)),
+                            reads
+                                .iter()
+                                .any(|r| covers(r) && r.state == ReadState::UnderWay),
+                            reads.len(),
+                        )
                     }
-                    return;
                 }
-                // Each poll looks again: the reuse holds for its second only.
-                let under_way = self.state().reading.contains_key(&slot);
-                let in_time = until.is_none_or(|u| now < u);
-                if under_way && in_time && !self.has(SeederFlaw::ReuseWithoutWaiting) {
+            };
+            let bounded = !self.has(SeederFlaw::OwnReadsUnbounded);
+            if bounded && self.has(SeederFlaw::WaitsWhileReading) && (back || under_way) {
+                // The eighteenth rework's wait: on any read of the account, whatever the second.
+                while self
+                    .state()
+                    .own_reads
+                    .get(&slot)
+                    .is_some_and(|(_, reads)| reads.iter().any(|r| r.state == ReadState::UnderWay))
+                {
                     next_poll().await;
-                    if self.has(SeederFlaw::ReuseWaitsOnePoll) {
-                        return;
-                    }
-                    continue;
                 }
                 return;
+            }
+            if bounded && back {
+                return;
+            }
+            let in_time = until.is_none_or(|u| now < u);
+            if bounded && under_way {
+                // Shared with its result: wait for it, to this entry's deadline at most (then
+                // as a read unanswered). Each poll looks again: the second may end first.
+                if self.has(SeederFlaw::ReuseWithoutWaiting) || !in_time {
+                    return;
+                }
+                waited_in.get_or_insert(now);
+                next_poll().await;
+                if self.has(SeederFlaw::ReuseWaitsOnePoll) {
+                    return;
+                }
+                continue;
+            }
+            if bounded && sent >= 2 && !self.has(SeederFlaw::AbandonedFreesItsPlace) {
+                // Two sent this second, and none with a result for this entry (abandoned):
+                // it reads in the next second, by its deadline.
+                if !in_time {
+                    return;
+                }
+                waited_in.get_or_insert(now);
+                next_poll().await;
+                continue;
             }
             if self.net.round_trips() {
                 if !self.has_reads(key) {
                     return;
                 }
-                self.record_read(slot, now, proofs.clone());
-                let mut reading = Reading::start(self, slot, now, proofs.clone());
+                let reading = Reading::start(self, slot, now, proofs.clone());
                 next_poll().await;
                 self.learn(Some(key), until);
-                reading.done = true;
+                reading.back();
             } else if self.learn(Some(key), until) {
-                self.record_read(slot, now, proofs.clone());
+                self.record_read(slot, now, proofs.clone(), ReadState::Back);
             }
             return;
         }
     }
 
-    /// Count a read of `slot`'s swaps, made in second `now`, for a payment of `proofs` or a
-    /// `hello` (`None`).
-    fn record_read(&self, slot: Key, now: u64, proofs: Option<Vec<u64>>) {
+    /// Count a read of `slot`'s swaps sent in second `now`, by a payment of `proofs` or a
+    /// `hello` (`None`), in `state`; its index in that second's reads.
+    fn record_read(
+        &self,
+        slot: Key,
+        now: u64,
+        proofs: Option<Vec<u64>>,
+        state: ReadState,
+    ) -> usize {
         let mut st = self.state();
         let reads = st.own_reads.entry(slot).or_insert((now, Vec::new()));
         if reads.0 != now && !self.has(SeederFlaw::NoSecondReset) {
             *reads = (now, Vec::new());
         }
-        reads.1.push(proofs);
+        reads.1.push(OwnRead { by: proofs, state });
+        reads.1.len() - 1
     }
 
     /// Send a swap left unknown again, with the same outputs: a retry. Answered `spent`,
@@ -2996,57 +3117,64 @@ impl Inner {
             + st.debt.len()
             + st.unknown.len()
             + st.own_reads.len()
-            + st.reading.len()
     }
 }
 
-/// A read of an account's swaps under way, counted until it is back or dropped: an entry
-/// reusing it waits for its result.
-/// A read abandoned before it is back (its entry dropped) also takes back its place in the
-/// second's reads, so the entries waiting for it read themselves.
+/// A read of an account's swaps under way (a round trip): marked back when it is, or
+/// abandoned if its entry is dropped first. Either way it was sent, and counts.
 struct Reading<'a> {
     e: &'a Inner,
     slot: Key,
     at: u64,
-    by: Option<Vec<u64>>,
-    done: bool,
+    index: usize,
+    back: bool,
 }
 
 impl<'a> Reading<'a> {
     fn start(e: &'a Inner, slot: Key, at: u64, by: Option<Vec<u64>>) -> Self {
-        *e.state().reading.entry(slot).or_default() += 1;
+        let index = e.record_read(slot, at, by, ReadState::UnderWay);
         Self {
             e,
             slot,
             at,
-            by,
-            done: false,
+            index,
+            back: false,
+        }
+    }
+
+    fn back(mut self) {
+        self.set(ReadState::Back);
+        self.back = true;
+    }
+
+    fn set(&self, state: ReadState) {
+        let mut st = self.e.state();
+        if let Some((at, reads)) = st.own_reads.get_mut(&self.slot)
+            && *at == self.at
+            && let Some(r) = reads.get_mut(self.index)
+        {
+            r.state = state;
         }
     }
 }
 
 impl Drop for Reading<'_> {
     fn drop(&mut self) {
-        let mut st = self.e.state();
-        if let Some(n) = st.reading.get_mut(&self.slot) {
-            *n -= 1;
-            if *n == 0 {
-                st.reading.remove(&self.slot);
-            }
+        if self.back {
+            return;
         }
-        if !self.done && !self.e.has(SeederFlaw::AbandonedReadKept) {
-            let emptied = st.own_reads.get_mut(&self.slot).is_some_and(|(at, by)| {
-                if *at == self.at
-                    && let Some(i) = by.iter().position(|b| *b == self.by)
-                {
-                    by.remove(i);
-                }
-                by.is_empty()
-            });
-            if emptied {
-                st.own_reads.remove(&self.slot);
+        if self.e.has(SeederFlaw::AbandonedFreesItsPlace) {
+            // The nineteenth rework's: the abandoned read gives its place back.
+            let mut st = self.e.state();
+            if let Some((at, reads)) = st.own_reads.get_mut(&self.slot)
+                && *at == self.at
+                && self.index < reads.len()
+            {
+                reads.remove(self.index);
             }
+            return;
         }
+        self.set(ReadState::Abandoned);
     }
 }
 
@@ -3242,7 +3370,7 @@ impl SeederEngine for MockEngine {
             if !reuse && e.has_reads(key) {
                 next_poll().await; // the round trip, counted only once it is back
                 if e.learn(Some(key), None) {
-                    e.record_read(key, now, None);
+                    e.record_read(key, now, None, ReadState::Back);
                 }
             }
         } else {
@@ -3381,6 +3509,9 @@ impl MockSession {
     async fn pay_in_turn(&mut self, pay: &Pay, id: u64) -> Result<Ack, Rej> {
         let e = self.e.clone();
         let turn_came = e.clock.now();
+        if e.has(SeederFlaw::KeysetFirst) && e.keyset_too_soon() {
+            return Err(unavailable("the mint's keyset expires too soon to swap to"));
+        }
         if e.has(SeederFlaw::ClaimsBeforeChecking) {
             let _ = e.net.swap_now(&pay.token);
         }
@@ -3513,9 +3644,9 @@ impl MockSession {
         // Outputs only from a keyset that outlives any wait to decide this swap: none whose
         // listed `final_expiry` is sooner than twice `account_ttl` away. With none, no swap:
         // the seeder's own keyset error, read nothing for.
-        let horizon = e.clock.now() + 2 * e.config.account_ttl.as_secs();
-        if e.net.keyset_final_expiry().is_some_and(|t| t < horizon)
-            && !e.has(SeederFlaw::IgnoresKeysetExpiry)
+        if !e.has(SeederFlaw::KeysetAfterRead)
+            && !e.has(SeederFlaw::KeysetFirst)
+            && e.keyset_too_soon()
         {
             return Err(unavailable("the mint's keyset expires too soon to swap to"));
         }
@@ -3564,6 +3695,9 @@ impl MockSession {
             recheck(e.state().accounts.get(&self.key).map_or(0, |a| a.acked))?;
         }
         e.learn_here(self.key, proofs, deadline).await;
+        if e.has(SeederFlaw::KeysetAfterRead) && e.keyset_too_soon() {
+            return Err(unavailable("the mint's keyset expires too soon to swap to"));
+        }
         {
             let mut st = e.state();
             let now = e.clock.now();
@@ -3901,6 +4035,15 @@ impl MockViewer {
             // either. It is retried like a reclaim the mint did not answer.
             Reclaim::Pending if self.has(ViewerFlaw::ReclaimPendingIsSpent) => Reclaim::SomeSpent,
             Reclaim::Expired if self.has(ViewerFlaw::ExpiredReclaimRetried) => Reclaim::Blocked,
+            // Lost to the expiry only if the mint lists the proofs' own keyset as expired;
+            // the 12003 may be the reclaim's outputs' (an expired active keyset): incomplete,
+            // retried once the mint has a keyset to take them back to.
+            Reclaim::Expired
+                if !self.net.proofs_listed_expired(token)
+                    && !self.has(ViewerFlaw::ExpiredByCodeAlone) =>
+            {
+                Reclaim::Blocked
+            }
             Reclaim::Pending => Reclaim::Blocked,
             outcome => outcome,
         }
@@ -4802,6 +4945,17 @@ impl Harness for MockHarness {
     fn rotate_keyset(&self) {
         let mut l = self.net.ledger();
         l.retired_outputs = l.next;
+        if let Some(x) = l.active_expired_since.take() {
+            let upto = l.next;
+            l.expired_ranges.push((x + 1, upto));
+            l.final_expiry = None;
+        }
+    }
+
+    fn expire_active_keyset(&self) {
+        let mut l = self.net.ledger();
+        l.final_expiry = Some(self.clock.now());
+        l.active_expired_since = Some(l.next);
     }
 
     fn keyset_expires_in(&self, after: Option<Duration>) {

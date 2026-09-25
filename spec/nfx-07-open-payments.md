@@ -89,8 +89,10 @@ payment-enforced after release, so no mechanism pretends otherwise.
   watermark, and `spent_total` is the face value accepted so far on the account.
 - **`rej` `mint-unavailable`**: the seeder could not complete the swap in time, and its
   outcome may be unknown; or it did not swap at all, because an earlier payment's
-  outcome on the account is still unknown. It is not a ban, and nothing was credited by
-  then; a swap that lands later is credited if it claimed the proofs (§3).
+  outcome on the account is still unknown, or the mint has no keyset it may swap to.
+  It is not a ban, and nothing was credited by then; a swap that lands later is
+  credited if it claimed the proofs and the seeder learns so before its outputs' keyset
+  expires (§3).
 - **`refuse`** (seeder→watcher): the seeder refused the watcher's request for `file`
   under this session, and served not one byte of it. That is how a refusal is told apart
   from a transfer the watcher aborted, which gets no `refuse`. One `refuse` answers one
@@ -320,10 +322,13 @@ checks run in this order:
        account made that second; a `pay` reuses one made for the same proofs; past two
        reads that second, every entry reuses them. A read counts from when it is sent,
        in the second it is sent, an entry that waited into a new second included, so two
-       entries at once share one read, and its result: an entry reusing a read still
-       under way waits for it. The reuse holds within its second, so the wait ends with
-       it at the latest, and at the entry's own deadline; a read abandoned before it is
-       back (its entry dropped) leaves the entries waiting for it to read themselves. A flood of hellos, or of payments
+       entries at once share one read, and its result: an entry waits for a read still
+       under way that would serve it, and for no other. A read abandoned before it is
+       back (its entry dropped) still counts, having been sent, but has no result: an
+       entry it would have served reads itself while the second's two are not spent, and
+       otherwise in the next second. An entry whose read has not come back when its
+       second ends reads itself, as a read of the new second; its wait ends at its own
+       deadline in any case. A flood of hellos, or of payments
        whatever their proofs, costs the mint two reads a second, while a watcher paying
        again after its reclaim, with other proofs, reads afresh.
      - A background sweep reads every account's, periodically, in as few requests as the
@@ -419,17 +424,21 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   - A reclaim refused as pending (the mint is still processing a request that reserved
     the proofs, §3) has neither taken them back nor found them spent: it is incomplete,
     and retried.
-  - A reclaim refused because the proofs' keyset has expired (CDK 12003, checked before
-    anything else) is decided by a NUT-07 check. An input spent is as a reclaim that
-    found proofs spent (above); an input pending, incomplete. Every input unspent, it is
-    complete: the proofs are lost to the expiry, not taken by the seeder, and the watcher
-    pays again.
+  - A reclaim refused because a keyset has expired (CDK 12003, the same code whether it is
+    the proofs' keyset or the reclaim's outputs', checked before anything else) is
+    decided by a NUT-07 check. An input spent is as a reclaim that found proofs spent
+    (above); an input pending, incomplete. Every input unspent: if the mint lists the
+    proofs' own keyset as expired, they are lost to the expiry, not taken by the seeder,
+    and the watcher pays again; otherwise the expired keyset is the reclaim's outputs' (a
+    CDK mint keeps an expired active keyset active), and the reclaim is incomplete,
+    retried once the mint has a keyset to take them back to.
   - A reclaim whose answer is lost can outlive its outputs' keyset (the watcher cannot
     refuse to reclaim: its proofs would be lost to the expiry anyway), and a restore then
     no longer shows its outputs: the watcher cannot tell its own reclaim from the
     seeder's claim, and treats the proofs as found spent. A stated concession, as the
     seeder's (§3): it keeps the watcher's bound, and the proofs' value is lost to the
-    expiry either way.
+    expiry either way. Its cost falls on an honest seeder that never claimed them: this
+    watcher pays it nothing more, on any of its videos, and no quote can settle it.
   - Until the reclaim completes (the mint may be down), the watcher pays that seeder
     nothing more. A quote showing the ledger plus that payment, both fields, settles it
     as accepted in the meantime, and the reclaim is dropped: the seeder has the proofs.
@@ -720,3 +729,11 @@ therefore loses nothing:
       abandoned read leaves its waiters to read themselves.
   - §3a: a reclaim whose outputs' keyset expires before the watcher can restore them is
     treated as found spent, a stated concession.
+- Draft 2026-09-25 (M2.0 twentieth audit, `docs/nfx/reviews/2026-09-24-m2.0-twentieth-audit.md`).
+  - §2: `mint-unavailable` names the keyset refusal, and the expiry concession.
+  - §3: an abandoned read still counts; an entry waits only for a read that would serve
+    it, reads itself when its second ends, and reads in the next second once the
+    second's two are spent without a result for it.
+  - §3a: a reclaim refused 12003 with its proofs unspent is lost to the expiry only if
+    the mint lists the proofs' own keyset as expired; otherwise it is incomplete and
+    retried. The concession names its cost to an honest seeder.

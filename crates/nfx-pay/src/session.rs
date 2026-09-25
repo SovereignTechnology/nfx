@@ -413,6 +413,10 @@ pub trait Harness {
     fn expire_keyset(&self);
     /// The mint's active keyset lists a `final_expiry` (NUT-02) `after` from now, or none.
     fn keyset_expires_in(&self, after: Option<Duration>);
+    /// The mint's active keyset expires, and stays active (CDK does not rotate an expired
+    /// keyset): outputs derived from it are refused (12003), while proofs of older keysets
+    /// stay valid, until [`Harness::rotate_keyset`].
+    fn expire_active_keyset(&self);
     /// `event` happens at the mint just before the next swap request reaches it: a
     /// seeder's first attempt, retry or completion alike. Several happen in the order
     /// given.
