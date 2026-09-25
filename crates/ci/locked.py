@@ -30,8 +30,8 @@ by path, would escape every check here.
 
 `compiled` also checks, without pins, on the money crates' own build: every target of
 nfx-pay and nfx-proto yields rustc's dep-info (a target without it fails), and every file
-it lists is tracked; nfx-pay's targets and nfx-proto's library read only their own
-crate's files, and nfx-proto's tests tracked files only (the vectors).
+it lists is tracked; every target reads only its own crate's files, except nfx-proto's
+integration tests, which may read tracked files elsewhere (the vectors).
 
 Out of scope, and why: code in other crates. It may compile a pinned file (by
 `#[path]`, say), but it cannot change one, and a copy of money logic written anywhere is
@@ -293,12 +293,14 @@ def compiled(pin: bool) -> None:
         if d is None:
             fail(f"no dep-info for {target}: every money target must show what it compiled")
         seen_targets += 1
-        is_test = msg["profile"].get("test", False)
+        # Only nfx-proto's integration tests may read outside their crate (the vectors).
+        # An example or a bench is built in test mode by --all-targets too: that is no
+        # exemption.
+        vectors_ok = crate != pay_dir and msg["target"]["kind"] == ["test"]
         for src in sources_read(d):
             if src not in tracked:
                 fail(f"{target} compiled {src}, which is not a tracked file ({d.name})")
-            own = crate in src.parents
-            if not own and (crate == pay_dir or not is_test):
+            if crate not in src.parents and not vectors_ok:
                 fail(f"{target} compiled {src}, from outside its crate ({d.name})")
     if seen_targets == 0:
         fail("found no dep-info for the money crates' build")

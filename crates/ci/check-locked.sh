@@ -54,9 +54,9 @@ fi
 #     whose name is not a plain identifier (an exported bash function, say); in CI, any
 #     variable outside the allow-list at all;
 #   - for any target of nfx-pay or nfx-proto: no dep-info, a compiled file that is
-#     untracked, or one outside its own crate (nfx-pay's targets and nfx-proto's library;
-#     nfx-proto's tests may read the tracked vectors). This catches #[path], include! and
-#     every spelling of them in the money crates, on the host build CI tests;
+#     untracked, or one outside its own crate (only nfx-proto's integration tests may
+#     read the tracked vectors). This catches #[path], include! and every spelling of
+#     them in the money crates, on the host build CI tests;
 #   - `nfx_pay` named in any Rust file outside nfx-pay and nfx-node's locked paths;
 #   - a path package that is not a workspace member;
 #   - the money tests not all running.
