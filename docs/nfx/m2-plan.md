@@ -19,14 +19,15 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after four independent
-audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of eight
+independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
 [fourth](reviews/2026-09-24-m2.0-fourth-audit.md),
 [fifth](reviews/2026-09-24-m2.0-fifth-audit.md),
 [sixth](reviews/2026-09-24-m2.0-sixth-audit.md),
-[seventh](reviews/2026-09-24-m2.0-seventh-audit.md)). sovtech's bar for the push is zero
+[seventh](reviews/2026-09-24-m2.0-seventh-audit.md),
+[eighth](reviews/2026-09-24-m2.0-eighth-audit.md)). sovtech's bar for the push is zero
 findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -55,8 +56,13 @@ findings, confirmed after the sixth:
     responses, outages, dial records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, one of them
-  threaded, and **each of 174 planted defects fails its scenario**, every surviving mutant
-  from all seven audits among them.
+  threaded, and **each of 181 planted defects fails its scenario**, every surviving mutant
+  from all eight audits among them.
+- **Since the eighth audit:**
+  - the suite covers a ban across videos, a late claim freeing the global cap, a stopped
+    standing's catch-up, refused hellos and the `mint-unavailable` count, unknown and
+    `banned` hello refusals, and a blocked catch-up's owner;
+  - nfx-proto's tests may read only the vectors outside their crate.
 - **Since the seventh audit:**
   - the lock is re-scoped to the money crates, failing closed on any target without
     dep-info;
