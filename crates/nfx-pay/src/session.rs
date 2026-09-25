@@ -32,7 +32,8 @@ pub trait SeederEngine {
     /// its quote carries the account's position. A `hello` creates no account. It waits
     /// for a payment in progress on the account to be answered (within 60 s of that
     /// payment's arrival), so its quote never misses an acknowledged one; while it waits
-    /// it counts toward the peer's session cap.
+    /// it counts toward the peer's session cap. It then reads its account's own unknown
+    /// swaps, if any, which adds their time (NFX-07 §3).
     ///
     /// Refused with:
     /// - `banned` for a banned peer;
@@ -45,7 +46,10 @@ pub trait SeederEngine {
     /// background task does periodically (NFX-07 §3). An account's own `hello` and `pay`
     /// learn its own; this is what learns the rest, and what completes a swap whose
     /// inputs stayed unspent past `account_ttl`. The suite calls it where that time would
-    /// pass.
+    /// pass, so:
+    /// - the engine under test sweeps only when called, never on a timer of its own;
+    /// - a sweep that finds another one running returns, or runs alongside it: it never
+    ///   waits for it ([`Harness::sweep_during_next_read`] runs one inside another's read).
     async fn sweep(&self);
 }
 
@@ -359,8 +363,8 @@ pub trait Harness {
     /// per request, however many swaps it covers.
     fn state_reads(&self) -> u64;
     /// The mint refuses, at once, a NUT-07 check or a NUT-09 restore that covers more than
-    /// `max` proofs or outputs (CDK's `max_inputs` and `max_outputs`, 11014), or reads any
-    /// size again (`None`).
+    /// `max` proofs or outputs (CDK's `max_inputs` and `max_outputs`: 11014 for a check,
+    /// 11015 for a restore), or reads any size again (`None`).
     fn limit_state_reads(&self, max: Option<usize>);
     /// A read the mint leaves unanswered costs its client `wait`, its timeout, on the
     /// harness's clock.
@@ -368,6 +372,17 @@ pub trait Harness {
     /// `engine`'s sweep runs, to its end, during the next read of a swap's state: two
     /// learners at once.
     fn sweep_during_next_read(&self, engine: &Self::Engine);
+    /// The mint rotates its active keyset: every output set made so far belongs to the
+    /// old one, and a swap to one of them is refused for good (CDK 12002), whatever its
+    /// inputs.
+    fn rotate_keyset(&self);
+    /// Just before the next swap request reaches the mint, it processes the requests whose
+    /// client gave up.
+    fn process_timed_out_before_next_swap(&self);
+    /// Just before the next swap request reaches the mint, the requests whose client gave
+    /// up start processing: their inputs are reserved (`PENDING`) until
+    /// [`Harness::release_swaps`] finishes them.
+    fn reserve_timed_out_before_next_swap(&self);
 
     /// Move the clock the seeder and the viewers keep forward.
     fn advance(&self, by: Duration);

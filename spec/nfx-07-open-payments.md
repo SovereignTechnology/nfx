@@ -109,7 +109,8 @@ payment-enforced after release, so no mechanism pretends otherwise.
   - It persists across the peer's sessions. A new `hello` continues the account; it
     never opens a fresh window.
   - A `hello` for an account with a payment in progress is answered once that payment
-    has been answered, at the latest at its deadline (60 s from its arrival). So a quote
+    has been answered, at the latest at its deadline (60 s from its arrival), plus the
+    time the `hello`'s own reads of its account's unknown swaps take (§3). So a quote
     never misses an acknowledged payment. A `hello` waiting so counts toward the peer's
     session cap.
 - Bans and the global cap belong to the **seeder**: one set of state for all its
@@ -153,8 +154,13 @@ payment-enforced after release, so no mechanism pretends otherwise.
   is completed: the seeder sends its swap again, with the same outputs, and settles it
   as that answer says. Its payer has had the inputs back all that time and never spent
   them, so the payment goes through after all, and is credited late (below); an away
-  watcher's next quote shows it. Undecided swaps therefore end, and cost a payer who
-  parks them its proofs.
+  watcher's next quote shows it. A completion is a retry: answered `spent`, a restore of
+  its outputs settles it; refused as pending, or unanswered, the swap stays unknown and
+  is completed again later. Refused for good, because its outputs' keyset is no longer
+  active (CDK 12002, after a rotation) or its inputs are invalid, it is settled by a
+  restore of its outputs too: signed, the claim; unsigned, nothing, since no request can
+  sign those outputs any more. Undecided swaps therefore end, and cost a payer who parks
+  them its proofs.
 - A seeder SHOULD keep a bounded cache of proofs it has seen spent. It then refuses a
   replayed one (`spent`, with a ban) without asking the mint.
 
@@ -266,13 +272,19 @@ checks run in this order:
        rolls it back (the reclaim then goes through).
      - Each unknown swap is decided on its own: one still unknown delays no other.
      - An account's own `hello` and `pay` read that account's unknown swaps, and no other
-       account's: a read left unanswered costs a payment's deadline only for its own
-       account. Admission and the other synchronous checks read nothing. A background
-       sweep reads every account's, periodically, in as few requests as the mint's
-       limits allow: a read the mint refuses as too large (CDK 11014, `max_inputs` and
-       `max_outputs`) is split, and every swap the mint once took fits in one request
-       alone. A read refused or unanswered proves nothing for the swaps it covered, and
-       nothing more.
+       account's, not even the same peer's on another video: a read left unanswered costs
+       a payment's deadline only for its own account. A `pay` reads nothing before its
+       peer's ban is checked. Admission and the other synchronous checks read nothing.
+     - An account's own reads are at most one a second: a `hello` reuses a read of its
+       account made that second, and so does a `pay` of the same proofs. A flood of
+       hellos, or of payments sending one token again, costs the mint one read a second;
+       a watcher paying again after its reclaim pays with other proofs, and reads afresh.
+     - A background sweep reads every account's, periodically, in as few requests as the
+       mint's limits allow: a read the mint refuses as too large (CDK 11014 for a NUT-07
+       check, 11015 for a restore; its `max_inputs` and `max_outputs`) is split, and
+       every swap the mint once took fits in one request alone. A read left unanswered is
+       not split. A read refused or unanswered proves nothing for the swaps it covered,
+       and nothing more.
      - Once learnt, an outcome is final: a response that comes later changes nothing.
        The converse holds too: the reads are round trips, and a response that lands
        while they are made has settled the swap, so their result then changes nothing.
@@ -569,13 +581,15 @@ therefore loses nothing:
   - §3: a swap abandoned at the deadline while still in flight is of unknown outcome:
     it counts toward the one-per-account bound, and the account's next payment is
     answered at once, without a swap, until it is learnt.
-- Draft 2026-09-25 (M2.0 fourteenth audit, `docs/nfx/reviews/2026-09-24-m2.0-fourteenth-audit.md`).
+- Draft 2026-09-25 (M2.0 twelfth audit, `docs/nfx/reviews/2026-09-24-m2.0-twelfth-audit.md`).
   - §3:
-    - an account's own `hello` and `pay` read only that account's unknown swaps;
-      admission reads nothing; a background sweep reads every account's;
-    - a read refused as too large for the mint is split;
-    - an unknown swap whose inputs read unspent `account_ttl` after it became unknown is
-      completed (sent again, with the same outputs), not dropped.
+    - a late outcome is learnt by reading the inputs (NUT-07), then the outputs (NUT-09);
+    - unsigned outputs are nothing only once an input is spent, and still unknown
+      while every input is unspent;
+    - an outcome, once learnt, is final;
+    - a swap abandoned in flight counts whether or not its `pay` is awaited, a new
+      peer's pre-payments included;
+    - a late claim is credited to a peer banned since.
 - Draft 2026-09-25 (M2.0 thirteenth audit, `docs/nfx/reviews/2026-09-24-m2.0-thirteenth-audit.md`).
   - §2: `mint-unavailable` also answers a payment refused without a swap while an
     earlier outcome on the account is unknown.
@@ -590,12 +604,18 @@ therefore loses nothing:
     - an unknown swap whose inputs read unspent `account_ttl` after it became unknown is
       dropped.
   - §3a: a reclaim refused as pending is incomplete, and retried.
-- Draft 2026-09-25 (M2.0 twelfth audit, `docs/nfx/reviews/2026-09-24-m2.0-twelfth-audit.md`).
+- Draft 2026-09-25 (M2.0 fourteenth audit, `docs/nfx/reviews/2026-09-24-m2.0-fourteenth-audit.md`).
   - §3:
-    - a late outcome is learnt by reading the inputs (NUT-07), then the outputs (NUT-09);
-    - unsigned outputs are nothing only once an input is spent, and still unknown
-      while every input is unspent;
-    - an outcome, once learnt, is final;
-    - a swap abandoned in flight counts whether or not its `pay` is awaited, a new
-      peer's pre-payments included;
-    - a late claim is credited to a peer banned since.
+    - an account's own `hello` and `pay` read only that account's unknown swaps;
+      admission reads nothing; a background sweep reads every account's;
+    - a read refused as too large for the mint is split;
+    - an unknown swap whose inputs read unspent `account_ttl` after it became unknown is
+      completed (sent again, with the same outputs), not dropped.
+- Draft 2026-09-25 (M2.0 fifteenth audit, `docs/nfx/reviews/2026-09-24-m2.0-fifteenth-audit.md`).
+  - §2: a `hello`'s answer may come later than a payment's deadline by its own reads.
+  - §3:
+    - a completion is a retry: `spent` is settled by restore, pending or unanswered
+      leaves the swap unknown, and outputs refused for good are settled by restore;
+    - own reads exclude the same peer's other videos, come after the ban check, and are
+      at most one a second, reused by a `hello` and by a `pay` of the same proofs;
+    - an oversized restore is CDK 11015; an unanswered read is not split.
