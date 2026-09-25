@@ -23,7 +23,8 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
-[fourth](reviews/2026-09-24-m2.0-fourth-audit.md)). sovtech's bar for the push is zero
+[fourth](reviews/2026-09-24-m2.0-fourth-audit.md),
+[fifth](reviews/2026-09-24-m2.0-fifth-audit.md)). sovtech's bar for the push is zero
 findings:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -51,9 +52,15 @@ findings:
   - a proof-based mock mint: multi-proof tokens, atomic swaps, held swaps or held
     responses, outages, dial records;
   - honest seeder and viewer engines, with a validated configuration.
-- **Suite:** `nfx_pay::adversary` has 52 scenarios, each under a timeout, and **each of
-  102 planted defects fails its scenario**, every surviving mutant from all four audits
-  among them.
+- **Suite:** `nfx_pay::adversary` has 60 scenarios, each under a timeout, one of them
+  threaded, and **each of 131 planted defects fails its scenario**, every surviving mutant
+  from all five audits among them.
+- **Since the fifth audit:**
+  - one lock decides each payment, with its deadline counted from arrival;
+  - a late claim is credited, and a late outcome bans nobody;
+  - the watcher keeps one standing per seeder, and a payment found spent awaits a quote;
+  - bans expire;
+  - the lock job reads its facts before any build and compiles only the money crates.
 - **Since the fourth audit:**
   - a `refuse` message;
   - windows per account;
