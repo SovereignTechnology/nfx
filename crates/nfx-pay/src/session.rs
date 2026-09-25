@@ -40,6 +40,13 @@ pub trait SeederEngine {
     /// - `bad-session` for a session id that is open, or beyond the per-peer cap on open
     ///   and waiting sessions, counted across all videos.
     async fn hello(&self, peer: &PeerId, hello: &Hello) -> Result<Self::Session, Rej>;
+
+    /// Learn the outcome of every swap left unknown, every account's, as a seeder's
+    /// background task does periodically (NFX-07 §3). An account's own `hello` and `pay`
+    /// learn its own; this is what learns the rest, and what completes a swap whose
+    /// inputs stayed unspent past `account_ttl`. The suite calls it where that time would
+    /// pass.
+    async fn sweep(&self);
 }
 
 /// One open session: one peer, one video. **Dropping it closes it.**
@@ -351,6 +358,16 @@ pub trait Harness {
     /// Reads of swap state the mint has served (NUT-07 checks and NUT-09 restores), one
     /// per request, however many swaps it covers.
     fn state_reads(&self) -> u64;
+    /// The mint refuses, at once, a NUT-07 check or a NUT-09 restore that covers more than
+    /// `max` proofs or outputs (CDK's `max_inputs` and `max_outputs`, 11014), or reads any
+    /// size again (`None`).
+    fn limit_state_reads(&self, max: Option<usize>);
+    /// A read the mint leaves unanswered costs its client `wait`, its timeout, on the
+    /// harness's clock.
+    fn unanswered_reads_take(&self, wait: Duration);
+    /// `engine`'s sweep runs, to its end, during the next read of a swap's state: two
+    /// learners at once.
+    fn sweep_during_next_read(&self, engine: &Self::Engine);
 
     /// Move the clock the seeder and the viewers keep forward.
     fn advance(&self, by: Duration);

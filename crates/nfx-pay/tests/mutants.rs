@@ -281,6 +281,12 @@ catches!(
     reads_per_swap: s(S::ReadsPerSwap) => bans_expire_and_state_stays_bounded,
     undecided_never_expires: s(S::UndecidedNeverExpires) => bans_expire_and_state_stays_bounded,
     viewer_pending_reclaim_is_spent: v(V::ReclaimPendingIsSpent) => an_honest_pair_rides_out_a_mint_outage,
+    reads_never_split: s(S::NoSplitOnLimit) => bans_expire_and_state_stays_bounded,
+    reads_other_accounts: s(S::ReadsOtherAccounts) => bans_expire_and_state_stays_bounded,
+    expiry_drops: s(S::ExpiryDrops) => bans_expire_and_state_stays_bounded,
+    in_flight_never_expires: s(S::FlightNeverExpires) => bans_expire_and_state_stays_bounded,
+    lost_claim_without_recheck: s(S::LostNoRecheck) => a_late_outcome_is_credited_never_banned,
+    pending_first_attempt_unknown: s(S::PendingFirstUnknown) => a_late_outcome_is_credited_never_banned,
     viewer_unanswered_restore_is_back: v(V::ReclaimRestoreDownIsBack) => a_viewer_reclaims_a_refused_payment,
     viewer_unanswered_restore_is_spent: v(V::ReclaimRestoreDownIsSpent) => a_viewer_reclaims_a_refused_payment,
 );
