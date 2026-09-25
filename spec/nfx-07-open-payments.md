@@ -318,19 +318,22 @@ checks run in this order:
        ban), just before its swap: a payment the seeder refuses anyway costs the mint
        nothing.
        Admission and the other synchronous checks read nothing.
-     - An account's own reads are at most two a second. A `hello` reuses any read of its
-       account made that second; a `pay` reuses one made for the same proofs; past two
-       reads that second, every entry reuses them. A read counts from when it is sent,
-       in the second it is sent, an entry that waited into a new second included, so two
-       entries at once share one read, and its result: an entry waits for a read still
-       under way that would serve it, and for no other. A read abandoned before it is
-       back (its entry dropped) still counts, having been sent, but has no result: an
-       entry it would have served reads itself while the second's two are not spent, and
-       otherwise in the next second. An entry whose read has not come back when its
-       second ends reads itself, as a read of the new second; its wait ends at its own
-       deadline in any case. A flood of hellos, or of payments
-       whatever their proofs, costs the mint two reads a second, while a watcher paying
-       again after its reclaim, with other proofs, reads afresh.
+     - An account's own reads are at most two a second, counted against that account
+       alone. A read counts from when it is sent, in the second it is sent (an entry
+       that waited into a new second included), whatever becomes of it.
+     - A read serves an entry of its account when it covered every swap undecided for
+       the account as the entry comes: not one sent before a swap became unknown. And it
+       is the entry's own proofs' read, or any read for a `hello`, or any read once two
+       were sent that second. So two entries at once share one read, and its result; a
+       `hello` that waited for a payment reads after it; a watcher paying again after
+       its reclaim, with other proofs, reads afresh; and a flood of hellos, or of
+       payments whatever their proofs, costs the mint two reads a second.
+     - An entry reuses a read that serves it and is back; waits for one under way that
+       would serve it, and for no other; and otherwise reads itself, while the second's
+       two are not spent. Once they are, it reads in the next second. A read abandoned
+       before it is back (its entry dropped) still counts, but has no result. An entry
+       whose read has not come back when its second ends reads itself, as a read of the
+       new second. Its wait ends at its own deadline in any case.
      - A background sweep reads every account's, periodically, in as few requests as the
        mint's limits allow: a read the mint refuses as too large (CDK 11014 for a NUT-07
        check, 11015 for a restore; its `max_inputs` and `max_outputs`) is split, and
@@ -427,11 +430,16 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   - A reclaim refused because a keyset has expired (CDK 12003, the same code whether it is
     the proofs' keyset or the reclaim's outputs', checked before anything else) is
     decided by a NUT-07 check. An input spent is as a reclaim that found proofs spent
-    (above); an input pending, incomplete. Every input unspent: if the mint lists the
-    proofs' own keyset as expired, they are lost to the expiry, not taken by the seeder,
-    and the watcher pays again; otherwise the expired keyset is the reclaim's outputs' (a
-    CDK mint keeps an expired active keyset active), and the reclaim is incomplete,
-    retried once the mint has a keyset to take them back to.
+    (above); an input pending, incomplete. Every input unspent, it is decided per proof,
+    by the `final_expiry` the mint lists for each proof's keyset against the watcher's
+    own clock (a wallet spends an older keyset's proofs first, so one token may hold
+    both): those past it are lost to the expiry, not taken by the seeder, and the rest
+    are taken back in a reclaim of their own; then the watcher pays again. With none
+    past it, the expired keyset is the reclaim's outputs' (a CDK mint keeps an expired
+    active keyset active), and the reclaim is incomplete, retried once the mint has a
+    keyset to take them back to. A watcher's clock ahead of the mint's, by some skew,
+    calls proofs lost that the mint takes for that long; one behind holds a reclaim
+    incomplete for that long.
   - A reclaim whose answer is lost can outlive its outputs' keyset (the watcher cannot
     refuse to reclaim: its proofs would be lost to the expiry anyway), and a restore then
     no longer shows its outputs: the watcher cannot tell its own reclaim from the
@@ -737,3 +745,8 @@ therefore loses nothing:
   - §3a: a reclaim refused 12003 with its proofs unspent is lost to the expiry only if
     the mint lists the proofs' own keyset as expired; otherwise it is incomplete and
     retried. The concession names its cost to an honest seeder.
+- Draft 2026-09-25 (M2.0 twenty-first audit, `docs/nfx/reviews/2026-09-24-m2.0-twenty-first-audit.md`).
+  - §3: a read serves only entries whose undecided swaps it covered; reads count against
+    their own account alone; the reuse rules restated as three bullets.
+  - §3a: a reclaim refused 12003 with its proofs unspent is decided per proof, by each
+    keyset's listed `final_expiry` against the watcher's clock, whose skew is named.

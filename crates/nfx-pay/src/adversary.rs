@@ -2203,6 +2203,150 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
     }
     h.release_swaps().await;
 
+    // A read serves only entries whose swaps it covered: one sent before a swap became
+    // unknown does not serve a hello waiting for that swap's payment, which reads again and
+    // quotes the new claim too.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    for upto in [4, 8] {
+        if upto == 8 {
+            serve(h, &mut s, 4, 4);
+        }
+        h.hold_swap_responses();
+        h.lose_next_swap_response();
+        let p = Pay {
+            upto_chunk: upto,
+            token: h.token(4).await,
+        };
+        let (peer, hello) = (h.peer(1), h.hello());
+        let ((r, quoted), ()) = both(both(s.pay(&p), e.hello(&peer, &hello)), async {
+            yield_once().await;
+            h.mint_outage(true);
+            h.release_swaps().await;
+            h.mint_outage(false);
+        })
+        .await;
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+        let q = quoted.expect("a hello").quote().clone();
+        assert_eq!(
+            (q.accepted_upto, q.spent_total),
+            (upto, upto),
+            "the waiting hello quotes the claim it waited for, though a read was sent earlier that second"
+        );
+    }
+
+    // Payments wait for reads too, and keep their deadline: a hello's read stalled, and a
+    // payment's read abandoned, spend the second's two. A payment then waits for the hello's
+    // read, and is answered by its deadline once the second has passed; one that nothing
+    // under way serves reads in the next second, and is swapped. And a flood of entries in
+    // that second, dropped or not, sends no more reads: at most two a second, abandoned ones
+    // included, however they end.
+    for case in 0..3 {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        let mut other = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        h.hold_next_swap_reserving(); // a swap its reads cannot decide yet
+        h.time_out_next_swap();
+        let parked = Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        };
+        let r = s.pay(&parked).await;
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+        if case == 1 {
+            // Taken back by its watcher once the mint rolls it back: the next read decides
+            // it as nothing.
+            h.roll_back_reserved();
+            assert!(
+                h.steal(&parked.token).await,
+                "its watcher takes the proofs back"
+            );
+        }
+        h.advance(SECOND);
+        let peer = h.peer(1);
+        let before = h.state_reads();
+        let stalled_hello = h.hello();
+        let mut stalled = Box::pin(e.hello(&peer, &stalled_hello));
+        if poll_now(stalled.as_mut()).is_some() {
+            continue; // synchronous reads: nothing is ever under way
+        }
+        if case == 1 {
+            drop(stalled); // abandoned: it has no result for anyone
+            stalled = Box::pin(e.hello(&peer, &stalled_hello));
+        }
+        {
+            let dropped = Pay {
+                upto_chunk: 4,
+                token: h.token(4).await,
+            };
+            let mut paying = Box::pin(other.pay(&dropped));
+            assert!(poll_now(paying.as_mut()).is_none(), "its read is under way");
+        } // its connection closes: abandoned
+        let p = Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        };
+        match case {
+            0 => {
+                let arrived = h.clock_secs();
+                let mut pay = Box::pin(s.pay(&p));
+                assert!(
+                    poll_now(pay.as_mut()).is_none(),
+                    "it waits for the hello's read"
+                );
+                h.advance(Duration::from_secs(61));
+                let answered = (0..10_000).find_map(|_| poll_now(pay.as_mut()));
+                assert!(
+                    answered.is_some_and(|r| is_rej(&r, &RejCode::MintUnavailable)),
+                    "answered by its deadline, {} s after arrival",
+                    h.clock_secs() - arrived
+                );
+            }
+            1 => {
+                let mut pay = Box::pin(s.pay(&p));
+                assert!(
+                    (0..1000).all(|_| poll_now(pay.as_mut()).is_none()),
+                    "two reads were sent this second, none with a result: it reads in the next"
+                );
+                h.advance(SECOND);
+                let ack = (0..10_000)
+                    .find_map(|_| poll_now(pay.as_mut()))
+                    .expect("answered in the next second")
+                    .expect("the parked swap read as nothing: swapped");
+                assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
+            }
+            _ => {
+                let hellos: Vec<_> = (0..20).map(|_| h.hello()).collect();
+                let mut flood = Vec::new();
+                for (n, hello) in hellos.iter().enumerate() {
+                    let mut f = Box::pin(e.hello(&peer, hello));
+                    let _ = poll_now(f.as_mut());
+                    if n % 2 == 0 {
+                        flood.push(f); // kept waiting
+                    } // the rest dropped mid-way
+                }
+                for _ in 0..20 {
+                    let again = Pay {
+                        upto_chunk: 4,
+                        token: p.token.clone(),
+                    };
+                    let mut f = Box::pin(s.pay(&again));
+                    let _ = poll_now(f.as_mut());
+                }
+                assert!(
+                    h.state_reads() - before <= 4,
+                    "two reads this second, a NUT-07 check and a restore each: {}",
+                    h.state_reads() - before
+                );
+                drop(flood);
+            }
+        }
+        drop(stalled);
+        h.release_swaps().await;
+    }
+
     // Reads under way (round trips), for a claim whose answer was lost and whose retry
     // never reached the mint, which the account's next read learns. An entry reusing a read
     // waits until it is back, however many polls that takes; and if its reader is dropped
@@ -2678,6 +2822,33 @@ pub async fn a_mint_outage_is_not_a_ban<H: Harness>(h: &H) {
                 debt_ttl: h.debt_ttl(),
                 account_ttl: ttl,
                 ban_ttl: Duration::from_secs(24 * 3600),
+                mints: 1,
+                extra_mint: None,
+            })
+            .expect("a valid configuration");
+        let mut s = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        h.keyset_expires_in(Some(after));
+        let r = s
+            .pay(&Pay {
+                upto_chunk: 4,
+                token: h.token(4).await,
+            })
+            .await;
+        assert_eq!(r.is_ok(), swaps, "a keyset {after:?} away: {r:?}");
+    }
+    // Nor the longer of the two: with an `account_ttl` of 24 h and a `ban_ttl` of 30 days, a
+    // keyset exactly 48 h away is swapped to.
+    let ttl = Duration::from_secs(24 * 3600);
+    for (after, swaps) in [(ttl * 2 - SECOND, false), (ttl * 2, true)] {
+        let e = h
+            .engine_checked(EngineParams {
+                price: 1,
+                window: 4,
+                global_cap: 1000,
+                debt_ttl: h.debt_ttl(),
+                account_ttl: ttl,
+                ban_ttl: Duration::from_secs(30 * 24 * 3600),
                 mints: 1,
                 extra_mint: None,
             })
@@ -4000,6 +4171,59 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
             "each account learns its own claim (video {video})"
         );
     }
+    // And a read counts against its own account only: two on one video in a second leave
+    // the peer's other video its own, so a stalled video holds up no other.
+    let e = h.engine(1, 4, 1000);
+    let mut zero = open_on(h, &e, 1, 0).await;
+    assert_eq!(serve_on(h, &mut zero, 0, 0, 2), 2);
+    h.hold_next_swap_reserving(); // undecidable for now: every read of it proves nothing
+    h.time_out_next_swap();
+    let r = zero
+        .pay(&Pay {
+            upto_chunk: 1,
+            token: h.token(1).await,
+        })
+        .await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    let mut one = open_on(h, &e, 1, 1).await;
+    assert_eq!(serve_on(h, &mut one, 1, 0, 1), 1);
+    h.hold_swap_responses();
+    h.lose_next_swap_response();
+    let p = Pay {
+        upto_chunk: 1,
+        token: h.token(1).await,
+    };
+    let (r, ()) = both(one.pay(&p), async {
+        yield_once().await;
+        h.mint_outage(true);
+        h.release_swaps().await;
+    })
+    .await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    h.mint_outage(false);
+    h.advance(SECOND);
+    drop(open_on(h, &e, 1, 0).await); // video 0's first read this second
+    let r = zero
+        .pay(&Pay {
+            upto_chunk: 2,
+            token: h.token(2).await,
+        })
+        .await; // and its second, for other proofs
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    let (peer, hello) = (h.peer(1), h.hello_for(1));
+    let mut other_video = Box::pin(e.hello(&peer, &hello));
+    let q = (0..1000)
+        .find_map(|_| poll_now(other_video.as_mut()))
+        .expect("video 0's two reads do not hold up video 1")
+        .expect("a hello")
+        .quote()
+        .clone();
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (1, 1),
+        "it reads its own at once"
+    );
+    h.release_swaps().await;
 
     // So are a new peer's pre-payments, before its account exists (with, for this second,
     // the record of its reads).
@@ -4939,6 +5163,62 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
         "once the mint rotates, it takes its proofs back"
     );
     assert!(next.is_some(), "and pays again");
+    // Proofs of the expired active keyset itself are listed expired: lost to the expiry,
+    // and the watcher pays again, though the reclaim's outputs' keyset has expired too.
+    h.expire_active_keyset();
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).unwrap();
+    for i in 0..2 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    let pay = v
+        .due()
+        .await
+        .unwrap()
+        .expect("due, in proofs of the expired keyset");
+    let rej = s.pay(&pay).await.expect_err("no keyset to swap to");
+    v.rej(&rej).await;
+    for i in 2..4 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    assert!(
+        v.due().await.unwrap().is_some(),
+        "its proofs lost to the expiry, it pays again"
+    );
+    h.rotate_keyset();
+    // A token of two keysets, one expired (a wallet spends an older keyset's proofs first):
+    // decided per proof. The expired one is lost; the other is taken back, and the watcher
+    // pays again.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).unwrap();
+    for i in 0..3 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    let pay = v.due().await.unwrap().expect("due: 3 sat, two proofs");
+    h.expire_keyset_of(&pay.token, 1);
+    let rej = s
+        .pay(&pay)
+        .await
+        .expect_err("one input's keyset has expired");
+    assert_eq!(rej.code, RejCode::MintUnavailable);
+    v.rej(&rej).await;
+    assert!(
+        h.claimed_any(&pay.token).await && !h.claimed_all(&pay.token).await,
+        "the good proof is taken back, the expired one left"
+    );
+    assert!(s.admit(&h.chunk(3)));
+    v.requested();
+    assert!(
+        v.due().await.unwrap().is_some(),
+        "complete, the seeder having taken nothing: it pays again"
+    );
 }
 
 /// A viewer waits exactly 180 s for an answer on a live connection, then reclaims its

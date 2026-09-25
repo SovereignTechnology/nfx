@@ -417,6 +417,9 @@ pub trait Harness {
     /// keyset): outputs derived from it are refused (12003), while proofs of older keysets
     /// stay valid, until [`Harness::rotate_keyset`].
     fn expire_active_keyset(&self);
+    /// The keyset of the first `proofs` of `token`'s proofs expires: an older keyset, whose
+    /// proofs a wallet spends first, while the rest of the token's stay good.
+    fn expire_keyset_of(&self, token: &str, proofs: usize);
     /// `event` happens at the mint just before the next swap request reaches it: a
     /// seeder's first attempt, retry or completion alike. Several happen in the order
     /// given.
