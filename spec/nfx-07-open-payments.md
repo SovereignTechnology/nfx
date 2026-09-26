@@ -109,7 +109,9 @@ payment-enforced after release, so no mechanism pretends otherwise.
   holds its position: `served`, `accepted_upto` and `spent_total`, all per account.
   - It is created by its first admission or payment. A `hello` alone creates nothing,
     and the quote then reports zeros. Nothing refused creates one: a refused `hello`,
-    request or `pay` leaves no account. A refused `hello` also holds no place under the
+    request or `pay` leaves no account. The one exception is a `pay` answered
+    `mint-unavailable` whose swap is later learnt as a claim: the claim creates the
+    account then (late outcomes, below). A refused `hello` also holds no place under the
     session cap and leaves no session id open.
   - It persists across the peer's sessions. A new `hello` continues the account; it
     never opens a fresh window.
@@ -240,8 +242,9 @@ whatever it offers. The checks run in this order:
 3. **DLEQ.** Every proof's DLEQ proof verifies against the keys of that quoted mint
    (fetched from it, then cached), else `bad-token`.
 4. **The face value** exactly covers the new chunks. Short is `underpaid`, over is
-   `overpaid`. A product above 2^53−1 is `underpaid`. Never extend credit on a
-   miscount.
+   `overpaid`. A product above 2^53−1 is `underpaid`. An exact payment that would take
+   the account's `spent_total` above 2^53−1 is `overpaid`: no `ack` or quote could carry
+   it (§2), so the account takes no more. Never extend credit on a miscount.
 5. **Swap, then acknowledge.** All the token's proofs go into one swap (NUT-03) at the
    quoted mint. The swap is atomic, and the seeder never swaps a subset. The account's
    watermark is read again as the swap is sent, after the payment's own read (below): a
@@ -905,5 +908,8 @@ therefore loses nothing:
   - §2: a banned peer's `hello` is refused `banned` whatever video it names, one the
     seeder does not serve included.
   - §3: nothing refused creates an account: a refused `hello`, request or `pay` leaves
-    none, and a refused `hello` holds no place under the session cap and leaves no session
-    id open.
+    none, except a `pay` answered `mint-unavailable` whose swap is later learnt as a
+    claim, which creates it then; and a refused `hello` holds no place under the session
+    cap and leaves no session id open.
+  - §3: an exact payment that would take its account's `spent_total` above 2^53−1 is
+    `overpaid`, since no `ack` or quote could carry it.

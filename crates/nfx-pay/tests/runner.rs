@@ -138,7 +138,7 @@ fn a_panic_at_a_line_that_makes_no_check_is_not_the_suite_failing() {
 fn a_runtime_panic_at_a_check_of_the_suite_is_not_the_suite_failing() {
     // Rust's own panics, raised for real, each reported at the line that caused it, then as
     // raised at a line of the suite that makes a check: one can sit on a check's line.
-    let runtime: [fn(); 35] = [
+    let runtime: [fn(); 44] = [
         || {
             bb(bb(0u64) - 1);
         },
@@ -245,6 +245,27 @@ fn a_runtime_panic_at_a_check_of_the_suite_is_not_the_suite_failing() {
             std::thread::scope(|scope| {
                 scope.spawn(|| panic!("the scoped thread's own"));
             });
+        },
+        || {
+            bb(bb(String::from("a")).remove(bb(1)));
+        },
+        || bb(String::from("é")).replace_range(bb(1)..2, "x"),
+        || bb(String::from("é")).replace_range(bb(0)..1, "x"),
+        || [1u8, 2, 3].copy_within(bb(0..2), bb(2)),
+        || {
+            bb(std::time::Duration::from_nanos_u128(bb(u128::MAX)));
+        },
+        || {
+            bb(std::time::SystemTime::now() + bb(std::time::Duration::MAX));
+        },
+        || {
+            bb(std::time::SystemTime::UNIX_EPOCH - bb(std::time::Duration::MAX));
+        },
+        || {
+            bb(bb(std::iter::repeat(bb(1u8))).count());
+        },
+        || {
+            bb(format!("{:1$}", 1, bb(70_000usize)));
         },
     ];
     let at = suite_line(|l| l.starts_with("assert_eq!("));

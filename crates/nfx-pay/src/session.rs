@@ -85,12 +85,16 @@ pub trait SeederSession {
     /// payment is refused `banned`, whatever it offers.
     ///
     /// The checks run in this order: structure (`bad-token`), quoted mint (`bad-mint`),
-    /// DLEQ (`bad-token`), exact face value (`underpaid`/`overpaid`), then the swap. A
-    /// completed swap gives the `ack`. The swap can also end as:
+    /// DLEQ (`bad-token`), exact face value (`underpaid`/`overpaid`), then the swap. An
+    /// exact payment that would take the account's `spent_total` above 2^53-1 is
+    /// `overpaid`: no `ack` or quote could carry it. A completed swap gives the `ack`. The
+    /// swap can also end as:
     /// - `spent` or invalid proofs: refused, and the peer is banned;
     /// - an unreachable mint: `mint-unavailable`, which is not a ban.
     ///
-    /// A refusal changes no accounting, creates no account and claims nothing.
+    /// A refusal changes no accounting, creates no account and claims nothing. The one
+    /// exception is a swap answered `mint-unavailable` that still lands: it is credited
+    /// late (below), and creates the account if there was none.
     ///
     /// Once its checks pass, and just before its swap, it reads its account's own unknown
     /// swaps (NFX-07 §3), and the account's watermark is read again: a payment it no
@@ -110,7 +114,8 @@ pub trait SeederSession {
     /// over reads the abandoned swap, as above.
     ///
     /// **Late outcomes:** an abandoned swap is settled when its outcome comes. A claim is
-    /// credited (the next quote shows it); a spent or invalid outcome bans nobody.
+    /// credited (the next quote shows it), creating the account if there was none; a spent
+    /// or invalid outcome bans nobody, and creates nothing.
     ///
     /// **Cancel-safe:** once the swap is sent it completes, and is credited or banned on,
     /// even if this future is dropped (the connection closed). The account's turn is held

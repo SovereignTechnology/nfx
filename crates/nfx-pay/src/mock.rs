@@ -2003,7 +2003,7 @@ pub enum SeederFlaw {
     /// amount: a free identity's refused payment is kept, and its double spend then bans.
     RefusalCreatesAccount,
     /// Takes a product above 2^53-1 as due, where it fits in 64 bits: a token paying it
-    /// exactly is swapped, and its `ack` carries a `spent_total` pay/1 cannot write.
+    /// exactly is not `underpaid` (the `spent_total` bound then refuses it `overpaid`).
     NoMaxIntFilter,
     /// Creates an empty account for a peer whose token it refuses as unreadable or of the
     /// wrong shape.
@@ -2055,6 +2055,66 @@ pub enum SeederFlaw {
     /// A payment frees from the global count the chunks up to it of the peer's other
     /// accounts too.
     CreditFreesPeerDebt,
+    /// Creates an empty account for a peer with none whose payment it refuses
+    /// `mint-unavailable` because the mint's keys did not come in time.
+    NoKeysCreatesAccount,
+    /// Creates an empty account for a peer with none whose swap never reached the mint.
+    UnreachableCreatesAccount,
+    /// Creates an empty account for a peer with none whose swap the mint refused as
+    /// pending.
+    PendingCreatesAccount,
+    /// Creates an empty account for a peer with none whose first swap the mint refused for
+    /// its outputs' keyset, rotated out.
+    OutputsRefusedCreatesAccount,
+    /// Creates an empty account for a peer with none whose first swap the mint refused
+    /// because a keyset expired.
+    ExpiredCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment it refuses because the
+    /// mint's keyset expires too soon to swap to.
+    KeysetCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment's turn did not come by
+    /// its deadline.
+    TurnTimeoutCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment's deadline passed before
+    /// its swap was sent.
+    UnsentCreatesAccount,
+    /// Creates an empty account for a peer with none as soon as its swap's answer is lost,
+    /// before the outcome is learnt: one learnt as nothing leaves it behind.
+    LostCreatesAccount,
+    /// Creates an empty account for a peer with none whose swap, abandoned at the deadline,
+    /// is learnt late as nothing.
+    LateNothingCreatesAccount,
+    /// Counts a `hello` it refuses after its wait, its session id opened meanwhile, toward
+    /// the peer's session cap, for good.
+    RecheckIdCounted,
+    /// Gives the session id of a `hello` it refuses after its wait, the id opened
+    /// meanwhile, to that `hello`'s peer: the id stays open once its holder closes.
+    RecheckIdTakesId,
+    /// Creates an empty account for a peer with none whose `hello` it refuses after its
+    /// wait, its session id opened meanwhile.
+    RecheckIdCreatesAccount,
+    /// After a `hello`'s wait, checks its session id before the ban: a banned peer's
+    /// `hello` whose id was opened meanwhile is refused `bad-session`.
+    RecheckIdBeforeBan,
+    /// A `hello` for a video it does not serve checks the peer's ban without first
+    /// expiring the bans past `ban_ttl`.
+    UnknownVideoBanNotAged,
+    /// Accepts a `debt_ttl` one second past 24 h.
+    DebtTtlCeilingOffByOne,
+    /// Acknowledges a payment that takes its account's `spent_total` past 2^53-1, which
+    /// pay/1 cannot write.
+    SpentTotalUnbounded,
+    /// Refuses a payment that takes its account's `spent_total` to exactly 2^53-1.
+    SpentTotalBoundOffByOne,
+    /// Refuses a payment that would take its account's `spent_total` past 2^53-1 as
+    /// `underpaid`.
+    SpentTotalUnderpaid,
+    /// Checks the `spent_total` bound before the face value: a short token that would
+    /// take it past 2^53-1 is `overpaid`, not `underpaid`.
+    SpentTotalBeforeAmount,
+    /// Bounds the sum of the peer's `spent_total` over all its accounts, not each
+    /// account's own.
+    SpentTotalPeerWide,
 }
 
 /// A defect planted in a mock viewer, to prove the adversary suite catches it.
@@ -2609,8 +2669,13 @@ impl EngineConfig {
             return Err("debt_ttl is at least 10 minutes".into());
         }
         let ceilings = flaw != Some(SeederFlaw::NoTtlCeiling);
+        let max_debt_ttl = if flaw == Some(SeederFlaw::DebtTtlCeilingOffByOne) {
+            MAX_DEBT_TTL + Duration::from_secs(1)
+        } else {
+            MAX_DEBT_TTL
+        };
         if ceilings
-            && (self.debt_ttl > MAX_DEBT_TTL
+            && (self.debt_ttl > max_debt_ttl
                 || self.account_ttl > MAX_STATE_TTL
                 || self.ban_ttl > MAX_STATE_TTL)
         {
@@ -3999,6 +4064,16 @@ impl Inner {
             | Swap::Pending
             | Swap::OutputsRefused
             | Swap::Expired => {
+                let creates = match outcome {
+                    Swap::Unreachable => SeederFlaw::UnreachableCreatesAccount,
+                    Swap::Pending => SeederFlaw::PendingCreatesAccount,
+                    Swap::OutputsRefused => SeederFlaw::OutputsRefusedCreatesAccount,
+                    Swap::Expired => SeederFlaw::ExpiredCreatesAccount,
+                    _ => SeederFlaw::LostCreatesAccount,
+                };
+                if self.has(creates) {
+                    self.account(st, key);
+                }
                 if self.has(SeederFlaw::OutageBans) {
                     self.ban(st, key);
                 }
@@ -4024,6 +4099,9 @@ impl Inner {
             }
             Swap::Spent | Swap::Invalid if self.has(SeederFlaw::LateOutcomeBans) => {
                 self.ban(st, pay.key);
+            }
+            Swap::Spent | Swap::Invalid if self.has(SeederFlaw::LateNothingCreatesAccount) => {
+                self.account(st, pay.key);
             }
             _ => {}
         }
@@ -4699,7 +4777,9 @@ impl SeederEngine for MockEngine {
             None => {
                 // A banned peer is refused `banned`, whatever video it names.
                 let mut st = e.state();
-                e.age(&mut st);
+                if !e.has(SeederFlaw::UnknownVideoBanNotAged) {
+                    e.age(&mut st);
+                }
                 if st.banned.contains_key(peer) && !e.has(SeederFlaw::UnknownVideoBeforeBan) {
                     return Err(rej(RejCode::Banned, "this peer is banned"));
                 }
@@ -4812,6 +4892,9 @@ impl SeederEngine for MockEngine {
             && !e.has(SeederFlaw::HelloNoBanRecheck)
             && !e.has(SeederFlaw::HelloBanCheckBeforeRead)
             && !(took_over && e.has(SeederFlaw::HelloTakeoverSkipsBanRecheck));
+        if e.has(SeederFlaw::RecheckIdBeforeBan) && st.open.contains_key(&hello.session) {
+            return Err(rej(RejCode::BadSession, "that session is open"));
+        }
         if recheck && e.peer_banned(&st, key) {
             if e.has(SeederFlaw::BannedHelloCounted) {
                 *st.hellos_waiting.entry(*peer).or_default() += 1;
@@ -4829,6 +4912,15 @@ impl SeederEngine for MockEngine {
             && !e.has(SeederFlaw::SessionIdAnyPeer)
             && !e.has(SeederFlaw::HelloNoSessionRecheck)
         {
+            if e.has(SeederFlaw::RecheckIdCounted) {
+                *st.hellos_waiting.entry(*peer).or_default() += 1;
+            }
+            if e.has(SeederFlaw::RecheckIdTakesId) {
+                st.open.insert(hello.session.clone(), key);
+            }
+            if e.has(SeederFlaw::RecheckIdCreatesAccount) {
+                e.account(&mut st, key);
+            }
             return Err(rej(RejCode::BadSession, "that session is open"));
         }
         st.open.insert(hello.session.clone(), key);
@@ -5029,7 +5121,7 @@ impl MockSession {
             && !e.has(SeederFlaw::PayIgnoresBan)
             && !e.has(SeederFlaw::BanCheckedBeforeTurn)
             && !(took_over && e.has(SeederFlaw::PayTakeoverSkipsBan));
-        let (acked, snapshot) = {
+        let (acked, spent, snapshot) = {
             let mut st = e.state();
             if !e.has(SeederFlaw::PayBanNotAged)
                 && !(took_over && e.has(SeederFlaw::TakeoverBanNotAged))
@@ -5048,7 +5140,16 @@ impl MockSession {
                 }
                 return Err(rej(RejCode::Banned, "this peer is banned"));
             }
-            (acked, snapshot)
+            let spent = if e.has(SeederFlaw::SpentTotalPeerWide) {
+                st.accounts
+                    .iter()
+                    .filter(|(k, _)| k.0 == self.key.0)
+                    .map(|(_, a)| a.spent)
+                    .sum()
+            } else {
+                st.accounts.get(&self.key).map_or(0, |a| a.spent)
+            };
+            (acked, spent, snapshot)
         };
         let read_before_stale = took_over && e.has(SeederFlaw::TakeoverReadsBeforeStale);
         if read_before_stale {
@@ -5093,6 +5194,9 @@ impl MockSession {
         }
         // 3. DLEQ, against the quoted mint's keys, fetched within the deadline.
         if !e.fetch_keys(&mint, id).await {
+            if e.has(SeederFlaw::NoKeysCreatesAccount) {
+                e.account(&mut e.state(), self.key);
+            }
             return Err(unavailable("no keys from the mint within 60 s"));
         }
         let read_before_amount = took_over && e.has(SeederFlaw::TakeoverReadsBeforeAmount);
@@ -5120,6 +5224,23 @@ impl MockSession {
                 .filter(|d| *d <= MAX_INT || e.has(SeederFlaw::NoMaxIntFilter))
                 .filter(|d| *d < MAX_INT || !e.has(SeederFlaw::ExactMaxIntUnderpaid))
         };
+        // The account's `spent_total` stays at most 2^53-1, so its `ack` can carry it: an
+        // exact payment that would take it past is `overpaid`.
+        let total = spent.checked_add(info.amount);
+        let past_bound = if e.has(SeederFlaw::SpentTotalBoundOffByOne) {
+            total.is_none_or(|t| t >= MAX_INT)
+        } else {
+            total.is_none_or(|t| t > MAX_INT) && !e.has(SeederFlaw::SpentTotalUnbounded)
+        };
+        let bound_code = if e.has(SeederFlaw::SpentTotalUnderpaid) {
+            RejCode::Underpaid
+        } else {
+            RejCode::Overpaid
+        };
+        if past_bound && e.has(SeederFlaw::SpentTotalBeforeAmount) {
+            self.on_refusal(&pay.token, pay.upto_chunk, info.amount, true);
+            return Err(rej(bound_code, "spent_total would pass 2^53-1"));
+        }
         if due.is_none_or(|d| info.amount < d) {
             self.on_refusal(&pay.token, pay.upto_chunk, info.amount, true);
             return Err(rej(RejCode::Underpaid, "short of the chunks claimed"));
@@ -5127,6 +5248,10 @@ impl MockSession {
         if due.is_some_and(|d| info.amount > d) && !e.has(SeederFlaw::AcceptsOverpay) {
             self.on_refusal(&pay.token, pay.upto_chunk, info.amount, true);
             return Err(rej(RejCode::Overpaid, "more than the chunks claimed"));
+        }
+        if past_bound {
+            self.on_refusal(&pay.token, pay.upto_chunk, info.amount, true);
+            return Err(rej(bound_code, "spent_total would pass 2^53-1"));
         }
         // 5. Swap, then acknowledge.
         let (upto, amount) = (pay.upto_chunk, info.amount);
@@ -5180,6 +5305,9 @@ impl MockSession {
             && !e.has(SeederFlaw::KeysetFirst)
             && e.keyset_too_soon()
         {
+            if e.has(SeederFlaw::KeysetCreatesAccount) {
+                e.account(&mut e.state(), self.key);
+            }
             return Err(unavailable("the mint's keyset expires too soon to swap to"));
         }
         // The swap's outputs, derived for it alone (NUT-13): its retries reuse them, and
@@ -5269,6 +5397,9 @@ impl MockSession {
                 && !e.has(SeederFlaw::SendIgnoresDeadline);
             if r.abandoned || expired {
                 let wake = e.abandon(&mut st, self.key, id);
+                if e.has(SeederFlaw::UnsentCreatesAccount) {
+                    e.account(&mut st, self.key);
+                }
                 drop(st);
                 wake_all(wake);
                 return Err(unavailable("no answer from the mint within 60 s"));
@@ -5424,6 +5555,9 @@ impl SeederSession for MockSession {
         if !self.e.has(SeederFlaw::ConcurrentPays) {
             let (came, _, taken) = self.e.wait_turn_at(self.key, Some(id)).await;
             if !came {
+                if self.e.has(SeederFlaw::TurnTimeoutCreatesAccount) {
+                    self.e.account(&mut self.e.state(), self.key);
+                }
                 record.answered = true;
                 return Err(unavailable("the account's turn did not come within 60 s"));
             }

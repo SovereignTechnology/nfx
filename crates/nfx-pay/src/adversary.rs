@@ -300,15 +300,24 @@ fn char_literal(rest: &[u8]) -> Option<usize> {
 /// behaviour.
 const NAMELESS: [&str; 2] = ["explicit panic", "internal error: entered unreachable code"];
 
-/// How the panics start that Rust raises of its own, reported at the line that caused them:
-/// the compiler's checks (arithmetic that overflows or divides by zero, an index past the
-/// end, a finished future polled again) and the standard library's checks that report their
-/// caller (a range past the end, a bare `unwrap`, a `RefCell` borrowed twice, a `Vec`, map
-/// or `VecDeque` index out of range, a `Duration` divided by zero, a slice split or copied
-/// out of range, a chunk or window size of zero, a logarithm or root out of its domain,
-/// `clamp` with its bounds crossed, an `Instant` out of range, a `String` cut inside a
-/// character, a poisoned `Once`, a scoped thread that panicked).
-const RUNTIME_PANICS: [&str; 36] = [
+/// How the panics start that Rust raises of its own, reported at the line that caused them.
+/// They are the second guard of [`Ran::failed_the_suite`]: the line rule is the first.
+/// - The compiler's checks: arithmetic that overflows or divides by zero, an index past
+///   the end, a finished future polled again.
+/// - The standard library's checks that report their caller: a range past the end, a bare
+///   `unwrap`, a `RefCell` borrowed twice, a `Vec`, map or `VecDeque` index out of range, a
+///   `Duration` divided by zero or out of range, a slice split or copied out of range, a
+///   chunk or window size of zero, a logarithm or root out of its domain, `clamp` with its
+///   bounds crossed, an `Instant` or `SystemTime` out of range, a `String` cut, edited or
+///   emptied at a bad place, a poisoned `Once`, a scoped thread that panicked, an
+///   infinite iterator counted, a width or precision past 65535 in a format.
+///
+/// The list holds every message of the library's `#[track_caller]` functions that safe,
+/// stable code can raise, as a scan of rustc 1.98's library source finds them (the crate
+/// forbids unsafe code), and three this toolchain raises nowhere a caller's line shows (a
+/// string sliced in a constant, `swap_remove`, a coroutine). The suite calls no other
+/// crate whose panics report their caller.
+const RUNTIME_PANICS: [&str; 45] = [
     "attempt to ",
     "index out of bounds",
     "range start index",
@@ -345,6 +354,15 @@ const RUNTIME_PANICS: [&str; 36] = [
     "assertion failed: self.is_char_boundary(",
     "Once instance has previously been poisoned",
     "a scoped thread panicked",
+    "cannot remove a char from the end of a string",
+    "start of range should be a character boundary",
+    "end of range should be a character boundary",
+    "dest is out of bounds",
+    "overflow in `Duration::from_nanos_u128`",
+    "overflow when adding duration to `SystemTime`",
+    "overflow when subtracting duration from `SystemTime`",
+    "iterator is infinite",
+    "Formatting argument out of range",
 ];
 
 std::thread_local! {
@@ -898,6 +916,7 @@ pub async fn an_overflowing_claim_is_underpaid<H: Harness>(h: &H) {
     };
     refused(h, &mut s, &pay, &RejCode::Underpaid).await;
     settles(h, &mut s, 4, 4 * 4096, 0).await;
+    an_account_spends_at_most_2_53_minus_1(h).await;
     a_product_above_2_53_is_underpaid(h).await;
 }
 
@@ -936,6 +955,87 @@ async fn a_product_above_2_53_is_underpaid<H: Harness>(h: &H) {
     assert!(
         matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (1, max)),
         "a product of exactly 2^53-1 is paid: {r:?}"
+    );
+}
+
+/// An account's `spent_total` is at most 2^53−1, all its `ack` and quote can carry: an
+/// exact payment that would take it past is `overpaid`, nothing is claimed and nobody is
+/// banned. A stale one is still `stale`, and a short one `underpaid`. The bound is each
+/// account's own, across its sessions, and not its peer's.
+async fn an_account_spends_at_most_2_53_minus_1<H: Harness>(h: &H) {
+    let max = (1u64 << 53) - 1;
+    // 2^53-1 is 6361 chunks at this price: each payment's product stays within the bound.
+    let price = 1_416_003_655_831;
+    let e = h.engine(price, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let ack = s
+        .pay(&Pay {
+            upto_chunk: 6360,
+            token: h.token(6360 * price).await,
+        })
+        .await
+        .expect("a pre-payment of 6360 chunks");
+    assert_eq!(ack.spent_total, 6360 * price);
+    let r = s
+        .pay(&Pay {
+            upto_chunk: 6361,
+            token: h.token(price).await,
+        })
+        .await;
+    assert!(
+        matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (6361, max)),
+        "a spent_total of exactly 2^53-1 is acknowledged: {r:?}"
+    );
+    // The bound is the account's, across its sessions.
+    drop(s);
+    let mut s = open(h, &e, 1).await;
+    let past = Pay {
+        upto_chunk: 6362,
+        token: h.token(price).await,
+    };
+    let r = s.pay(&past).await;
+    assert!(
+        is_rej(&r, &RejCode::Overpaid),
+        "an exact payment taking spent_total past 2^53-1 is overpaid: {r:?}"
+    );
+    assert!(!h.claimed_any(&past.token).await, "nothing is claimed");
+    assert!(!s.banned(), "the bound bans nobody");
+    let r = s
+        .pay(&Pay {
+            upto_chunk: 6361,
+            token: h.token(price).await,
+        })
+        .await;
+    assert!(
+        is_rej(&r, &RejCode::Stale),
+        "a stale payment at the bound is stale, checked first: {r:?}"
+    );
+    let r = s
+        .pay(&Pay {
+            upto_chunk: 6362,
+            token: h.token(price - 1).await,
+        })
+        .await;
+    assert!(
+        is_rej(&r, &RejCode::Underpaid),
+        "a short payment past the bound is underpaid, the face value checked first: {r:?}"
+    );
+    let q = open(h, &e, 1).await.quote().clone();
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (6361, max),
+        "the refusals moved nothing"
+    );
+    let mut other = open_on(h, &e, 1, 1).await;
+    let r = other
+        .pay(&Pay {
+            upto_chunk: 1,
+            token: h.token(price).await,
+        })
+        .await;
+    assert!(
+        matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (1, price)),
+        "the bound is each account's own: the peer's other video pays as usual: {r:?}"
     );
 }
 
@@ -1180,6 +1280,7 @@ pub async fn a_banned_peer_stays_banned<H: Harness>(h: &H) {
     a_banned_peers_hello_is_refused_as_it_arrives(h).await;
     a_banned_peer_is_refused_before_all_else(h).await;
     a_hello_refused_after_its_wait_keeps_nothing(h).await;
+    a_waited_hello_is_refused_banned_before_its_id(h).await;
 }
 
 /// A banned peer's `hello` is refused `banned`, whatever else it names: a video not served,
@@ -1245,6 +1346,15 @@ async fn a_banned_peer_is_refused_before_all_else<H: Harness>(h: &H) {
         held,
         "a banned peer's refused payment creates no account on a video it had none on"
     );
+    drop(sessions);
+    h.advance(h.ban_ttl());
+    let r = e.hello(&h.peer(1), &h.unknown_hello()).await;
+    assert!(
+        is_rej(&r, &RejCode::UnknownVideo),
+        "once its ban has expired, its hello for a video not served is refused unknown-video: \
+         {:?}",
+        r.as_ref().err()
+    );
 }
 
 /// A `hello` refused `banned` after waiting behind the payment that banned its peer keeps
@@ -1281,6 +1391,40 @@ async fn a_hello_refused_after_its_wait_keeps_nothing<H: Harness>(h: &H) {
         let s = e.hello(&h.peer(3), &h.hello()).await;
         sessions.push(s.expect("the refused hello holds no place under the session cap"));
     }
+}
+
+/// A `hello` that waited behind the payment that banned its peer is refused `banned`, even
+/// when another peer opened its session id meanwhile.
+async fn a_waited_hello_is_refused_banned_before_its_id<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 3).await;
+    serve(h, &mut s, 0, 4);
+    let spent = h.token(4).await;
+    assert!(h.steal(&spent).await, "someone else spent it");
+    let (peer, hello) = (h.peer(3), h.hello());
+    h.hold_swaps();
+    let replay = Pay {
+        upto_chunk: 4,
+        token: spent,
+    };
+    let mut paying = pin!(s.pay(&replay));
+    assert!(poll_now(paying.as_mut()).is_none(), "its swap is held");
+    let mut waiting = pin!(e.hello(&peer, &hello));
+    assert!(
+        poll_now(waiting.as_mut()).is_none(),
+        "it waits for the payment"
+    );
+    let holder = e.hello(&h.peer(4), &hello).await;
+    let _holder = holder.expect("another peer opens that id meanwhile");
+    h.release_swaps().await;
+    let r = paying.await;
+    assert!(is_rej(&r, &RejCode::Spent), "{r:?}");
+    let r = waiting.await;
+    assert!(
+        is_rej(&r, &RejCode::Banned),
+        "a waited hello is refused banned, though its session id was opened meanwhile: {:?}",
+        r.as_ref().err()
+    );
 }
 
 /// A new `hello` continues the account: its quote carries the account's position, it
@@ -1369,6 +1513,7 @@ pub async fn a_session_id_names_one_open_session<H: Harness>(h: &H) {
     );
 
     one_session_id_for_two_waiting_hellos(h).await;
+    a_hello_refused_bad_session_after_its_wait_keeps_nothing(h).await;
 }
 
 /// A peer holds at most the cap of sessions open at once, across all its videos; closed
@@ -5861,6 +6006,16 @@ pub async fn bad_configurations_are_refused<H: Harness>(h: &H) {
     for p in bad {
         assert!(h.engine_checked(p).is_err(), "refused: {p:?}");
     }
+    let long_debt = EngineParams {
+        debt_ttl: Duration::from_secs(24 * 3600 + 1),
+        account_ttl: Duration::from_secs(30 * 24 * 3600),
+        ban_ttl: Duration::from_secs(30 * 24 * 3600),
+        ..good
+    };
+    assert!(
+        h.engine_checked(long_debt).is_err(),
+        "a debt_ttl past 24 h is refused, whatever the other ttls: {long_debt:?}"
+    );
 }
 
 /// A `hello` alone leaves no state behind: free identities cost the seeder nothing. Nor
@@ -5917,6 +6072,7 @@ pub async fn a_hello_holds_no_state<H: Harness>(h: &H) {
     refused_hellos_keep_nothing(h).await;
     refused_requests_keep_nothing(h).await;
     refused_payments_keep_nothing(h).await;
+    unavailable_payments_keep_nothing(h).await;
 }
 
 /// Refused `hello`s leave nothing behind either: for a video not served, naming an open
@@ -5996,9 +6152,9 @@ async fn refused_requests_keep_nothing<H: Harness>(h: &H) {
     );
 }
 
-/// Free identities whose payments are refused, for whatever reason, leave nothing behind:
-/// a refused token is not claimed, so one serves them all. Such a peer has no account, so
-/// its double spend then keeps no ban.
+/// Free identities whose payments are refused by the checks, for their mint, their amount
+/// or a bad token of any kind, leave nothing behind: a refused token is not claimed, so one
+/// serves them all. Such a peer has no account, so its double spend then keeps no ban.
 async fn refused_payments_keep_nothing<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut refusals = vec![
@@ -6056,6 +6212,251 @@ async fn refused_payments_keep_nothing<H: Harness>(h: &H) {
         h.identities_held(&e),
         0,
         "a peer whose payments were all refused has no account: its double spend keeps no ban"
+    );
+}
+
+/// Nor do payments refused `mint-unavailable` when nothing was swapped: the mint's keys
+/// late, the turn not come by the deadline, the deadline past before the swap was sent,
+/// the mint down, the proofs reserved by another request, the keyset too near its expiry,
+/// or a first swap refused for a keyset. Nor does a swap whose outcome was unknown once it
+/// is learnt as nothing: only a claim creates the account (NFX-07 §3, late outcomes).
+async fn unavailable_payments_keep_nothing<H: Harness>(h: &H) {
+    let minute = Duration::from_secs(60);
+    let e = h.engine(1, 4, 1000);
+    let token = h.token(4).await;
+    h.hold_key_fetches();
+    for p in 1..=16u8 {
+        let mut s = open(h, &e, p).await;
+        let pay = Pay {
+            upto_chunk: 4,
+            token: token.clone(),
+        };
+        let (r, ()) = both(s.pay(&pay), async {
+            yield_once().await;
+            h.advance(minute);
+        })
+        .await;
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "no keys: {r:?}");
+    }
+    h.release_swaps().await;
+    assert_eq!(
+        h.identities_held(&e),
+        0,
+        "free identities' payments refused mint-unavailable for want of the mint's keys leave \
+         nothing behind"
+    );
+    // Keys that come at the deadline: too late to swap. A fresh seeder has none cached.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    h.hold_key_fetches();
+    {
+        let pay = Pay {
+            upto_chunk: 4,
+            token: token.clone(),
+        };
+        let mut paying = pin!(s.pay(&pay));
+        assert!(poll_now(paying.as_mut()).is_none(), "its keys are held");
+        h.advance(minute);
+        h.release_swaps().await;
+        let r = paying.await;
+        assert!(
+            is_rej(&r, &RejCode::MintUnavailable),
+            "keys at the deadline: {r:?}"
+        );
+    }
+    drop(s);
+    assert_eq!(
+        h.identities_held(&e),
+        0,
+        "a payment whose deadline passed before its swap was sent leaves nothing behind"
+    );
+    // Two payments of one account from the same second: the first holds the turn, its keys
+    // held, so the second's turn never comes.
+    let e = h.engine(1, 4, 1000);
+    let (mut first, mut second) = (open(h, &e, 1).await, open(h, &e, 1).await);
+    h.hold_key_fetches();
+    {
+        let (a, b) = (
+            Pay {
+                upto_chunk: 4,
+                token: token.clone(),
+            },
+            Pay {
+                upto_chunk: 4,
+                token: h.token(4).await,
+            },
+        );
+        let mut holding = pin!(first.pay(&a));
+        let mut waiting = pin!(second.pay(&b));
+        assert!(poll_now(holding.as_mut()).is_none(), "its keys are held");
+        assert!(
+            poll_now(waiting.as_mut()).is_none(),
+            "it waits for the turn"
+        );
+        h.advance(minute);
+        let r = waiting.await;
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "no turn: {r:?}");
+        let r = holding.await;
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "no keys: {r:?}");
+    }
+    h.release_swaps().await;
+    drop((first, second));
+    assert_eq!(
+        h.identities_held(&e),
+        0,
+        "a payment whose turn did not come by its deadline leaves nothing behind"
+    );
+    // The mint down, its keys fetched (for a payment refused underpaid): no swap reaches it.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 0).await;
+    let r = s
+        .pay(&Pay {
+            upto_chunk: 4,
+            token: h.token(3).await,
+        })
+        .await;
+    assert!(is_rej(&r, &RejCode::Underpaid), "{r:?}");
+    drop(s);
+    h.mint_outage(true);
+    for p in 1..=16u8 {
+        let mut s = open(h, &e, p).await;
+        let r = s
+            .pay(&Pay {
+                upto_chunk: 4,
+                token: token.clone(),
+            })
+            .await;
+        assert!(
+            is_rej(&r, &RejCode::MintUnavailable),
+            "the mint down: {r:?}"
+        );
+    }
+    h.mint_outage(false);
+    assert_eq!(
+        h.identities_held(&e),
+        0,
+        "free identities' payments whose swaps never reached the mint leave nothing behind"
+    );
+    // Proofs another request holds reserved: one token serves every identity.
+    let reserved = h.token(4).await;
+    assert!(
+        h.reserve_rest(&reserved).await,
+        "another request reserves them"
+    );
+    for p in 17..=32u8 {
+        let mut s = open(h, &e, p).await;
+        let r = s
+            .pay(&Pay {
+                upto_chunk: 4,
+                token: reserved.clone(),
+            })
+            .await;
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "reserved: {r:?}");
+        assert!(!s.banned(), "a swap refused as pending bans nobody");
+    }
+    h.roll_back_reserved();
+    assert_eq!(
+        h.identities_held(&e),
+        0,
+        "free identities' payments refused as pending leave nothing behind"
+    );
+    h.keyset_expires_in(Some(h.account_ttl()));
+    for p in 33..=48u8 {
+        let mut s = open(h, &e, p).await;
+        let r = s
+            .pay(&Pay {
+                upto_chunk: 4,
+                token: token.clone(),
+            })
+            .await;
+        assert!(
+            is_rej(&r, &RejCode::MintUnavailable),
+            "keyset too soon: {r:?}"
+        );
+    }
+    h.keyset_expires_in(None);
+    assert_eq!(
+        h.identities_held(&e),
+        0,
+        "free identities' payments refused for a keyset too near its expiry leave nothing \
+         behind"
+    );
+    // A first swap refused for a keyset: the seeder's outputs', rotated out, or one that
+    // expired, the seeder's or the payer's.
+    let mut peers = 49..=255u8;
+    for (what, event) in [
+        ("rotated out", MintEvent::RotateKeyset),
+        ("expired", MintEvent::ExpireKeyset),
+        ("the payer's, expired", MintEvent::ExpireInputKeyset),
+    ] {
+        for p in peers.by_ref().take(4) {
+            let fresh = h.token(4).await;
+            h.before_next_swap(event);
+            let mut s = open(h, &e, p).await;
+            let r = s
+                .pay(&Pay {
+                    upto_chunk: 4,
+                    token: fresh,
+                })
+                .await;
+            assert!(is_rej(&r, &RejCode::MintUnavailable), "{what}: {r:?}");
+        }
+        assert_eq!(
+            h.identities_held(&e),
+            0,
+            "free identities' first swaps refused for a keyset {what} leave nothing behind"
+        );
+    }
+    // A swap whose answer never came, and one abandoned in flight at the deadline, each
+    // learnt as nothing: their payers took the proofs back first.
+    let e = h.engine(1, 4, 1000);
+    for p in 1..=4u8 {
+        let lost = Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        };
+        h.time_out_next_swap();
+        h.mint_outage(true);
+        let r = open(h, &e, p).await.pay(&lost).await;
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "no answer: {r:?}");
+        h.mint_outage(false);
+        assert!(
+            h.steal(&lost.token).await,
+            "its payer takes the proofs back"
+        );
+        h.release_swaps().await; // the given-up request finds its inputs spent
+    }
+    e.sweep().await;
+    assert_eq!(
+        h.identities_held(&e),
+        0,
+        "free identities' payments whose answers never came, learnt as nothing, leave nothing \
+         behind"
+    );
+    for p in 5..=8u8 {
+        let late = Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        };
+        h.hold_next_swap();
+        let mut s = open(h, &e, p).await;
+        let (r, ()) = both(s.pay(&late), async {
+            yield_once().await;
+            h.advance(minute);
+        })
+        .await;
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "abandoned: {r:?}");
+        assert!(
+            h.steal(&late.token).await,
+            "its payer takes the proofs back"
+        );
+        h.release_swaps().await; // the held swap finds them spent: a late nothing
+    }
+    assert_eq!(
+        h.identities_held(&e),
+        0,
+        "free identities' swaps abandoned at the deadline, learnt late as nothing, leave \
+         nothing behind"
     );
 }
 
@@ -10934,6 +11335,58 @@ async fn one_session_id_for_two_waiting_hellos<H: Harness>(h: &H) {
         (1, 1),
         "one session id names one open session: of two hellos that waited, one opens and the \
          other is refused bad-session"
+    );
+}
+
+/// A `hello` refused `bad-session` after its wait, another peer having opened its session
+/// id meanwhile, keeps nothing: once every session has closed, its peer opens that id,
+/// then its full cap of sessions, and holds no account.
+async fn a_hello_refused_bad_session_after_its_wait_keeps_nothing<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let spent = h.token(4).await;
+    assert!(h.steal(&spent).await, "someone else spent it");
+    let (peer, hello) = (h.peer(1), h.hello());
+    let mut s = open(h, &e, 1).await;
+    h.hold_swaps();
+    {
+        let replay = Pay {
+            upto_chunk: 4,
+            token: spent,
+        };
+        let mut paying = pin!(s.pay(&replay));
+        assert!(poll_now(paying.as_mut()).is_none(), "its swap is held");
+        let mut waiting = pin!(e.hello(&peer, &hello));
+        assert!(
+            poll_now(waiting.as_mut()).is_none(),
+            "it waits for the payment"
+        );
+        let holder = e.hello(&h.peer(2), &hello).await;
+        let holder = holder.expect("another peer opens that id meanwhile");
+        h.release_swaps().await;
+        let r = paying.await;
+        assert!(is_rej(&r, &RejCode::Spent), "{r:?}");
+        let r = waiting.await;
+        assert!(
+            is_rej(&r, &RejCode::BadSession),
+            "a waited hello whose session id was opened meanwhile is refused bad-session: {:?}",
+            r.as_ref().err()
+        );
+        drop(holder);
+    }
+    drop(s);
+    let first = e.hello(&peer, &hello).await;
+    let mut sessions = vec![
+        first.expect("the refused hello did not take the id: it is free once its holder closed"),
+    ];
+    for _ in 1..h.session_cap() {
+        let s = e.hello(&peer, &h.hello()).await;
+        sessions.push(s.expect("the refused hello holds no place under the session cap"));
+    }
+    sessions.clear();
+    assert_eq!(
+        h.identities_held(&e),
+        0,
+        "a hello refused bad-session after its wait creates no account"
     );
 }
 
