@@ -473,17 +473,27 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     clock ahead of the mint's, by some skew, calls proofs lost that the mint takes for
     that long; one behind holds a reclaim incomplete for that long.
   - Proofs the mint lists under an expired keyset (past its `final_expiry`, by the
-    watcher's clock) are worth nothing: the watcher drops them, whatever became of their
-    payment, and never pays with them. A wallet that spends an older keyset's proofs
-    first with no expiry filter (CDK's does) would otherwise pay with them again, and each
-    such payment would be refused (12003) and answered `mint-unavailable`, costing the
-    seeder a swap request and the watcher one of its three tries.
-  - A reclaim whose answer is lost can outlive its outputs' keyset (the watcher cannot
-    refuse to reclaim: its proofs would be lost to the expiry anyway), and a restore then
+    watcher's clock) are worth nothing: the watcher drops them, those its wallet still
+    holds and those left from a payment alike, whatever became of that payment, and never
+    pays with them. A wallet that spends an older keyset's proofs first with no expiry
+    filter (CDK's does) would otherwise pay with them, and each such payment would be
+    refused (12003) and answered `mint-unavailable`, costing the seeder a swap request and
+    the watcher one of its three tries.
+  - A reclaim's outputs are of the mint's active keyset, the only one a mint signs to.
+    The watcher reclaims to it at once, however soon its listed `final_expiry` and
+    whatever the proofs' own keysets' (an active keyset already expired is the incomplete
+    case above): it cannot apply the seeder's margin (§3), not knowing the seeder's
+    `account_ttl`, and a reclaim held for a later keyset would pay that seeder nothing for
+    as long. So a reclaim can move the value of proofs of a longer-lived keyset (an older
+    one, which CDK's wallet spends first) into the active keyset, whose `final_expiry` may
+    come sooner. As for any proofs it holds, the wallet must move them out of a keyset
+    before its `final_expiry`.
+  - A reclaim whose answer is lost can outlive its outputs' keyset, and a restore then
     no longer shows its outputs: the watcher cannot tell its own reclaim from the
-    seeder's claim, and treats the proofs as found spent. A stated concession, as the
-    seeder's (§3): it keeps the watcher's bound, and the proofs' value is lost to the
-    expiry either way. Its cost falls on an honest seeder that never claimed them: this
+    seeder's claim, and treats the proofs as found spent, whatever their own keyset was.
+    A stated concession, as the seeder's (§3): it keeps the watcher's bound, and
+    whichever it was, the value is gone from the watcher, to the seeder or with the
+    outputs' keyset. Its cost falls on an honest seeder that never claimed them: this
     watcher pays it nothing more, on any of its videos, and no quote can settle it.
   - Until the reclaim completes (the mint may be down), the watcher pays that seeder
     nothing more. A quote showing the ledger plus that payment, both fields, settles it
@@ -820,3 +830,9 @@ therefore loses nothing:
     sent in the deadline's second or later was sent after the freeing and may serve a
     `hello` that waited; while an abandoned swap's outcome is unknown, the payment that
     takes its turn is answered without a swap after its own read of it, not "at once".
+  - §3a: proofs listed expired are dropped whether the wallet still holds them or they are
+    left from a payment; a reclaim goes to the mint's active keyset at once, however soon
+    its `final_expiry` and whatever the proofs' own keysets', so it can move value into a
+    keyset that expires sooner, and the wallet must move proofs out of a keyset before its
+    `final_expiry`; the expiry concession holds whatever the proofs' own keyset, and its
+    premise "its proofs would be lost to the expiry anyway" is withdrawn.

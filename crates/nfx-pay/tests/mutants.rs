@@ -460,4 +460,6 @@ catches!(
     land_freed_after_deadline: r(S::LandFreedAfterDeadline) => a_late_outcome_is_credited_never_banned,
     deadline_second_late: r(S::DeadlineSecondLate) => a_late_outcome_is_credited_never_banned,
     deadline_second_early: r(S::DeadlineSecondEarly) => a_late_outcome_is_credited_never_banned,
+    viewer_listing_only_while_active_expired: v(V::ListingOnlyWhileActiveExpired) => a_viewer_reclaims_a_refused_payment,
+    viewer_ack_accepts_short: v(V::AckAcceptsShort) => a_viewer_stops_on_a_wrong_or_unsolicited_ack,
 );

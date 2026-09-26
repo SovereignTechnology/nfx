@@ -292,11 +292,35 @@ struct Ledger {
     /// Sat the watchers' wallets hold in proofs of an older keyset, spent first
     /// ([`Harness::fund_older_keyset`]).
     older_balance: u64,
-    /// Proofs of that older keyset: never the active one's.
+    /// Proofs of older keysets: never the active one's.
     older: HashSet<u64>,
+    /// Those of the older keyset the wallets were funded in last.
+    older_now: HashSet<u64>,
+    /// That older keyset has expired: every proof of it, those the wallets still hold
+    /// included ([`Harness::expire_older_keyset`]).
+    older_expired: bool,
 }
 
 impl Ledger {
+    /// The keyset of `proofs` expires, while the mint's own does not. Proofs of the older
+    /// keyset the wallets hold take the whole of it with them.
+    fn expire_inputs(&mut self, proofs: impl IntoIterator<Item = u64>) {
+        for p in proofs {
+            if self.older_now.contains(&p) {
+                self.expire_older();
+            }
+            self.expired_inputs.insert(p);
+        }
+    }
+
+    /// The older keyset expires: the proofs of it drawn so far, and those the wallets still
+    /// hold, as they draw them.
+    fn expire_older(&mut self) {
+        self.older_expired = true;
+        let drawn: Vec<u64> = self.older_now.iter().copied().collect();
+        self.expired_inputs.extend(drawn);
+    }
+
     fn in_expired_keyset(&self, id: u64) -> bool {
         id <= self.expired_upto
             || self
@@ -367,6 +391,10 @@ impl MockNetwork {
             if l.older_balance >= amount && amount > 0 {
                 l.older_balance -= amount;
                 l.older.extend(fresh.iter().copied());
+                l.older_now.extend(fresh.iter().copied());
+                if l.older_expired {
+                    l.expired_inputs.extend(fresh.iter().copied());
+                }
             }
         }
         proofs.extend(fresh);
@@ -494,7 +522,7 @@ impl MockNetwork {
                 MintEvent::ExpireInputKeyset => {
                     let mut l = self.ledger();
                     if let Some(i) = l.tokens.get(token).cloned() {
-                        l.expired_inputs.extend(i.proofs);
+                        l.expire_inputs(i.proofs);
                     }
                 }
                 MintEvent::ProcessTimedOut | MintEvent::ReserveTimedOut => self.given_up(event),
@@ -547,7 +575,7 @@ impl MockNetwork {
                 } else {
                     l.reserved.extend(i.proofs.iter().copied());
                     if expire_after {
-                        l.expired_inputs.extend(i.proofs);
+                        l.expire_inputs(i.proofs);
                     }
                 }
             }
@@ -918,22 +946,59 @@ impl MockNetwork {
         )
     }
 
-    /// A third party claiming one unclaimed proof of `token`: whether it got one.
+    /// Whether a third party's swap of proof `p` alone goes through: unclaimed, and neither
+    /// reserved (11002) nor of an expired keyset (12003).
+    fn claimable(l: &Ledger, p: u64) -> bool {
+        !l.claimed.contains(&p)
+            && !l.forged.contains(&p)
+            && !l.reserved.contains(&p)
+            && !l.proof_expired(p)
+    }
+
+    /// A third party claiming the first unclaimed proof of `token`, in a swap of it alone:
+    /// whether it got it.
     fn steal_one(&self, token: &str) -> bool {
         let mut l = self.ledger();
         let Some(info) = l.tokens.get(token).cloned() else {
             return false;
         };
-        let Some(p) = info
-            .proofs
-            .iter()
-            .copied()
-            .find(|p| !l.claimed.contains(p) && !l.forged.contains(p))
-        else {
+        let Some(p) = info.proofs.iter().copied().find(|p| !l.claimed.contains(p)) else {
             return false;
         };
+        if !Self::claimable(&l, p) {
+            return false;
+        }
         l.claimed.insert(p);
         true
+    }
+
+    /// A third party's request of `token`'s unclaimed proofs (a melt, say) that the mint
+    /// reserves and never finishes, until it rolls back what it reserved: whether it
+    /// reserved any. Refused whole if any is reserved already or of an expired keyset.
+    fn reserve_rest(&self, token: &str) -> bool {
+        let mut l = self.ledger();
+        let Some(info) = l.tokens.get(token).cloned() else {
+            return false;
+        };
+        let rest: Vec<u64> = info
+            .proofs
+            .into_iter()
+            .filter(|p| !l.claimed.contains(p))
+            .collect();
+        if rest.is_empty() || rest.iter().any(|p| !Self::claimable(&l, *p)) {
+            return false;
+        }
+        l.reserved.extend(rest);
+        true
+    }
+
+    /// The wallets drop the proofs they hold that the mint lists expired: those of the older
+    /// keyset, once it has expired.
+    fn drop_expired_held(&self) {
+        let mut l = self.ledger();
+        if l.older_expired {
+            l.older_balance = 0;
+        }
     }
 
     /// Send a swap, as an engine does: `done` runs with the outcome when the mint answers,
@@ -954,7 +1019,7 @@ impl MockNetwork {
                 // only once their keysets and the outputs' have passed its checks.
                 l.reserved.extend(i.proofs.iter().copied());
                 if expire_after {
-                    l.expired_inputs.extend(i.proofs);
+                    l.expire_inputs(i.proofs);
                 }
                 if !l.time_out_next {
                     l.queued.push((id, token.to_owned(), outputs, done));
@@ -1080,7 +1145,8 @@ impl MockNetwork {
         }
     }
 
-    /// A third party claiming whatever is unclaimed, outages aside: whether it got any.
+    /// A third party claiming whatever is unclaimed, outages aside, in swaps at the mint:
+    /// never a proof the mint holds reserved or lists expired. Whether it got any.
     fn steal(&self, token: &str) -> bool {
         let mut l = self.ledger();
         let Some(info) = l.tokens.get(token).cloned() else {
@@ -1090,7 +1156,7 @@ impl MockNetwork {
             .proofs
             .iter()
             .copied()
-            .filter(|p| !l.claimed.contains(p) && !l.forged.contains(p))
+            .filter(|p| Self::claimable(&l, *p))
             .collect();
         let any = !fresh.is_empty();
         l.claimed.extend(fresh);
@@ -1968,12 +2034,19 @@ pub enum ViewerFlaw {
     /// After a 12003 with a spent input not its own, awaits a quote when the inputs left are
     /// pending, instead of holding the reclaim incomplete: they are never taken back.
     ForeignPendingAwaits,
-    /// after a 12003 with a spent input not its own, when the inputs left cannot be
+    /// After a 12003 with a spent input not its own, when the inputs left cannot be
     /// taken back yet (the mint's active keyset expired too, or they are pending), awaits a
     /// quote at once instead of holding the reclaim incomplete: they are never taken back.
     ExpiredForeignBlockedAwaits,
-    /// pays the last payment of a session with proofs the mint lists expired.
+    /// Pays the last payment of a session with proofs the mint lists expired.
     LastPayWithExpiredProofs,
+    /// Checks a payment's proofs against the mint's listing only while its active keyset has
+    /// expired: it pays with proofs it holds of an expired older keyset, which a wallet
+    /// spends first.
+    ListingOnlyWhileActiveExpired,
+    /// Accepts an ack whose `accepted_upto` is short of the payment's `upto_chunk` but above
+    /// its ledger: it pays the chunks between again.
+    AckAcceptsShort,
     /// Gives no sign that its tries are used up.
     BudgetNotSignalled,
     /// Reclaims a payment left unsettled by a dropped connection at once.
@@ -5162,15 +5235,19 @@ impl MockViewer {
         } else {
             Vec::new()
         };
-        let token = self.net.issue_with(&self.mint, amount, &kept);
+        let mut token = self.net.issue_with(&self.mint, amount, &kept);
         // Proofs the mint lists under an expired keyset are worth nothing: never paid with.
-        // With only such proofs (the mint's active keyset expired), it pays nothing until
-        // the mint rotates.
-        if !self.has(ViewerFlaw::PaysWithExpiredProofs)
+        // It drops those it holds and pays with the rest; with only such proofs (the mint's
+        // active keyset expired), it pays nothing until the mint rotates.
+        let checks = !self.has(ViewerFlaw::PaysWithExpiredProofs)
             && !(last && self.has(ViewerFlaw::LastPayWithExpiredProofs))
-            && self.net.proofs_listing(&token).0 > 0
-        {
-            return Ok(None);
+            && !(self.has(ViewerFlaw::ListingOnlyWhileActiveExpired) && !self.net.active_expired());
+        if checks && self.net.proofs_listing(&token).0 > 0 {
+            self.net.drop_expired_held();
+            token = self.net.issue_with(&self.mint, amount, &[]);
+            if self.net.proofs_listing(&token).0 > 0 {
+                return Ok(None);
+            }
         }
         self.set_pending(Pending {
             upto,
@@ -5425,7 +5502,10 @@ impl Viewer for MockViewer {
                 ack.accepted_upto >= p.upto && ack.spent_total >= self.spent + p.amount
             }
             Some(p) => {
-                ack.accepted_upto == p.upto
+                (ack.accepted_upto == p.upto
+                    || (self.has(ViewerFlaw::AckAcceptsShort)
+                        && ack.accepted_upto > self.acked
+                        && ack.accepted_upto < p.upto))
                     && (ack.spent_total == self.spent + p.amount
                         || self.has(ViewerFlaw::IgnoresSpentTotal))
             }
@@ -5870,6 +5950,10 @@ impl Harness for MockHarness {
         self.net.steal_one(token)
     }
 
+    async fn reserve_rest(&self, token: &str) -> bool {
+        self.net.reserve_rest(token)
+    }
+
     fn restore_outage(&self, down: bool) {
         self.net.ledger().restore_down = down;
     }
@@ -5943,8 +6027,12 @@ impl Harness for MockHarness {
     fn expire_keyset_of(&self, token: &str, proofs: usize) {
         let mut l = self.net.ledger();
         if let Some(i) = l.tokens.get(token).cloned() {
-            l.expired_inputs.extend(i.proofs.into_iter().take(proofs));
+            l.expire_inputs(i.proofs.into_iter().take(proofs));
         }
+    }
+
+    fn expire_older_keyset(&self) {
+        self.net.ledger().expire_older();
     }
 
     fn expire_active_keyset(&self) {
@@ -5955,7 +6043,13 @@ impl Harness for MockHarness {
     }
 
     fn fund_older_keyset(&self, amount: u64) {
-        self.net.ledger().older_balance = amount;
+        let mut l = self.net.ledger();
+        l.older_balance = amount;
+        if l.older_expired {
+            // Another older keyset: the expired one's proofs stay expired.
+            l.older_expired = false;
+            l.older_now.clear();
+        }
     }
 
     fn keyset_expires_in(&self, after: Option<Duration>) {

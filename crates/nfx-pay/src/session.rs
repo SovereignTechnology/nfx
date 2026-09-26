@@ -339,11 +339,21 @@ pub trait Harness {
     /// Whether all of them have.
     async fn claimed_all(&self, token: &str) -> bool;
     /// A third party (a seeder keeping a refused payment, say) claims whatever of
-    /// `token`'s proofs are still unclaimed: whether it got any.
+    /// `token`'s proofs are still unclaimed, in swaps at the mint: whether it got any. As at
+    /// a real mint, it takes no proof the mint holds reserved (CDK 11002), lists under an
+    /// expired keyset (12003) or refuses as invalid.
     async fn steal(&self, token: &str) -> bool;
-    /// The same for one unclaimed proof of `token` only (a seeder keeping part of a
-    /// payment): whether it got one.
+    /// The same for one proof of `token` only (a seeder keeping part of a payment): the
+    /// token's first unclaimed proof, in the token's order, in a swap of that proof alone.
+    /// Whether it got it: not if the mint holds it reserved, lists it expired or refuses it
+    /// as invalid.
     async fn steal_one(&self, token: &str) -> bool;
+    /// A third party sends a request spending `token`'s unclaimed proofs (a melt, say),
+    /// which the mint reserves (NUT-07 `PENDING`) and does not finish: any other request of
+    /// them, a reclaim included, is refused as pending (CDK 11002) until
+    /// [`Harness::roll_back_reserved`] abandons it. Whether it reserved them: a mint refuses
+    /// the whole request if any is reserved already or listed expired.
+    async fn reserve_rest(&self, token: &str) -> bool;
     /// Whether anything (keys, a swap) has been fetched from the mint at `url`.
     fn dialled(&self, url: &str) -> bool;
 
@@ -452,10 +462,17 @@ pub trait Harness {
     fn expire_active_keyset(&self);
     /// The watchers' wallets hold `amount` sat (0: none) in proofs of an older keyset than
     /// the active one, which a wallet spends first (CDK selects an inactive keyset's proofs
-    /// first): their next payments draw on them.
+    /// first): their next payments draw on them. After [`Harness::expire_older_keyset`], the
+    /// proofs are of another older keyset, not expired.
     fn fund_older_keyset(&self, amount: u64);
+    /// The older keyset of [`Harness::fund_older_keyset`] reaches its own `final_expiry`
+    /// (NUT-02), while the mint's active keyset stays current: every proof of it, those the
+    /// wallets still hold included, is refused (12003) and listed expired.
+    fn expire_older_keyset(&self);
     /// The keyset of the first `proofs` of `token`'s proofs expires: an older keyset, whose
-    /// proofs a wallet spends first, while the rest of the token's stay good.
+    /// proofs a wallet spends first, while the rest of the token's are of one that stays
+    /// good. Any other proof of the expired keyset expires with them, those the wallets
+    /// still hold included.
     fn expire_keyset_of(&self, token: &str, proofs: usize);
     /// `event` happens at the mint just before the next swap request reaches it: a
     /// seeder's first attempt, retry or completion alike. Several happen in the order

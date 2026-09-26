@@ -5914,7 +5914,8 @@ pub async fn a_viewer_refuses_quotes_it_cannot_honour<H: Harness>(h: &H) {
 }
 
 /// A viewer stops paying a seeder whose `ack` is unsolicited, or does not match the
-/// payment's `accepted_upto` or `spent_total`, whether short or inflated.
+/// payment's `accepted_upto` or `spent_total`, whether short or inflated. An `accepted_upto`
+/// short of the payment's `upto_chunk` is wrong even when it is above the ledger.
 pub async fn a_viewer_stops_on_a_wrong_or_unsolicited_ack<H: Harness>(h: &H) {
     let mut unsolicited = h.viewer(1);
     unsolicited
@@ -5950,6 +5951,31 @@ pub async fn a_viewer_stops_on_a_wrong_or_unsolicited_ack<H: Harness>(h: &H) {
         v.requested();
         assert!(v.due().await.unwrap().is_none(), "no more payments");
     }
+    // With 4 chunks acknowledged, a payment up to chunk 8 acked at chunk 5: above the
+    // ledger, and short of the payment. Taken, the watcher would pay chunks 6 to 8 again.
+    let e = h.engine(1, 8, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).unwrap();
+    for i in 0..4 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    let first = v.due().await.unwrap().expect("due");
+    v.ack(&s.pay(&first).await.expect("accepted")).unwrap(); // the ledger: 4, 4
+    for i in 4..8 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    let pay = v.due().await.unwrap().expect("due");
+    assert_eq!(pay.upto_chunk, 8);
+    let mut ack = s.pay(&pay).await.expect("accepted");
+    ack.accepted_upto = 5;
+    assert!(
+        v.ack(&ack).is_err() && v.stopped(),
+        "an ack short of the payment's upto_chunk, though above the ledger, does not match: \
+         refused, and it stops"
+    );
 }
 
 /// A viewer reclaims every proof of a refused payment, whatever the code, known or not,
@@ -5957,7 +5983,8 @@ pub async fn a_viewer_stops_on_a_wrong_or_unsolicited_ack<H: Harness>(h: &H) {
 /// except after `mint-unavailable`. Proofs its own unanswered reclaim took back are not
 /// lost: a restore of its outputs shows them. A refusal because a keyset expired is
 /// decided per proof, the watcher's own reclaims counted as back, and proofs listed
-/// expired are never paid with again.
+/// expired, those the wallet still holds included, are never paid with. A reclaim goes to
+/// the mint's active keyset, whatever the proofs' own.
 pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     let codes = [
         RejCode::Underpaid,
@@ -6097,8 +6124,8 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     // A reclaim whose answer is lost, and whose outputs' keyset expires before the retry:
     // a restore no longer shows them, so the watcher cannot tell its own reclaim from the
     // seeder's claim. It treats the proofs as found spent and awaits a quote, keeping its
-    // bound (a seeder takes at most that one payment); their value is lost to the expiry
-    // either way.
+    // bound (a seeder takes at most that one payment); whichever it was, their value is gone
+    // from the watcher, to the seeder or with the outputs' keyset.
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
@@ -6442,6 +6469,11 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     last_pay_never_with_expired_proofs(h).await;
 
     a_pending_rest_keeps_the_reclaim_incomplete(h).await;
+
+    // Proofs the wallet still holds of an expired older keyset are never paid with; and a
+    // reclaim goes to the mint's active keyset at once, whatever the proofs' own keyset.
+    held_expired_proofs_never_paid_with(h).await;
+    older_proofs_reclaimed_into_an_expiring_keyset(h).await;
 }
 
 /// A viewer waits exactly 180 s for an answer on a live connection, then reclaims its
@@ -9601,28 +9633,26 @@ async fn an_unwaited_hello_reuses_the_payments_read<H: Harness>(h: &H) {
 
 /// After a 12003 with a spent input not its own, inputs left that are pending keep the
 /// reclaim incomplete: the watcher retries, and once the mint rolls the request back it
-/// takes them back, and awaits a quote. The state (one input spent by someone else, the
-/// others reserved) is what a seeder's swap of one proof alone plus a request of the rest
-/// that the mint holds give; the harness reaches it by reserving the whole token and then
-/// having one proof taken.
+/// takes them back, and awaits a quote. A seeder keeps one proof of a three-proof payment,
+/// in a swap of that proof alone, and a request of the rest is held reserved at the mint.
 async fn a_pending_rest_keeps_the_reclaim_incomplete<H: Harness>(h: &H) {
     let e = h.engine(7, 2, 1000);
-    let mut s = open(h, &e, 1).await;
+    let s = open(h, &e, 1).await;
     let mut v = h.viewer(7);
     v.quote(s.quote()).unwrap();
-    assert!(s.admit(&h.chunk(0)));
     v.requested();
     let pay = v.due().await.unwrap().expect("due: 7 sat, three proofs");
-    h.hold_next_swap_reserving();
-    h.time_out_next_swap();
-    let rej = s.pay(&pay).await.expect_err("parked at the mint");
-    assert_eq!(rej.code, RejCode::MintUnavailable);
+    assert!(h.steal_one(&pay.token).await, "the seeder keeps one proof");
     assert!(
-        h.steal_one(&pay.token).await,
-        "one proof taken by someone else"
+        h.reserve_rest(&pay.token).await,
+        "a request of the rest, held reserved"
     );
-    h.expire_keyset_of(&pay.token, 1); // that proof's keyset expires: the reclaim gets a 12003
-    v.rej(&rej).await;
+    h.expire_keyset_of(&pay.token, 1); // the kept proof's keyset expires: the reclaim gets a 12003
+    v.rej(&Rej {
+        code: RejCode::MintUnavailable,
+        detail: None,
+    })
+    .await;
     assert!(
         !v.awaiting_quote() && v.due().await.unwrap().is_none(),
         "the inputs left are pending: the reclaim is incomplete, not settled as found spent"
@@ -9638,4 +9668,118 @@ async fn a_pending_rest_keeps_the_reclaim_incomplete<H: Harness>(h: &H) {
         v.awaiting_quote(),
         "and, a proof being someone else's, awaits a quote"
     );
+    drop(s);
+}
+
+/// Proofs a wallet still holds of an older keyset that has reached its own `final_expiry`,
+/// while the mint's active keyset is current, are listed expired: never paid with, though a
+/// wallet spends an older keyset's proofs first. The watcher pays with others, and the
+/// seeder swaps them.
+async fn held_expired_proofs_never_paid_with<H: Harness>(h: &H) {
+    h.fund_older_keyset(1000);
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).unwrap();
+    for i in 0..2 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    let first = v
+        .due()
+        .await
+        .unwrap()
+        .expect("due, in the older keyset's proofs");
+    v.ack(
+        &s.pay(&first)
+            .await
+            .expect("the older keyset is good: swapped"),
+    )
+    .unwrap();
+    h.expire_older_keyset(); // the proofs the wallet still holds of it expire too
+    for i in 2..4 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    let pay = v
+        .due()
+        .await
+        .unwrap()
+        .expect("due, in proofs of a keyset not expired");
+    let ack = s
+        .pay(&pay)
+        .await
+        .expect("its payment holds no proof of the expired older keyset: swapped");
+    assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
+    v.ack(&ack).unwrap();
+    h.fund_older_keyset(0);
+}
+
+/// A reclaim's outputs are of the mint's active keyset, and the watcher reclaims at once
+/// whatever the proofs' own keyset: proofs of an older keyset that never expires are taken
+/// back into an active keyset whose `final_expiry` comes sooner. If that reclaim's answer is
+/// lost and the active keyset expires before the retry, a restore no longer shows its
+/// outputs: the watcher treats the proofs as found spent, whatever their own keyset, and
+/// awaits a quote (NFX-07 §3a's concession).
+async fn older_proofs_reclaimed_into_an_expiring_keyset<H: Harness>(h: &H) {
+    h.fund_older_keyset(1000);
+    h.keyset_expires_in(Some(h.account_ttl())); // too soon for a seeder to swap to
+    for lost in [false, true] {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        let mut v = h.viewer(1);
+        v.quote(s.quote()).unwrap();
+        for i in 0..2 {
+            assert!(s.admit(&h.chunk(i)));
+            v.requested();
+        }
+        let pay = v
+            .due()
+            .await
+            .unwrap()
+            .expect("due, in the older keyset's proofs");
+        let rej = s
+            .pay(&pay)
+            .await
+            .expect_err("the active keyset expires too soon to swap to");
+        assert_eq!(rej.code, RejCode::MintUnavailable);
+        if lost {
+            h.lose_next_reclaim_response();
+        }
+        v.rej(&rej).await;
+        assert!(
+            h.claimed_all(&pay.token).await,
+            "reclaimed at once into the active keyset, though it expires sooner than the \
+             proofs' own (answer lost: {lost})"
+        );
+        if !lost {
+            assert!(
+                !v.awaiting_quote() && v.due().await.unwrap().is_some(),
+                "every proof back: it pays again"
+            );
+            continue;
+        }
+        h.advance(h.account_ttl());
+        h.expire_active_keyset();
+        assert!(
+            v.due().await.unwrap().is_none() && v.awaiting_quote(),
+            "its reclaim's outputs expired unrestored: the proofs are treated as found spent, \
+             whatever their own keyset, and it awaits a quote"
+        );
+        drop(s);
+        v.end();
+        h.rotate_keyset();
+        let s = open(h, &e, 1).await;
+        assert_eq!(
+            (s.quote().accepted_upto, s.quote().spent_total),
+            (0, 0),
+            "the seeder never swapped it"
+        );
+        v.quote(s.quote()).unwrap();
+        assert!(
+            v.awaiting_quote(),
+            "a quote equal to the ledger leaves it waiting: the concession's cost"
+        );
+    }
+    h.fund_older_keyset(0);
 }
