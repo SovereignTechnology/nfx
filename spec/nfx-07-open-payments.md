@@ -111,18 +111,22 @@ payment-enforced after release, so no mechanism pretends otherwise.
   - It persists across the peer's sessions. A new `hello` continues the account; it
     never opens a fresh window.
   - A `hello` for an account with a payment in progress waits while a payment holds the
-    account's turn: each holds it until it is answered, at the latest at its own deadline
-    (60 s from its arrival), and one that arrives meanwhile may take the turn next (§3).
-    The turn is freed then: when its payment is answered, or at its deadline if that
-    comes first, however late after it the answer goes out, the swap's outcome comes, or
-    an entry takes the turn over. Deadlines and the seeder's clock count whole seconds,
-    so a turn freed at a deadline was freed as that second began: every read sent in it
-    or later was sent after the freeing. The `hello` is answered then, plus the time its
-    own reads of its account's unknown swaps take. It reads after that wait, which ended
-    when the turn was last freed before the `hello` found it free: no read sent before
-    then serves it, the payment's own included. So a quote never misses an acknowledged
-    payment, nor a claim that had reached the mint when the turn was so freed, the mint
-    answering. A `hello` waiting so counts toward the peer's session cap.
+    account's turn: each holds it until it is answered, or dropped before its swap is
+    sent (its connection closed: it is abandoned unswapped), at the latest at its own
+    deadline (60 s from its arrival), and one that arrives meanwhile may take the turn
+    next (§3). The turn is freed then: when its payment is answered or so dropped, or at
+    its deadline if that comes first, however late after it the answer goes out, the
+    swap's outcome comes, or an entry takes the turn over. Deadlines and the seeder's
+    clock count whole seconds, so a turn freed at a deadline was freed as that second
+    began: every read sent in it or later was sent after the freeing. The `hello` is
+    answered then, plus the time its own reads of its account's unknown swaps take. It
+    reads after that wait, which ended when the turn was last freed before the `hello`
+    found it free: no read sent before then serves it, the payment's own included. A
+    `hello` that takes the turn over reads so too, the abandoned swap included; one that
+    comes after the deadline that freed the turn found it free, and did not wait. So a
+    quote never misses an acknowledged payment, nor a claim that had reached the mint
+    when the turn was so freed, the mint answering. A `hello` waiting so counts toward the
+    peer's session cap.
 - Bans and the global cap belong to the **seeder**: one set of state for all its
   videos. The window belongs to the account.
 - A `session` id names one **open** session. A `hello` naming a session id that is open
@@ -211,10 +215,12 @@ ahead.
 
 **Verifying a `pay`.** One account's payments are processed one at a time, in no set
 order: each waits while another holds the account's turn, which that one holds until it
-is answered, at most to its own deadline: a turn held to a deadline is freed there,
-however late the answer goes out, the swap's outcome comes, or an entry takes the turn
-over (the deadline, below). Bans are checked when a payment's turn comes, not when it
-arrives. The checks run in this order:
+is answered, or dropped before its swap is sent (then abandoned unswapped), at most to
+its own deadline: a turn held to a deadline is freed there, however late the answer goes
+out, the swap's outcome comes, or an entry takes the turn over (the deadline, below).
+Bans are checked when a payment's turn comes, not when it arrives, a turn it takes over
+included, and before any other check: a banned peer's payment is refused `banned`,
+whatever it offers. The checks run in this order:
 1. **Structure.** A token is `bad-token` if it is:
    - unreadable;
    - not in unit `sat`;
@@ -250,17 +256,17 @@ arrives. The checks run in this order:
        no answer has an unknown one.
    - **Retries.** The seeder retries the same swap request (NUT-19), with the same
      outputs, while it still has time. Those outputs are derived for this swap alone
-     (NUT-13), so a NUT-09 restore of them finds this swap and no other. A retry
-     answered `spent` may be its own earlier attempt that succeeded unseen: a restore
-     that finds the outputs signed settles it as a claim, and one that does not makes it
-     `mint-unavailable` with nothing to learn, since its inputs are spent. A retry's
-     `spent` is never a ban. A retry refused as pending (below) may be refused because
-     of the first attempt, still being processed: the outcome stays unknown. A retry
-     refused as invalid (CDK 10001) is answered as a first attempt refused so is,
-     `bad-token` and a ban: validity is the proofs' own, so the first attempt was
-     refused the same way. 12001 (a keyset the mint does not know) is not invalid: it
-     may name the seeder's own outputs, and the seeder checked the inputs' DLEQs
-     against that keyset's keys.
+     (NUT-13), so a NUT-09 restore of them finds this swap and no other. A retry answered
+     `spent` may be its own earlier attempt that succeeded unseen: a restore that finds
+     the outputs signed settles it as a claim, and one that does not makes it
+     `mint-unavailable` with nothing to learn, since its inputs are spent: it leaves
+     nothing unknown. A retry's `spent` is never a ban. A retry refused as pending
+     (below) may be refused because of the first attempt, still being processed: the
+     outcome stays unknown. A retry refused as invalid (CDK 10001) is answered as a first
+     attempt refused so is, `bad-token` and a ban: validity is the proofs' own, so the
+     first attempt was refused the same way. 12001 (a keyset the mint does not know) is
+     not invalid: it may name the seeder's own outputs, and the seeder checked the
+     inputs' DLEQs against that keyset's keys.
    - **The outputs' keyset.** The seeder derives a swap's outputs only from an active
      keyset whose `final_expiry` (NUT-02), as the mint lists it, is absent or at least
      twice `account_ttl` away by the seeder's own clock. With none, it does not swap:
@@ -282,19 +288,28 @@ arrives. The checks run in this order:
    - **The deadline.** The seeder answers every `pay` within **60 s of its arrival**,
      that is of the transport receiving it, not of the engine reading it: the wait for
      the account's turn, the key fetch and the swap all count. A payment whose outcome
-     the seeder has by then is answered with it, even at the deadline. Otherwise it
-     answers `mint-unavailable`, abandons the swap (it sends no further swap request for
-     those proofs), and releases the account's turn to whichever payment takes it next.
-     The turn is freed at the deadline, however late that answer goes out, the swap's
-     outcome comes, or an entry takes the turn over: a read sent in the deadline's second
-     or later was sent after the freeing. The payment that takes the turn, once its
-     checks pass, reads the abandoned swap (below); while that outcome is still unknown,
-     it is answered `mint-unavailable` without a swap (bounded state, above). A payment's
-     own reads and completions (below) count too, and so do the reads and requests that
-     settle a retry or a completion: all end at its deadline, however late they start
-     (after a wait for the account's turn, or a slow key fetch). One still unanswered
-     then is abandoned, proves nothing, and the payment is answered `mint-unavailable` at
-     the deadline.
+     the seeder has by then is answered with it, even at the deadline: a refusal its
+     checks reached by then, or its swap's outcome. Otherwise it answers
+     `mint-unavailable`, however its checks would have ended, abandons the swap (it sends
+     no further swap request for those proofs), and releases the account's turn to
+     whichever payment takes it next. Deadlines and the seeder's clock count whole
+     seconds, and a deadline is as its second began: what comes in the deadline's second
+     came after it. So keys that come then or later are not used, and nothing that needs
+     them (DLEQ, amount) is judged; a swap's outcome the seeder settles then is late
+     (below); and a payment whose swap is not sent by then is not rechecked against the
+     watermark (step 5). Each is answered `mint-unavailable`. The turn is freed at the
+     deadline, however late that answer goes out, the swap's outcome comes, or an entry
+     takes the turn over: a read sent in the deadline's second or later was sent after
+     the freeing. A payment dropped before its swap is sent (its connection closed) is
+     abandoned unswapped, and frees the turn then; one dropped after is settled as its
+     swap completes (step 5). The payment that takes the turn, once its checks pass,
+     reads the abandoned swap (below), whether it waited for the turn or came after the
+     deadline; while that outcome is still unknown, it is answered `mint-unavailable`
+     without a swap (bounded state, above). A payment's own reads and completions (below)
+     count too, and so do the reads and requests that settle a retry or a completion: all
+     end at its deadline, however late they start (after a wait for the account's turn,
+     or a slow key fetch). One still unanswered then is abandoned, proves nothing, and
+     the payment is answered `mint-unavailable` at the deadline.
    - **Late outcomes.** A swap the seeder has answered `mint-unavailable` for, at the
      deadline or earlier, is still settled when its outcome becomes known. The seeder
      MUST learn it: from a late response, or, when none comes, by reading the swap's
@@ -327,9 +342,9 @@ arrives. The checks run in this order:
      - An account's own `hello` and `pay` read that account's unknown swaps, and no other
        account's, not even the same peer's on another video: a read left unanswered costs
        only its own account's payments, and never past their deadline. A `pay` reads
-       once, after its checks (`stale`, structure, mint, DLEQ, amount, and its peer's
-       ban), just before its swap: a payment the seeder refuses anyway costs the mint
-       nothing.
+       once, after its checks (its peer's ban first, then `stale`, structure, mint, DLEQ
+       and amount), just before its swap: a payment the seeder refuses anyway costs the
+       mint nothing.
        Admission and the other synchronous checks read nothing.
      - An account's own reads are at most two a second, counted against that account
        alone. A read counts from when it is sent, in the second it is sent (an entry
@@ -377,7 +392,8 @@ arrives. The checks run in this order:
 Every refusal leaves the accounting untouched and the proofs unclaimed, except that
 after `mint-unavailable` the swap's outcome may be unknown (§3a says how the watcher
 settles that). A banned peer's `hello` and `pay` are refused (`banned`), whatever it
-offers, and nothing of it is admitted.
+offers, and nothing of it is admitted. A `hello` checks the ban as it arrives and again as
+it answers, after its wait and its reads: a ban earned meanwhile refuses it.
 
 For licensed videos, step 5's swap is replaced by the offline checks of NFX-08 §4.1:
 chunk proofs there are P2PK-locked and cannot be swapped by the seeder.
@@ -836,3 +852,12 @@ therefore loses nothing:
     keyset that expires sooner, and the wallet must move proofs out of a keyset before its
     `final_expiry`; the expiry concession holds whatever the proofs' own keyset, and its
     premise "its proofs would be lost to the expiry anyway" is withdrawn.
+- Draft 2026-09-26 (M2.0 twenty-sixth audit, `docs/nfx/reviews/2026-09-24-m2.0-twenty-sixth-audit.md`).
+  - §3: a payment dropped before its swap is sent is abandoned unswapped and frees the
+    turn then; a `hello` that takes the turn over reads as one that waited, and one that
+    comes after the deadline that freed the turn did not wait; a payment's ban is checked
+    before any other check, on a turn taken over too, and a `hello`'s again as it
+    answers, after its wait and its reads; a refusal is the answer only if the checks
+    reached it by the deadline: keys that come in the deadline's second or later are not
+    used, a swap's outcome settled in it is late, and a payment not sent by then is not
+    rechecked; a retry's `spent` with its outputs unsigned leaves nothing unknown.

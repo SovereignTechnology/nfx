@@ -30,17 +30,20 @@ pub trait SeederEngine {
 
     /// A `hello` from `peer`. The session continues the peer's account for the video, and
     /// its quote carries the account's position. A `hello` creates no account. It waits
-    /// while a payment holds the account's turn (each until it is answered, at most to its
-    /// own deadline, 60 s from its arrival, and one arriving meanwhile may take the turn
-    /// next), so its quote never misses an acknowledged one; while it waits it counts
-    /// toward the peer's session cap. It then reads its account's own unknown swaps, if
-    /// any, which adds their time. After a wait, only a read sent after the turn was last
-    /// freed before it found the turn free serves it; a turn held to a deadline was freed
-    /// as that second began, however late the payment's answer goes out, its swap's outcome
-    /// comes, or an entry takes the turn over (NFX-07 §3).
+    /// while a payment holds the account's turn (each until it is answered, or dropped
+    /// before its swap is sent, when it is abandoned unswapped, at most to its own
+    /// deadline, 60 s from its arrival, and one arriving meanwhile may take the turn next),
+    /// so its quote never misses an acknowledged one; while it waits it counts toward the
+    /// peer's session cap. It then reads its account's own unknown swaps, if any, which
+    /// adds their time, a swap it abandoned by taking the turn over included. After a wait,
+    /// only a read sent after the turn was last freed before it found the turn free serves
+    /// it; a turn held to a deadline was freed as that second began, however late the
+    /// payment's answer goes out, its swap's outcome comes, or an entry takes the turn
+    /// over, and a `hello` that comes after that deadline did not wait (NFX-07 §3).
     ///
     /// Refused with:
-    /// - `banned` for a banned peer;
+    /// - `banned` for a banned peer, checked as it arrives and again as it answers, after
+    ///   its wait and its reads;
     /// - `unknown-video` for a video this seeder does not serve;
     /// - `bad-session` for a session id that is open, or beyond the per-peer cap on open
     ///   and waiting sessions, counted across all videos.
@@ -72,7 +75,8 @@ pub trait SeederSession {
     fn admit(&mut self, sha256: &str) -> bool;
 
     /// Handle a `pay` (NFX-07 §3), one at a time per account; bans are checked when its
-    /// turn comes.
+    /// turn comes, a turn it takes over included, before any other check: a banned peer's
+    /// payment is refused `banned`, whatever it offers.
     ///
     /// The checks run in this order: structure (`bad-token`), quoted mint (`bad-mint`),
     /// DLEQ (`bad-token`), exact face value (`underpaid`/`overpaid`), then the swap. A
@@ -90,17 +94,22 @@ pub trait SeederSession {
     /// **The deadline:** answered within 60 s of its arrival (the transport's receipt, not
     /// this call's), the wait for the account's turn, any key fetch and its own reads
     /// included. A payment whose outcome is known by then is answered with it; otherwise
-    /// with `mint-unavailable`, and its swap is abandoned: no further request is sent for
-    /// those proofs, and the account is released. Its turn is freed at the deadline,
-    /// however late this answer goes out, the swap's outcome comes, or another entry takes
-    /// the turn over.
+    /// with `mint-unavailable`, however its checks would have ended, and its swap is
+    /// abandoned: no further request is sent for those proofs, and the account is
+    /// released. Deadlines count whole seconds, and what comes in the deadline's second
+    /// came after it: keys that come then or later are not used, a swap's outcome settled
+    /// then is late, and a payment whose swap is not sent by then is not rechecked. Its
+    /// turn is freed at the deadline, however late this answer goes out, the swap's
+    /// outcome comes, or another entry takes the turn over. A payment that takes a turn
+    /// over reads the abandoned swap, as above.
     ///
     /// **Late outcomes:** an abandoned swap is settled when its outcome comes. A claim is
     /// credited (the next quote shows it); a spent or invalid outcome bans nobody.
     ///
     /// **Cancel-safe:** once the swap is sent it completes, and is credited or banned on,
     /// even if this future is dropped (the connection closed). The account's turn is held
-    /// until then, or until the deadline.
+    /// until then, or until the deadline. Dropped before its swap is sent, the payment is
+    /// abandoned unswapped, and its turn is freed then.
     async fn pay(&mut self, pay: &Pay) -> Result<Ack, Rej>;
 
     /// Whether this session's peer is banned.
