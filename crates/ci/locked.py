@@ -35,6 +35,10 @@ one crate, an unpinned module could change how a pinned one compiles.
   fails), and every file it lists is tracked; every target reads only its own crate's
   files, except nfx-pay-wire's integration tests, which may read the pay/1 vectors;
 - no file outside nfx-pay and nfx-node's locked paths names `nfx_pay`;
+- no tracked file of the money crates but the suite's own (nfx-pay/src/adversary.rs)
+  names `track_caller`: a panic in a function so marked is reported where it was called,
+  so one in the mock, called from the suite, would be taken for a failed assertion of the
+  suite;
 - the suite, the mutants, the runner they share and the pay/1 vector tests each ran, and
   reported exactly the number of tests their pinned sources declare. A test runner that
   runs nothing fails.
@@ -60,6 +64,8 @@ CRATES = REPO / "crates"
 PAY1_VECTORS = (REPO / "spec" / "test-vectors" / "pay1.json").resolve()
 PINS = CRATES / "ci" / "locked-compiled.txt"
 MONEY_USERS = [":!crates/nfx-pay", ":!crates/nfx-node/src/pay", ":!crates/nfx-node/src/origin_pay.rs"]
+# Where `track_caller` may not appear: every money crate file but the suite's own.
+NOT_TRACK_CALLER = ["crates/nfx-pay", "crates/nfx-pay-wire", ":!crates/nfx-pay/src/adversary.rs"]
 BUILD = "money-build "
 
 
@@ -320,6 +326,16 @@ def compiled(pin: bool) -> None:
                            cwd=REPO, capture_output=True, text=True)
     if named.returncode == 0:
         fail("only nfx-pay and nfx-node's locked paths may name nfx_pay:\n" + named.stdout)
+
+    # The runner judges a panic by where it was raised: a #[track_caller] function reports
+    # its panics at its caller's line, so one in the mock would move them into the suite.
+    marked = subprocess.run(["git", "grep", "-n", "track_caller", "--", *NOT_TRACK_CALLER],
+                            cwd=REPO, capture_output=True, text=True)
+    if marked.returncode == 0:
+        fail("only the suite (crates/nfx-pay/src/adversary.rs) may name track_caller:\n"
+             + marked.stdout)
+    if marked.returncode != 1:
+        fail(f"git grep for track_caller failed:\n{marked.stderr[-3000:]}")
 
     # The money tests ran, all of them. `cargo test` exits 0 when a runner skips them.
     want = test_counts()

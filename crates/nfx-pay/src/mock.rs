@@ -1825,6 +1825,26 @@ pub enum SeederFlaw {
     /// Takes a turn freed in its payment's deadline second as freed then, not at the
     /// deadline: a read sent earlier in that second serves no `hello` behind it.
     DeadlineSecondLate,
+    /// A swap learnt as nothing, its answer lost or abandoned in flight, frees its account's
+    /// chunks up to the payment from the global count, though nothing was paid for them.
+    LateNothingFreesDebt,
+    /// A payment checks its peer's ban without first expiring the bans past `ban_ttl`.
+    PayBanNotAged,
+    /// Refuses a request for a file of another video, or of none, but logs it in the global
+    /// count as an unpaid chunk.
+    ForeignAdmitCounts,
+    /// Refuses a banned peer's request, but counts it as an unpaid chunk, to its account and
+    /// in the global count.
+    BannedAdmitCounts,
+    /// A payment refused while its account's earlier swap is unknown drops the account's
+    /// chunks from the log that ages them: they stay in the global count for good.
+    PayDropsDebtLog,
+    /// A swap abandoned in flight and learnt as nothing frees its account's chunks up to the
+    /// payment from the global count; one whose answer was lost frees none.
+    NothingInFlightFreesDebt,
+    /// Refuses a banned peer's request, but counts it to its account (its window and its
+    /// `served`), not to the global count.
+    BannedAdmitCountsToAccount,
 }
 
 /// A defect planted in a mock viewer, to prove the adversary suite catches it.
@@ -2502,6 +2522,8 @@ impl Inner {
                 }
                 if read == Read::Claimed {
                     self.settle_late(&mut st, &u.pay, Swap::Claimed);
+                } else if self.has(SeederFlaw::LateNothingFreesDebt) {
+                    self.free_unpaid(&mut st, &u.pay);
                 }
             }
             let lost_open = st
@@ -2524,6 +2546,10 @@ impl Inner {
                     }
                     if read == Read::Claimed {
                         self.settle_late(&mut st, pay, Swap::Claimed);
+                    } else if self.has(SeederFlaw::LateNothingFreesDebt)
+                        || self.has(SeederFlaw::NothingInFlightFreesDebt)
+                    {
+                        self.free_unpaid(&mut st, pay);
                     }
                     st.pays.remove(&id);
                     // A turn it still holds is released, and what waits for it woken; a
@@ -2545,6 +2571,25 @@ impl Inner {
             }
         }
         wake_all(wake);
+    }
+
+    /// What [`SeederFlaw::LateNothingFreesDebt`] and [`SeederFlaw::NothingInFlightFreesDebt`]
+    /// free for a swap learnt as nothing: its account's unpaid chunks up to the payment leave
+    /// the global count, unpaid.
+    fn free_unpaid(&self, st: &mut State, pay: &Settle) {
+        let Some(a) = st.accounts.get(&pay.key) else {
+            return;
+        };
+        let generation = a.generation;
+        let freed: Vec<u64> = a
+            .unpaid
+            .iter()
+            .copied()
+            .filter(|n| *n <= pay.upto)
+            .collect();
+        for n in freed {
+            st.live.remove(&self.debt_key(pay.key, generation, n));
+        }
     }
 
     /// The swaps [`Inner::learn`] reads: `scope`'s own, or every account's. Lost answers
@@ -4487,7 +4532,9 @@ impl MockSession {
         let ban_now = !e.has(SeederFlaw::PayIgnoresBan) && !e.has(SeederFlaw::BanCheckedBeforeTurn);
         let (acked, snapshot) = {
             let mut st = e.state();
-            e.age(&mut st);
+            if !e.has(SeederFlaw::PayBanNotAged) {
+                e.age(&mut st);
+            }
             if ban_now && e.peer_banned(&st, self.key) {
                 return Err(rej(RejCode::Banned, "this peer is banned"));
             }
@@ -4671,6 +4718,10 @@ impl MockSession {
             let mut st = e.state();
             let now = e.clock.now();
             if e.unknown_swap(&st, self.key, id) && !e.has(SeederFlaw::UnknownUnbounded) {
+                if e.has(SeederFlaw::PayDropsDebtLog) {
+                    let key = self.key;
+                    st.debt.retain(|(debt, _)| debt.0 != key);
+                }
                 return Err(unavailable("an earlier payment's outcome is not known yet"));
             }
             if !e.has(SeederFlaw::RecheckBeforeRead) {
@@ -4724,10 +4775,31 @@ impl SeederSession for MockSession {
         let mut st = e.state();
         e.age(&mut st);
         if e.peer_banned(&st, self.key) && !e.has(SeederFlaw::AdmitIgnoresBan) {
+            if e.has(SeederFlaw::BannedAdmitCounts) || e.has(SeederFlaw::BannedAdmitCountsToAccount)
+            {
+                let now = e.clock.now();
+                let a = e.account(&mut st, self.key);
+                a.admitted += 1;
+                let (n, generation) = (a.admitted, a.generation);
+                a.unpaid.push_back(n);
+                if e.has(SeederFlaw::BannedAdmitCounts) {
+                    let debt = e.debt_key(self.key, generation, n);
+                    st.debt.push_back((debt, now));
+                    st.live.insert(debt);
+                }
+            }
             return false;
         }
         let member = e.videos[self.key.1].members.contains(sha256);
         if !member && !e.has(SeederFlaw::AdmitsForeignChunks) {
+            if e.has(SeederFlaw::ForeignAdmitCounts) {
+                // Under a generation of its own: it collides with no account's chunk.
+                let generation = st.next_generation;
+                st.next_generation += 1;
+                let debt = e.debt_key(self.key, generation, 1);
+                st.debt.push_back((debt, e.clock.now()));
+                st.live.insert(debt);
+            }
             return false;
         }
         let covered = if e.has(SeederFlaw::CoveredPeerWide) {

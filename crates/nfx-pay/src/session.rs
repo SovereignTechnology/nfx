@@ -431,12 +431,15 @@ pub trait Harness {
     fn gather_state_reads(&self, n: usize, wait: Duration);
     /// The clock moves by `by` between the next swap outcome's arrival and its settlement:
     /// an outcome arriving just before its payment's deadline and settled just after, as on
-    /// another thread.
+    /// another thread. Asking moves nothing yet.
     fn advance_during_next_land(&self, by: Duration);
     /// Whether the clock move [`Harness::advance_during_next_land`] asked for has been made
     /// (an outcome settled since). A real engine's harness needs a seam in its settlement to
-    /// make it; one that ignores the request fails the scenario that asks, rather than
-    /// passing it untested.
+    /// make it. One that ignores the request, or moves the clock as it is asked, fails the
+    /// scenario that asks, rather than passing it untested. One that moves the clock
+    /// elsewhere before the outcome arrives (as it releases the swaps, say) cannot be told
+    /// from outside: an engine that judges lateness at arrival is caught deterministically
+    /// only where the harness makes the move at that seam (the mock's does).
     fn advanced_during_land(&self) -> bool;
     /// An engine that admits in two steps (a check, then a count) has its admissions wait
     /// between the steps, in real time and at most `wait`, until `n` have checked (`n` 0:
