@@ -935,6 +935,7 @@ pub async fn a_banned_peer_stays_banned<H: Harness>(h: &H) {
     a_banned_peers_pay_is_refused_whatever_it_offers(h).await;
     a_turn_taken_over_is_checked_for_the_ban(h).await;
     a_hello_checks_the_ban_as_it_answers(h).await;
+    a_banned_peers_hello_is_refused_as_it_arrives(h).await;
 }
 
 /// A new `hello` continues the account: its quote carries the account's position, it
@@ -1131,32 +1132,88 @@ pub async fn a_seeder_answers_within_its_deadline<H: Harness>(h: &H) {
         assert!(!s.banned());
     }
 
-    // Keys that arrive only once the deadline has passed send no swap, and nor do keys that
-    // came a second before it, to a payment that goes on only at its deadline.
-    for keys_at in [60, 59] {
-        let e = h.engine(1, 4, 1000);
-        let mut s = open(h, &e, 1).await;
-        serve(h, &mut s, 0, 4);
-        let slow = Pay {
+    // Keys that arrive only once the deadline has passed send no swap.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    let slow = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    h.hold_key_fetches();
+    let (r, ()) = both(s.pay(&slow), async {
+        yield_once().await;
+        h.advance(Duration::from_secs(60));
+        h.release_swaps().await;
+    })
+    .await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    assert!(
+        !h.claimed_any(&slow.token).await,
+        "no swap is sent after the deadline"
+    );
+
+    // Nor does a payment whose own read runs into its deadline. Its account's swap, A,
+    // never reached the mint, and its payer spent the proofs since. The sweep runs during
+    // the payment's read: it learns A came to nothing, and completes another account's
+    // swap, B, whose request goes unanswered for 60 s. The payment reaches its swap at its
+    // deadline, with nothing left unknown.
+    let e = h.engine(1, 4, 1000);
+    let mut other = open(h, &e, 2).await;
+    serve(h, &mut other, 0, 1);
+    let b = Pay {
+        upto_chunk: 1,
+        token: h.token(1).await,
+    };
+    h.time_out_next_swap();
+    h.mint_outage(true);
+    assert!(is_rej(&other.pay(&b).await, &RejCode::MintUnavailable));
+    h.mint_outage(false);
+    h.advance(h.account_ttl()); // B's inputs unspent all that time: it is due a completion
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    let a = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    h.time_out_next_swap();
+    h.mint_outage(true);
+    assert!(is_rej(&s.pay(&a).await, &RejCode::MintUnavailable));
+    h.mint_outage(false);
+    assert!(h.steal(&a.token).await, "A's payer spent its proofs");
+    h.unanswered_reads_take(Duration::from_secs(60));
+    h.hold_next_swap(); // B's completion
+    h.sweep_during_next_read(&e);
+    let slow = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    let arrived = h.clock_secs();
+    let r = s.pay(&slow).await;
+    h.unanswered_reads_take(Duration::ZERO);
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    assert!(
+        !h.claimed_any(&slow.token).await,
+        "no swap is sent after the deadline"
+    );
+    assert_eq!(
+        h.clock_secs() - arrived,
+        60,
+        "the payment's read ran into its deadline"
+    );
+    h.release_swaps().await;
+    let next = s
+        .pay(&Pay {
             upto_chunk: 4,
             token: h.token(4).await,
-        };
-        h.hold_key_fetches();
-        let mut paying = Box::pin(s.pay(&slow));
-        assert!(poll_now(paying.as_mut()).is_none(), "waiting for the keys");
-        h.advance(Duration::from_secs(keys_at));
-        h.release_swaps().await; // its keys come
-        h.advance(Duration::from_secs(60 - keys_at)); // it goes on only at its deadline
-        let r = (0..1000)
-            .find_map(|_| poll_now(paying.as_mut()))
-            .expect("answered at its deadline");
-        drop(paying);
-        assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
-        assert!(
-            !h.claimed_any(&slow.token).await,
-            "no swap is sent after the deadline"
-        );
-    }
+        })
+        .await;
+    assert!(
+        next.as_ref()
+            .is_ok_and(|ack| (ack.accepted_upto, ack.spent_total) == (4, 4)),
+        "the payment sent no swap by its deadline, and left nothing unknown: the next is \
+         acknowledged: {next:?}"
+    );
 
     let e = h.engine(1, 4, 1000);
     let mut first = open(h, &e, 1).await;
@@ -2719,9 +2776,8 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
         }
     }
 
-    // A payment that reaches its own read at its deadline (its mint's keys came a second
-    // before, and it goes on only then) has no time left to send one: it reads nothing,
-    // and counts no read. A hello that waited for it, and one after it in that second,
+    // A payment whose mint's keys come only at its deadline reads nothing: the keys came
+    // too late to be used. A hello that waited for it, and one after it in that second,
     // read then, and quote the claim.
     for waiting in [true, false] {
         let e = h.engine(1, 4, 1000);
@@ -2744,9 +2800,8 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
                 "the hello waits for the payment"
             );
         }
-        h.advance(Duration::from_secs(59));
-        h.release_swaps().await; // its keys come, a second before its deadline
-        h.advance(SECOND); // the payment's deadline, when it goes on
+        h.advance(Duration::from_secs(60)); // the payment's deadline
+        h.release_swaps().await; // its keys come only now
         let r = (0..1000)
             .find_map(|_| poll_now(paying.as_mut()))
             .expect("answered at its deadline");
@@ -3449,6 +3504,8 @@ pub async fn the_deadline_frees_the_account<H: Harness>(h: &H) {
     a_dropped_payment_that_waited_holds_the_turn_to_its_deadline(h).await;
     a_takeover_reads_the_abandoned_swap(h).await;
     a_payment_dropped_before_its_swap_frees_the_turn(h).await;
+    a_takeover_is_checked_before_it_reads(h).await;
+    a_takeovers_reads_end_at_its_deadline(h).await;
     no_retry_at_the_deadline(h).await; // last: the mint event it queues stays queued
 }
 
@@ -5208,6 +5265,54 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
     );
 
     a_ban_expires_on_its_own_session(h).await;
+    a_lapsed_ban_refuses_no_takeover(h).await;
+}
+
+/// Flaw `TakeoverBanNotAged`. A ban lasts `ban_ttl`, and a payment's turn, a turn it takes
+/// over included, checks the ban as it stands then (NFX-07 §3). P1's swap is held at the
+/// mint, its watcher takes the proofs back, and its connection closes. A second later the
+/// peer is banned, for a double spend on its other video. The ban lapses with nothing more
+/// from the peer, until P2, which takes P1's dead turn over: it is acknowledged.
+async fn a_lapsed_ban_refuses_no_takeover<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 8).await;
+    let mut s2 = open(h, &e, 8).await;
+    let mut other = open_on(h, &e, 8, 1).await;
+    serve(h, &mut s, 0, 4);
+    h.hold_next_swap();
+    let p1 = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    poll_once(s.pay(&p1)).await; // its connection closes, its swap in flight
+    assert!(
+        h.steal(&p1.token).await,
+        "P1's watcher takes the proofs back"
+    );
+    h.advance(SECOND);
+    let spent = h.token(1).await;
+    assert!(h.steal(&spent).await, "someone else spent it");
+    let r = other
+        .pay(&Pay {
+            upto_chunk: 1,
+            token: spent,
+        })
+        .await;
+    assert!(is_rej(&r, &RejCode::Spent), "{r:?}");
+    assert!(s2.banned(), "the peer is banned");
+    h.advance(h.ban_ttl());
+    let r = s2
+        .pay(&Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        })
+        .await;
+    assert!(
+        r.as_ref()
+            .is_ok_and(|ack| (ack.accepted_upto, ack.spent_total) == (4, 4)),
+        "the peer's ban lapsed before P2 took P1's dead turn over: P2 is acknowledged: {r:?}"
+    );
+    h.release_swaps().await;
 }
 
 /// A seeder refuses to start with a configuration NFX-07 §3 forbids, and starts with one
@@ -5646,6 +5751,32 @@ pub async fn a_dropped_pay_is_credited_or_never_claimed<H: Harness>(h: &H) {
             );
         }
     }
+
+    a_dropped_pays_double_spend_bans(h).await;
+}
+
+/// Flaw `DropAbandonsInFlight`. A payment dropped once its swap is sent (its connection
+/// closed) is settled as its swap completes, and banned on (NFX-07 §3): it is not
+/// abandoned. P's proofs were spent elsewhere; its swap is held, and its connection
+/// closes. A second later the mint refuses the swap `spent`, in time: the peer is banned.
+async fn a_dropped_pays_double_spend_bans<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    let pay = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    assert!(h.steal(&pay.token).await, "someone else spent it");
+    h.hold_swaps();
+    poll_once(s.pay(&pay)).await; // its connection closes, its swap in flight
+    h.advance(SECOND);
+    h.release_swaps().await; // refused spent, in time
+    assert!(
+        s.banned(),
+        "P's swap was sent before its connection closed, and refused spent in time: the peer \
+         is banned"
+    );
 }
 
 /// Admission is atomic: the most sessions one peer may hold, admitting from as many
@@ -8297,10 +8428,11 @@ async fn a_read_sent_during_the_wait_serves_no_waited_hello<H: Harness>(h: &H) {
 
 /// Flaws `WaitReadPastDeadline` (`stalled`) and `NextSecondPastDeadline`.
 /// "Its wait ends at its own deadline in any case" (NFX-07 §3), and a `pay` is answered
-/// within 60 s. Hellos that passed the turn before P took it wait on a stalled read; in
-/// P's deadline second they read, one abandoned and one stalled (or both abandoned), so
-/// P, whose keys came a second before its deadline and which goes on only at it, finds the
-/// second's two spent there.
+/// within 60 s. Hellos that passed the turn before P took it wait on a stalled read. In
+/// P's second before its deadline two of them read and are dropped, and two find that
+/// second's two spent and wait for the next; so does P, whose keys come then. In P's
+/// deadline second those two read, one abandoned and one stalled (or both abandoned), and
+/// P finds the second's two spent there.
 async fn a_payment_waits_no_longer_than_its_deadline<H: Harness>(h: &H) {
     for stalled in [true, false] {
         let e = h.engine(1, 4, 1000);
@@ -8310,22 +8442,19 @@ async fn a_payment_waits_no_longer_than_its_deadline<H: Harness>(h: &H) {
         parked(h, &mut s, 4).await;
         h.advance(SECOND);
         let peer = h.peer(1);
-        let (one, two, three) = (h.hello(), h.hello(), h.hello());
-        let mut first = Box::pin(e.hello(&peer, &one));
+        let hellos: Vec<_> = (0..5).map(|_| h.hello()).collect();
+        let mut first = Box::pin(e.hello(&peer, &hellos[0]));
         if poll_now(first.as_mut()).is_some() {
             h.release_swaps().await;
             return; // synchronous reads: nothing is ever under way
         }
-        let mut second = Box::pin(e.hello(&peer, &two));
-        let mut third = Box::pin(e.hello(&peer, &three));
-        assert!(
-            poll_now(second.as_mut()).is_none(),
-            "waits for the first's read"
-        );
-        assert!(
-            poll_now(third.as_mut()).is_none(),
-            "waits for the first's read"
-        );
+        let mut waiting: Vec<_> = hellos[1..]
+            .iter()
+            .map(|hello| Box::pin(e.hello(&peer, hello)))
+            .collect();
+        for f in &mut waiting {
+            assert!(poll_now(f.as_mut()).is_none(), "waits for the first's read");
+        }
         h.hold_key_fetches();
         let p = Pay {
             upto_chunk: 4,
@@ -8337,9 +8466,29 @@ async fn a_payment_waits_no_longer_than_its_deadline<H: Harness>(h: &H) {
             poll_now(paying.as_mut()).is_none(),
             "P holds the turn, waiting for keys"
         );
-        h.advance(Duration::from_secs(59));
-        h.release_swaps().await; // P's keys come, a second before its deadline
+        h.advance(Duration::from_secs(59)); // P's second before its deadline
+        let mut late = waiting.split_off(2);
+        for mut f in waiting {
+            assert!(
+                poll_now(f.as_mut()).is_none(),
+                "it reads, and is dropped mid-read"
+            );
+        }
+        for f in &mut late {
+            assert!(
+                poll_now(f.as_mut()).is_none(),
+                "the second's two spent: it waits for the next"
+            );
+        }
+        h.release_swaps().await; // P's keys come
+        assert!(
+            poll_now(paying.as_mut()).is_none(),
+            "P finds this second's two reads spent, and waits for the next"
+        );
         h.advance(SECOND); // P's deadline
+        let mut it = late.into_iter();
+        let mut second = it.next().expect("a hello");
+        let mut third = it.next().expect("a hello");
         assert!(
             poll_now(second.as_mut()).is_none(),
             "the second reads, in P's deadline second"
@@ -9031,11 +9180,13 @@ async fn a_waited_hello_waits_for_no_read_sent_before_its_wait_ended<H: Harness>
 }
 
 /// Flaw `PlaceTakenPastDeadline`. No read is sent at or past its entry's deadline, "and
-/// none counted" (NFX-07 §3). P's keys come a second before its deadline, and A finishes
-/// at the mint. A hello that passed the turn before P took it reads A in P's deadline
-/// second, and is dropped mid-read: one of that second's two is spent. P goes on only
-/// then, and finds no time left to read. A fresh hello has the second's other place: it
-/// reads, this second, and quotes A's claim.
+/// none counted" (NFX-07 §3). Hellos that passed the turn before P took it wait on a
+/// stalled read of A. In P's second before its deadline two of them read and are dropped,
+/// and a third finds that second's two spent and waits for the next; so does P, whose
+/// keys come then, as A finishes at the mint. In P's deadline second the third reads A and
+/// is dropped mid-read: one of that second's two is spent. P goes on only then, and finds
+/// no time left to read. A fresh hello has the second's other place: it reads, this
+/// second, and quotes A's claim.
 async fn no_place_is_counted_at_the_deadline<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
@@ -9044,17 +9195,19 @@ async fn no_place_is_counted_at_the_deadline<H: Harness>(h: &H) {
     let a = parked(h, &mut s, 4).await;
     h.advance(SECOND);
     let peer = h.peer(1);
-    let (one, two) = (h.hello(), h.hello());
-    let mut first = Box::pin(e.hello(&peer, &one));
+    let hellos: Vec<_> = (0..4).map(|_| h.hello()).collect();
+    let mut first = Box::pin(e.hello(&peer, &hellos[0]));
     if poll_now(first.as_mut()).is_some() {
         h.release_swaps().await;
         return; // synchronous reads: nothing is ever under way
     }
-    let mut second = Box::pin(e.hello(&peer, &two));
-    assert!(
-        poll_now(second.as_mut()).is_none(),
-        "waits for the first's read"
-    );
+    let mut waiting: Vec<_> = hellos[1..]
+        .iter()
+        .map(|hello| Box::pin(e.hello(&peer, hello)))
+        .collect();
+    for f in &mut waiting {
+        assert!(poll_now(f.as_mut()).is_none(), "waits for the first's read");
+    }
     h.hold_key_fetches();
     let p = Pay {
         upto_chunk: 4,
@@ -9065,15 +9218,30 @@ async fn no_place_is_counted_at_the_deadline<H: Harness>(h: &H) {
         poll_now(paying.as_mut()).is_none(),
         "P holds the turn, waiting for keys"
     );
-    h.advance(Duration::from_secs(59));
+    h.advance(Duration::from_secs(59)); // P's second before its deadline
+    let mut third = waiting.pop().expect("a hello");
+    for mut f in waiting {
+        assert!(
+            poll_now(f.as_mut()).is_none(),
+            "it reads A, and is dropped mid-read"
+        );
+    }
+    assert!(
+        poll_now(third.as_mut()).is_none(),
+        "the second's two spent: it waits for the next"
+    );
     h.release_swaps().await; // P's keys come; A finishes at the mint
     assert!(h.claimed_all(&a.token).await);
+    assert!(
+        poll_now(paying.as_mut()).is_none(),
+        "P finds this second's two reads spent, and waits for the next"
+    );
     h.advance(SECOND); // P's deadline
     assert!(
-        poll_now(second.as_mut()).is_none(),
-        "the second reads A, in P's deadline second"
+        poll_now(third.as_mut()).is_none(),
+        "the third reads A, in P's deadline second"
     );
-    drop(second); // dropped mid-read: it counts
+    drop(third); // dropped mid-read: it counts
     let r = (0..1000)
         .find_map(|_| poll_now(paying.as_mut()))
         .expect("P answered at its deadline");
@@ -10225,12 +10393,14 @@ async fn a_banned_peers_pay_is_refused_whatever_it_offers<H: Harness>(h: &H) {
     }
 }
 
-/// Flaws `PayTakeoverSkipsBan` and `HelloTakeoverSkipsBanRecheck`. Bans are checked when a
-/// payment's turn comes, a turn it takes over included, and a `hello` checks again after
-/// its wait, however it ended (NFX-07 §3). P1's swap is held at the mint, its watcher takes
-/// the proofs back, and its connection closes. P2, or a `hello`, arrives 10 s later and
-/// waits; at 30 s the peer is banned, for a double spend on its other video. At P1's
-/// deadline P2, or the `hello`, takes the turn over, and is refused `banned`.
+/// Flaws `PayTakeoverSkipsBan`, `TakeoverReadsBeforeChecks` and
+/// `HelloTakeoverSkipsBanRecheck`. Bans are checked when a payment's turn comes, a turn it
+/// takes over included, before any other check, and a payment reads only once its checks
+/// pass; a `hello` checks again after its wait, however it ended (NFX-07 §3). P1's swap is
+/// held at the mint, its watcher takes the proofs back, and its connection closes. P2, or a
+/// `hello`, arrives 10 s later and waits; at 30 s the peer is banned, for a double spend on
+/// its other video. At P1's deadline P2, or the `hello`, takes the turn over, and is
+/// refused `banned`; P2 reads nothing, not even the swap it abandoned.
 async fn a_turn_taken_over_is_checked_for_the_ban<H: Harness>(h: &H) {
     for entry in ["a payment", "a hello"] {
         let e = h.engine(1, 4, 1000);
@@ -10279,6 +10449,7 @@ async fn a_turn_taken_over_is_checked_for_the_ban<H: Harness>(h: &H) {
         assert!(is_rej(&r, &RejCode::Spent), "{r:?}");
         h.advance(Duration::from_secs(30)); // P1's deadline: the turn is taken over
         if entry == "a payment" {
+            let before = h.state_reads();
             let r = (0..1000)
                 .find_map(|_| poll_now(paying.as_mut()))
                 .expect("P2 answered");
@@ -10286,6 +10457,12 @@ async fn a_turn_taken_over_is_checked_for_the_ban<H: Harness>(h: &H) {
                 is_rej(&r, &RejCode::Banned),
                 "banned while it waited, P2 took the dead turn over and is refused banned at \
                  its turn: {r:?}"
+            );
+            assert_eq!(
+                h.state_reads(),
+                before,
+                "a banned payment that took the turn over reads nothing, not even P1's \
+                 abandoned swap"
             );
             assert!(!h.claimed_any(&p2.token).await, "its payment is not taken");
         } else {
@@ -10302,17 +10479,18 @@ async fn a_turn_taken_over_is_checked_for_the_ban<H: Harness>(h: &H) {
     }
 }
 
-/// Flaws `LateKeysUsed`, `KeysInDeadlineSecondUsed`, `KeysDeadlineFirst`,
-/// `AbandonedKeysUnused` and `RecheckPastDeadline`. A payment whose outcome the seeder has
-/// by its deadline is answered with it; otherwise it is answered `mint-unavailable`,
-/// however it would have been refused (NFX-07 §3). P is polled only 5 s past its deadline.
-/// Keys that come then, or in the deadline's second, are not used: P, 1 sat for 4 chunks,
-/// is `mint-unavailable`, not `underpaid`. Keys that came at 30 s are: it is `underpaid`,
-/// its turn taken over at its deadline or not. And a payment whose swap was not sent by its
-/// deadline is not rechecked: a claim learnt past the deadline covers P, which is
-/// `mint-unavailable`, not `stale`, its keys come in time or late.
+/// Flaws `LateKeysUsed`, `KeysInDeadlineSecondUsed` and `RecheckPastDeadline`. A payment
+/// whose outcome the seeder has by its deadline is answered with it; otherwise it is
+/// answered `mint-unavailable`, however it would have been refused (NFX-07 §3). Keys that
+/// come at P's deadline or later are not used: P, 1 sat for 4 chunks, is
+/// `mint-unavailable`, not `underpaid`. Keys that come a second before are: it is
+/// `underpaid`. And a payment that reaches its swap past its deadline is not rechecked: a
+/// claim learnt then covers P, which is `mint-unavailable`, not `stale`. Where P's keys are
+/// held, it is polled as they come, or first after its deadline passed without them: a
+/// payment left unpolled while keys that came in time wait for it may be answered either
+/// way, since an engine that takes them in on another task reaches its checks as they come.
 async fn checks_after_the_deadline_answer_nothing<H: Harness>(h: &H) {
-    for (keys_at, taken_over) in [(65, false), (60, false), (30, false), (30, true)] {
+    for keys_at in [65, 60, 59] {
         let e = h.engine(1, 4, 1000);
         let mut s = open(h, &e, 1).await;
         serve(h, &mut s, 0, 4);
@@ -10328,11 +10506,6 @@ async fn checks_after_the_deadline_answer_nothing<H: Harness>(h: &H) {
         );
         h.advance(Duration::from_secs(keys_at));
         h.release_swaps().await; // its keys come
-        h.advance(Duration::from_secs(65 - keys_at));
-        if taken_over {
-            let q = open(h, &e, 1).await.quote().clone(); // it takes P's turn over
-            assert_eq!((q.accepted_upto, q.spent_total), (0, 0));
-        }
         let r = (0..1000)
             .find_map(|_| poll_now(paying.as_mut()))
             .expect("P answered");
@@ -10345,44 +10518,80 @@ async fn checks_after_the_deadline_answer_nothing<H: Harness>(h: &H) {
         } else {
             assert!(
                 is_rej(&r, &RejCode::Underpaid),
-                "P's keys came {keys_at} s after its arrival, in time: the refusal they give \
-                 is the answer, however late P is polled (its turn taken over at its deadline: \
-                 {taken_over}): {r:?}"
+                "P's keys came a second before its deadline: they are used, and the refusal \
+                 they give is the answer: {r:?}"
             );
         }
         assert!(!h.claimed_any(&p.token).await, "not swapped");
     }
-    for keys_at in [30, 65] {
-        let e = h.engine(1, 4, 1000);
-        let mut s = open(h, &e, 1).await;
-        let mut s2 = open(h, &e, 1).await;
-        serve(h, &mut s, 0, 4);
-        lost_claim(h, &mut s, 4, 4).await;
-        h.advance(SECOND);
-        h.hold_key_fetches();
-        let p = Pay {
-            upto_chunk: 4,
-            token: h.token(4).await,
-        };
-        let mut paying = Box::pin(s2.pay(&p));
-        assert!(
-            poll_now(paying.as_mut()).is_none(),
-            "P holds the turn, waiting for keys"
-        );
-        h.advance(Duration::from_secs(keys_at));
-        h.release_swaps().await; // its keys come
-        h.advance(Duration::from_secs(65 - keys_at));
-        e.sweep().await; // the earlier claim is learnt now, past P's deadline
-        let r = (0..1000)
-            .find_map(|_| poll_now(paying.as_mut()))
-            .expect("P answered");
-        assert!(
-            is_rej(&r, &RejCode::MintUnavailable),
-            "the claim that covers P was learnt 5 s past its deadline, its keys come at \
-             {keys_at} s: P had no outcome by then, and is not rechecked: {r:?}"
-        );
-        assert!(!h.claimed_any(&p.token).await, "not swapped");
-    }
+
+    // The claim that covers P is learnt by a sweep 5 s past P's deadline, as its keys come.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut s2 = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    lost_claim(h, &mut s, 4, 4).await;
+    h.advance(SECOND);
+    h.hold_key_fetches();
+    let p = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    let mut paying = Box::pin(s2.pay(&p));
+    assert!(
+        poll_now(paying.as_mut()).is_none(),
+        "P holds the turn, waiting for keys"
+    );
+    h.advance(Duration::from_secs(65));
+    h.release_swaps().await; // its keys come
+    e.sweep().await; // the earlier claim is learnt now, past P's deadline
+    let r = (0..1000)
+        .find_map(|_| poll_now(paying.as_mut()))
+        .expect("P answered");
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "the claim that covers P was learnt 5 s past its deadline, as its keys came: P had no \
+         outcome by then, and is not rechecked: {r:?}"
+    );
+    assert!(!h.claimed_any(&p.token).await, "not swapped");
+    drop(paying);
+
+    // P's keys come in time, and its checks pass. It reads its account's unknown swap, A, a
+    // claim; the sweep runs during that read, with the mint's state checks unanswered for
+    // 60 s, and learns the claim, which covers P, at P's deadline. P reaches its swap then.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    lost_claim(h, &mut s, 4, 4).await;
+    h.advance(SECOND);
+    h.state_check_outage(true);
+    h.unanswered_reads_take(Duration::from_secs(60));
+    h.sweep_during_next_read(&e);
+    let p = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    let arrived = h.clock_secs();
+    let r = s.pay(&p).await;
+    h.unanswered_reads_take(Duration::ZERO);
+    h.state_check_outage(false);
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "the claim that covers P was learnt at its deadline, during P's own read: P had no \
+         outcome by then, and is not rechecked: {r:?}"
+    );
+    assert!(!h.claimed_any(&p.token).await, "not swapped");
+    assert_eq!(
+        h.clock_secs() - arrived,
+        60,
+        "P's read ran into its deadline"
+    );
+    let q = open(h, &e, 1).await.quote().clone();
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (4, 4),
+        "the claim is credited"
+    );
 }
 
 /// Flaw `LandInTimeAtDeadline`. Deadlines and the clock count whole seconds, and a deadline
@@ -10656,20 +10865,19 @@ async fn a_takeover_reads_the_abandoned_swap<H: Harness>(h: &H) {
         } else {
             h.advance(Duration::from_secs(65)); // P2 arrives 5 s past P1's deadline
         }
-        let r = (0..1000)
-            .find_map(|_| poll_now(paying.as_mut()))
-            .expect("P2 answered");
+        let r = (0..1000).find_map(|_| poll_now(paying.as_mut()));
         drop(paying);
         if claimed {
             assert!(
-                is_rej(&r, &RejCode::Stale),
+                r.as_ref().is_some_and(|r| is_rej(r, &RejCode::Stale)),
                 "P2 took the turn over, and its read learnt P1's claim, which covers it: {r:?}"
             );
             assert!(!h.claimed_any(&p2.token).await, "P2 is not swapped");
         } else {
             assert!(
-                r.as_ref()
-                    .is_ok_and(|ack| (ack.accepted_upto, ack.spent_total) == (4, 4)),
+                r.as_ref().is_some_and(|r| r
+                    .as_ref()
+                    .is_ok_and(|ack| (ack.accepted_upto, ack.spent_total) == (4, 4))),
                 "P2 took the turn over, and its read learnt P1's swap as nothing: swapped: {r:?}"
             );
         }
@@ -10728,10 +10936,147 @@ async fn a_payment_dropped_before_its_swap_frees_the_turn<H: Harness>(h: &H) {
     drop((behind, queued));
 }
 
-/// Flaw `HelloBanCheckBeforeRead`. A `hello` checks its peer's ban again as it answers,
-/// after its wait and its reads (NFX-07 §3). Its read of A is under way when the peer is
-/// banned, for a double spend on its other video: once the read is back, the `hello` is
-/// refused `banned`.
+/// Flaws `TakeoverReadsBeforeStale`, `TakeoverReadsBeforeAmount` and
+/// `TakeoverStaleSkipped`. A payment reads only once its checks pass, and is refused as
+/// they say, a turn it takes over included (NFX-07 §3). Paid to 4, the account's P1, for
+/// chunks 5 to 8, is held at the mint, and its connection closes. P2 arrives 30 s later
+/// and waits; at P1's deadline it takes the turn over. A payment at the watermark, an
+/// unreadable token, a foreign mint's, one with an invalid DLEQ, and a short payment are
+/// each refused as their checks say, read nothing, not even P1's abandoned swap, and are
+/// not claimed.
+async fn a_takeover_is_checked_before_it_reads<H: Harness>(h: &H) {
+    let offers = [
+        (
+            "a payment at the watermark",
+            4,
+            h.token(4).await,
+            RejCode::Stale,
+        ),
+        (
+            "an unreadable token",
+            8,
+            h.bad_token(BadToken::Garbage, 4).await,
+            RejCode::BadToken,
+        ),
+        (
+            "a foreign mint's token",
+            8,
+            h.token_at("https://other-mint.example", 4).await,
+            RejCode::BadMint,
+        ),
+        (
+            "an invalid DLEQ",
+            8,
+            h.bad_token(BadToken::BadDleq, 4).await,
+            RejCode::BadToken,
+        ),
+        ("a short payment", 8, h.token(3).await, RejCode::Underpaid),
+    ];
+    for (offer, upto, token, want) in offers {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        let mut s2 = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        let ack = s
+            .pay(&Pay {
+                upto_chunk: 4,
+                token: h.token(4).await,
+            })
+            .await
+            .expect("paid to 4");
+        assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
+        serve(h, &mut s, 4, 4);
+        h.hold_next_swap();
+        let p1 = Pay {
+            upto_chunk: 8,
+            token: h.token(4).await,
+        };
+        poll_once(s.pay(&p1)).await; // its connection closes, its swap in flight
+        h.advance(Duration::from_secs(30));
+        let p2 = Pay {
+            upto_chunk: upto,
+            token: token.clone(),
+        };
+        let mut paying = Box::pin(s2.pay(&p2));
+        assert!(
+            poll_now(paying.as_mut()).is_none(),
+            "P2 waits for P1's turn"
+        );
+        h.advance(Duration::from_secs(30)); // P1's deadline: P2 takes the turn over
+        let before = h.state_reads();
+        let r = (0..1000).find_map(|_| poll_now(paying.as_mut()));
+        assert!(
+            r.as_ref().is_some_and(|r| is_rej(r, &want)),
+            "P2 took the dead turn over: {offer} is refused {want:?}, as its checks say: {r:?}"
+        );
+        assert_eq!(
+            h.state_reads(),
+            before,
+            "P2 took the dead turn over and was refused: it read nothing, not even P1's \
+             abandoned swap ({offer})"
+        );
+        assert!(!h.claimed_any(&token).await, "{offer}: not claimed");
+        drop(paying);
+        h.release_swaps().await;
+    }
+}
+
+/// Flaw `TakeoverReadsWithoutDeadline`. A payment's own reads end at its deadline, 60 s
+/// from its arrival, a turn it takes over included (NFX-07 §3). P1's swap is held at the
+/// mint, and its connection closes. P2 arrives 30 s later and waits; at P1's deadline it
+/// takes the turn over and reads the abandoned swap, while the mint leaves reads
+/// unanswered for 90 s. P2 is answered `mint-unavailable` at its own deadline.
+async fn a_takeovers_reads_end_at_its_deadline<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut s2 = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    h.hold_next_swap();
+    let p1 = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    poll_once(s.pay(&p1)).await; // its connection closes, its swap in flight
+    h.advance(Duration::from_secs(30));
+    let p2 = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    let arrived = h.clock_secs();
+    let mut paying = Box::pin(s2.pay(&p2));
+    assert!(
+        poll_now(paying.as_mut()).is_none(),
+        "P2 waits for P1's turn"
+    );
+    h.state_check_outage(true);
+    h.restore_outage(true);
+    h.unanswered_reads_take(Duration::from_secs(90));
+    h.advance(Duration::from_secs(30)); // P1's deadline: P2 takes the turn over
+    let r = (0..1000).find_map(|_| poll_now(paying.as_mut()));
+    h.unanswered_reads_take(Duration::ZERO);
+    h.state_check_outage(false);
+    h.restore_outage(false);
+    assert!(
+        r.as_ref()
+            .is_some_and(|r| is_rej(r, &RejCode::MintUnavailable)),
+        "P2 took the dead turn over, and its read of the abandoned swap went unanswered: \
+         mint-unavailable: {r:?}"
+    );
+    assert_eq!(
+        h.clock_secs() - arrived,
+        60,
+        "P2's read ended at its own deadline, 60 s after its arrival"
+    );
+    drop(paying);
+    h.release_swaps().await;
+}
+
+/// Flaws `HelloBanCheckBeforeRead` and `HelloRecheckOnlyAfterWait`. A `hello` checks its
+/// peer's ban again as it answers, after its wait and its reads, whether it waited or not
+/// (NFX-07 §3). Its read of A is under way when the peer is banned, for a double spend on
+/// its other video: once the read is back, the `hello` is refused `banned`. And on either
+/// harness: the double spend's answer, held, lands as the `hello` reads A; the `hello` is
+/// refused `banned` as it answers.
 async fn a_hello_checks_the_ban_as_it_answers<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 6).await;
@@ -10741,26 +11086,104 @@ async fn a_hello_checks_the_ban_as_it_answers<H: Harness>(h: &H) {
     h.advance(SECOND);
     let (peer, hello) = (h.peer(6), h.hello());
     let mut reading = Box::pin(e.hello(&peer, &hello));
-    if poll_now(reading.as_mut()).is_some() {
-        h.release_swaps().await;
-        return; // synchronous reads: nothing is ever under way
-    }
-    let spent = h.token(1).await;
-    assert!(h.steal(&spent).await, "someone else spent it");
-    let r = other
-        .pay(&Pay {
-            upto_chunk: 1,
-            token: spent,
-        })
-        .await;
-    assert!(is_rej(&r, &RejCode::Spent), "{r:?}");
-    let r = (0..1000)
-        .find_map(|_| poll_now(reading.as_mut()))
-        .expect("the hello answered");
-    assert!(
-        is_rej(&r, &RejCode::Banned),
-        "the peer was banned while its hello read: it is refused banned as it answers"
-    );
+    if poll_now(reading.as_mut()).is_none() {
+        let spent = h.token(1).await;
+        assert!(h.steal(&spent).await, "someone else spent it");
+        let r = other
+            .pay(&Pay {
+                upto_chunk: 1,
+                token: spent,
+            })
+            .await;
+        assert!(is_rej(&r, &RejCode::Spent), "{r:?}");
+        let r = (0..1000)
+            .find_map(|_| poll_now(reading.as_mut()))
+            .expect("the hello answered");
+        assert!(
+            is_rej(&r, &RejCode::Banned),
+            "the peer was banned while its hello read: it is refused banned as it answers"
+        );
+    } // else synchronous reads: nothing is ever under way
     drop(reading);
     h.release_swaps().await;
+
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 6).await;
+    let mut other = open_on(h, &e, 6, 1).await;
+    serve(h, &mut s, 0, 4);
+    parked(h, &mut s, 4).await;
+    h.advance(SECOND);
+    let spent = h.token(1).await;
+    assert!(h.steal(&spent).await, "someone else spent it");
+    let double = Pay {
+        upto_chunk: 1,
+        token: spent,
+    };
+    h.hold_swap_responses();
+    let mut paying = Box::pin(other.pay(&double));
+    assert!(
+        poll_now(paying.as_mut()).is_none(),
+        "the double spend's answer is held"
+    );
+    h.deliver_responses_mid_read();
+    let r = e.hello(&peer, &hello).await;
+    assert!(
+        is_rej(&r, &RejCode::Banned),
+        "the peer was banned as its hello read, which did not wait: it is refused banned as it \
+         answers"
+    );
+    let r = (0..1000)
+        .find_map(|_| poll_now(paying.as_mut()))
+        .expect("the double spend answered");
+    assert!(is_rej(&r, &RejCode::Spent), "{r:?}");
+    drop(paying);
+    h.release_swaps().await;
+}
+
+/// Flaw `HelloBanNotAtArrival`. A `hello` checks its peer's ban as it arrives (NFX-07 §3):
+/// a banned peer's `hello` is refused at once, and waits for no turn and reads nothing. The
+/// peer, banned for a double spend on its other video, has a payment's swap in flight on
+/// video 0, which holds the account's turn, or a swap there parked unknown.
+async fn a_banned_peers_hello_is_refused_as_it_arrives<H: Harness>(h: &H) {
+    for held in [true, false] {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 7).await;
+        let mut other = open_on(h, &e, 7, 1).await;
+        serve(h, &mut s, 0, 4);
+        if held {
+            h.hold_next_swap();
+            let p = Pay {
+                upto_chunk: 4,
+                token: h.token(4).await,
+            };
+            poll_once(s.pay(&p)).await; // its connection closes, its swap in flight
+        } else {
+            parked(h, &mut s, 4).await;
+        }
+        let spent = h.token(1).await;
+        assert!(h.steal(&spent).await, "someone else spent it");
+        let r = other
+            .pay(&Pay {
+                upto_chunk: 1,
+                token: spent,
+            })
+            .await;
+        assert!(is_rej(&r, &RejCode::Spent), "{r:?}");
+        let before = h.state_reads();
+        let (peer, hello) = (h.peer(7), h.hello());
+        let mut arriving = Box::pin(e.hello(&peer, &hello));
+        let r = poll_now(arriving.as_mut());
+        assert!(
+            r.as_ref().is_some_and(|r| is_rej(r, &RejCode::Banned)),
+            "a banned peer's hello is refused at once, as it arrives (its account's turn held: \
+             {held})"
+        );
+        assert_eq!(
+            h.state_reads(),
+            before,
+            "a banned peer's hello reads nothing (its account's turn held: {held})"
+        );
+        drop(arriving);
+        h.release_swaps().await;
+    }
 }

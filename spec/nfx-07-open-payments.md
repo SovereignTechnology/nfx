@@ -392,8 +392,9 @@ whatever it offers. The checks run in this order:
 Every refusal leaves the accounting untouched and the proofs unclaimed, except that
 after `mint-unavailable` the swap's outcome may be unknown (§3a says how the watcher
 settles that). A banned peer's `hello` and `pay` are refused (`banned`), whatever it
-offers, and nothing of it is admitted. A `hello` checks the ban as it arrives and again as
-it answers, after its wait and its reads: a ban earned meanwhile refuses it.
+offers, and nothing of it is admitted. A `hello` checks the ban as it arrives, before any
+wait or read, and again as it answers, after its wait and its reads: a ban earned
+meanwhile refuses it.
 
 For licensed videos, step 5's swap is replaced by the offline checks of NFX-08 §4.1:
 chunk proofs there are P2PK-locked and cannot be swapped by the seeder.
@@ -856,8 +857,9 @@ therefore loses nothing:
   - §3: a payment dropped before its swap is sent is abandoned unswapped and frees the
     turn then; a `hello` that takes the turn over reads as one that waited, and one that
     comes after the deadline that freed the turn did not wait; a payment's ban is checked
-    before any other check, on a turn taken over too, and a `hello`'s again as it
-    answers, after its wait and its reads; a refusal is the answer only if the checks
-    reached it by the deadline: keys that come in the deadline's second or later are not
-    used, a swap's outcome settled in it is late, and a payment not sent by then is not
-    rechecked; a retry's `spent` with its outputs unsigned leaves nothing unknown.
+    before any other check, on a turn taken over too, and a `hello`'s as it arrives,
+    before any wait or read, and again as it answers, after its wait and its reads; a
+    refusal is the answer only if the checks reached it by the deadline: keys that come
+    in the deadline's second or later are not used, a swap's outcome settled in it is
+    late, and a payment not sent by then is not rechecked; a retry's `spent` with its
+    outputs unsigned leaves nothing unknown.

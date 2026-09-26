@@ -42,8 +42,8 @@ pub trait SeederEngine {
     /// over, and a `hello` that comes after that deadline did not wait (NFX-07 §3).
     ///
     /// Refused with:
-    /// - `banned` for a banned peer, checked as it arrives and again as it answers, after
-    ///   its wait and its reads;
+    /// - `banned` for a banned peer, checked as it arrives, before any wait or read, and
+    ///   again as it answers, after its wait and its reads;
     /// - `unknown-video` for a video this seeder does not serve;
     /// - `bad-session` for a session id that is open, or beyond the per-peer cap on open
     ///   and waiting sessions, counted across all videos.
