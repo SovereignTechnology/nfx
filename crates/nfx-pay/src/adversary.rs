@@ -5914,8 +5914,9 @@ pub async fn a_viewer_refuses_quotes_it_cannot_honour<H: Harness>(h: &H) {
 }
 
 /// A viewer stops paying a seeder whose `ack` is unsolicited, or does not match the
-/// payment's `accepted_upto` or `spent_total`, whether short or inflated. An `accepted_upto`
-/// short of the payment's `upto_chunk` is wrong even when it is above the ledger.
+/// payment's `accepted_upto` or `spent_total`, whether short or inflated. An ack short of
+/// the payment is wrong even when it is above the ledger: in `accepted_upto`, in
+/// `spent_total`, or in both at the quoted price.
 pub async fn a_viewer_stops_on_a_wrong_or_unsolicited_ack<H: Harness>(h: &H) {
     let mut unsolicited = h.viewer(1);
     unsolicited
@@ -5951,31 +5952,59 @@ pub async fn a_viewer_stops_on_a_wrong_or_unsolicited_ack<H: Harness>(h: &H) {
         v.requested();
         assert!(v.due().await.unwrap().is_none(), "no more payments");
     }
-    // With 4 chunks acknowledged, a payment up to chunk 8 acked at chunk 5: above the
-    // ledger, and short of the payment. Taken, the watcher would pay chunks 6 to 8 again.
-    let e = h.engine(1, 8, 1000);
-    let mut s = open(h, &e, 1).await;
-    let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
-    for i in 0..4 {
-        assert!(s.admit(&h.chunk(i)));
-        v.requested();
+    // With 4 chunks acknowledged at 1 sat each, a payment up to chunk 8 (4 sat) acked short
+    // of it, though above the ledger: at chunk 5 with the payment's total, at chunk 5 with
+    // a total short by chunks 6 to 8 (the fields agree at the price), or at chunk 8 with a
+    // total short by 1. Taken, the first two would have the watcher pay chunks 6 to 8 again.
+    for (accepted_upto, spent_total, wrong) in [
+        (
+            5,
+            8,
+            "an ack short of the payment's upto_chunk, though above the ledger",
+        ),
+        (
+            5,
+            5,
+            "an ack short of the payment in both fields, at its price",
+        ),
+        (
+            8,
+            7,
+            "an ack whose spent_total is short of the ledger's plus the payment's, though above \
+             the ledger's",
+        ),
+    ] {
+        let e = h.engine(1, 8, 1000);
+        let mut s = open(h, &e, 1).await;
+        let mut v = h.viewer(1);
+        v.quote(s.quote()).unwrap();
+        for i in 0..4 {
+            assert!(s.admit(&h.chunk(i)));
+            v.requested();
+        }
+        let first = v.due().await.unwrap().expect("due");
+        v.ack(&s.pay(&first).await.expect("accepted")).unwrap(); // the ledger: 4, 4
+        for i in 4..8 {
+            assert!(s.admit(&h.chunk(i)));
+            v.requested();
+        }
+        let pay = v.due().await.unwrap().expect("due");
+        assert_eq!(pay.upto_chunk, 8);
+        let ack = s.pay(&pay).await.expect("accepted");
+        assert_eq!(
+            (ack.accepted_upto, ack.spent_total),
+            (8, 8),
+            "the seeder's own ack matches the payment"
+        );
+        let ack = Ack {
+            accepted_upto,
+            spent_total,
+        };
+        assert!(
+            v.ack(&ack).is_err() && v.stopped(),
+            "{wrong}, does not match: refused, and it stops"
+        );
     }
-    let first = v.due().await.unwrap().expect("due");
-    v.ack(&s.pay(&first).await.expect("accepted")).unwrap(); // the ledger: 4, 4
-    for i in 4..8 {
-        assert!(s.admit(&h.chunk(i)));
-        v.requested();
-    }
-    let pay = v.due().await.unwrap().expect("due");
-    assert_eq!(pay.upto_chunk, 8);
-    let mut ack = s.pay(&pay).await.expect("accepted");
-    ack.accepted_upto = 5;
-    assert!(
-        v.ack(&ack).is_err() && v.stopped(),
-        "an ack short of the payment's upto_chunk, though above the ledger, does not match: \
-         refused, and it stops"
-    );
 }
 
 /// A viewer reclaims every proof of a refused payment, whatever the code, known or not,
@@ -9673,46 +9702,50 @@ async fn a_pending_rest_keeps_the_reclaim_incomplete<H: Harness>(h: &H) {
 
 /// Proofs a wallet still holds of an older keyset that has reached its own `final_expiry`,
 /// while the mint's active keyset is current, are listed expired: never paid with, though a
-/// wallet spends an older keyset's proofs first. The watcher pays with others, and the
-/// seeder swaps them.
+/// wallet spends an older keyset's proofs first, nor at a session's end. The watcher pays
+/// with others, and the seeder swaps them.
 async fn held_expired_proofs_never_paid_with<H: Harness>(h: &H) {
-    h.fund_older_keyset(1000);
-    let e = h.engine(1, 4, 1000);
-    let mut s = open(h, &e, 1).await;
-    let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
-    for i in 0..2 {
-        assert!(s.admit(&h.chunk(i)));
-        v.requested();
-    }
-    let first = v
-        .due()
-        .await
-        .unwrap()
-        .expect("due, in the older keyset's proofs");
-    v.ack(
-        &s.pay(&first)
+    for last in [false, true] {
+        h.fund_older_keyset(1000);
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        let mut v = h.viewer(1);
+        v.quote(s.quote()).unwrap();
+        for i in 0..2 {
+            assert!(s.admit(&h.chunk(i)));
+            v.requested();
+        }
+        let first = v
+            .due()
             .await
-            .expect("the older keyset is good: swapped"),
-    )
-    .unwrap();
-    h.expire_older_keyset(); // the proofs the wallet still holds of it expire too
-    for i in 2..4 {
-        assert!(s.admit(&h.chunk(i)));
-        v.requested();
+            .unwrap()
+            .expect("due, in the older keyset's proofs");
+        v.ack(
+            &s.pay(&first)
+                .await
+                .expect("the older keyset is good: swapped"),
+        )
+        .unwrap();
+        h.expire_older_keyset(); // the proofs the wallet still holds of it expire too
+        for i in 2..4 {
+            assert!(s.admit(&h.chunk(i)));
+            v.requested();
+        }
+        let (pay, which) = if last {
+            (v.last_pay().await, "its session's last payment")
+        } else {
+            (v.due().await, "its payment")
+        };
+        let pay = pay
+            .unwrap()
+            .expect("due, in proofs of a keyset not expired");
+        let ack = s.pay(&pay).await.unwrap_or_else(|rej| {
+            panic!("{which} holds no proof of the expired older keyset: swapped: {rej:?}")
+        });
+        assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
+        v.ack(&ack).unwrap();
+        h.fund_older_keyset(0);
     }
-    let pay = v
-        .due()
-        .await
-        .unwrap()
-        .expect("due, in proofs of a keyset not expired");
-    let ack = s
-        .pay(&pay)
-        .await
-        .expect("its payment holds no proof of the expired older keyset: swapped");
-    assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
-    v.ack(&ack).unwrap();
-    h.fund_older_keyset(0);
 }
 
 /// A reclaim's outputs are of the mint's active keyset, and the watcher reclaims at once

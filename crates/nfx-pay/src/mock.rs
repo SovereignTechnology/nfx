@@ -265,8 +265,9 @@ struct Ledger {
     /// Output sets up to this id belong to a keyset rotated out: refused (0: none).
     retired_outputs: u64,
     /// Proofs and output sets up to this id belong to the mint's keyset that has expired
-    /// (0: none): a request spending such a proof, or with such outputs, is refused (CDK
-    /// 12003), and a restore does not show such outputs (CDK skips an expired keyset's).
+    /// (0: none), proofs of older keysets excepted: a request spending such a proof, or with
+    /// such outputs, is refused (CDK 12003), and a restore does not show such outputs (CDK
+    /// skips an expired keyset's).
     expired_upto: u64,
     /// Proofs of an older keyset that has expired, while the mint's own is still current.
     expired_inputs: HashSet<u64>,
@@ -322,7 +323,7 @@ impl Ledger {
     }
 
     fn in_expired_keyset(&self, id: u64) -> bool {
-        id <= self.expired_upto
+        (id <= self.expired_upto && !self.older.contains(&id))
             || self
                 .active_expired_since
                 .is_some_and(|x| id > x && !self.older.contains(&id))
@@ -946,8 +947,8 @@ impl MockNetwork {
         )
     }
 
-    /// Whether a third party's swap of proof `p` alone goes through: unclaimed, and neither
-    /// reserved (11002) nor of an expired keyset (12003).
+    /// Whether a third party's swap of proof `p` alone goes through: unclaimed, and not
+    /// reserved (11002), of an expired keyset (12003) or invalid (forged).
     fn claimable(l: &Ledger, p: u64) -> bool {
         !l.claimed.contains(&p)
             && !l.forged.contains(&p)
@@ -974,7 +975,8 @@ impl MockNetwork {
 
     /// A third party's request of `token`'s unclaimed proofs (a melt, say) that the mint
     /// reserves and never finishes, until it rolls back what it reserved: whether it
-    /// reserved any. Refused whole if any is reserved already or of an expired keyset.
+    /// reserved them. Refused whole if any is reserved already, of an expired keyset or
+    /// invalid.
     fn reserve_rest(&self, token: &str) -> bool {
         let mut l = self.ledger();
         let Some(info) = l.tokens.get(token).cloned() else {
@@ -2047,6 +2049,17 @@ pub enum ViewerFlaw {
     /// Accepts an ack whose `accepted_upto` is short of the payment's `upto_chunk` but above
     /// its ledger: it pays the chunks between again.
     AckAcceptsShort,
+    /// Accepts an ack short of the payment in both fields at its price: `accepted_upto`
+    /// above its ledger and short of `upto_chunk`, `spent_total` short by the chunks
+    /// between. It takes the ack for its ledger and pays those chunks again.
+    AckAcceptsPartial,
+    /// Accepts an ack whose `accepted_upto` matches the payment but whose `spent_total` is
+    /// short of its ledger's plus the payment's, though above its ledger.
+    AckAcceptsShortSpent,
+    /// Checks a session's last payment against the mint's listing only while its active
+    /// keyset has expired: at the end, it pays with proofs it holds of an expired older
+    /// keyset, which a wallet spends first.
+    LastPayListingOnlyWhileActiveExpired,
     /// Gives no sign that its tries are used up.
     BudgetNotSignalled,
     /// Reclaims a payment left unsettled by a dropped connection at once.
@@ -5241,7 +5254,10 @@ impl MockViewer {
         // active keyset expired), it pays nothing until the mint rotates.
         let checks = !self.has(ViewerFlaw::PaysWithExpiredProofs)
             && !(last && self.has(ViewerFlaw::LastPayWithExpiredProofs))
-            && !(self.has(ViewerFlaw::ListingOnlyWhileActiveExpired) && !self.net.active_expired());
+            && !(self.has(ViewerFlaw::ListingOnlyWhileActiveExpired) && !self.net.active_expired())
+            && !(last
+                && self.has(ViewerFlaw::LastPayListingOnlyWhileActiveExpired)
+                && !self.net.active_expired());
         if checks && self.net.proofs_listing(&token).0 > 0 {
             self.net.drop_expired_held();
             token = self.net.issue_with(&self.mint, amount, &[]);
@@ -5497,23 +5513,37 @@ impl Viewer for MockViewer {
             }
         }
         let expected = self.take_pending();
+        // Short of the payment's upto, though above the ledger.
+        let short = |p: &Pending| ack.accepted_upto > self.acked && ack.accepted_upto < p.upto;
+        // Short of the payment in both fields, at its price.
+        let partial = expected.as_ref().is_some_and(|p| {
+            self.has(ViewerFlaw::AckAcceptsPartial)
+                && short(p)
+                && ack.spent_total.checked_sub(self.spent).is_some_and(|d| {
+                    d * (p.upto - self.acked) == (ack.accepted_upto - self.acked) * p.amount
+                })
+        });
         let ok = match &expected {
+            Some(_) if partial => true,
             Some(p) if self.has(ViewerFlaw::AckAcceptsInflated) => {
                 ack.accepted_upto >= p.upto && ack.spent_total >= self.spent + p.amount
             }
             Some(p) => {
-                (ack.accepted_upto == p.upto
-                    || (self.has(ViewerFlaw::AckAcceptsShort)
-                        && ack.accepted_upto > self.acked
-                        && ack.accepted_upto < p.upto))
+                (ack.accepted_upto == p.upto || (self.has(ViewerFlaw::AckAcceptsShort) && short(p)))
                     && (ack.spent_total == self.spent + p.amount
-                        || self.has(ViewerFlaw::IgnoresSpentTotal))
+                        || self.has(ViewerFlaw::IgnoresSpentTotal)
+                        || (self.has(ViewerFlaw::AckAcceptsShortSpent)
+                            && ack.accepted_upto == p.upto
+                            && ack.spent_total > self.spent
+                            && ack.spent_total < self.spent + p.amount))
             }
             None => self.has(ViewerFlaw::AcceptsUnsolicitedAck),
         };
         if ok || self.has(ViewerFlaw::IgnoresBadAck) {
             self.acked = ack.accepted_upto;
-            if let Some(p) = expected {
+            if partial {
+                self.spent = ack.spent_total;
+            } else if let Some(p) = expected {
                 self.spent += p.amount;
             }
             if !self.has(ViewerFlaw::AckKeepsUnavailable) {

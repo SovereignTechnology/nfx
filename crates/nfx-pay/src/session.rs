@@ -215,10 +215,11 @@ pub enum MintEvent {
     /// request's outputs from the old one, as a seeder with stale keys does.
     RotateKeyset,
     /// The mint's keyset expires (NUT-02 `final_expiry`): every proof issued and every
-    /// output set derived so far, the seeder's included. A request spending such a proof,
-    /// or with such outputs, is refused (CDK 12003); a request whose inputs the mint had
-    /// reserved is refused too, when it signs, if its outputs' keyset has expired; and a
-    /// restore no longer shows such outputs.
+    /// output set derived so far, the seeder's included, while proofs of older keysets
+    /// ([`Harness::fund_older_keyset`]) stay valid. A request spending such a proof, or with
+    /// such outputs, is refused (CDK 12003); a request whose inputs the mint had reserved is
+    /// refused too, when it signs, if its outputs' keyset has expired; and a restore no
+    /// longer shows such outputs.
     ExpireKeyset,
     /// The keyset of the next request's inputs expires: an older one, the payer's, while
     /// the mint's current keyset (the seeder's outputs) does not. A request spending them
@@ -352,7 +353,7 @@ pub trait Harness {
     /// which the mint reserves (NUT-07 `PENDING`) and does not finish: any other request of
     /// them, a reclaim included, is refused as pending (CDK 11002) until
     /// [`Harness::roll_back_reserved`] abandons it. Whether it reserved them: a mint refuses
-    /// the whole request if any is reserved already or listed expired.
+    /// the whole request if any is reserved already, listed expired or invalid.
     async fn reserve_rest(&self, token: &str) -> bool;
     /// Whether anything (keys, a swap) has been fetched from the mint at `url`.
     fn dialled(&self, url: &str) -> bool;
@@ -451,7 +452,8 @@ pub trait Harness {
     /// old one, and a swap to one of them is refused for good (CDK 12002), whatever its
     /// inputs.
     fn rotate_keyset(&self);
-    /// The mint's keyset expires now, as [`MintEvent::ExpireKeyset`] does before a swap.
+    /// The mint's keyset expires now, as [`MintEvent::ExpireKeyset`] does before a swap:
+    /// proofs of older keysets ([`Harness::fund_older_keyset`]) stay valid.
     fn expire_keyset(&self);
     /// The mint's active keyset lists a `final_expiry` (NUT-02) `after` from now, or none.
     fn keyset_expires_in(&self, after: Option<Duration>);
