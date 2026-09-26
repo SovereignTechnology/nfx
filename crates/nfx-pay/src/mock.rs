@@ -1739,6 +1739,24 @@ pub enum SeederFlaw {
     /// Counts the deadline to which a payment holds the turn from when it took the turn,
     /// not from its arrival.
     HolderDeadlineFromTurn,
+    /// Notes a turn held past its payment's deadline as freed when an entry takes it over,
+    /// not at the deadline.
+    TakeoverFreedAfterDeadline,
+    /// Notes a turn held past its payment's deadline, with no swap sent, as freed when that
+    /// payment is answered or dropped, not at the deadline.
+    ReleaseFreedAfterDeadline,
+    /// Notes a turn held past its payment's deadline, its swap in flight, as freed when
+    /// that payment is answered `mint-unavailable`, not at the deadline.
+    AnswerFreedAfterDeadline,
+    /// Notes a turn held past its payment's deadline as freed when that payment's swap
+    /// lands, not at the deadline.
+    LandFreedAfterDeadline,
+    /// Takes a turn freed in the second before its payment's deadline as freed at the
+    /// deadline: a read sent earlier in that second serves the `hello` behind it.
+    DeadlineSecondEarly,
+    /// Takes a turn freed in its payment's deadline second as freed then, not at the
+    /// deadline: a read sent earlier in that second serves no `hello` behind it.
+    DeadlineSecondLate,
 }
 
 /// A defect planted in a mock viewer, to prove the adversary suite catches it.
@@ -3604,8 +3622,15 @@ impl Inner {
     fn free_turn(&self, st: &mut State, key: Key) {
         let holder = st.paying.remove(&key);
         let now = self.clock.now();
-        let at_deadline =
-            holder.is_some_and(|h| now >= h.deadline) && !self.has(SeederFlaw::FreedAfterDeadline);
+        let at_deadline = holder.is_some_and(|h| {
+            if self.has(SeederFlaw::DeadlineSecondEarly) {
+                now + 1 >= h.deadline
+            } else if self.has(SeederFlaw::DeadlineSecondLate) {
+                now > h.deadline
+            } else {
+                now >= h.deadline
+            }
+        }) && !self.has(SeederFlaw::FreedAfterDeadline);
         if let Some((at, reads, freed)) = st.own_reads.get_mut(&self.slot(key))
             && *at == now
             && !at_deadline
@@ -3613,6 +3638,33 @@ impl Inner {
         {
             *freed = reads.len();
         }
+    }
+
+    /// Run `free`, which frees `key`'s turn if payment `pay` holds it. With `flaw`, a
+    /// planted defect of that way of freeing it, a turn held past its deadline is noted as
+    /// freed now, not at the deadline.
+    fn freeing(
+        &self,
+        st: &mut State,
+        key: Key,
+        pay: u64,
+        flaw: SeederFlaw,
+        free: impl FnOnce(&mut State) -> Vec<Waker>,
+    ) -> Vec<Waker> {
+        let now = self.clock.now();
+        let late = self.has(flaw)
+            && st
+                .paying
+                .get(&key)
+                .is_some_and(|h| h.pay == pay && now >= h.deadline);
+        let wake = free(st);
+        if late
+            && let Some((at, reads, freed)) = st.own_reads.get_mut(&self.slot(key))
+            && *at == now
+        {
+            *freed = reads.len();
+        }
+        wake
     }
 
     /// Where `key`'s own reads are counted: its account's (by peer alone, with the flaw).
@@ -3670,7 +3722,10 @@ impl Inner {
                         && !self.has(SeederFlaw::NoDeadline)
                         && !(claim.is_some() && self.has(SeederFlaw::PayNoTakeover));
                     if takeover {
-                        wake = self.abandon(&mut st, key, holder);
+                        let flaw = SeederFlaw::TakeoverFreedAfterDeadline;
+                        wake = self.freeing(&mut st, key, holder, flaw, |st| {
+                            self.abandon(st, key, holder)
+                        });
                     }
                 }
                 // A payment whose own deadline has passed takes no turn.
@@ -3846,7 +3901,10 @@ impl Inner {
                     r.answer = Some(answer);
                 }
             }
-            wake.extend(self.release_turn(&mut st, pay.key, id));
+            let flaw = SeederFlaw::LandFreedAfterDeadline;
+            wake.extend(self.freeing(&mut st, pay.key, id, flaw, |st| {
+                self.release_turn(st, pay.key, id)
+            }));
             if finished && !self.has(SeederFlaw::LandKeepsFinished) {
                 st.pays.remove(&id);
             }
@@ -3881,7 +3939,8 @@ impl Inner {
             }
             r.answer = None;
             let key = r.key;
-            let wake = self.abandon(&mut st, key, id);
+            let flaw = SeederFlaw::AnswerFreedAfterDeadline;
+            let wake = self.freeing(&mut st, key, id, flaw, |st| self.abandon(st, key, id));
             (
                 Err(unavailable("no answer from the mint within 60 s")),
                 wake,
@@ -4024,7 +4083,10 @@ impl Drop for PayGuard {
                 if sent || self.e.has(SeederFlaw::RefusalKeepsTurn) {
                     Vec::new()
                 } else {
-                    self.e.release_turn(&mut st, key, self.id)
+                    let (e, flaw) = (&self.e, SeederFlaw::ReleaseFreedAfterDeadline);
+                    e.freeing(&mut st, key, self.id, flaw, |st| {
+                        e.release_turn(st, key, self.id)
+                    })
                 }
             }
         };

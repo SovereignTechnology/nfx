@@ -36,8 +36,8 @@ pub trait SeederEngine {
     /// toward the peer's session cap. It then reads its account's own unknown swaps, if
     /// any, which adds their time. After a wait, only a read sent after the turn was last
     /// freed before it found the turn free serves it; a turn held to a deadline was freed
-    /// as that second began, however late the payment's answer goes out or an entry takes
-    /// the turn over (NFX-07 §3).
+    /// as that second began, however late the payment's answer goes out, its swap's outcome
+    /// comes, or an entry takes the turn over (NFX-07 §3).
     ///
     /// Refused with:
     /// - `banned` for a banned peer;
@@ -92,7 +92,8 @@ pub trait SeederSession {
     /// included. A payment whose outcome is known by then is answered with it; otherwise
     /// with `mint-unavailable`, and its swap is abandoned: no further request is sent for
     /// those proofs, and the account is released. Its turn is freed at the deadline,
-    /// however late this answer goes out or another entry takes the turn over.
+    /// however late this answer goes out, the swap's outcome comes, or another entry takes
+    /// the turn over.
     ///
     /// **Late outcomes:** an abandoned swap is settled when its outcome comes. A claim is
     /// credited (the next quote shows it); a spent or invalid outcome bans nobody.

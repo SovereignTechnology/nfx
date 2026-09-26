@@ -3157,6 +3157,7 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
     a_payment_waits_no_longer_than_its_deadline(h).await;
     a_payment_waits_no_longer_than_its_deadline_behind_a_turn(h).await;
     a_turn_held_past_its_deadline_was_freed_there(h).await;
+    a_turn_held_past_its_deadline_by_a_swap_was_freed_there(h).await;
     a_hello_behind_two_payments_reads_after_the_last(h).await;
     a_waited_hello_waits_for_no_read_sent_before_its_wait_ended(h).await;
     no_place_is_counted_at_the_deadline(h).await;
@@ -8520,26 +8521,31 @@ async fn a_payment_waits_only_for_a_read_that_serves_it<H: Harness>(h: &H) {
     drop((paying, stalled));
 }
 
-/// Flaw `FreedAfterDeadline`. A turn held past its payment's deadline was freed at that
-/// deadline, however late P's answer goes out or an entry takes the turn over (NFX-07 §3):
-/// a read sent in the deadline's second or later, while P still holds the turn, was sent
-/// after the freeing, and serves the `hello` behind P. Hellos that passed the turn before P
-/// took it wait on a stalled read; one reads A at P's deadline, or 5 s past it, P still
-/// holding the turn (waiting for keys). The hello behind P then takes the turn over, or
-/// finds it free once P is answered or dropped, reuses that read, sending none of its own,
-/// and quotes what it learnt: A's claim if A reached the mint before the deadline, and
-/// nothing if A reached it only while that read was under way.
+/// Flaws `FreedAfterDeadline`, `TakeoverFreedAfterDeadline`, `ReleaseFreedAfterDeadline`,
+/// `DeadlineSecondLate` and `DeadlineSecondEarly`. A turn held past its payment's deadline
+/// was freed at that deadline, however late P's answer goes out or an entry takes the turn
+/// over (NFX-07 §3): a read sent in the deadline's second or later, while P still holds the
+/// turn, was sent after the freeing, and serves the `hello` behind P. Hellos that passed
+/// the turn before P took it wait on a stalled read; one reads A at P's deadline, or 5 s
+/// past it, P still holding the turn (waiting for keys). The hello behind P then takes the
+/// turn over, or finds it free once P is answered or dropped, reuses that read, sending
+/// none of its own, and quotes what it learnt: A's claim if A reached the mint before the
+/// deadline, and nothing if A reached it only while that read was under way. A turn freed
+/// in the second before the deadline, once that read is back, was freed then: the read
+/// does not serve the hello behind P, which reads itself and quotes A's claim.
 async fn a_turn_held_past_its_deadline_was_freed_there<H: Harness>(h: &H) {
-    // (seconds past P's deadline, how P leaves the turn, A at the mint before the deadline)
-    for (past, leaves, early) in [
-        (0, "taken over", false),
-        (5, "taken over", false),
-        (0, "answered", false),
-        (5, "answered", false),
-        (0, "dropped", false),
-        (5, "dropped", false),
-        (0, "taken over", true),
-        (5, "answered", true),
+    // (seconds after P's arrival, how P leaves the turn, A at the mint before the deadline)
+    for (at, leaves, early) in [
+        (60, "taken over", false),
+        (65, "taken over", false),
+        (60, "answered", false),
+        (65, "answered", false),
+        (60, "dropped", false),
+        (65, "dropped", false),
+        (60, "taken over", true),
+        (65, "answered", true),
+        (59, "answered", false),
+        (59, "dropped", false),
     ] {
         let e = h.engine(1, 4, 1000);
         let mut s = open(h, &e, 1).await;
@@ -8562,7 +8568,7 @@ async fn a_turn_held_past_its_deadline_was_freed_there<H: Harness>(h: &H) {
         h.hold_key_fetches();
         let p = Pay {
             upto_chunk: 4,
-            token: h.token(4).await,
+            token: h.token(1).await, // underpaid, once P has the keys
         };
         let mut paying = Some(Box::pin(s2.pay(&p)));
         assert!(
@@ -8577,7 +8583,7 @@ async fn a_turn_held_past_its_deadline_was_freed_there<H: Harness>(h: &H) {
             h.release_oldest_swap().await; // A finishes at the mint before P's deadline
             assert!(h.claimed_all(&a.token).await);
         }
-        h.advance(Duration::from_secs(60 + past)); // P's deadline, or `past` s after it
+        h.advance(Duration::from_secs(at)); // P's deadline is 60 s after its arrival
         let before = h.state_reads();
         assert!(
             poll_now(second.as_mut()).is_none(),
@@ -8594,6 +8600,14 @@ async fn a_turn_held_past_its_deadline_was_freed_there<H: Harness>(h: &H) {
             .quote()
             .clone();
         match leaves {
+            "answered" if at < 60 => {
+                h.release_swaps().await; // P's keys come
+                let r = paying
+                    .as_mut()
+                    .and_then(|f| (0..1000).find_map(|_| poll_now(f.as_mut())))
+                    .expect("P answered before its deadline");
+                assert!(is_rej(&r, &RejCode::Underpaid), "{r:?}");
+            }
             "answered" => {
                 let r = paying
                     .as_mut()
@@ -8606,22 +8620,37 @@ async fn a_turn_held_past_its_deadline_was_freed_there<H: Harness>(h: &H) {
         }
         let q = (0..1000)
             .find_map(|_| poll_now(behind.as_mut()))
-            .expect("the hello answered past P's deadline")
+            .expect("the hello answered once P left the turn")
             .expect("a hello")
             .quote()
             .clone();
-        assert_eq!(
-            h.state_reads() - before,
-            2,
-            "the second's read was sent after P's deadline, which freed the turn: it serves the \
-             hello behind P, which sends no read of its own ({past} s past the deadline, P \
-             {leaves})"
-        );
-        assert_eq!(
-            (q.accepted_upto, q.spent_total),
-            (learnt.accepted_upto, learnt.spent_total),
-            "the hello quotes what that read learnt"
-        );
+        if at < 60 {
+            assert_eq!(
+                h.state_reads() - before,
+                4,
+                "the second's read was sent before P was {leaves}, 1 s before its deadline, \
+                 which freed the turn: the hello behind P reads itself"
+            );
+            assert_eq!(
+                (q.accepted_upto, q.spent_total),
+                (4, 4),
+                "the hello's own read learnt A's claim"
+            );
+        } else {
+            let past = at - 60;
+            assert_eq!(
+                h.state_reads() - before,
+                2,
+                "the second's read was sent after P's deadline, which freed the turn: it \
+                 serves the hello behind P, which sends no read of its own ({past} s past the \
+                 deadline, P {leaves})"
+            );
+            assert_eq!(
+                (q.accepted_upto, q.spent_total),
+                (learnt.accepted_upto, learnt.spent_total),
+                "the hello quotes what that read learnt"
+            );
+        }
         if early {
             assert_eq!(
                 (q.accepted_upto, q.spent_total),
@@ -8629,6 +8658,99 @@ async fn a_turn_held_past_its_deadline_was_freed_there<H: Harness>(h: &H) {
                 "A reached the mint before P's deadline freed the turn: the quote shows its claim"
             );
         }
+        drop((paying, first));
+        h.release_swaps().await;
+    }
+}
+
+/// Flaws `AnswerFreedAfterDeadline` and `LandFreedAfterDeadline`. The same with P's swap
+/// in flight at its deadline. A hello that passed the turn waits on a stalled read, A's
+/// claim is learnt by a sweep, and P pays; the mint holds P's swap. At P's deadline, or
+/// 5 s past it, that hello reads P's swap, P still holding the turn. Then P is answered
+/// `mint-unavailable`, or its swap lands (its answer lost) while P still holds the turn,
+/// or the hello behind P takes the turn over. That hello reuses the read, sending none of
+/// its own, and quotes what it learnt, though P's claim may have reached the mint since.
+async fn a_turn_held_past_its_deadline_by_a_swap_was_freed_there<H: Harness>(h: &H) {
+    for (past, leaves) in [
+        (0, "P answered"),
+        (5, "P answered"),
+        (0, "P's swap landed, its answer lost"),
+        (5, "P's swap landed, its answer lost"),
+        (0, "P taken over"),
+        (5, "P taken over"),
+    ] {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        let mut s2 = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        lost_claim(h, &mut s, 4, 4).await;
+        h.advance(SECOND);
+        let peer = h.peer(1);
+        let (one, two, three) = (h.hello(), h.hello(), h.hello());
+        let mut first = Box::pin(e.hello(&peer, &one));
+        if poll_now(first.as_mut()).is_some() {
+            return; // synchronous reads: nothing is ever under way
+        }
+        let mut second = Box::pin(e.hello(&peer, &two));
+        assert!(
+            poll_now(second.as_mut()).is_none(),
+            "waits for the first's read"
+        );
+        e.sweep().await; // A's claim is learnt meanwhile
+        assert_eq!(serve(h, &mut s, 4, 4), 4, "A's claim is credited");
+        h.hold_swaps();
+        h.lose_next_swap_response();
+        let p = Pay {
+            upto_chunk: 8,
+            token: h.token(4).await,
+        };
+        let mut paying = Box::pin(s2.pay(&p));
+        assert!(
+            poll_now(paying.as_mut()).is_none(),
+            "P holds the turn, its swap held"
+        );
+        let mut behind = Box::pin(e.hello(&peer, &three));
+        assert!(poll_now(behind.as_mut()).is_none(), "the hello waits for P");
+        h.advance(Duration::from_secs(60 + past)); // P's deadline, or `past` s after it
+        let before = h.state_reads();
+        assert!(
+            poll_now(second.as_mut()).is_none(),
+            "the second reads P's swap, P still holding the turn"
+        );
+        let learnt = (0..1000)
+            .find_map(|_| poll_now(second.as_mut()))
+            .expect("the second's read back")
+            .expect("a hello")
+            .quote()
+            .clone();
+        if leaves == "P answered" {
+            let r = (0..1000)
+                .find_map(|_| poll_now(paying.as_mut()))
+                .expect("P answered at its deadline");
+            assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+        }
+        if leaves != "P taken over" {
+            h.release_oldest_swap().await; // P's swap reaches the mint, its answer lost
+            assert!(h.claimed_all(&p.token).await);
+        }
+        let q = (0..1000)
+            .find_map(|_| poll_now(behind.as_mut()))
+            .expect("the hello answered past P's deadline")
+            .expect("a hello")
+            .quote()
+            .clone();
+        assert_eq!(
+            h.state_reads() - before,
+            2,
+            "the second's read of P's swap was sent after P's deadline, which freed the turn: \
+             it serves the hello behind P, which sends no read of its own ({past} s past the \
+             deadline, {leaves})"
+        );
+        assert_eq!(
+            (q.accepted_upto, q.spent_total),
+            (learnt.accepted_upto, learnt.spent_total),
+            "the hello quotes what that read learnt"
+        );
         drop((paying, first));
         h.release_swaps().await;
     }

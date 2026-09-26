@@ -454,4 +454,10 @@ catches!(
     turn_wait_past_deadline_round_trip: r(S::TurnWaitPastDeadline) => the_deadline_frees_the_account,
     holder_deadline_from_turn: s(S::HolderDeadlineFromTurn) => the_deadline_frees_the_account,
     holder_deadline_from_turn_round_trip: r(S::HolderDeadlineFromTurn) => the_deadline_frees_the_account,
+    takeover_freed_after_deadline: r(S::TakeoverFreedAfterDeadline) => a_late_outcome_is_credited_never_banned,
+    release_freed_after_deadline: r(S::ReleaseFreedAfterDeadline) => a_late_outcome_is_credited_never_banned,
+    answer_freed_after_deadline: r(S::AnswerFreedAfterDeadline) => a_late_outcome_is_credited_never_banned,
+    land_freed_after_deadline: r(S::LandFreedAfterDeadline) => a_late_outcome_is_credited_never_banned,
+    deadline_second_late: r(S::DeadlineSecondLate) => a_late_outcome_is_credited_never_banned,
+    deadline_second_early: r(S::DeadlineSecondEarly) => a_late_outcome_is_credited_never_banned,
 );
