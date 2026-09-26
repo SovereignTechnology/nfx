@@ -12,27 +12,29 @@ macro_rules! catches {
         $(
             #[test]
             fn $test() {
-                // On a thread of its own, waited for in real time, so a defect that blocks
-                // the thread is timed out too. The defect must fail an assertion: a hang names
-                // no behaviour, so it is not a catch.
-                let (done, answer) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
-                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .expect("a runtime")
-                            .block_on(async { adversary::$scenario(&$harness).await })
-                    }));
-                    let _ = done.send(run);
+                // The defect must fail an assertion of the suite: a hang, or a panic raised
+                // in the engine, the harness or a runtime, names no behaviour, so neither is
+                // a catch.
+                let run = adversary::run_on_a_thread(10, || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("a runtime")
+                        .block_on(async { adversary::$scenario(&$harness).await })
                 });
-                match answer.recv_timeout(std::time::Duration::from_secs(10)) {
-                    Ok(Ok(())) => panic!(
+                match &run {
+                    adversary::Ran::Finished => panic!(
                         "{} did not catch the planted defect",
                         stringify!($scenario)
                     ),
-                    Ok(Err(_caught)) => {}
-                    Err(_) => panic!("{} hung on the planted defect", stringify!($scenario)),
+                    adversary::Ran::Hung => {
+                        panic!("{} hung on the planted defect", stringify!($scenario))
+                    }
+                    adversary::Ran::Panicked { file, line, .. } => assert!(
+                        run.failed_the_suite(),
+                        "{} panicked outside the suite, at {file}:{line}",
+                        stringify!($scenario)
+                    ),
                 }
             }
         )*
@@ -416,4 +418,27 @@ catches!(
     land_stale_clock: s(S::LandStaleClock) => racing_outcomes_settle_once,
     land_stale_clock_round_trip: r(S::LandStaleClock) => racing_outcomes_settle_once,
     admit_split_lock: s(S::AdmitSplitLock) => concurrent_admission_is_atomic,
+    retry_at_deadline: s(S::RetryAtDeadline) => the_deadline_frees_the_account,
+    retry_at_deadline_round_trip: r(S::RetryAtDeadline) => the_deadline_frees_the_account,
+    hello_no_session_recheck: s(S::HelloNoSessionRecheck) => a_session_id_names_one_open_session,
+    hello_no_session_recheck_round_trip: r(S::HelloNoSessionRecheck) => a_session_id_names_one_open_session,
+    floor_without_wait: s(S::FloorWithoutWait) => a_late_outcome_is_credited_never_banned,
+    floor_without_wait_round_trip: r(S::FloorWithoutWait) => a_late_outcome_is_credited_never_banned,
+    pay_served_by_any_read: s(S::PayServedByAnyRead) => a_late_outcome_is_credited_never_banned,
+    pay_served_by_any_read_round_trip: r(S::PayServedByAnyRead) => a_late_outcome_is_credited_never_banned,
+    floor_at_arrival: r(S::FloorAtArrival) => a_late_outcome_is_credited_never_banned,
+    floor_across_seconds: r(S::FloorAcrossSeconds) => a_late_outcome_is_credited_never_banned,
+    freed_kept_at_new_second: r(S::FreedKeptAtNewSecond) => a_late_outcome_is_credited_never_banned,
+    wait_read_past_deadline: r(S::WaitReadPastDeadline) => a_late_outcome_is_credited_never_banned,
+    next_second_past_deadline: r(S::NextSecondPastDeadline) => a_late_outcome_is_credited_never_banned,
+    reading_ignores_second: r(S::ReadingIgnoresSecond) => a_late_outcome_is_credited_never_banned,
+    counted_at_first_look: r(S::CountedAtFirstLook) => a_late_outcome_is_credited_never_banned,
+    waits_for_any_under_way: r(S::WaitsForAnyUnderWay) => a_late_outcome_is_credited_never_banned,
+    takeover_writes_no_floor: r(S::TakeoverWritesNoFloor) => a_late_outcome_is_credited_never_banned,
+    viewer_settle_ignores_ledger_spent: v(V::SettleIgnoresLedgerSpent) => a_viewer_settles_only_on_an_exact_match,
+    viewer_foreign_pending_awaits: v(V::ForeignPendingAwaits) => a_viewer_reclaims_a_refused_payment,
+    viewer_expired_foreign_blocked_awaits: v(V::ExpiredForeignBlockedAwaits) => a_viewer_reclaims_a_refused_payment,
+    hello_waits_for_first_only: s(S::HelloWaitsForFirstOnly) => the_deadline_frees_the_account,
+    hello_waits_for_first_only_round_trip: r(S::HelloWaitsForFirstOnly) => the_deadline_frees_the_account,
+    viewer_last_pay_with_expired_proofs: v(V::LastPayWithExpiredProofs) => a_viewer_reclaims_a_refused_payment,
 );

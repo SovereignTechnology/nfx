@@ -35,8 +35,9 @@ one crate, an unpinned module could change how a pinned one compiles.
   fails), and every file it lists is tracked; every target reads only its own crate's
   files, except nfx-pay-wire's integration tests, which may read the pay/1 vectors;
 - no file outside nfx-pay and nfx-node's locked paths names `nfx_pay`;
-- the suite, the mutants and the pay/1 vector tests each ran, and reported exactly the
-  number of tests their pinned sources declare. A test runner that runs nothing fails.
+- the suite, the mutants, the runner they share and the pay/1 vector tests each ran, and
+  reported exactly the number of tests their pinned sources declare. A test runner that
+  runs nothing fails.
 
 Out of scope, and why: code in other crates. It may compile a pinned file (by
 `#[path]`, say), but it cannot change one, and a copy of money logic written anywhere is
@@ -205,12 +206,14 @@ def test_counts() -> dict[str, int]:
     if not listed:
         fail("cannot find the adversary_suite! list")
     mutants = (CRATES / "nfx-pay" / "tests" / "mutants.rs").read_text()
+    runner = (CRATES / "nfx-pay" / "tests" / "runner.rs").read_text()
     pay1 = (CRATES / "nfx-pay-wire" / "tests" / "pay1.rs").read_text()
     scenarios = len(re.findall(r"^\s+[a-z_0-9]+,$", listed.group(1), re.M))
     return {
         "adversary": scenarios,
         "round_trip": scenarios,  # the same suite, the mint answering reads on a later poll
         "mutants": len(re.findall(r"^\s+[a-z_0-9]+: [svr]\(", mutants, re.M)),
+        "runner": len(re.findall(r"^#\[test\]$", runner, re.M)),
         "pay1": len(re.findall(r"^#\[test\]$", pay1, re.M)),
     }
 
@@ -323,7 +326,7 @@ def compiled(pin: bool) -> None:
     out = subprocess.run(["cargo", "test", "--color", "never", "--locked", "--offline",
                           "-p", "nfx-pay", "-p", "nfx-pay-wire",
                           "--test", "adversary", "--test", "round_trip", "--test", "mutants",
-                          "--test", "pay1"],
+                          "--test", "runner", "--test", "pay1"],
                          cwd=CRATES, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if out.returncode != 0:
         fail(f"the money tests failed:\n{out.stdout[-4000:]}")

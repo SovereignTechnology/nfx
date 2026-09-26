@@ -30,10 +30,11 @@ pub trait SeederEngine {
 
     /// A `hello` from `peer`. The session continues the peer's account for the video, and
     /// its quote carries the account's position. A `hello` creates no account. It waits
-    /// for a payment in progress on the account to be answered (within 60 s of that
-    /// payment's arrival), so its quote never misses an acknowledged one; while it waits
-    /// it counts toward the peer's session cap. It then reads its account's own unknown
-    /// swaps, if any, which adds their time (NFX-07 §3).
+    /// while a payment holds the account's turn (each at most to its own deadline, 60 s
+    /// from its arrival, and one arriving meanwhile may take the turn next), so its quote
+    /// never misses an acknowledged one; while it waits it counts toward the peer's session
+    /// cap. It then reads its account's own unknown swaps, if any, which adds their time
+    /// (NFX-07 §3).
     ///
     /// Refused with:
     /// - `banned` for a banned peer;
@@ -416,10 +417,17 @@ pub trait Harness {
     /// an outcome arriving just before its payment's deadline and settled just after, as on
     /// another thread.
     fn advance_during_next_land(&self, by: Duration);
+    /// Whether the clock move [`Harness::advance_during_next_land`] asked for has been made
+    /// (an outcome settled since). A real engine's harness needs a seam in its settlement to
+    /// make it; one that ignores the request fails the scenario that asks, rather than
+    /// passing it untested.
+    fn advanced_during_land(&self) -> bool;
     /// An engine that admits in two steps (a check, then a count) has its admissions wait
     /// between the steps, in real time and at most `wait`, until `n` have checked (`n` 0:
     /// none waits): admissions on threads then meet there. An engine that admits in one step
-    /// has nowhere to wait, and ignores it.
+    /// has nowhere to wait, and ignores it. So the catch of a split admission is
+    /// deterministic only where the harness reaches the point between the check and the
+    /// count (the mock's does); elsewhere the scenario is a stress of threads at once.
     fn gather_admissions(&self, n: usize, wait: Duration);
     /// `engine`'s sweep runs, to its end, during the next read of a swap's state: two
     /// learners at once.

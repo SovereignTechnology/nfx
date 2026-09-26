@@ -110,13 +110,15 @@ payment-enforced after release, so no mechanism pretends otherwise.
     and the quote then reports zeros.
   - It persists across the peer's sessions. A new `hello` continues the account; it
     never opens a fresh window.
-  - A `hello` for an account with a payment in progress is answered once that payment
-    has been answered, at the latest at its deadline (60 s from its arrival), plus the
-    time the `hello`'s own reads of its account's unknown swaps take (§3). It reads
-    after that wait: no read sent before the wait ended serves it, the payment's own
-    included. So a quote never misses an acknowledged payment, nor a claim that had
-    reached the mint when the wait ended, the mint answering. A `hello` waiting so counts
-    toward the peer's session cap.
+  - A `hello` for an account with a payment in progress waits while a payment holds the
+    account's turn: each holds it until it is answered, at the latest at its own deadline
+    (60 s from its arrival), and one that arrives meanwhile may take the turn next (§3).
+    The `hello` is answered then, plus the time its own reads of its account's unknown
+    swaps take. It reads after that wait, which ended when the turn was last freed
+    before the `hello` found it free: no read sent before then serves it, the payment's
+    own included. So a quote never misses an acknowledged payment, nor a claim that had
+    reached the mint when the turn was so freed, the mint answering. A `hello` waiting so
+    counts toward the peer's session cap.
 - Bans and the global cap belong to the **seeder**: one set of state for all its
   videos. The window belongs to the account.
 - A `session` id names one **open** session. A `hello` naming a session id that is open
@@ -203,8 +205,9 @@ watchers expected at once. Each holds up to about `window`/2 unpaid chunks betwe
 payments, so a cap of C carries about C / (`window`/2) of them before they must pay
 ahead.
 
-**Verifying a `pay`.** One account's payments are processed one at a time, in order
-of arrival. Bans are checked when a payment's turn comes, not when it arrives. The
+**Verifying a `pay`.** One account's payments are processed one at a time, in no set
+order: each waits while another holds the account's turn, which that one holds at most to
+its own deadline. Bans are checked when a payment's turn comes, not when it arrives. The
 checks run in this order:
 1. **Structure.** A token is `bad-token` if it is:
    - unreadable;
@@ -275,8 +278,8 @@ checks run in this order:
      the account's turn, the key fetch and the swap all count. A payment
      whose outcome the seeder has by then is answered with it, even at the deadline.
      Otherwise it answers `mint-unavailable`, abandons the swap (it sends no further
-     swap request for those proofs), and releases the account's turn to its next
-     payment. That payment is answered at once, and while the abandoned swap's outcome
+     swap request for those proofs), and releases the account's turn to whichever
+     payment takes it next. That payment is answered at once, and while the abandoned swap's outcome
      is unknown, `mint-unavailable` without a swap (bounded state, above). A payment's
      own reads and completions (below) count too, and so do the reads and requests that
      settle a retry or a completion: all end at its deadline, however late they start
@@ -334,8 +337,8 @@ checks run in this order:
        the account as the entry comes: not one sent before a swap became unknown. And it
        is the entry's own proofs' read, or any read for a `hello`, or any read once two
        were sent that second; but for a `hello` that waited for a payment, only a read
-       sent after its wait ended (when it found the account's turn free), past two or
-       not. The reads sent before still count toward the second's two. So two entries at
+       sent after its wait ended (when the account's turn was last freed before the
+       `hello` found it free), past two or not. The reads sent before still count toward the second's two. So two entries at
        once share one read, and its result, hellos woken by one payment included;
        a `hello` that waited for a payment reads after it; a watcher paying again after
        its reclaim, with other proofs, reads afresh; and a flood of hellos, or of
@@ -451,7 +454,8 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     watcher's own clock (a wallet spends an older keyset's proofs first, so one token may
     hold both):
     those past it are lost to the expiry, not taken by the seeder, and the rest are taken
-    back in a reclaim of their own; then the watcher pays again. That reclaim, refused
+    back in a reclaim of their own; then, if every spent input was its own, the watcher
+    pays again (otherwise the payment awaits a quote, above). That reclaim, refused
     in turn because the mint's active keyset has expired too, leaves the whole reclaim
     incomplete, retried once the mint has a keyset to take them back to. With no input
     past it, the expired keyset is the reclaim's outputs' (a CDK mint keeps an expired
@@ -475,7 +479,8 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     nothing more. A quote showing the ledger plus that payment, both fields, settles it
     as accepted in the meantime, and the reclaim is dropped: the seeder has the proofs.
   - After `mint-unavailable` the watcher pays again once every proof is confirmed
-    reclaimed, or the payment is settled by a quote. After any other code it stops paying
+    reclaimed or lost to the expiry (the 12003 case above), or the payment is settled by
+    a quote. After any other code it stops paying
     that seeder.
 - **Wait 180 s from sending before reclaiming an unanswered payment**: a leg each for
   the `pay`'s delivery, the seeder's 60 s deadline and the answer's delivery (§2).
@@ -792,3 +797,10 @@ therefore loses nothing:
   - §3a: after a 12003, each spent input is decided on its own; the unspent ones are
     decided per proof whatever the spent ones were; an unanswered NUT-07 check leaves the
     reclaim incomplete.
+- Draft 2026-09-26 (M2.0 twenty-fourth audit, `docs/nfx/reviews/2026-09-24-m2.0-twenty-fourth-audit.md`).
+  - §3: a waited `hello`'s wait ends when the turn was last freed before it found the turn
+    free, and the claim promise is stated from then; it waits while any payment holds the
+    turn, each to its own deadline; one account's payments are processed one at a time,
+    in no set order (the rule "in order of arrival" withdrawn).
+  - §3a: after a 12003, the watcher pays again only if every spent input was its own;
+    proofs lost to the expiry count, with those reclaimed, toward paying again.
