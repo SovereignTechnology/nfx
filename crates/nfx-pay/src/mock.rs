@@ -200,9 +200,12 @@ struct Ledger {
     claimed: HashSet<u64>,
     forged: HashSet<u64>,
     next: u64,
+    /// The seeder's swap requests are held on their way to the mint
+    /// ([`Harness::hold_swaps`]): third parties' claims and watchers' reclaims are not.
     hold: bool,
-    /// Hold only the next swap submitted.
+    /// Hold only the seeder's next swap request.
     hold_next: bool,
+    /// The responses to the seeder's swaps are held on their way back.
     hold_responses: bool,
     hold_keys: bool,
     down: bool,
@@ -378,35 +381,44 @@ impl MockNetwork {
     /// A fresh token worth `amount` sat from `mint`.
     #[must_use]
     pub fn issue(&self, mint: &str, amount: u64) -> String {
-        self.issue_with(mint, amount, &[])
+        self.draw(mint, amount, &[]).0
     }
 
-    /// A token worth `amount` sat from `mint`: `old` proofs a wallet holds, then proofs for
-    /// the amount (the mock does not weigh proofs one by one), of the older keyset while the
-    /// wallets hold enough of it ([`Harness::fund_older_keyset`]), else fresh ones.
-    fn issue_with(&self, mint: &str, amount: u64, old: &[u64]) -> String {
-        let mut proofs = old.to_vec();
-        let fresh = self.proofs_for(amount);
-        {
+    /// A token worth `amount` sat from `mint`, as a wallet selects it: `old` proofs it
+    /// holds, then what the wallets hold of the older keyset ([`Harness::fund_older_keyset`]),
+    /// spent first, up to the amount, topped up with fresh proofs (CDK selects an inactive
+    /// keyset's proofs first). The mock does not weigh proofs one by one. With the sat it
+    /// drew of the older keyset.
+    fn draw(&self, mint: &str, amount: u64, old: &[u64]) -> (String, u64) {
+        let older = {
             let mut l = self.ledger();
-            if l.older_balance >= amount && amount > 0 {
-                l.older_balance -= amount;
-                l.older.extend(fresh.iter().copied());
-                l.older_now.extend(fresh.iter().copied());
-                if l.older_expired {
-                    l.expired_inputs.extend(fresh.iter().copied());
-                }
+            let older = l.older_balance.min(amount);
+            l.older_balance -= older;
+            older
+        };
+        let mut proofs = old.to_vec();
+        if older > 0 {
+            let drawn = self.proofs_for(older);
+            let mut l = self.ledger();
+            l.older.extend(drawn.iter().copied());
+            l.older_now.extend(drawn.iter().copied());
+            if l.older_expired {
+                l.expired_inputs.extend(drawn.iter().copied());
             }
+            proofs.extend(drawn);
         }
-        proofs.extend(fresh);
-        self.mint_token(TokenInfo {
+        if older < amount || amount == 0 {
+            proofs.extend(self.proofs_for(amount - older));
+        }
+        let token = self.mint_token(TokenInfo {
             proofs,
             mints: vec![mint.to_owned()],
             amount,
             unit: "sat",
             locked: false,
             dleq: Dleq::Valid,
-        })
+        });
+        (token, older)
     }
 
     fn read(&self, token: &str) -> Option<TokenInfo> {
@@ -827,6 +839,15 @@ impl MockNetwork {
         )
     }
 
+    /// Whether any of `token`'s proofs is reserved: what a NUT-07 check shows pending
+    /// beside a spent one ([`SeederFlaw::SpentBesidePendingUnknown`] only).
+    fn any_reserved(&self, token: &str) -> bool {
+        let l = self.ledger();
+        l.tokens
+            .get(token)
+            .is_some_and(|i| i.proofs.iter().any(|p| l.reserved.contains(p)))
+    }
+
     /// The mint gives `token`'s reserved proofs back to processing: done before it
     /// processes the request that reserved them.
     fn unreserve(&self, token: &str) {
@@ -1001,6 +1022,21 @@ impl MockNetwork {
         if l.older_expired {
             l.older_balance = 0;
         }
+    }
+
+    /// A wallet keeps the `sat` of the older keyset it drew and did not pay with, unless the
+    /// mint lists that keyset expired: then they are dropped with the rest of it.
+    fn put_back(&self, sat: u64) {
+        let mut l = self.ledger();
+        if !l.older_expired {
+            l.older_balance += sat;
+        }
+    }
+
+    /// The wallets drop every proof they hold of the older keyset, good or not
+    /// ([`ViewerFlaw::DropsHeldOlderOnAnyExpired`] only).
+    fn drop_older_held(&self) {
+        self.ledger().older_balance = 0;
     }
 
     /// Send a swap, as an engine does: `done` runs with the outcome when the mint answers,
@@ -1949,6 +1985,9 @@ pub enum SeederFlaw {
     /// deadline without a swap leaves an unknown one behind, and its account's next payment
     /// is refused.
     SentBeforeExpiry,
+    /// Reads a swap whose NUT-07 check shows an input spent beside others pending as
+    /// pending: it stays unknown, where outputs unsigned with an input spent are nothing.
+    SpentBesidePendingUnknown,
 }
 
 /// A defect planted in a mock viewer, to prove the adversary suite catches it.
@@ -2197,6 +2236,51 @@ pub enum ViewerFlaw {
     StopsOnOutage,
     /// Takes a reclaim refused as pending (CDK 11002) for proofs found spent.
     ReclaimPendingIsSpent,
+    /// Accepts an ack whose `accepted_upto` is below its ledger's, `spent_total` its
+    /// ledger's plus the payment's: it takes the ack for its ledger, rewinding it, and pays
+    /// those chunks again.
+    AckResyncsDown,
+    /// Accepts an ack whose `accepted_upto` matches the payment but whose `spent_total` is
+    /// below its ledger's.
+    AckAcceptsSpentBelowLedger,
+    /// With no keyset expired, takes a reclaim that finds a proof spent beside inputs
+    /// pending for found spent: it awaits a quote, and never takes those inputs back once
+    /// the mint rolls their request back.
+    PendingBesideSpentAwaits,
+    /// On a selection holding a proof the mint lists expired, drops every proof it holds of
+    /// an older keyset, good ones included: it loses proofs it could pay with.
+    DropsHeldOlderOnAnyExpired,
+    /// Checks a quote's mints on its first session only: a resumed session's quote naming no
+    /// mint it holds tokens from is taken.
+    MintCheckFirstOnly,
+    /// Accepts an ack equal to its ledger in both fields, as if the payment had not been
+    /// taken: it counts the payment spent and pays its chunks again.
+    AckAcceptsLedger,
+    /// Accepts an ack below its ledger in both fields and takes it for its ledger (resyncs
+    /// down, as it never does to a quote): it pays those chunks again.
+    AckResyncsDownBoth,
+    /// Takes an honest ack of the payment in flight as leave to pay again: the ack clears
+    /// the standing's stop.
+    AckClearsStop,
+    /// Pays ahead after a refusal though it has stopped.
+    PayAheadIgnoresStop,
+    /// Says it awaits a quote while stopped (its tries used, or a payment awaiting one),
+    /// though no new session makes it pay.
+    AwaitingQuoteWhenStopped,
+    /// Takes a quote only if every mint it names is one it holds: it refuses a quote naming
+    /// its mint among others.
+    QuoteNeedsEveryMint,
+    /// Takes a quote naming a lookalike of its mint, one URL a prefix of the other.
+    QuoteMintByPrefix,
+    /// Compares a quote's mints with its own as parsed URLs, not byte for byte: it takes a
+    /// quote naming its mint in another spelling (upper case, a trailing `/`, the default
+    /// port).
+    QuoteMintNormalised,
+    /// Stops on a quote over its price cap, where it only refuses it.
+    CapRefusalStops,
+    /// Takes a quote equal to its ledger as cancelling its incomplete reclaim: it pays
+    /// again, and the proofs it never took back are left for the seeder to claim.
+    QuoteAtLedgerDropsReclaim,
 }
 
 /// (peer, video index): one account.
@@ -3332,6 +3416,12 @@ impl Inner {
                     return Read::Claimed;
                 }
                 let state = match states[i] {
+                    Some(InputState::Spent)
+                        if self.has(SeederFlaw::SpentBesidePendingUnknown)
+                            && self.net.any_reserved(&tokens[i]) =>
+                    {
+                        InputState::Pending
+                    }
                     Some(s) => s,
                     None if self.has(SeederFlaw::StateDownIsSpent) => InputState::Spent,
                     None => return Read::Unknown,
@@ -5334,6 +5424,13 @@ impl MockViewer {
             Reclaim::Pending if expired_code && self.has(ViewerFlaw::ExpiredPendingIsLost) => {
                 Reclaim::Expired
             }
+            Reclaim::Pending
+                if !expired_code
+                    && self.has(ViewerFlaw::PendingBesideSpentAwaits)
+                    && self.net.claimed_any(token) =>
+            {
+                Reclaim::SomeSpent
+            }
             // Spent may be this watcher's own reclaim, gone through unanswered: a restore
             // of its outputs shows which.
             Reclaim::SomeSpent if !self.has(ViewerFlaw::ReclaimNoRestore) => {
@@ -5549,7 +5646,10 @@ impl MockViewer {
         let out_of_tries = self.out_of_tries()
             && !(may_ahead && self.has(ViewerFlaw::PayAheadSkipsBudget))
             && !(last && self.has(ViewerFlaw::LastPayIgnoresBudget));
-        if (self.halted() && stop_holds) || awaiting || reclaim_blocks || pending_blocks {
+        let stop_blocks = self.halted()
+            && stop_holds
+            && !(may_ahead && self.has(ViewerFlaw::PayAheadIgnoresStop));
+        if stop_blocks || awaiting || reclaim_blocks || pending_blocks {
             return Ok(None);
         }
         if out_of_tries {
@@ -5587,10 +5687,11 @@ impl MockViewer {
         } else {
             Vec::new()
         };
-        let mut token = self.net.issue_with(&self.mint, amount, &kept);
+        let (mut token, mut older) = self.net.draw(&self.mint, amount, &kept);
         // Proofs the mint lists under an expired keyset are worth nothing: never paid with.
-        // It drops those it holds and pays with the rest; with only such proofs (the mint's
-        // active keyset expired), it pays nothing until the mint rotates.
+        // It drops those it holds, keeps the good ones it drew, and pays with the rest; with
+        // too few good ones (the mint's active keyset expired), it pays nothing until the
+        // mint rotates, and keeps them.
         let checks = !self.has(ViewerFlaw::PaysWithExpiredProofs)
             && !(last && self.has(ViewerFlaw::LastPayWithExpiredProofs))
             && !(self.has(ViewerFlaw::ListingOnlyWhileActiveExpired) && !self.net.active_expired())
@@ -5598,9 +5699,14 @@ impl MockViewer {
                 && self.has(ViewerFlaw::LastPayListingOnlyWhileActiveExpired)
                 && !self.net.active_expired());
         if checks && self.net.proofs_listing(&token).0 > 0 {
+            self.net.put_back(older);
+            if self.has(ViewerFlaw::DropsHeldOlderOnAnyExpired) {
+                self.net.drop_older_held();
+            }
             self.net.drop_expired_held();
-            token = self.net.issue_with(&self.mint, amount, &[]);
+            (token, older) = self.net.draw(&self.mint, amount, &[]);
             if self.net.proofs_listing(&token).0 > 0 {
+                self.net.put_back(older);
                 return Ok(None);
             }
         }
@@ -5689,6 +5795,9 @@ impl Viewer for MockViewer {
         let resumed = self.requested > 0 || self.acked > 0;
         let skip_cap = resumed && self.has(ViewerFlaw::SkipsCapOnResume);
         if quote.price_per_chunk > self.max_price && !skip_cap {
+            if self.has(ViewerFlaw::CapRefusalStops) {
+                self.halt();
+            }
             return Err("price above this viewer's cap".into());
         }
         let skip_ceiling = resumed && self.has(ViewerFlaw::SkipsCeilingOnResume);
@@ -5696,7 +5805,27 @@ impl Viewer for MockViewer {
         {
             return Err("window above this viewer's ceiling".into());
         }
-        if !quote.mints.contains(&self.mint) {
+        // Its mint's URL, byte for byte (NFX-07 §2), or as a flaw reads it.
+        let loose = |u: &str| {
+            u.to_ascii_lowercase()
+                .trim_end_matches('/')
+                .replace(":443", "")
+        };
+        let names = |m: &String| {
+            if self.has(ViewerFlaw::QuoteMintByPrefix) {
+                m.starts_with(&self.mint) || self.mint.starts_with(m.as_str())
+            } else if self.has(ViewerFlaw::QuoteMintNormalised) {
+                loose(m) == loose(&self.mint)
+            } else {
+                *m == self.mint
+            }
+        };
+        let holds = if self.has(ViewerFlaw::QuoteNeedsEveryMint) {
+            quote.mints.iter().all(names)
+        } else {
+            quote.mints.iter().any(names)
+        };
+        if !holds && !(resumed && self.has(ViewerFlaw::MintCheckFirstOnly)) {
             return Err("no mint this viewer holds tokens from".into());
         }
         // A quote showing an unsettled payment accepted, both fields, settles it.
@@ -5732,6 +5861,12 @@ impl Viewer for MockViewer {
             );
             if let Some(entries) = before {
                 self.standing().reclaiming = entries;
+            }
+            if self.has(ViewerFlaw::QuoteAtLedgerDropsReclaim)
+                && (quote.accepted_upto, quote.spent_total) == (self.acked, self.spent)
+            {
+                let id = self.id;
+                self.standing().reclaiming.retain(|(l, _)| *l != id);
             }
         }
         let mut honest = quote.served
@@ -5862,25 +5997,39 @@ impl Viewer for MockViewer {
                     d * (p.upto - self.acked) == (ack.accepted_upto - self.acked) * p.amount
                 })
         });
+        // At its ledger in both fields, or below it in both (the flaws).
+        let at_ledger = self.has(ViewerFlaw::AckAcceptsLedger)
+            && (ack.accepted_upto, ack.spent_total) == (self.acked, self.spent);
+        let below = self.has(ViewerFlaw::AckResyncsDownBoth)
+            && ack.accepted_upto < self.acked
+            && ack.spent_total < self.spent;
         let ok = match &expected {
-            Some(_) if partial => true,
+            Some(_) if partial || at_ledger || below => true,
             Some(p) if self.has(ViewerFlaw::AckAcceptsInflated) => {
                 ack.accepted_upto >= p.upto && ack.spent_total >= self.spent + p.amount
             }
             Some(p) => {
-                (ack.accepted_upto == p.upto || (self.has(ViewerFlaw::AckAcceptsShort) && short(p)))
+                (ack.accepted_upto == p.upto
+                    || (self.has(ViewerFlaw::AckAcceptsShort) && short(p))
+                    || (self.has(ViewerFlaw::AckResyncsDown) && ack.accepted_upto < self.acked))
                     && (ack.spent_total == self.spent + p.amount
                         || self.has(ViewerFlaw::IgnoresSpentTotal)
                         || (self.has(ViewerFlaw::AckAcceptsShortSpent)
                             && ack.accepted_upto == p.upto
                             && ack.spent_total > self.spent
-                            && ack.spent_total < self.spent + p.amount))
+                            && ack.spent_total < self.spent + p.amount)
+                        || (self.has(ViewerFlaw::AckAcceptsSpentBelowLedger)
+                            && ack.accepted_upto == p.upto
+                            && ack.spent_total < self.spent))
             }
             None => self.has(ViewerFlaw::AcceptsUnsolicitedAck),
         };
         if ok || self.has(ViewerFlaw::IgnoresBadAck) {
+            if ok && self.has(ViewerFlaw::AckClearsStop) {
+                self.standing().stopped = false;
+            }
             self.acked = ack.accepted_upto;
-            if partial {
+            if partial || below {
                 self.spent = ack.spent_total;
             } else if let Some(p) = expected {
                 self.spent += p.amount;
@@ -6002,7 +6151,7 @@ impl Viewer for MockViewer {
 
     fn awaiting_quote(&self) -> bool {
         let tries_used = self.out_of_tries() && !self.has(ViewerFlaw::BudgetNotSignalled);
-        !self.halted()
+        (!self.halted() || self.has(ViewerFlaw::AwaitingQuoteWhenStopped))
             && (self.awaiting(!self.has(ViewerFlaw::AwaitingQuoteAnyLedger)) || tries_used)
     }
 }

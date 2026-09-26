@@ -422,9 +422,13 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     unsettled payment, which the quote thereby settles as accepted;
   - a quote **below** the ledger is refused, and the watcher never resyncs down to it;
   - a quote above the watcher's price cap is refused, on every session, a resumed one
-    included, and so is one naming no mint it holds tokens from;
+    included, and so is one naming no mint it holds tokens from, by the mint's exact URL
+    (§2): a lookalike names none;
   - so is a quote whose `window` is above the watcher's own ceiling, at most 64 (§2):
     `window` bounds what one refusal makes it pay ahead.
+
+  A quote dishonest about the account stops the watcher paying that seeder; one refused
+  for its price, its `window` or its mints does not.
 - **Owe every request sent,** except one the seeder answers with `refuse`. A refused
   request is always un-owed; if it was already paid for, that payment becomes credit. A
   request the watcher abandons stays owed; if the seeder never saw it, the payment
@@ -462,7 +466,14 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     watcher pays that seeder nothing more until a quote, from a new session and at any
     later time, shows it: `accepted_upto` and `spent_total` both equal to the ledger plus
     the payment, which settles it as accepted. A quote equal to the ledger leaves it
-    waiting. Any other quote is dishonest (above).
+    waiting. Any other quote is dishonest (above). A mint refuses a swap holding a spent
+    proof whole, so the reclaim checks the proofs' states first (NUT-07) and takes back
+    the inputs left, every one unspent, in a reclaim of their own, whether or not a keyset
+    has expired (the 12003 case below). While any of those inputs is pending, the reclaim
+    is incomplete (below) until the mint finishes the request that reserved it or rolls it
+    back, and the payment awaits a quote once the reclaim completes. CDK 0.18.1's own
+    revoke (`SendSaga::revoke`) does not do this: finding a proof spent, it takes nothing
+    back, so a watcher built on it must.
   - So a seeder that keeps a payment without crediting it has taken that one payment,
     and gets nothing more. This holds whether it refuses and then claims, or answers
     `mint-unavailable` after a swap that went through. A seeder that credits it late (§3)
@@ -514,7 +525,8 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     watcher pays it nothing more, on any of its videos, and no quote can settle it.
   - Until the reclaim completes (the mint may be down), the watcher pays that seeder
     nothing more. A quote showing the ledger plus that payment, both fields, settles it
-    as accepted in the meantime, and the reclaim is dropped: the seeder has the proofs.
+    as accepted in the meantime, and the reclaim is dropped: the seeder has the proofs. A
+    quote equal to the ledger leaves the reclaim incomplete.
   - After `mint-unavailable` the watcher pays again once every proof is confirmed
     reclaimed or lost to the expiry (the 12003 case above), or the payment is settled by
     a quote. After any other code it stops paying
@@ -531,10 +543,11 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   - Either way, a reclaim that finds proofs spent leaves the payment awaiting a quote,
     as above. A `pay` still buffered on a dropped connection can reach the seeder after
     the watcher's next `hello`, and be credited after that session's quote.
-- **Pay nothing after stopping,** at the end of a session included. Reclaiming is not
-  paying: a stopped watcher still reclaims a live session's payment that is refused, or
-  unanswered after the wait, finishes its incomplete reclaims, and reclaims a closed
-  session's unsettled payment after the wait.
+- **Pay nothing after stopping,** at the end of a session included, nor ahead after a
+  refusal. Nothing undoes a stop, a later `ack` that matches its payment included.
+  Reclaiming is not paying: a stopped watcher still reclaims a live session's payment
+  that is refused, or unanswered after the wait, finishes its incomplete reclaims, and
+  reclaims a closed session's unsettled payment after the wait.
 
 ## 4. HTTPS (origin) payment surface
 
@@ -552,7 +565,7 @@ therefore loses nothing:
 
   On any refusal the client reclaims its proofs, as in §3a. After a `503` it pays again
   only once every proof is confirmed reclaimed, and a proof found spent means that
-  payment is lost.
+  payment is lost, though the proofs left unspent are still taken back (§3a).
 - Bans do not apply: the payer is anonymous, and spent proofs simply earn a `402`.
 - Origins MAY serve gratis (`price_hint` 0 or `free` beacons). The website's ad/default
   mode is exactly this (origin at price 0).
@@ -863,3 +876,13 @@ therefore loses nothing:
     in the deadline's second or later are not used, a swap's outcome settled in it is
     late, and a payment not sent by then is not rechecked; a retry's `spent` with its
     outputs unsigned leaves nothing unknown.
+  - §3a: a reclaim that finds a proof spent checks the proofs' states first (NUT-07), a
+    swap holding a spent proof being refused whole, and takes back the inputs left, every
+    one unspent, whether or not a keyset has expired; an input pending keeps it incomplete
+    until the mint finishes or rolls back its request; CDK 0.18.1's `SendSaga::revoke`
+    does not do this.
+  - §3a: a quote names the watcher's mint only by its exact URL; a dishonest quote stops
+    the watcher, and one refused for its price, `window` or mints does not; a quote equal
+    to the ledger leaves an incomplete reclaim incomplete; a stopped watcher pays nothing
+    ahead after a refusal, and nothing undoes a stop, a later matching `ack` included.
+  - §4: after a proof found spent, the client still takes back the proofs left unspent.
