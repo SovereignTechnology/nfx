@@ -402,6 +402,10 @@ pub trait Harness {
     /// A read the mint leaves unanswered costs its client `wait`, its timeout, on the
     /// harness's clock.
     fn unanswered_reads_take(&self, wait: Duration);
+    /// Each read of swap state the mint serves waits, in real time and at most `wait`,
+    /// until `n` reads have reached it (`n` 0: none waits): entries on threads then meet
+    /// at the mint, as a real engine's can.
+    fn gather_state_reads(&self, n: usize, wait: Duration);
     /// `engine`'s sweep runs, to its end, during the next read of a swap's state: two
     /// learners at once.
     fn sweep_during_next_read(&self, engine: &Self::Engine);

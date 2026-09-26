@@ -65,6 +65,7 @@ macro_rules! adversary_suite {
             one_accounts_payments_are_serialised,
             a_dropped_pay_is_credited_or_never_claimed,
             concurrent_admission_is_atomic,
+            concurrent_entries_read_two_a_second,
             a_viewer_pays_for_every_request_and_no_more,
             a_viewer_owes_nothing_for_refused_requests,
             a_viewer_pays_ahead_only_after_a_refusal,
@@ -297,6 +298,52 @@ fn serve_on<H: Harness>(h: &H, s: &mut Session<H>, video: u8, from: u16, n: u16)
 
 fn is_rej<T>(r: &Result<T, Rej>, code: &RejCode) -> bool {
     matches!(r, Err(rej) if rej.code == *code)
+}
+
+/// A payment to `upto` of `amount` claimed at the mint, its answer lost and its retry
+/// never reaching the mint: unknown to the seeder, and learnt by the account's next read.
+async fn lost_claim<H: Harness>(h: &H, s: &mut Session<H>, upto: u64, amount: u64) -> Pay {
+    h.hold_swap_responses();
+    h.lose_next_swap_response();
+    let p = Pay {
+        upto_chunk: upto,
+        token: h.token(amount).await,
+    };
+    let (r, ()) = both(s.pay(&p), async {
+        yield_once().await;
+        h.mint_outage(true);
+        h.release_swaps().await;
+    })
+    .await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    h.mint_outage(false);
+    assert!(h.claimed_all(&p.token).await, "the mint has the claim");
+    p
+}
+
+/// A payment to `upto` whose swap the mint holds, its inputs reserved, and the seeder's
+/// client timed out: unknown, and undecidable while the mint holds it.
+async fn parked<H: Harness>(h: &H, s: &mut Session<H>, upto: u64) -> Pay {
+    h.hold_next_swap_reserving();
+    h.time_out_next_swap();
+    let p = Pay {
+        upto_chunk: upto,
+        token: h.token(4).await,
+    };
+    let r = s.pay(&p).await;
+    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    p
+}
+
+/// Poll `f` until it is ready, moving the clock a second at a time (at most `secs`).
+fn settle_on<F: Future, H: Harness>(h: &H, mut f: Pin<&mut F>, secs: u64) -> F::Output {
+    for _ in 0..=secs {
+        if let Some(v) = (0..1000).find_map(|_| poll_now(f.as_mut())) {
+            return v;
+        }
+        h.advance(SECOND);
+    }
+    panic!("never answered");
 }
 
 /// A refusal claims nothing, not even one proof, and credits nothing: the full window
@@ -987,7 +1034,9 @@ pub async fn a_seeder_answers_within_its_deadline<H: Harness>(h: &H) {
 /// polled only after the deadline. A swap whose response is lost is retried in time, and
 /// a retry answered `spent` is settled by restore, never banned on; an outcome still
 /// unknown is learnt by restore once the mint is back. A restore can show a claim before
-/// its answer comes, and the answer then changes nothing.
+/// its answer comes, and the answer then changes nothing. An account's own reads serve
+/// only the entries whose swaps they covered, as fixed when sent; none is sent at an
+/// entry's deadline; and a `hello` that waited for a payment reads after it.
 pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 4);
     let mut s = open(h, &e, 1).await;
@@ -2476,6 +2525,229 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
                 "and quotes the claim"
             );
             drop(first);
+        }
+    }
+
+    // A payment that reaches its own read at its deadline (its mint's keys came late) has
+    // no time left to send one: it reads nothing, and counts no read. A hello that waited
+    // for it, and one after it in that second, read then, and quote the claim.
+    for waiting in [true, false] {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        lost_claim(h, &mut s, 4, 4).await;
+        h.advance(SECOND);
+        h.hold_key_fetches();
+        let late = Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        };
+        let (peer, hello) = (h.peer(1), h.hello());
+        let mut paying = Box::pin(s.pay(&late));
+        assert!(poll_now(paying.as_mut()).is_none(), "waiting for the keys");
+        let mut behind = waiting.then(|| Box::pin(e.hello(&peer, &hello)));
+        if let Some(b) = behind.as_mut() {
+            assert!(
+                poll_now(b.as_mut()).is_none(),
+                "the hello waits for the payment"
+            );
+        }
+        h.advance(Duration::from_secs(60)); // the payment's deadline
+        h.release_swaps().await; // its keys come only now
+        let r = (0..1000)
+            .find_map(|_| poll_now(paying.as_mut()))
+            .expect("answered at its deadline");
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+        drop(paying);
+        let quoted = match behind {
+            Some(mut b) => (0..1000)
+                .find_map(|_| poll_now(b.as_mut()))
+                .expect("answered once the payment was"),
+            None => e.hello(&peer, &hello).await,
+        };
+        let q = quoted.expect("a hello").quote().clone();
+        assert_eq!(
+            (q.accepted_upto, q.spent_total),
+            (4, 4),
+            "no read was sent at the payment's deadline: the hello read, and quotes the claim \
+             (it waited for the payment: {waiting})"
+        );
+    }
+
+    // What a read covers is fixed when it is sent: a read under way while another learner
+    // decided A and a new claim, B, became unknown never read B, and serves no hello after.
+    {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        lost_claim(h, &mut s, 4, 4).await;
+        h.advance(SECOND);
+        let (peer, first) = (h.peer(1), h.hello());
+        let mut stalled = Box::pin(e.hello(&peer, &first));
+        let under_way = poll_now(stalled.as_mut()).is_none();
+        e.sweep().await; // A learnt by the sweep meanwhile
+        assert_eq!(serve(h, &mut s, 4, 4), 4, "A credited");
+        lost_claim(h, &mut s, 8, 4).await; // B
+        if under_way {
+            let _ = (0..1000)
+                .find_map(|_| poll_now(stalled.as_mut()))
+                .expect("its read is back");
+        }
+        drop(stalled);
+        let q = open(h, &e, 1).await.quote().clone();
+        assert_eq!(
+            (q.accepted_upto, q.spent_total),
+            (8, 8),
+            "a read sent before B became unknown does not serve a hello after it"
+        );
+    }
+
+    // Past two reads a second, a read still serves only an entry whose swaps it covered, a
+    // payment as a hello. Two reads of A (a hello's, and a payment's of other proofs) in one
+    // second; A then learnt by the sweep, and B, the next payment's swap, left unknown in
+    // that second. A hello reads B in the next second and quotes it (B a claim); a payment
+    // reads B in the next second and is swapped (B taken back by its watcher, nothing).
+    for b_claimed in [true, false] {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        let a = parked(h, &mut s, 4).await;
+        h.advance(SECOND);
+        let before = h.state_reads();
+        drop(open(h, &e, 1).await); // the hello's read of A
+        let other = Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        };
+        let r = s.pay(&other).await; // the payment's, of other proofs
+        assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+        assert_eq!(h.state_reads() - before, 4, "two reads of A this second");
+        h.release_swaps().await; // the mint finishes A: a claim
+        assert!(h.claimed_all(&a.token).await);
+        e.sweep().await; // learnt by the sweep, no read of the account's own
+        assert_eq!(serve(h, &mut s, 4, 4), 4, "A credited");
+        if b_claimed {
+            lost_claim(h, &mut s, 8, 4).await;
+            let (peer, hello) = (h.peer(1), h.hello());
+            let quoting = pin!(e.hello(&peer, &hello));
+            let q = settle_on(h, quoting, 3).expect("a hello").quote().clone();
+            assert_eq!(
+                (q.accepted_upto, q.spent_total),
+                (8, 8),
+                "neither of the second's two reads covered B: the hello reads it, in the next second"
+            );
+        } else {
+            let b = parked(h, &mut s, 8).await;
+            h.roll_back_reserved();
+            assert!(h.steal(&b.token).await, "its watcher takes B's proofs back");
+            let again = Pay {
+                upto_chunk: 8,
+                token: h.token(4).await,
+            };
+            let paying = pin!(s.pay(&again));
+            let ack = settle_on(h, paying, 3)
+                .expect("B read as nothing in the next second: the payment is swapped");
+            assert_eq!((ack.accepted_upto, ack.spent_total), (8, 8));
+        }
+    }
+
+    // A payment's own proofs' read serves it only if it covered the account's swaps. A
+    // payment reads A (nothing: its watcher took the proofs back), then swaps, and that
+    // swap's answer is lost: B, a claim. The same proofs again that second: the first read
+    // never read B, so the replay reads it, learns the claim, and is `stale`.
+    {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        let a = parked(h, &mut s, 4).await;
+        h.roll_back_reserved();
+        assert!(h.steal(&a.token).await, "its watcher takes A's proofs back");
+        h.advance(SECOND);
+        let b = lost_claim(h, &mut s, 4, 4).await; // reads A (nothing), then swaps: B
+        let r = s.pay(&b).await;
+        assert!(
+            is_rej(&r, &RejCode::Stale),
+            "the replay reads B (its own proofs' read covered only A), and learns the claim: {r:?}"
+        );
+    }
+
+    // Two hellos in one second share one read of a swap abandoned in flight (sent, and past
+    // its payment's deadline unanswered), as of a swap whose answer was lost.
+    {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        h.hold_next_swap_reserving();
+        let p = Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        };
+        {
+            let mut paying = Box::pin(s.pay(&p));
+            assert!(poll_now(paying.as_mut()).is_none(), "its swap in flight");
+            h.advance(Duration::from_secs(60));
+            let r = (0..1000)
+                .find_map(|_| poll_now(paying.as_mut()))
+                .expect("answered at its deadline");
+            assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+        }
+        h.advance(SECOND);
+        let before = h.state_reads();
+        drop(open(h, &e, 1).await);
+        drop(open(h, &e, 1).await);
+        assert_eq!(
+            h.state_reads() - before,
+            2,
+            "two hellos in one second share one read (a NUT-07 check and a restore)"
+        );
+        h.release_swaps().await;
+    }
+
+    // A hello that waited for a payment reads after it: the payment's own read, sent before
+    // the wait ended, does not serve it. A is undecided (its inputs reserved at the mint);
+    // payment P reads A, and while that read is under way the mint finishes A, a claim. P is
+    // answered without a swap (A still unknown to it); the hello behind P reads, and quotes A.
+    {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        let a = parked(h, &mut s, 4).await;
+        h.advance(SECOND);
+        let p = Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        };
+        let (peer, hello) = (h.peer(1), h.hello());
+        let mut paying = Box::pin(s.pay(&p));
+        if poll_now(paying.as_mut()).is_none() {
+            // Its read under way (round trips): the hello behind it waits for its turn.
+            let mut behind = Box::pin(e.hello(&peer, &hello));
+            assert!(
+                poll_now(behind.as_mut()).is_none(),
+                "the hello waits for the payment"
+            );
+            h.release_swaps().await; // A finishes at the mint, while P's read is under way
+            assert!(
+                h.claimed_all(&a.token).await,
+                "A's claim landed before the hello read"
+            );
+            let r = (0..1000)
+                .find_map(|_| poll_now(paying.as_mut()))
+                .expect("answered");
+            assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+            let q = (0..1000)
+                .find_map(|_| poll_now(behind.as_mut()))
+                .expect("answered once the payment was")
+                .expect("a hello")
+                .quote()
+                .clone();
+            assert_eq!(
+                (q.accepted_upto, q.spent_total),
+                (4, 4),
+                "the hello that waited for P read after it, and quotes A's claim"
+            );
+        } else {
+            h.release_swaps().await; // synchronous reads: nothing is ever under way
         }
     }
 }
@@ -4708,6 +4980,43 @@ pub async fn concurrent_admission_is_atomic<H: Harness + Sync>(h: &H) {
     assert_eq!(admitted, 4);
 }
 
+/// An account's own reads stay two a second when its entries run on threads at once: an
+/// entry takes its read's place in the same look that finds one free, so entries meeting at
+/// the mint cannot all have found the second's places free and all read.
+pub async fn concurrent_entries_read_two_a_second<H: Harness + Sync>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    let a = parked(h, &mut s, 4).await; // a swap every hello reads, and none can decide
+    drop(s);
+    h.advance(SECOND);
+    let n = h.session_cap();
+    // Each read waits at the mint for the others (a second at most): as many reads as
+    // entries that found a place free.
+    h.gather_state_reads(n, SECOND);
+    let before = h.state_reads();
+    let barrier = std::sync::Barrier::new(n);
+    std::thread::scope(|scope| {
+        for _ in 0..n {
+            let (barrier, e) = (&barrier, &e);
+            scope.spawn(move || {
+                let (peer, hello) = (h.peer(1), h.hello());
+                barrier.wait();
+                drop(block_on(e.hello(&peer, &hello)).expect("a hello"));
+            });
+        }
+    });
+    h.gather_state_reads(0, Duration::ZERO);
+    let reads = h.state_reads() - before;
+    assert!(
+        reads <= 4,
+        "{n} hellos on threads in one second: two reads, a NUT-07 check and a restore each, \
+         not {reads} requests"
+    );
+    h.release_swaps().await;
+    assert!(h.claimed_all(&a.token).await);
+}
+
 /// A viewer pays for every request it sent and the seeder did not refuse, never ahead of
 /// need (except half a window after a refusal), one payment at a time.
 pub async fn a_viewer_pays_for_every_request_and_no_more<H: Harness>(h: &H) {
@@ -4965,7 +5274,9 @@ pub async fn a_viewer_stops_on_a_wrong_or_unsolicited_ack<H: Harness>(h: &H) {
 /// A viewer reclaims every proof of a refused payment, whatever the code, known or not,
 /// so a seeder that refuses and then claims gets nothing. It stops paying that seeder,
 /// except after `mint-unavailable`. Proofs its own unanswered reclaim took back are not
-/// lost: a restore of its outputs shows them.
+/// lost: a restore of its outputs shows them. A refusal because a keyset expired is
+/// decided per proof, the watcher's own reclaims counted as back, and proofs listed
+/// expired are never paid with again.
 pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     let codes = [
         RejCode::Underpaid,
@@ -5215,9 +5526,83 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     );
     assert!(s.admit(&h.chunk(3)));
     v.requested();
+    let next = v
+        .due()
+        .await
+        .unwrap()
+        .expect("complete, the seeder having taken nothing: it pays again");
+    // Never with the proof lost to the expiry: it is worth nothing, and a payment holding
+    // it would be refused (12003) and answered `mint-unavailable`.
+    let ack = s
+        .pay(&next)
+        .await
+        .expect("its payment holds no proof listed expired: swapped");
+    assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
+    v.ack(&ack).unwrap();
+
+    // The same token, its good proof's reclaim going through with the answer lost: the
+    // retry is refused (12003) with that proof spent. A restore shows it the watcher's own,
+    // so nothing was taken by the seeder: the other proof, unspent and listed expired, is
+    // lost to the expiry, and the watcher pays again, awaiting no quote.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).unwrap();
+    for i in 0..3 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    let pay = v.due().await.unwrap().expect("due: 3 sat, two proofs");
+    h.expire_keyset_of(&pay.token, 1);
+    let rej = s
+        .pay(&pay)
+        .await
+        .expect_err("one input's keyset has expired");
+    assert_eq!(rej.code, RejCode::MintUnavailable);
+    h.lose_next_reclaim_response();
+    v.rej(&rej).await;
     assert!(
-        v.due().await.unwrap().is_some(),
-        "complete, the seeder having taken nothing: it pays again"
+        h.claimed_any(&pay.token).await && !h.claimed_all(&pay.token).await,
+        "the good proof is taken back (its answer lost), the expired one left"
+    );
+    assert!(s.admit(&h.chunk(3)));
+    v.requested();
+    let next = v.due().await.unwrap();
+    assert!(
+        !v.awaiting_quote(),
+        "the seeder took nothing: its own reclaim has the good proof, the other is lost to the expiry"
+    );
+    assert!(next.is_some(), "and it pays again");
+
+    // The same token while the mint's active keyset has expired too: the good proof cannot
+    // be taken back yet (no keyset for the reclaim's outputs), so the reclaim is
+    // incomplete, and the watcher pays nothing until the mint rotates and it completes.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).unwrap();
+    for i in 0..3 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    let pay = v.due().await.unwrap().expect("due: 3 sat, two proofs");
+    h.expire_keyset_of(&pay.token, 1);
+    h.expire_active_keyset();
+    let rej = s.pay(&pay).await.expect_err("refused");
+    assert_eq!(rej.code, RejCode::MintUnavailable);
+    v.rej(&rej).await;
+    assert!(!h.claimed_any(&pay.token).await, "nothing taken back yet");
+    assert!(s.admit(&h.chunk(3)));
+    v.requested();
+    assert!(
+        v.due().await.unwrap().is_none(),
+        "the good proof not yet taken back: the reclaim is incomplete, and it pays nothing"
+    );
+    h.rotate_keyset();
+    assert!(v.due().await.unwrap().is_some(), "then it pays again");
+    assert!(
+        h.claimed_any(&pay.token).await && !h.claimed_all(&pay.token).await,
+        "the good proof taken back, the expired one left"
     );
 }
 
