@@ -326,6 +326,8 @@ def compiled(pin: bool) -> None:
                            cwd=REPO, capture_output=True, text=True)
     if named.returncode == 0:
         fail("only nfx-pay and nfx-node's locked paths may name nfx_pay:\n" + named.stdout)
+    if named.returncode != 1:  # 1 is "no match"; anything else is git failing to look
+        fail(f"git grep for nfx_pay failed ({named.returncode}):\n{named.stderr}")
 
     # The runner judges a panic by where it was raised: a #[track_caller] function reports
     # its panics at its caller's line, so one in the mock would move them into the suite.

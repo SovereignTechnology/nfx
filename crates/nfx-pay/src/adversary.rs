@@ -1907,7 +1907,7 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
             h.mint_outage(false);
         }
         h.advance(SECOND);
-        let mut again = open(h, &e, 1).await;
+        let mut again = open_unbanned(h, &e, 1, &format!("nor anyone banned (late {late})")).await;
         let q = again.quote().clone();
         assert_eq!(
             (q.accepted_upto, q.spent_total),
