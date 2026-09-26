@@ -1706,11 +1706,39 @@ pub enum SeederFlaw {
     WaitsForAnyUnderWay,
     /// A payment is served by any read, as a hello is.
     PayServedByAnyRead,
-    /// A takeover at the deadline frees the turn without noting the floor.
-    TakeoverWritesNoFloor,
     /// A `hello` waits only for the payment holding the turn as it arrives: once that one
     /// has left it, the `hello` goes on, whatever payment holds the turn by then.
     HelloWaitsForFirstOnly,
+    /// Notes a turn held past its payment's deadline as freed when it is taken over or
+    /// released, not at the deadline: a read sent in between serves no `hello` behind it.
+    FreedAfterDeadline,
+    /// A waited `hello` takes its floor at the first freeing it sees (a new payment holding
+    /// the turn), not at the last before it finds the turn free: that payment's own read
+    /// serves it.
+    FloorAtFirstWake,
+    /// A `hello` behind several payments quotes the account as it stood when the payment it
+    /// first waited for left the turn.
+    QuoteAtFirstWake,
+    /// A waiting `hello` stops counting toward the session cap once the payment it first
+    /// waited for has left the turn, though it waits on behind the next.
+    HelloUncountedAfterFirst,
+    /// A waited `hello`'s floor is applied to reads that are back, not to reads under way:
+    /// it waits for a read sent before its wait ended.
+    FloorIgnoredForUnderWay,
+    /// A `hello` waits for any read of its account under way, serving it or not.
+    HelloWaitsForAnyUnderWay,
+    /// A payment's read is counted in the second the payment first looked, not the one it
+    /// is sent in.
+    PayCountedAtFirstLook,
+    /// An entry at or past its deadline takes a read's place, and abandons it, before it
+    /// finds it may send nothing: a read never sent is counted.
+    PlaceTakenPastDeadline,
+    /// A payment waiting for its account's turn is answered only once it takes the turn,
+    /// not at its own deadline.
+    TurnWaitPastDeadline,
+    /// Counts the deadline to which a payment holds the turn from when it took the turn,
+    /// not from its arrival.
+    HolderDeadlineFromTurn,
 }
 
 /// A defect planted in a mock viewer, to prove the adversary suite catches it.
@@ -2033,11 +2061,15 @@ struct State {
     /// The second each account's own entries last read its swaps, and each read sent in it:
     /// kept for that second.
     own_reads: HashMap<Key, OwnReads>,
+    /// The position a waiting `hello` noted as the payment it first waited for left the
+    /// turn ([`SeederFlaw::QuoteAtFirstWake`] only).
+    first_wake_position: HashMap<Key, (u64, u64, u64)>,
 }
 
 /// An account's own reads in one second: the second, each read sent in it, and how many had
 /// been sent when its turn was last freed that second (a `hello` that waited for the turn
-/// reads after it: none of those serves it).
+/// reads after it: none of those serves it). A turn freed at its payment's deadline was
+/// freed as that second began, and counts none.
 type OwnReads = (u64, Vec<OwnRead>, usize);
 
 /// One read of an account's swaps, sent by a payment of `by` (`None`: a `hello`), covering
@@ -2530,6 +2562,8 @@ impl Inner {
             || (proofs.is_some() && self.has(SeederFlaw::PayWaitsForRead));
         let first_in_time = until.is_none_or(|u| self.clock.now() < u);
         let first_look = self.clock.now();
+        let at_first_look = self.has(SeederFlaw::CountedAtFirstLook)
+            || (proofs.is_some() && self.has(SeederFlaw::PayCountedAtFirstLook));
         let mut waited_in = None;
         loop {
             let now = self.clock.now();
@@ -2611,7 +2645,12 @@ impl Inner {
                                     .enumerate()
                                     .any(|(i, r)| serves(i, r) && back(r)),
                                 reads.iter().enumerate().any(|(i, r)| {
-                                    (serves(i, r) || self.has(SeederFlaw::WaitsForAnyUnderWay))
+                                    (serves(i, r)
+                                        || (self.has(SeederFlaw::FloorIgnoredForUnderWay)
+                                            && serves(i.max(from), r))
+                                        || self.has(SeederFlaw::WaitsForAnyUnderWay)
+                                        || (proofs.is_none()
+                                            && self.has(SeederFlaw::HelloWaitsForAnyUnderWay)))
                                         && r.state == ReadState::UnderWay
                                 }),
                                 sent,
@@ -2650,6 +2689,12 @@ impl Inner {
                         Plan::NextSecond
                     }
                 } else if !in_time && !self.has(SeederFlaw::ReadsPastDeadline) {
+                    if self.has(SeederFlaw::PlaceTakenPastDeadline) {
+                        let index = self.take_place(&mut st, slot, now, proofs.clone(), need);
+                        if let Some((_, reads, _)) = st.own_reads.get_mut(&slot) {
+                            reads[index].state = ReadState::Abandoned;
+                        }
+                    }
                     Plan::Done // no time left to send it: no read, and none counted
                 } else if self.has(SeederFlaw::PlaceTakenAfterCheck) {
                     Plan::Read(None)
@@ -2662,11 +2707,7 @@ impl Inner {
                     } else {
                         need
                     };
-                    let at = if self.has(SeederFlaw::CountedAtFirstLook) {
-                        first_look
-                    } else {
-                        now
-                    };
+                    let at = if at_first_look { first_look } else { now };
                     let index = self.take_place(&mut st, slot, at, proofs.clone(), covers);
                     Plan::Read(Some((index, lost, flight)))
                 }
@@ -2724,11 +2765,7 @@ impl Inner {
                     return;
                 }
                 Plan::Read(Some((index, lost, flight))) => {
-                    let at = if self.has(SeederFlaw::CountedAtFirstLook) {
-                        first_look
-                    } else {
-                        now
-                    };
+                    let at = if at_first_look { first_look } else { now };
                     let reading = Reading::taken(self, slot, at, index);
                     // Sent now, exactly the swaps its place covers: its requests reach the
                     // mint.
@@ -3561,12 +3598,17 @@ impl Inner {
     }
 
     /// Free `key`'s turn: what waits for it goes on, and a `hello` among them reads after
-    /// it, so the second's reads sent by now serve none of them.
+    /// it, so the second's reads sent by now serve none of them. A turn held to its
+    /// payment's deadline was freed at that deadline, however late this runs: every read
+    /// of this second was sent at or after it (deadlines and the clock are whole seconds).
     fn free_turn(&self, st: &mut State, key: Key) {
-        st.paying.remove(&key);
+        let holder = st.paying.remove(&key);
         let now = self.clock.now();
+        let at_deadline =
+            holder.is_some_and(|h| now >= h.deadline) && !self.has(SeederFlaw::FreedAfterDeadline);
         if let Some((at, reads, freed)) = st.own_reads.get_mut(&self.slot(key))
             && *at == now
+            && !at_deadline
             && !(self.has(SeederFlaw::FloorFirstFreeOnly) && *freed > 0)
         {
             *freed = reads.len();
@@ -3607,6 +3649,8 @@ impl Inner {
         let mut waited = false;
         let mut arrival: Option<(u64, usize)> = None;
         let mut first_holder: Option<u64> = None;
+        let mut first_wake: Option<(u64, usize)> = None;
+        let mut uncounted = false;
         poll_fn(|cx| {
             let mut wake = Vec::new();
             let done = {
@@ -3626,21 +3670,14 @@ impl Inner {
                         && !self.has(SeederFlaw::NoDeadline)
                         && !(claim.is_some() && self.has(SeederFlaw::PayNoTakeover));
                     if takeover {
-                        let slot = self.slot(key);
-                        let kept = st.own_reads.get(&slot).map(|r| r.2);
                         wake = self.abandon(&mut st, key, holder);
-                        self.free_turn(&mut st, key);
-                        if self.has(SeederFlaw::TakeoverWritesNoFloor)
-                            && let (Some(k), Some(r)) = (kept, st.own_reads.get_mut(&slot))
-                        {
-                            r.2 = k;
-                        }
                     }
                 }
                 // A payment whose own deadline has passed takes no turn.
-                let over = claim
-                    .and_then(|id| st.pays.get(&id))
-                    .is_some_and(|r| r.abandoned || now >= r.deadline);
+                let over = claim.and_then(|id| st.pays.get(&id)).is_some_and(|r| {
+                    r.abandoned
+                        || (now >= r.deadline && !self.has(SeederFlaw::TurnWaitPastDeadline))
+                });
                 if over && !self.has(SeederFlaw::NoDeadline) {
                     done = Some(false);
                 } else if let Some(holder) = st.paying.get(&key).map(|h| h.pay)
@@ -3649,6 +3686,32 @@ impl Inner {
                         && first_holder.is_some_and(|f| f != holder))
                 {
                     first_holder.get_or_insert(holder);
+                    // A `hello` behind a later payment: the one it first waited for has left.
+                    let moved_on = claim.is_none() && first_holder != Some(holder);
+                    if moved_on && first_wake.is_none() && self.has(SeederFlaw::FloorAtFirstWake) {
+                        let freed = st
+                            .own_reads
+                            .get(&self.slot(key))
+                            .filter(|(at, ..)| *at == now)
+                            .map_or(0, |(_, _, freed)| *freed);
+                        first_wake = Some((now, freed));
+                    }
+                    if moved_on && !uncounted && self.has(SeederFlaw::HelloUncountedAfterFirst) {
+                        uncounted = true;
+                        if let Some(n) = st.hellos_waiting.get_mut(&key.0) {
+                            *n = n.saturating_sub(1);
+                            if *n == 0 {
+                                st.hellos_waiting.remove(&key.0);
+                            }
+                        }
+                    }
+                    if moved_on && self.has(SeederFlaw::QuoteAtFirstWake) {
+                        let position = st
+                            .accounts
+                            .get(&key)
+                            .map_or((0, 0, 0), |a| (a.admitted, a.acked, a.spent));
+                        st.first_wake_position.entry(key).or_insert(position);
+                    }
                     if !waited && self.has(SeederFlaw::FloorAtArrival) {
                         let sent = st
                             .own_reads
@@ -3671,15 +3734,24 @@ impl Inner {
                     .get(&self.slot(key))
                     .filter(|(at, ..)| *at == now)
                     .map_or(0, |(_, _, freed)| *freed);
+                if uncounted {
+                    *st.hellos_waiting.entry(key.0).or_default() += 1; // for its `done`
+                }
                 if done.is_none() {
                     if let Some(id) = claim {
-                        let deadline = st.pays.get(&id).map_or(u64::MAX, |r| r.deadline);
+                        let deadline = if self.has(SeederFlaw::HolderDeadlineFromTurn) {
+                            now + SEEDER_DEADLINE.as_secs()
+                        } else {
+                            st.pays.get(&id).map_or(u64::MAX, |r| r.deadline)
+                        };
                         st.paying.insert(key, Holder { pay: id, deadline });
                     }
                     done = Some(true);
                 }
                 let floor = if self.has(SeederFlaw::FloorAtArrival) {
                     arrival
+                } else if first_wake.is_some() {
+                    first_wake
                 } else {
                     (waited || self.has(SeederFlaw::FloorWithoutWait)).then_some((now, freed))
                 };
@@ -4141,10 +4213,16 @@ impl SeederEngine for MockEngine {
             e.account(&mut st, key);
         }
         // A hello creates no account: a new one quotes zeros.
-        let (mut served, accepted_upto, mut spent_total) = st
+        let mut position = st
             .accounts
             .get(&key)
             .map_or((0, 0, 0), |a| (a.admitted, a.acked, a.spent));
+        if e.has(SeederFlaw::QuoteAtFirstWake)
+            && let Some(noted) = st.first_wake_position.remove(&key)
+        {
+            position = noted;
+        }
+        let (mut served, accepted_upto, mut spent_total) = position;
         let peer_wide = |f: fn(&Account) -> u64| -> u64 {
             st.accounts
                 .iter()

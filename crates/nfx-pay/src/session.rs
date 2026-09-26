@@ -30,11 +30,14 @@ pub trait SeederEngine {
 
     /// A `hello` from `peer`. The session continues the peer's account for the video, and
     /// its quote carries the account's position. A `hello` creates no account. It waits
-    /// while a payment holds the account's turn (each at most to its own deadline, 60 s
-    /// from its arrival, and one arriving meanwhile may take the turn next), so its quote
-    /// never misses an acknowledged one; while it waits it counts toward the peer's session
-    /// cap. It then reads its account's own unknown swaps, if any, which adds their time
-    /// (NFX-07 §3).
+    /// while a payment holds the account's turn (each until it is answered, at most to its
+    /// own deadline, 60 s from its arrival, and one arriving meanwhile may take the turn
+    /// next), so its quote never misses an acknowledged one; while it waits it counts
+    /// toward the peer's session cap. It then reads its account's own unknown swaps, if
+    /// any, which adds their time. After a wait, only a read sent after the turn was last
+    /// freed before it found the turn free serves it; a turn held to a deadline was freed
+    /// as that second began, however late the payment's answer goes out or an entry takes
+    /// the turn over (NFX-07 §3).
     ///
     /// Refused with:
     /// - `banned` for a banned peer;
@@ -88,7 +91,8 @@ pub trait SeederSession {
     /// this call's), the wait for the account's turn, any key fetch and its own reads
     /// included. A payment whose outcome is known by then is answered with it; otherwise
     /// with `mint-unavailable`, and its swap is abandoned: no further request is sent for
-    /// those proofs, and the account is released.
+    /// those proofs, and the account is released. Its turn is freed at the deadline,
+    /// however late this answer goes out or another entry takes the turn over.
     ///
     /// **Late outcomes:** an abandoned swap is settled when its outcome comes. A claim is
     /// credited (the next quote shows it); a spent or invalid outcome bans nobody.
