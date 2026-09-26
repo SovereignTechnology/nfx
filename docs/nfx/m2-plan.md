@@ -43,7 +43,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [twenty-first](reviews/2026-09-24-m2.0-twenty-first-audit.md),
 [twenty-second](reviews/2026-09-24-m2.0-twenty-second-audit.md),
 [twenty-third](reviews/2026-09-24-m2.0-twenty-third-audit.md),
-[twenty-fourth](reviews/2026-09-24-m2.0-twenty-fourth-audit.md)). sovtech's bar for the push
+[twenty-fourth](reviews/2026-09-24-m2.0-twenty-fourth-audit.md),
+[twenty-fifth](reviews/2026-09-24-m2.0-twenty-fifth-audit.md)). sovtech's bar for the push
 is zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -85,9 +86,22 @@ is zero findings, confirmed after the sixth:
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 63 scenarios, each on its own thread under a
   real-time timeout, three of them threaded, run twice (the second time with reads as
-  round trips), and **each of 385 planted defects fails an assertion in its scenario**
-  (a hang, or a panic raised outside the suite, is not a catch), every surviving mutant
-  from all twenty-four audits among them.
+  round trips), and **each of 435 planted defects fails an assertion in its scenario**
+  (a hang, a panic raised outside the suite, or a runtime panic of Rust's own, is not a
+  catch), every surviving mutant from all twenty-five audits among them.
+- **Since the twenty-fifth audit:**
+  - a turn held past its deadline is freed at the deadline, however late its answer, its
+    swap's outcome or a takeover (NFX-07 §3); a payment that takes a dead turn reads the
+    abandoned swap first;
+  - NFX-07 §3a: the watcher reclaims to the active keyset at once, whatever the proofs'
+    own keysets, and the expiry concession is restated on a true premise;
+  - the mock's third-party claims are made as a mint allows them, and an older keyset's
+    proofs can be held expired;
+  - the suite pins short acks, a late "nothing" keeping its chunks in the cap, refused
+    requests counting nothing, bans expiring for every first entry, and payments and
+    `hello`s behind several payments;
+  - the runner no longer counts Rust's own runtime panics in the suite as catches, and
+    the lock refuses `#[track_caller]` outside the suite.
 - **Since the twenty-fourth audit:**
   - NFX-07 §3 says what the mock does: a `hello` waits while any payment holds its
     account's turn, each to its own deadline; payments take the turn in no set order; a
