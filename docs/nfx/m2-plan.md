@@ -42,7 +42,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [twentieth](reviews/2026-09-24-m2.0-twentieth-audit.md),
 [twenty-first](reviews/2026-09-24-m2.0-twenty-first-audit.md),
 [twenty-second](reviews/2026-09-24-m2.0-twenty-second-audit.md),
-[twenty-third](reviews/2026-09-24-m2.0-twenty-third-audit.md)). sovtech's bar for the push
+[twenty-third](reviews/2026-09-24-m2.0-twenty-third-audit.md),
+[twenty-fourth](reviews/2026-09-24-m2.0-twenty-fourth-audit.md)). sovtech's bar for the push
 is zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -84,8 +85,18 @@ is zero findings, confirmed after the sixth:
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 63 scenarios, each on its own thread under a
   real-time timeout, three of them threaded, run twice (the second time with reads as
-  round trips), and **each of 362 planted defects fails an assertion in its scenario**
-  (a hang is not a catch), every surviving mutant from all twenty-three audits among them.
+  round trips), and **each of 385 planted defects fails an assertion in its scenario**
+  (a hang, or a panic raised outside the suite, is not a catch), every surviving mutant
+  from all twenty-four audits among them.
+- **Since the twenty-fourth audit:**
+  - NFX-07 §3 says what the mock does: a `hello` waits while any payment holds its
+    account's turn, each to its own deadline; payments take the turn in no set order; a
+    waited `hello`'s wait ends at the turn's last freeing before it found it free;
+  - NFX-07 §3a: the watcher pays again after a 12003 only if every spent input was its
+    own, and proofs lost to the expiry count toward paying again;
+  - older-keyset proofs survive a rotation in the mock, as in CDK;
+  - one runner for the suite and the mutants, which counts only a failed assertion of the
+    suite as a catch; a harness hook that ignores a request fails its scenario.
 - **Since the twenty-third audit:**
   - a waited `hello`'s floor is taken as it finds the turn free; a read's coverage is fixed
     as its place is taken, and exactly those swaps are sent;
