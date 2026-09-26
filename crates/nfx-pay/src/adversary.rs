@@ -5185,7 +5185,7 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
         "nothing was claimed"
     );
 
-    a_ban_expires_for_a_payment_on_its_own_session(h).await;
+    a_ban_expires_on_its_own_session(h).await;
 }
 
 /// A seeder refuses to start with a configuration NFX-07 §3 forbids, and starts with one
@@ -9887,61 +9887,80 @@ async fn older_proofs_reclaimed_into_an_expiring_keyset<H: Harness>(h: &H) {
 
 /// A swap learnt as nothing pays for nothing: its account's chunks stay in the global count
 /// until they age out at `debt_ttl`, whether its answer was lost or it was abandoned in
-/// flight. Here its watcher took the proofs back, so it can no longer go through.
+/// flight, and whoever learns it: the sweep, the account's own hello, or its next payment
+/// (whose own swap then finds the mint down). Here its watcher took the proofs back, so it
+/// can no longer go through.
 async fn a_swap_learnt_as_nothing_frees_no_debt<H: Harness>(h: &H) {
     for in_flight in [false, true] {
-        let e = h.engine(1, 4, 4);
-        let admitted = h.clock_secs();
-        let mut s = open(h, &e, 1).await;
-        assert_eq!(serve(h, &mut s, 0, 4), 4, "the cap is full");
-        let p = Pay {
-            upto_chunk: 4,
-            token: h.token(4).await,
-        };
-        if in_flight {
-            h.hold_next_swap();
-            let (r, ()) = both(s.pay(&p), async {
-                yield_once().await;
-                h.advance(Duration::from_secs(60));
-            })
-            .await;
-            assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
-            assert!(h.steal(&p.token).await, "its watcher takes the proofs back");
-        } else {
-            h.time_out_next_swap();
-            h.mint_outage(true);
-            assert!(is_rej(&s.pay(&p).await, &RejCode::MintUnavailable));
-            h.mint_outage(false);
-            assert!(h.steal(&p.token).await, "its watcher takes the proofs back");
-            h.release_swaps().await; // the given-up request finds its inputs spent
+        for by in ["the sweep", "its hello", "a payment"] {
+            let e = h.engine(1, 4, 4);
+            let admitted = h.clock_secs();
+            let mut s = open(h, &e, 1).await;
+            assert_eq!(serve(h, &mut s, 0, 4), 4, "the cap is full");
+            let p = Pay {
+                upto_chunk: 4,
+                token: h.token(4).await,
+            };
+            if in_flight {
+                h.hold_next_swap();
+                let (r, ()) = both(s.pay(&p), async {
+                    yield_once().await;
+                    h.advance(Duration::from_secs(60));
+                })
+                .await;
+                assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+                assert!(h.steal(&p.token).await, "its watcher takes the proofs back");
+            } else {
+                h.time_out_next_swap();
+                h.mint_outage(true);
+                assert!(is_rej(&s.pay(&p).await, &RejCode::MintUnavailable));
+                h.mint_outage(false);
+                assert!(h.steal(&p.token).await, "its watcher takes the proofs back");
+                h.release_swaps().await; // the given-up request finds its inputs spent
+            }
+            h.advance(SECOND); // no read of the account's is reused
+            let before = h.state_reads();
+            match by {
+                "the sweep" => e.sweep().await,
+                "its hello" => drop(open(h, &e, 1).await),
+                _ => {
+                    h.before_next_swap(MintEvent::Down);
+                    let r = s
+                        .pay(&Pay {
+                            upto_chunk: 4,
+                            token: h.token(4).await,
+                        })
+                        .await;
+                    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+                    h.mint_outage(false);
+                }
+            }
+            assert!(
+                h.state_reads() > before,
+                "{by} reads the swap (in flight {in_flight})"
+            );
+            let mut other = open(h, &e, 2).await;
+            assert_eq!(
+                serve(h, &mut other, 0, 4),
+                0,
+                "a swap learnt as nothing frees none of its chunks from the global cap (learnt by \
+                 {by}, in flight {in_flight})"
+            );
+            let aged = admitted + h.debt_ttl().as_secs();
+            h.advance(Duration::from_secs(aged - 1 - h.clock_secs()));
+            assert_eq!(
+                serve(h, &mut other, 0, 4),
+                0,
+                "still counted a second before debt_ttl (learnt by {by}, in flight {in_flight})"
+            );
+            h.advance(SECOND);
+            assert_eq!(
+                serve(h, &mut other, 0, 4),
+                4,
+                "they age out at debt_ttl (learnt by {by}, in flight {in_flight})"
+            );
+            h.release_swaps().await;
         }
-        let before = h.state_reads();
-        e.sweep().await;
-        assert!(
-            h.state_reads() > before,
-            "the sweep reads the swap (in flight {in_flight})"
-        );
-        let mut other = open(h, &e, 2).await;
-        assert_eq!(
-            serve(h, &mut other, 0, 4),
-            0,
-            "a swap learnt as nothing frees none of its chunks from the global cap (in flight \
-             {in_flight})"
-        );
-        let aged = admitted + h.debt_ttl().as_secs();
-        h.advance(Duration::from_secs(aged - 1 - h.clock_secs()));
-        assert_eq!(
-            serve(h, &mut other, 0, 4),
-            0,
-            "still counted a second before debt_ttl (in flight {in_flight})"
-        );
-        h.advance(SECOND);
-        assert_eq!(
-            serve(h, &mut other, 0, 4),
-            4,
-            "they age out at debt_ttl (in flight {in_flight})"
-        );
-        h.release_swaps().await;
     }
 }
 
@@ -9988,40 +10007,65 @@ async fn debt_ages_while_a_swap_is_unknown<H: Harness>(h: &H) {
     h.release_swaps().await;
 }
 
-/// A ban expires at `ban_ttl` for a payment on the session it was earned on, when that
-/// payment is the first entry to come then: the payment expires it itself.
-async fn a_ban_expires_for_a_payment_on_its_own_session<H: Harness>(h: &H) {
-    let e = h.engine(1, 4, 1000);
-    let mut s = open(h, &e, 1).await;
-    assert_eq!(serve(h, &mut s, 0, 2), 2);
-    let spent = h.token(2).await;
-    assert!(h.steal(&spent).await, "someone else spent it");
-    let r = s
-        .pay(&Pay {
-            upto_chunk: 2,
-            token: spent,
-        })
-        .await;
-    assert!(is_rej(&r, &RejCode::Spent), "{r:?}");
-    h.advance(h.ban_ttl() - SECOND);
-    let r = s
-        .pay(&Pay {
-            upto_chunk: 2,
-            token: h.token(2).await,
-        })
-        .await;
-    assert!(is_rej(&r, &RejCode::Banned), "banned until ban_ttl: {r:?}");
-    h.advance(SECOND);
-    let r = s
-        .pay(&Pay {
-            upto_chunk: 2,
-            token: h.token(2).await,
-        })
-        .await;
-    assert!(
-        matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (2, 2)),
-        "at ban_ttl the ban has expired, for a payment on the session it was earned on: {r:?}"
-    );
+/// A ban expires at `ban_ttl` on the session it was earned on, whatever comes first then: a
+/// payment or a request expires it itself, and the session's `banned` says so.
+async fn a_ban_expires_on_its_own_session<H: Harness>(h: &H) {
+    for first in ["a payment", "a request", "banned"] {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        assert_eq!(serve(h, &mut s, 0, 2), 2);
+        let spent = h.token(2).await;
+        assert!(h.steal(&spent).await, "someone else spent it");
+        let r = s
+            .pay(&Pay {
+                upto_chunk: 2,
+                token: spent,
+            })
+            .await;
+        assert!(is_rej(&r, &RejCode::Spent), "{r:?}");
+        h.advance(h.ban_ttl() - SECOND);
+        match first {
+            "a payment" => {
+                let r = s
+                    .pay(&Pay {
+                        upto_chunk: 2,
+                        token: h.token(2).await,
+                    })
+                    .await;
+                assert!(is_rej(&r, &RejCode::Banned), "banned until ban_ttl: {r:?}");
+                h.advance(SECOND);
+                let r = s
+                    .pay(&Pay {
+                        upto_chunk: 2,
+                        token: h.token(2).await,
+                    })
+                    .await;
+                assert!(
+                    matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (2, 2)),
+                    "at ban_ttl the ban has expired, for a payment on the session it was earned \
+                     on: {r:?}"
+                );
+            }
+            "a request" => {
+                assert!(!s.admit(&h.chunk(2)), "banned until ban_ttl");
+                h.advance(SECOND);
+                assert!(
+                    s.admit(&h.chunk(2)),
+                    "at ban_ttl the ban has expired, for a request on the session it was earned \
+                     on"
+                );
+            }
+            _ => {
+                assert!(s.banned(), "banned until ban_ttl");
+                h.advance(SECOND);
+                assert!(
+                    !s.banned(),
+                    "at ban_ttl the ban has expired, for the banned() of the session it was \
+                     earned on"
+                );
+            }
+        }
+    }
 }
 
 /// A request that is not admitted counts toward nothing: requests for files of another

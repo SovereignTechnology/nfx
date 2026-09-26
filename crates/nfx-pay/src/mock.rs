@@ -1845,6 +1845,24 @@ pub enum SeederFlaw {
     /// Refuses a banned peer's request, but counts it to its account (its window and its
     /// `served`), not to the global count.
     BannedAdmitCountsToAccount,
+    /// A swap learnt as nothing by its account's own `hello` or payment frees the account's
+    /// chunks up to the payment from the global count; one the sweep learns frees none.
+    OwnNothingFreesDebt,
+    /// A swap learnt as nothing by a payment of its account frees the account's chunks up
+    /// to the payment from the global count; one a `hello` or the sweep learns frees none.
+    PayNothingFreesDebt,
+    /// A swap abandoned in flight and learnt as nothing by its account's own `hello` or
+    /// payment frees the account's chunks up to the payment from the global count; one
+    /// whose answer was lost, or that the sweep learns, frees none.
+    OwnNothingInFlightFreesDebt,
+    /// A swap abandoned in flight and learnt as nothing by a payment of its account frees
+    /// the account's chunks up to the payment from the global count; one whose answer was
+    /// lost, or that a `hello` or the sweep learns, frees none.
+    PayNothingInFlightFreesDebt,
+    /// A request checks its peer's ban without first expiring the bans past `ban_ttl`.
+    AdmitBanNotAged,
+    /// A session's `banned` answers without first expiring the bans past `ban_ttl`.
+    BannedNotAged,
 }
 
 /// A defect planted in a mock viewer, to prove the adversary suite catches it.
@@ -2231,6 +2249,17 @@ enum Plan {
     Read(Option<(usize, Vec<Unknown>, Vec<InFlight>)>),
 }
 
+/// Who applies a read of swap state: the sweep, or an account's own entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Learner {
+    /// The background sweep.
+    Sweep,
+    /// The account's own `hello`.
+    Hello,
+    /// A payment of the account.
+    Pay,
+}
+
 /// A read of swap state, sent, and not yet applied: its swaps, and what it found for each.
 struct Learnt {
     lost: Vec<Unknown>,
@@ -2414,11 +2443,12 @@ impl Inner {
     /// after it became unknown is completed: the seeder sends its swap again, with the
     /// same outputs, and settles it as that answer says.
     /// Whether it read anything. `until`: the reads, and completions, end then (a
-    /// payment's deadline): one still unanswered is abandoned, and proves nothing.
-    fn learn(&self, scope: Option<Key>, until: Option<u64>) -> bool {
+    /// payment's deadline): one still unanswered is abandoned, and proves nothing. `by`:
+    /// who applies it.
+    fn learn(&self, scope: Option<Key>, until: Option<u64>, by: Learner) -> bool {
         match self.learn_read(scope, until) {
             Some(learnt) => {
-                self.learn_apply(&learnt);
+                self.learn_apply(&learnt, by);
                 true
             }
             None => false,
@@ -2497,8 +2527,9 @@ impl Inner {
         })
     }
 
-    /// The apply half of [`Inner::learn`]: each decision taken for a swap still undecided.
-    fn learn_apply(&self, learnt: &Learnt) {
+    /// The apply half of [`Inner::learn`]: each decision taken for a swap still undecided,
+    /// by `by`.
+    fn learn_apply(&self, learnt: &Learnt, by: Learner) {
         let (lost, flight, reads) = (&learnt.lost, &learnt.flight, &learnt.reads);
         let (lost_reads, flight_reads) = reads.split_at(lost.len());
         let decided = |read: Read| matches!(read, Read::Claimed | Read::Nothing);
@@ -2522,7 +2553,7 @@ impl Inner {
                 }
                 if read == Read::Claimed {
                     self.settle_late(&mut st, &u.pay, Swap::Claimed);
-                } else if self.has(SeederFlaw::LateNothingFreesDebt) {
+                } else if self.nothing_frees(by, false) {
                     self.free_unpaid(&mut st, &u.pay);
                 }
             }
@@ -2546,9 +2577,7 @@ impl Inner {
                     }
                     if read == Read::Claimed {
                         self.settle_late(&mut st, pay, Swap::Claimed);
-                    } else if self.has(SeederFlaw::LateNothingFreesDebt)
-                        || self.has(SeederFlaw::NothingInFlightFreesDebt)
-                    {
+                    } else if self.nothing_frees(by, true) {
                         self.free_unpaid(&mut st, pay);
                     }
                     st.pays.remove(&id);
@@ -2573,9 +2602,20 @@ impl Inner {
         wake_all(wake);
     }
 
-    /// What [`SeederFlaw::LateNothingFreesDebt`] and [`SeederFlaw::NothingInFlightFreesDebt`]
-    /// free for a swap learnt as nothing: its account's unpaid chunks up to the payment leave
-    /// the global count, unpaid.
+    /// Whether a swap learnt as nothing by `by` frees its account's chunks from the global
+    /// count (`in_flight`: abandoned in flight, else its answer lost): only a flaw's does.
+    fn nothing_frees(&self, by: Learner, in_flight: bool) -> bool {
+        let (own, pay) = (by != Learner::Sweep, by == Learner::Pay);
+        self.has(SeederFlaw::LateNothingFreesDebt)
+            || (in_flight && self.has(SeederFlaw::NothingInFlightFreesDebt))
+            || (own && self.has(SeederFlaw::OwnNothingFreesDebt))
+            || (pay && self.has(SeederFlaw::PayNothingFreesDebt))
+            || (own && in_flight && self.has(SeederFlaw::OwnNothingInFlightFreesDebt))
+            || (pay && in_flight && self.has(SeederFlaw::PayNothingInFlightFreesDebt))
+    }
+
+    /// What the flaws of [`Inner::nothing_frees`] free for a swap learnt as nothing: its
+    /// account's unpaid chunks up to the payment leave the global count, unpaid.
     fn free_unpaid(&self, st: &mut State, pay: &Settle) {
         let Some(a) = st.accounts.get(&pay.key) else {
             return;
@@ -2693,6 +2733,11 @@ impl Inner {
         floor: Option<(u64, usize)>,
     ) {
         let slot = self.slot(key);
+        let by = if proofs.is_some() {
+            Learner::Pay
+        } else {
+            Learner::Hello
+        };
         // A `hello` that waited for a payment: the reads of its second sent before its wait
         // ended (`floor`, noted as it saw the turn free) serve it not.
         let after_wait = floor.is_some() && !self.has(SeederFlaw::WaitedHelloReusesEarlierRead);
@@ -2899,10 +2944,10 @@ impl Inner {
                         let reading =
                             Reading::start(self, slot, now, proofs.clone(), learnt.covers());
                         next_poll().await;
-                        self.learn_apply(&learnt);
+                        self.learn_apply(&learnt, by);
                         reading.back();
                     } else if let Some(learnt) = self.learn_read(Some(key), until) {
-                        self.learn_apply(&learnt);
+                        self.learn_apply(&learnt, by);
                         self.record_read(
                             slot,
                             now,
@@ -2937,7 +2982,7 @@ impl Inner {
                             );
                         }
                     }
-                    self.learn_apply(&learnt);
+                    self.learn_apply(&learnt, by);
                     reading.back();
                     return;
                 }
@@ -4308,7 +4353,7 @@ impl SeederEngine for MockEngine {
         if self.0.net.round_trips() {
             next_poll().await;
         }
-        self.0.learn(None, None);
+        self.0.learn(None, None, Learner::Sweep);
     }
 
     async fn hello(&self, peer: &PeerId, hello: &Hello) -> Result<MockSession, Rej> {
@@ -4363,7 +4408,7 @@ impl SeederEngine for MockEngine {
         }
         if e.has(SeederFlaw::HelloReadsBeforeTurn) {
         } else if e.has(SeederFlaw::HelloReadsAll) {
-            e.learn(None, None);
+            e.learn(None, None, Learner::Hello);
         } else if e.has(SeederFlaw::HelloAwaitsRead) {
             let now = e.clock.now();
             let reuse = e
@@ -4374,7 +4419,7 @@ impl SeederEngine for MockEngine {
             if !reuse && e.has_reads(key) {
                 next_poll().await; // the round trip, counted only once it is back
                 if let Some(learnt) = e.learn_read(Some(key), None) {
-                    e.learn_apply(&learnt);
+                    e.learn_apply(&learnt, Learner::Hello);
                     e.record_read(key, now, None, learnt.covers(), ReadState::Back);
                 }
             }
@@ -4773,7 +4818,13 @@ impl SeederSession for MockSession {
     fn admit(&mut self, sha256: &str) -> bool {
         let e = self.e.clone();
         let mut st = e.state();
-        e.age(&mut st);
+        if e.has(SeederFlaw::AdmitBanNotAged) {
+            let bans = st.banned.clone(); // its debt ages, its bans do not
+            e.age(&mut st);
+            st.banned = bans;
+        } else {
+            e.age(&mut st);
+        }
         if e.peer_banned(&st, self.key) && !e.has(SeederFlaw::AdmitIgnoresBan) {
             if e.has(SeederFlaw::BannedAdmitCounts) || e.has(SeederFlaw::BannedAdmitCountsToAccount)
             {
@@ -4875,7 +4926,9 @@ impl SeederSession for MockSession {
 
     fn banned(&self) -> bool {
         let mut st = self.e.state();
-        self.e.age(&mut st);
+        if !self.e.has(SeederFlaw::BannedNotAged) {
+            self.e.age(&mut st);
+        }
         self.e.peer_banned(&st, self.key)
     }
 }
@@ -6174,7 +6227,7 @@ impl Harness for MockHarness {
     fn sweep_during_next_read(&self, engine: &MockEngine) {
         let e = engine.0.clone();
         self.net.ledger().during_read = Some(Box::new(move || {
-            e.learn(None, None);
+            e.learn(None, None, Learner::Sweep);
         }));
     }
 
