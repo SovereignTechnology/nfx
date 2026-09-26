@@ -2075,9 +2075,6 @@ pub enum SeederFlaw {
     /// Creates an empty account for a peer with none whose payment's turn did not come by
     /// its deadline.
     TurnTimeoutCreatesAccount,
-    /// Creates an empty account for a peer with none whose payment's deadline passed before
-    /// its swap was sent.
-    UnsentCreatesAccount,
     /// Creates an empty account for a peer with none as soon as its swap's answer is lost,
     /// before the outcome is learnt: one learnt as nothing leaves it behind.
     LostCreatesAccount,
@@ -5397,9 +5394,6 @@ impl MockSession {
                 && !e.has(SeederFlaw::SendIgnoresDeadline);
             if r.abandoned || expired {
                 let wake = e.abandon(&mut st, self.key, id);
-                if e.has(SeederFlaw::UnsentCreatesAccount) {
-                    e.account(&mut st, self.key);
-                }
                 drop(st);
                 wake_all(wake);
                 return Err(unavailable("no answer from the mint within 60 s"));

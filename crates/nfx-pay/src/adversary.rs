@@ -6245,7 +6245,7 @@ async fn unavailable_payments_keep_nothing<H: Harness>(h: &H) {
         "free identities' payments refused mint-unavailable for want of the mint's keys leave \
          nothing behind"
     );
-    // Keys that come at the deadline: too late to swap. A fresh seeder has none cached.
+    // Keys that come at the deadline are not used (NFX-07 §3). A fresh seeder has none cached.
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     h.hold_key_fetches();
@@ -6268,7 +6268,7 @@ async fn unavailable_payments_keep_nothing<H: Harness>(h: &H) {
     assert_eq!(
         h.identities_held(&e),
         0,
-        "a payment whose deadline passed before its swap was sent leaves nothing behind"
+        "a payment whose keys came only at its deadline leaves nothing behind"
     );
     // Two payments of one account from the same second: the first holds the turn, its keys
     // held, so the second's turn never comes.

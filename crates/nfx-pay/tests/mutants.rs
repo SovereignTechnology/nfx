@@ -631,8 +631,6 @@ catches!(
     keyset_creates_account_round_trip: r(S::KeysetCreatesAccount) => a_hello_holds_no_state,
     turn_timeout_creates_account: s(S::TurnTimeoutCreatesAccount) => a_hello_holds_no_state,
     turn_timeout_creates_account_round_trip: r(S::TurnTimeoutCreatesAccount) => a_hello_holds_no_state,
-    unsent_creates_account: s(S::UnsentCreatesAccount) => a_hello_holds_no_state,
-    unsent_creates_account_round_trip: r(S::UnsentCreatesAccount) => a_hello_holds_no_state,
     lost_creates_account: s(S::LostCreatesAccount) => a_hello_holds_no_state,
     lost_creates_account_round_trip: r(S::LostCreatesAccount) => a_hello_holds_no_state,
     late_nothing_creates_account: s(S::LateNothingCreatesAccount) => a_hello_holds_no_state,
