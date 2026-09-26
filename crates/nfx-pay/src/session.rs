@@ -42,11 +42,15 @@ pub trait SeederEngine {
     /// over, and a `hello` that comes after that deadline did not wait (NFX-07 §3).
     ///
     /// Refused with:
-    /// - `banned` for a banned peer, checked as it arrives, before any wait or read, and
+    /// - `banned` for a banned peer, whatever else it names (a video not served, an open
+    ///   session's id, one past the cap), checked as it arrives, before any wait or read, and
     ///   again as it answers, after its wait and its reads;
     /// - `unknown-video` for a video this seeder does not serve;
-    /// - `bad-session` for a session id that is open, or beyond the per-peer cap on open
-    ///   and waiting sessions, counted across all videos.
+    /// - `bad-session` for a session id that is open, on any video, or beyond the per-peer
+    ///   cap on open and waiting sessions, counted across all videos.
+    ///
+    /// A refused `hello` leaves nothing: no account, no place under the cap, and its
+    /// session id not open.
     async fn hello(&self, peer: &PeerId, hello: &Hello) -> Result<Self::Session, Rej>;
 
     /// Learn the outcome of every swap left unknown, every account's, as a seeder's
@@ -72,6 +76,8 @@ pub trait SeederSession {
     /// - the peer is banned;
     /// - the file is not this video's;
     /// - the chunk is not pre-paid and the account's window or the global cap is full.
+    ///
+    /// A refused request counts nowhere and creates no account.
     fn admit(&mut self, sha256: &str) -> bool;
 
     /// Handle a `pay` (NFX-07 §3), one at a time per account; bans are checked when its
@@ -84,7 +90,7 @@ pub trait SeederSession {
     /// - `spent` or invalid proofs: refused, and the peer is banned;
     /// - an unreachable mint: `mint-unavailable`, which is not a ban.
     ///
-    /// A refusal changes no accounting and claims nothing.
+    /// A refusal changes no accounting, creates no account and claims nothing.
     ///
     /// Once its checks pass, and just before its swap, it reads its account's own unknown
     /// swaps (NFX-07 §3), and the account's watermark is read again: a payment it no
@@ -350,7 +356,9 @@ pub trait Harness {
     /// The quoted mint's URL.
     fn mint(&self) -> String;
     /// A fresh token worth exactly `amount` sat from the quoted mint, split into
-    /// power-of-two proofs as a real mint issues them.
+    /// power-of-two proofs as a real mint issues them. The suite asks for up to 2^53 + 1
+    /// sat, so the mint's keyset holds every power of two to 2^53 (a default CDK keyset
+    /// stops at 2^31).
     async fn token(&self, amount: u64) -> String;
     /// The same from the mint at `url`, quoted or not.
     async fn token_at(&self, url: &str, amount: u64) -> String;

@@ -12,9 +12,9 @@ macro_rules! catches {
         $(
             #[test]
             fn $test() {
-                // The defect must fail an assertion of the suite: a hang, or a panic raised
-                // in the engine, the harness or a runtime, names no behaviour, so neither is
-                // a catch.
+                // The defect must fail a check of the suite: a hang, a panic raised in the
+                // engine, the harness or a runtime, or one at a line of the suite that makes
+                // no check (a bare unwrap), names no behaviour, so none is a catch.
                 let run = adversary::run_on_a_thread(10, || {
                     tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -32,7 +32,7 @@ macro_rules! catches {
                     }
                     adversary::Ran::Panicked { file, line, .. } => assert!(
                         run.failed_the_suite(),
-                        "{} panicked outside the suite, at {file}:{line}",
+                        "{} failed no check of the suite: it panicked at {file}:{line}",
                         stringify!($scenario)
                     ),
                 }
@@ -575,4 +575,46 @@ catches!(
     viewer_resumed_mint_refusal_stops: v(V::ResumedMintRefusalStops) => a_viewer_refuses_quotes_it_cannot_honour,
     viewer_resumed_ceiling_refusal_stops: v(V::ResumedCeilingRefusalStops) => a_viewer_refuses_quotes_it_cannot_honour,
     viewer_sibling_restores_tries: v(V::SiblingRestoresTries) => an_unavailable_seeder_gets_three_tries_a_session,
+    refusal_creates_account: s(S::RefusalCreatesAccount) => a_hello_holds_no_state,
+    refusal_creates_account_round_trip: r(S::RefusalCreatesAccount) => a_hello_holds_no_state,
+    no_max_int_filter: s(S::NoMaxIntFilter) => an_overflowing_claim_is_underpaid,
+    no_max_int_filter_round_trip: r(S::NoMaxIntFilter) => an_overflowing_claim_is_underpaid,
+    bad_token_creates_account: s(S::BadTokenCreatesAccount) => a_hello_holds_no_state,
+    bad_token_creates_account_round_trip: r(S::BadTokenCreatesAccount) => a_hello_holds_no_state,
+    bad_dleq_creates_account: s(S::BadDleqCreatesAccount) => a_hello_holds_no_state,
+    bad_dleq_creates_account_round_trip: r(S::BadDleqCreatesAccount) => a_hello_holds_no_state,
+    invalid_creates_account: s(S::InvalidCreatesAccount) => a_hello_holds_no_state,
+    invalid_creates_account_round_trip: r(S::InvalidCreatesAccount) => a_hello_holds_no_state,
+    exact_max_int_underpaid: s(S::ExactMaxIntUnderpaid) => an_overflowing_claim_is_underpaid,
+    exact_max_int_underpaid_round_trip: r(S::ExactMaxIntUnderpaid) => an_overflowing_claim_is_underpaid,
+    amount_before_mint: s(S::AmountBeforeMint) => foreign_and_lookalike_mints_are_refused,
+    amount_before_mint_round_trip: r(S::AmountBeforeMint) => foreign_and_lookalike_mints_are_refused,
+    amount_before_dleq: s(S::AmountBeforeDleq) => bad_tokens_are_refused,
+    amount_before_dleq_round_trip: r(S::AmountBeforeDleq) => bad_tokens_are_refused,
+    unknown_video_counted: s(S::UnknownVideoCounted) => a_hello_holds_no_state,
+    unknown_video_counted_round_trip: r(S::UnknownVideoCounted) => a_hello_holds_no_state,
+    open_id_refusal_counted: s(S::OpenIdRefusalCounted) => a_hello_holds_no_state,
+    open_id_refusal_counted_round_trip: r(S::OpenIdRefusalCounted) => a_hello_holds_no_state,
+    banned_hello_counted: s(S::BannedHelloCounted) => a_banned_peer_stays_banned,
+    banned_hello_counted_round_trip: r(S::BannedHelloCounted) => a_banned_peer_stays_banned,
+    banned_hello_keeps_id: s(S::BannedHelloKeepsId) => a_banned_peer_stays_banned,
+    banned_hello_keeps_id_round_trip: r(S::BannedHelloKeepsId) => a_banned_peer_stays_banned,
+    session_id_per_video: s(S::SessionIdPerVideo) => a_session_id_names_one_open_session,
+    session_id_per_video_round_trip: r(S::SessionIdPerVideo) => a_session_id_names_one_open_session,
+    unknown_video_before_ban: s(S::UnknownVideoBeforeBan) => a_banned_peer_stays_banned,
+    unknown_video_before_ban_round_trip: r(S::UnknownVideoBeforeBan) => a_banned_peer_stays_banned,
+    session_id_before_ban: s(S::SessionIdBeforeBan) => a_banned_peer_stays_banned,
+    session_id_before_ban_round_trip: r(S::SessionIdBeforeBan) => a_banned_peer_stays_banned,
+    cap_before_ban: s(S::CapBeforeBan) => a_banned_peer_stays_banned,
+    cap_before_ban_round_trip: r(S::CapBeforeBan) => a_banned_peer_stays_banned,
+    banned_admit_creates_account: s(S::BannedAdmitCreatesAccount) => a_banned_peer_stays_banned,
+    banned_admit_creates_account_round_trip: r(S::BannedAdmitCreatesAccount) => a_banned_peer_stays_banned,
+    banned_pay_creates_account: s(S::BannedPayCreatesAccount) => a_banned_peer_stays_banned,
+    banned_pay_creates_account_round_trip: r(S::BannedPayCreatesAccount) => a_banned_peer_stays_banned,
+    cap_refusal_creates_account: s(S::CapRefusalCreatesAccount) => a_hello_holds_no_state,
+    cap_refusal_creates_account_round_trip: r(S::CapRefusalCreatesAccount) => a_hello_holds_no_state,
+    foreign_creates_account: s(S::ForeignCreatesAccount) => a_hello_holds_no_state,
+    foreign_creates_account_round_trip: r(S::ForeignCreatesAccount) => a_hello_holds_no_state,
+    credit_frees_peer_debt: s(S::CreditFreesPeerDebt) => the_global_cap_holds_whatever_payments_do,
+    credit_frees_peer_debt_round_trip: r(S::CreditFreesPeerDebt) => the_global_cap_holds_whatever_payments_do,
 );

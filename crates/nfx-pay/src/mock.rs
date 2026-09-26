@@ -1999,6 +1999,62 @@ pub enum SeederFlaw {
     /// Reads a swap whose NUT-07 check shows an input spent beside others pending as
     /// pending: it stays unknown, where outputs unsigned with an input spent are nothing.
     SpentBesidePendingUnknown,
+    /// Creates an empty account for a peer whose payment it refuses by its mint or its
+    /// amount: a free identity's refused payment is kept, and its double spend then bans.
+    RefusalCreatesAccount,
+    /// Takes a product above 2^53-1 as due, where it fits in 64 bits: a token paying it
+    /// exactly is swapped, and its `ack` carries a `spent_total` pay/1 cannot write.
+    NoMaxIntFilter,
+    /// Creates an empty account for a peer whose token it refuses as unreadable or of the
+    /// wrong shape.
+    BadTokenCreatesAccount,
+    /// Creates an empty account for a peer whose token it refuses for an invalid DLEQ.
+    BadDleqCreatesAccount,
+    /// Creates an empty account for a peer whose proofs the mint refuses as invalid, and
+    /// so bans a peer that has none.
+    InvalidCreatesAccount,
+    /// Takes a product of exactly 2^53-1 as beyond the bound: `underpaid`.
+    ExactMaxIntUnderpaid,
+    /// Checks the face value before the mint: a foreign token of the wrong amount is
+    /// `underpaid` or `overpaid`, not `bad-mint`.
+    AmountBeforeMint,
+    /// Checks the face value before the DLEQs: a token with an invalid DLEQ and the wrong
+    /// amount is `underpaid` or `overpaid`, not `bad-token`.
+    AmountBeforeDleq,
+    /// Counts a `hello` it refuses `unknown-video` toward the peer's session cap, for good.
+    UnknownVideoCounted,
+    /// Counts a `hello` it refuses for naming an open session's id toward the peer's
+    /// session cap, for good.
+    OpenIdRefusalCounted,
+    /// Counts a `hello` it refuses `banned` after its wait toward the peer's session cap,
+    /// for good.
+    BannedHelloCounted,
+    /// Leaves the session id of a `hello` it refuses `banned` after its wait open.
+    BannedHelloKeepsId,
+    /// Takes a session id as open only on its own video: a `hello` for another video may
+    /// name an open session's id.
+    SessionIdPerVideo,
+    /// Answers a banned peer's `hello` for a video it does not serve `unknown-video`.
+    UnknownVideoBeforeBan,
+    /// Answers a banned peer's `hello` naming an open session's id `bad-session`.
+    SessionIdBeforeBan,
+    /// Answers a banned peer's `hello` past its session cap `bad-session`.
+    CapBeforeBan,
+    /// Creates an empty account for a banned peer's refused request, on a video it has
+    /// none on.
+    BannedAdmitCreatesAccount,
+    /// Creates an empty account for a banned peer's refused payment, on a video it has
+    /// none on.
+    BannedPayCreatesAccount,
+    /// Creates an empty account for a peer with none whose request the full global cap
+    /// refuses.
+    CapRefusalCreatesAccount,
+    /// Creates an empty account for a peer with none whose request for another video's
+    /// file it refuses.
+    ForeignCreatesAccount,
+    /// A payment frees from the global count the chunks up to it of the peer's other
+    /// accounts too.
+    CreditFreesPeerDebt,
 }
 
 /// A defect planted in a mock viewer, to prove the adversary suite catches it.
@@ -3878,6 +3934,10 @@ impl Inner {
         }
         a.acked = a.acked.max(upto);
         a.spent += amount;
+        if self.has(SeederFlaw::CreditFreesPeerDebt) {
+            st.live
+                .retain(|(k, _, n)| !(k.0 == key.0 && *k != key && *n <= upto));
+        }
         if !paid_stays {
             for n in &freed {
                 st.live.remove(&self.debt_key(key, generation, *n));
@@ -3910,6 +3970,9 @@ impl Inner {
                 Err(rej(RejCode::Spent, "a proof is already spent"))
             }
             Swap::Invalid => {
+                if self.has(SeederFlaw::InvalidCreatesAccount) {
+                    self.account(st, key);
+                }
                 if !self.has(SeederFlaw::InvalidNoBan) {
                     self.ban(st, key);
                 }
@@ -4633,7 +4696,18 @@ impl SeederEngine for MockEngine {
         let video = match e.videos.iter().position(|v| v.addr == hello.video) {
             Some(v) => v,
             None if e.has(SeederFlaw::HelloAnyVideo) => 0,
-            None => return Err(rej(RejCode::UnknownVideo, "not served here")),
+            None => {
+                // A banned peer is refused `banned`, whatever video it names.
+                let mut st = e.state();
+                e.age(&mut st);
+                if st.banned.contains_key(peer) && !e.has(SeederFlaw::UnknownVideoBeforeBan) {
+                    return Err(rej(RejCode::Banned, "this peer is banned"));
+                }
+                if e.has(SeederFlaw::UnknownVideoCounted) {
+                    *st.hellos_waiting.entry(*peer).or_default() += 1;
+                }
+                return Err(rej(RejCode::UnknownVideo, "not served here"));
+            }
         };
         let key = (*peer, video);
         let count_key = (
@@ -4644,10 +4718,32 @@ impl SeederEngine for MockEngine {
         {
             let mut st = e.state();
             e.age(&mut st);
+            let id_open = |st: &State| {
+                let open = st.open.get(&hello.session);
+                if e.has(SeederFlaw::SessionIdPerVideo) {
+                    open.is_some_and(|k| k.1 == video)
+                } else {
+                    open.is_some()
+                }
+            };
+            if e.has(SeederFlaw::SessionIdBeforeBan) && id_open(&st) {
+                return Err(rej(RejCode::BadSession, "that session is open"));
+            }
+            let at_cap = |st: &State| {
+                st.open_count.get(&count_key).copied().unwrap_or(0)
+                    + st.hellos_waiting.get(peer).copied().unwrap_or(0)
+                    >= cap
+            };
+            if e.has(SeederFlaw::CapBeforeBan) && at_cap(&st) {
+                return Err(rej(RejCode::BadSession, "too many open sessions"));
+            }
             if e.peer_banned(&st, key) && !e.has(SeederFlaw::HelloBanNotAtArrival) {
                 return Err(rej(RejCode::Banned, "this peer is banned"));
             }
-            if st.open.contains_key(&hello.session) && !e.has(SeederFlaw::SessionIdAnyPeer) {
+            if id_open(&st) && !e.has(SeederFlaw::SessionIdAnyPeer) {
+                if e.has(SeederFlaw::OpenIdRefusalCounted) {
+                    *st.hellos_waiting.entry(*peer).or_default() += 1;
+                }
                 return Err(rej(RejCode::BadSession, "that session is open"));
             }
             let opened = if e.has(SeederFlaw::SessionCapLifetime) {
@@ -4717,9 +4813,19 @@ impl SeederEngine for MockEngine {
             && !e.has(SeederFlaw::HelloBanCheckBeforeRead)
             && !(took_over && e.has(SeederFlaw::HelloTakeoverSkipsBanRecheck));
         if recheck && e.peer_banned(&st, key) {
+            if e.has(SeederFlaw::BannedHelloCounted) {
+                *st.hellos_waiting.entry(*peer).or_default() += 1;
+            }
+            if e.has(SeederFlaw::BannedHelloKeepsId) {
+                st.open.insert(hello.session.clone(), key);
+            }
             return Err(rej(RejCode::Banned, "this peer is banned"));
         }
-        if st.open.contains_key(&hello.session)
+        let id_open = st
+            .open
+            .get(&hello.session)
+            .is_some_and(|k| !e.has(SeederFlaw::SessionIdPerVideo) || k.1 == video);
+        if id_open
             && !e.has(SeederFlaw::SessionIdAnyPeer)
             && !e.has(SeederFlaw::HelloNoSessionRecheck)
         {
@@ -4825,6 +4931,9 @@ impl MockSession {
     fn on_refusal(&mut self, token: &str, upto: u64, amount: u64, amount_refusal: bool) {
         let e = self.e.clone();
         let mut st = e.state();
+        if e.has(SeederFlaw::RefusalCreatesAccount) {
+            e.account(&mut st, self.key);
+        }
         if e.has(SeederFlaw::RefusalCredits) {
             e.credit(&mut st, self.key, (upto, 0), &[], false);
         }
@@ -4839,6 +4948,22 @@ impl MockSession {
         if e.has(SeederFlaw::ClaimsOnRefusal) {
             e.net.claim_first(token);
         }
+    }
+
+    /// Step 4 alone, for the flaws that run it early.
+    fn check_amount(&self, pay: &Pay, acked: u64, amount: u64) -> Result<(), Rej> {
+        let due = pay
+            .upto_chunk
+            .saturating_sub(acked)
+            .checked_mul(self.e.config.price_per_chunk)
+            .filter(|d| *d <= MAX_INT);
+        if due.is_none_or(|d| amount < d) {
+            return Err(rej(RejCode::Underpaid, "short of the chunks claimed"));
+        }
+        if due.is_some_and(|d| amount > d) {
+            return Err(rej(RejCode::Overpaid, "more than the chunks claimed"));
+        }
+        Ok(())
     }
 
     fn settle_now(&self, upto: u64, amount: u64, outcome: Swap) -> Result<Ack, Rej> {
@@ -4872,6 +4997,9 @@ impl MockSession {
         // The structure checks (step 1), on the token as it reads.
         let structure = || -> Result<TokenInfo, Rej> {
             let Some(info) = e.net.read(&pay.token) else {
+                if e.has(SeederFlaw::BadTokenCreatesAccount) {
+                    e.account(&mut e.state(), self.key);
+                }
                 return Err(rej(RejCode::BadToken, "unreadable token"));
             };
             let no_dleq = info.dleq == Dleq::Missing && !e.has(SeederFlaw::NoDleqAccepted);
@@ -4883,6 +5011,9 @@ impl MockSession {
             let shape_bad =
                 info.unit != "sat" || info.mints.len() != 1 || info.locked || no_dleq || too_many;
             if shape_bad && !e.has(SeederFlaw::AcceptsBadTokens) {
+                if e.has(SeederFlaw::BadTokenCreatesAccount) {
+                    e.account(&mut e.state(), self.key);
+                }
                 return Err(rej(
                     RejCode::BadToken,
                     "not a single-mint sat token with DLEQs",
@@ -4912,6 +5043,9 @@ impl MockSession {
                 return Err(rej(RejCode::Stale, "already paid up to there"));
             }
             if ban_now && e.peer_banned(&st, self.key) {
+                if e.has(SeederFlaw::BannedPayCreatesAccount) {
+                    e.account(&mut st, self.key);
+                }
                 return Err(rej(RejCode::Banned, "this peer is banned"));
             }
             (acked, snapshot)
@@ -4937,6 +5071,9 @@ impl MockSession {
                 return Err(rej(RejCode::BadToken, "an invalid DLEQ"));
             }
         }
+        if e.has(SeederFlaw::AmountBeforeMint) {
+            self.check_amount(pay, acked, info.amount)?;
+        }
         // 2. The mint: exactly a quoted URL, before anything is fetched.
         let quoted = if e.has(SeederFlaw::PrefixMint) {
             e.config.mints.iter().any(|q| mint.starts_with(q.as_str()))
@@ -4951,6 +5088,9 @@ impl MockSession {
             let deadline = e.state().pays.get(&id).map_or(0, |r| r.deadline);
             e.learn_here(self.key, info.proofs.clone(), deadline).await;
         }
+        if e.has(SeederFlaw::AmountBeforeDleq) {
+            self.check_amount(pay, acked, info.amount)?;
+        }
         // 3. DLEQ, against the quoted mint's keys, fetched within the deadline.
         if !e.fetch_keys(&mint, id).await {
             return Err(unavailable("no keys from the mint within 60 s"));
@@ -4961,6 +5101,9 @@ impl MockSession {
             e.learn_here(self.key, info.proofs.clone(), deadline).await;
         }
         if info.dleq == Dleq::Invalid && !e.has(SeederFlaw::AcceptsBadTokens) {
+            if e.has(SeederFlaw::BadDleqCreatesAccount) {
+                e.account(&mut e.state(), self.key);
+            }
             return Err(rej(RejCode::BadToken, "an invalid DLEQ"));
         }
         if e.has(SeederFlaw::ReadsBeforeAmount) {
@@ -4974,7 +5117,8 @@ impl MockSession {
         } else {
             chunks
                 .checked_mul(e.config.price_per_chunk)
-                .filter(|d| *d <= MAX_INT)
+                .filter(|d| *d <= MAX_INT || e.has(SeederFlaw::NoMaxIntFilter))
+                .filter(|d| *d < MAX_INT || !e.has(SeederFlaw::ExactMaxIntUnderpaid))
         };
         if due.is_none_or(|d| info.amount < d) {
             self.on_refusal(&pay.token, pay.upto_chunk, info.amount, true);
@@ -5072,7 +5216,7 @@ impl MockSession {
             }
             let due_now = (pay.upto_chunk - acked_now)
                 .checked_mul(e.config.price_per_chunk)
-                .filter(|d| *d <= MAX_INT);
+                .filter(|d| *d <= MAX_INT || e.has(SeederFlaw::NoMaxIntFilter));
             let by_amount = !e.has(SeederFlaw::RecheckStaleOnly);
             if by_amount && due_now.is_none_or(|d| amount < d) {
                 return Err(rej(RejCode::Underpaid, "short of the chunks claimed"));
@@ -5174,6 +5318,9 @@ impl SeederSession for MockSession {
             e.age(&mut st);
         }
         if e.peer_banned(&st, self.key) && !e.has(SeederFlaw::AdmitIgnoresBan) {
+            if e.has(SeederFlaw::BannedAdmitCreatesAccount) {
+                e.account(&mut st, self.key);
+            }
             if e.has(SeederFlaw::BannedAdmitCounts) || e.has(SeederFlaw::BannedAdmitCountsToAccount)
             {
                 let now = e.clock.now();
@@ -5191,6 +5338,9 @@ impl SeederSession for MockSession {
         }
         let member = e.videos[self.key.1].members.contains(sha256);
         if !member && !e.has(SeederFlaw::AdmitsForeignChunks) {
+            if e.has(SeederFlaw::ForeignCreatesAccount) {
+                e.account(&mut st, self.key);
+            }
             if e.has(SeederFlaw::ForeignAdmitCounts) {
                 // Under a generation of its own: it collides with no account's chunk.
                 let generation = st.next_generation;
@@ -5229,6 +5379,9 @@ impl SeederSession for MockSession {
                 global >= e.config.global_cap
             };
             if capped && !e.has(SeederFlaw::NoGlobalCap) {
+                if e.has(SeederFlaw::CapRefusalCreatesAccount) {
+                    e.account(&mut st, self.key);
+                }
                 return false;
             }
         }

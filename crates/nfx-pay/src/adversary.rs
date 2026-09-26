@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
-use nfx_pay_wire::pay::{Ack, Pay, Quote, Rej, RejCode};
+use nfx_pay_wire::pay::{Ack, Hello, Pay, Quote, Rej, RejCode};
 
 use crate::session::{
     BadToken, EngineParams, Harness, MintEvent, SeederEngine, SeederSession, Viewer,
@@ -133,14 +133,23 @@ pub enum Ran {
 }
 
 impl Ran {
-    /// Whether it failed an assertion of the suite: a panic raised in this file, the
-    /// scenarios' own, not in the engine, the harness or a runtime, on the scenario's thread
-    /// or one it spawned ([`rejoin`]). Only the suite's assertions and its named `expect`s
-    /// count: a panic Rust raises of its own at a line of this file (`RUNTIME_PANICS`), or
-    /// one with no message, names no behaviour.
+    /// Whether it failed a check of the suite: a panic raised in this file, the scenarios'
+    /// own, not in the engine, the harness or a runtime, on the scenario's thread or one it
+    /// spawned ([`rejoin`]). Only the suite's checks count, and both of these must hold:
+    /// - the line it was raised at makes one ([`makes_a_check`]): an assertion, `panic!`,
+    ///   `unreachable!` or a named `expect`. So a bare `unwrap`, an index or an overflow at
+    ///   any other line counts nowhere;
+    /// - it is not a panic Rust raises of its own there (`RUNTIME_PANICS`), nor one that
+    ///   names nothing (no message, or `panic!()` and `unreachable!()` bare): a check's line
+    ///   can hold those too.
     #[must_use]
     pub fn failed_the_suite(&self) -> bool {
-        let Self::Panicked { file, payload, .. } = self else {
+        let Self::Panicked {
+            file,
+            line,
+            payload,
+        } = self
+        else {
             return false;
         };
         let message = payload
@@ -148,16 +157,158 @@ impl Ran {
             .copied()
             .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
         file.ends_with("nfx-pay/src/adversary.rs")
-            && message.is_some_and(|m| !RUNTIME_PANICS.iter().any(|p| m.starts_with(p)))
+            && makes_a_check(include_str!("adversary.rs"), *line)
+            && message.is_some_and(|m| {
+                !NAMELESS.contains(&m) && !RUNTIME_PANICS.iter().any(|p| m.starts_with(p))
+            })
     }
 }
+
+/// Whether line `line` (from 1) of the Rust source `source` makes a check in its code: an
+/// assertion (`assert!`, `assert_eq!`, `assert_ne!`), `panic!`, `unreachable!`, or a named
+/// `expect` or `expect_err`. Its comments, and the text of its string and character
+/// literals, are not code: a check named there is not made.
+#[must_use]
+pub fn makes_a_check(source: &str, line: u32) -> bool {
+    const CHECKS: [&str; 7] = [
+        "assert!(",
+        "assert_eq!(",
+        "assert_ne!(",
+        "panic!(",
+        "unreachable!(",
+        ".expect(",
+        ".expect_err(",
+    ];
+    let code = String::from_utf8_lossy(&code_on(source.as_bytes(), line)).into_owned();
+    CHECKS.iter().any(|c| code.contains(c))
+}
+
+/// Where a scan of Rust source is.
+#[derive(Clone, Copy)]
+enum Scan {
+    Code,
+    LineComment,
+    /// In a block comment, nested this deep.
+    BlockComment(u32),
+    Str,
+    /// In a raw string closed by a quote and this many `#`s.
+    RawStr(usize),
+}
+
+/// The code on line `line` (from 1) of the source `s`: its comments left out and its
+/// literals emptied, so literals and comments of any line, before it or on it, cannot pass
+/// for code.
+fn code_on(s: &[u8], line: u32) -> Vec<u8> {
+    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let (mut i, mut at, mut scan, mut code) = (0, 1, Scan::Code, Vec::new());
+    while i < s.len() && at <= line {
+        let (c, rest) = (s[i], &s[i..]);
+        if c == b'\n' {
+            at += 1;
+            if matches!(scan, Scan::LineComment) {
+                scan = Scan::Code;
+            }
+            i += 1;
+            continue;
+        }
+        match scan {
+            Scan::Code if rest.starts_with(b"//") => scan = Scan::LineComment,
+            Scan::Code if rest.starts_with(b"/*") => {
+                scan = Scan::BlockComment(1);
+                i += 1;
+            }
+            Scan::Code if c == b'"' => scan = Scan::Str,
+            Scan::Code if is_ident(c) => {
+                // A whole word (a scan in code is always at a word's start): a raw string's
+                // prefix, or code.
+                let word = rest.iter().take_while(|c| is_ident(**c)).count();
+                let hashes = rest[word..].iter().take_while(|c| **c == b'#').count();
+                let raw = matches!(&rest[..word], b"r" | b"br" | b"cr")
+                    && rest.get(word + hashes) == Some(&b'"');
+                if raw {
+                    scan = Scan::RawStr(hashes);
+                    i += word + hashes;
+                } else {
+                    if at == line {
+                        code.extend_from_slice(&rest[..word]);
+                    }
+                    i += word - 1;
+                }
+            }
+            Scan::Code if c == b'\'' => match char_literal(rest) {
+                Some(len) => i += len - 1,
+                None if at == line => code.push(c),
+                None => {}
+            },
+            Scan::Code if at == line => code.push(c),
+            Scan::Code | Scan::LineComment => {}
+            Scan::BlockComment(depth) if rest.starts_with(b"/*") => {
+                scan = Scan::BlockComment(depth + 1);
+                i += 1;
+            }
+            Scan::BlockComment(depth) if rest.starts_with(b"*/") => {
+                scan = if depth == 1 {
+                    Scan::Code
+                } else {
+                    Scan::BlockComment(depth - 1)
+                };
+                i += 1;
+            }
+            Scan::BlockComment(_) => {}
+            Scan::Str if c == b'\\' => {
+                // An escape: the next byte is part of it, a line break too.
+                if rest.get(1) == Some(&b'\n') {
+                    at += 1;
+                }
+                i += 1;
+            }
+            Scan::Str if c == b'"' => scan = Scan::Code,
+            Scan::Str => {}
+            Scan::RawStr(hashes)
+                if c == b'"'
+                    && rest
+                        .get(1..=hashes)
+                        .is_some_and(|h| h.iter().all(|c| *c == b'#')) =>
+            {
+                scan = Scan::Code;
+                i += hashes;
+            }
+            Scan::RawStr(_) => {}
+        }
+        i += 1;
+    }
+    code
+}
+
+/// How long the character literal is that `rest` starts with, at its quote; `None` if the
+/// quote starts a lifetime or a label instead.
+fn char_literal(rest: &[u8]) -> Option<usize> {
+    let body = &rest[1..];
+    let body = &body[..body.iter().position(|c| *c == b'\n').unwrap_or(body.len())];
+    if body.first() == Some(&b'\\') {
+        // An escape: to the quote after the escaped character.
+        return body.iter().skip(2).position(|c| *c == b'\'').map(|p| p + 4);
+    }
+    let ch = String::from_utf8_lossy(&body[..body.len().min(4)])
+        .chars()
+        .next()?
+        .len_utf8();
+    (body.get(ch) == Some(&b'\'')).then_some(ch + 2)
+}
+
+/// What `panic!()` and `unreachable!()` say bare: like a panic with no message, they name no
+/// behaviour.
+const NAMELESS: [&str; 2] = ["explicit panic", "internal error: entered unreachable code"];
 
 /// How the panics start that Rust raises of its own, reported at the line that caused them:
 /// the compiler's checks (arithmetic that overflows or divides by zero, an index past the
 /// end, a finished future polled again) and the standard library's checks that report their
-/// caller (a range past the end, a bare `unwrap`, a `RefCell` borrowed twice, a `Vec` index
-/// out of range).
-const RUNTIME_PANICS: [&str; 19] = [
+/// caller (a range past the end, a bare `unwrap`, a `RefCell` borrowed twice, a `Vec`, map
+/// or `VecDeque` index out of range, a `Duration` divided by zero, a slice split or copied
+/// out of range, a chunk or window size of zero, a logarithm or root out of its domain,
+/// `clamp` with its bounds crossed, an `Instant` out of range, a `String` cut inside a
+/// character, a poisoned `Once`, a scoped thread that panicked).
+const RUNTIME_PANICS: [&str; 36] = [
     "attempt to ",
     "index out of bounds",
     "range start index",
@@ -177,6 +328,23 @@ const RUNTIME_PANICS: [&str; 19] = [
     "`at` split index",
     "`async fn` resumed after",
     "coroutine resumed after",
+    "no entry found for key",
+    "Out of bounds access",
+    "divide by zero error when dividing duration",
+    "mid > len",
+    "copy_from_slice: source slice length",
+    "destination and source slices have different lengths",
+    "chunk size must be non-zero",
+    "window size must be non-zero",
+    "argument of integer logarithm must be positive",
+    "base of integer logarithm must be at least 2",
+    "argument of integer square root cannot be negative",
+    "min > max",
+    "overflow when adding duration to instant",
+    "overflow when subtracting duration from instant",
+    "assertion failed: self.is_char_boundary(",
+    "Once instance has previously been poisoned",
+    "a scoped thread panicked",
 ];
 
 std::thread_local! {
@@ -599,6 +767,18 @@ pub async fn foreign_and_lookalike_mints_are_refused<H: Harness>(h: &H) {
         refused(h, &mut s, &pay, &RejCode::BadMint).await;
         assert!(!h.dialled(url), "nothing is fetched from {url}");
     }
+    // The mint is checked before the amount: short or over, a foreign token is `bad-mint`.
+    for amount in [11, 13] {
+        let pay = Pay {
+            upto_chunk: 4,
+            token: h.token_at("https://other-mint.example", amount).await,
+        };
+        let r = s.pay(&pay).await;
+        assert!(
+            is_rej(&r, &RejCode::BadMint),
+            "the mint is checked before the amount ({amount}): {r:?}"
+        );
+    }
     settles(h, &mut s, 4, 12, 0).await;
     assert!(h.dialled(&m), "keys come from the quoted mint");
 }
@@ -625,6 +805,29 @@ pub async fn bad_tokens_are_refused<H: Harness>(h: &H) {
         };
         refused(h, &mut s, &pay, &RejCode::BadToken).await;
         assert!(!s.banned(), "{kind:?} is refused, not banned");
+    }
+    // Its structure and its DLEQs are checked before its amount: short or over, each is
+    // still `bad-token`.
+    for kind in [
+        BadToken::WrongUnit,
+        BadToken::TwoMints,
+        BadToken::TooManyProofs,
+        BadToken::Locked,
+        BadToken::NoDleq,
+        BadToken::BadDleq,
+        BadToken::Garbage,
+    ] {
+        for amount in [11, 13] {
+            let pay = Pay {
+                upto_chunk: 4,
+                token: h.bad_token(kind, amount).await,
+            };
+            let r = s.pay(&pay).await;
+            assert!(
+                is_rej(&r, &RejCode::BadToken),
+                "{kind:?} is checked before the amount ({amount}): {r:?}"
+            );
+        }
     }
     settles(h, &mut s, 4, 12, 0).await;
 
@@ -695,6 +898,45 @@ pub async fn an_overflowing_claim_is_underpaid<H: Harness>(h: &H) {
     };
     refused(h, &mut s, &pay, &RejCode::Underpaid).await;
     settles(h, &mut s, 4, 4 * 4096, 0).await;
+    a_product_above_2_53_is_underpaid(h).await;
+}
+
+/// A product above 2^53−1 is `underpaid` below 2^64 too, where no multiplication overflows:
+/// a token paying it exactly, or more, is refused and nothing is claimed. A product of
+/// exactly 2^53−1 is paid.
+async fn a_product_above_2_53_is_underpaid<H: Harness>(h: &H) {
+    let max = (1u64 << 53) - 1;
+    let e = h.engine(1 << 51, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    // Four chunks at 2^51: a product of 2^53.
+    for amount in [max + 1, max + 2] {
+        let pay = Pay {
+            upto_chunk: 4,
+            token: h.token(amount).await,
+        };
+        let r = s.pay(&pay).await;
+        assert!(
+            is_rej(&r, &RejCode::Underpaid),
+            "a product of 2^53 is underpaid, a token of {amount} too: {r:?}"
+        );
+        assert!(!h.claimed_any(&pay.token).await, "nothing is claimed");
+    }
+    settles(h, &mut s, 1, 1 << 51, 0).await;
+
+    let e = h.engine(max, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 1);
+    let r = s
+        .pay(&Pay {
+            upto_chunk: 1,
+            token: h.token(max).await,
+        })
+        .await;
+    assert!(
+        matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (1, max)),
+        "a product of exactly 2^53-1 is paid: {r:?}"
+    );
 }
 
 /// Proofs already spent are `spent` and ban the peer, even re-encoded, and wherever a
@@ -936,6 +1178,109 @@ pub async fn a_banned_peer_stays_banned<H: Harness>(h: &H) {
     a_turn_taken_over_is_checked_for_the_ban(h).await;
     a_hello_checks_the_ban_as_it_answers(h).await;
     a_banned_peers_hello_is_refused_as_it_arrives(h).await;
+    a_banned_peer_is_refused_before_all_else(h).await;
+    a_hello_refused_after_its_wait_keeps_nothing(h).await;
+}
+
+/// A banned peer's `hello` is refused `banned`, whatever else it names: a video not served,
+/// an open session's id, or one past its session cap. Its request and its payment on a
+/// video it has no account on are refused, and create none.
+async fn a_banned_peer_is_refused_before_all_else<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let hellos: Vec<Hello> = (0..h.session_cap())
+        .map(|n| if n == 0 { h.hello() } else { h.hello_for(1) })
+        .collect();
+    let mut sessions = Vec::new();
+    for hello in &hellos {
+        let s = e.hello(&h.peer(1), hello).await;
+        sessions.push(s.expect("up to the session cap"));
+    }
+    assert_eq!(serve(h, &mut sessions[0], 0, 1), 1);
+    let spent = h.token(1).await;
+    assert!(h.steal(&spent).await, "someone else spent it");
+    let r = sessions[0]
+        .pay(&Pay {
+            upto_chunk: 1,
+            token: spent,
+        })
+        .await;
+    assert!(is_rej(&r, &RejCode::Spent), "{r:?}");
+    let held = h.identities_held(&e);
+    for (what, hello) in [
+        ("past its session cap", h.hello()),
+        ("an open session's id", hellos[1].clone()),
+        ("a video not served", h.unknown_hello()),
+    ] {
+        let r = e.hello(&h.peer(1), &hello).await;
+        assert!(
+            is_rej(&r, &RejCode::Banned),
+            "a banned peer's hello is refused banned, {what}: {:?}",
+            r.as_ref().err()
+        );
+    }
+    assert_eq!(
+        h.identities_held(&e),
+        held,
+        "its refused hellos keep nothing"
+    );
+    let other = &mut sessions[1];
+    assert!(
+        !other.admit(&h.chunk_of(1, 0)),
+        "banned: nothing is admitted"
+    );
+    assert_eq!(
+        h.identities_held(&e),
+        held,
+        "a banned peer's refused request creates no account on a video it had none on"
+    );
+    let r = other
+        .pay(&Pay {
+            upto_chunk: 1,
+            token: h.token(1).await,
+        })
+        .await;
+    assert!(is_rej(&r, &RejCode::Banned), "{r:?}");
+    assert_eq!(
+        h.identities_held(&e),
+        held,
+        "a banned peer's refused payment creates no account on a video it had none on"
+    );
+}
+
+/// A `hello` refused `banned` after waiting behind the payment that banned its peer keeps
+/// nothing: once the ban has expired, the peer opens its full cap of sessions, one of them
+/// under that `hello`'s session id.
+async fn a_hello_refused_after_its_wait_keeps_nothing<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 3).await;
+    serve(h, &mut s, 0, 4);
+    let spent = h.token(4).await;
+    assert!(h.steal(&spent).await, "someone else spent it");
+    let replay = Pay {
+        upto_chunk: 4,
+        token: spent,
+    };
+    let hello = h.hello();
+    h.hold_swaps();
+    let ((r, waited), ()) = both(both(s.pay(&replay), e.hello(&h.peer(3), &hello)), async {
+        yield_once().await;
+        h.release_swaps().await;
+    })
+    .await;
+    assert!(is_rej(&r, &RejCode::Spent), "{r:?}");
+    assert!(
+        is_rej(&waited, &RejCode::Banned),
+        "{:?}",
+        waited.as_ref().err()
+    );
+    drop(s);
+    h.advance(h.ban_ttl());
+    let first = e.hello(&h.peer(3), &hello).await;
+    let mut sessions = vec![first.expect("the refused hello's session id is not open")];
+    for _ in 1..h.session_cap() {
+        let s = e.hello(&h.peer(3), &h.hello()).await;
+        sessions.push(s.expect("the refused hello holds no place under the session cap"));
+    }
 }
 
 /// A new `hello` continues the account: its quote carries the account's position, it
@@ -1006,6 +1351,16 @@ pub async fn a_session_id_names_one_open_session<H: Harness>(h: &H) {
         &e.hello(&h.peer(1), &hello).await,
         &RejCode::BadSession
     ));
+    let other_video = Hello {
+        session: hello.session.clone(),
+        ..h.hello_for(1)
+    };
+    let r = e.hello(&h.peer(1), &other_video).await;
+    assert!(
+        is_rej(&r, &RejCode::BadSession),
+        "an open session's id, on another video too: {:?}",
+        r.as_ref().err()
+    );
     drop(_open);
     drop(
         e.hello(&h.peer(2), &hello)
@@ -4049,6 +4404,33 @@ pub async fn the_global_cap_holds_whatever_payments_do<H: Harness>(h: &H) {
     }
     assert_eq!(others, 10, "one account's credit offsets no other's debt");
     assert_eq!(serve(h, &mut rich, 0, 200), 100, "and it is served in full");
+
+    a_payment_frees_only_its_own_accounts_chunks(h).await;
+}
+
+/// A payment frees from the global count only its own account's chunks, none of its
+/// peer's on another video, whatever their numbers.
+async fn a_payment_frees_only_its_own_accounts_chunks<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 8);
+    let mut zero = open_on(h, &e, 1, 0).await;
+    let mut one = open_on(h, &e, 1, 1).await;
+    assert_eq!(serve_on(h, &mut zero, 0, 0, 4), 4);
+    assert_eq!(serve_on(h, &mut one, 1, 0, 4), 4, "the global cap is full");
+    one.pay(&Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    })
+    .await
+    .expect("video 1's four chunks, paid");
+    let mut others = 0;
+    for p in 2..=3u8 {
+        let mut s = open(h, &e, p).await;
+        others += serve(h, &mut s, 0, 4);
+    }
+    assert_eq!(
+        others, 4,
+        "the payment freed video 1's four chunks, and none of video 0's"
+    );
 }
 
 /// A pre-paid chunk is served however full the global cap is.
@@ -5481,7 +5863,8 @@ pub async fn bad_configurations_are_refused<H: Harness>(h: &H) {
     }
 }
 
-/// A `hello` alone leaves no state behind: free identities cost the seeder nothing.
+/// A `hello` alone leaves no state behind: free identities cost the seeder nothing. Nor
+/// does anything refused to a peer with no account: a `hello`, a request or a payment.
 pub async fn a_hello_holds_no_state<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     for p in 0..=255u8 {
@@ -5530,6 +5913,149 @@ pub async fn a_hello_holds_no_state<H: Harness>(h: &H) {
         h.identities_held(&e),
         0,
         "free identities replaying a spent token leave no bans"
+    );
+    refused_hellos_keep_nothing(h).await;
+    refused_requests_keep_nothing(h).await;
+    refused_payments_keep_nothing(h).await;
+}
+
+/// Refused `hello`s leave nothing behind either: for a video not served, naming an open
+/// session's id, or past the peer's session cap. None holds a place under the cap.
+async fn refused_hellos_keep_nothing<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let taken = h.hello();
+    let holder = e.hello(&h.peer(0), &taken).await.expect("a hello");
+    let held = h.identities_held(&e);
+    for p in 1..=255u8 {
+        let r = e.hello(&h.peer(p), &h.unknown_hello()).await;
+        assert!(is_rej(&r, &RejCode::UnknownVideo), "{:?}", r.as_ref().err());
+    }
+    assert_eq!(
+        h.identities_held(&e),
+        held,
+        "free identities' hellos refused unknown-video leave nothing behind"
+    );
+    for p in 1..=255u8 {
+        let r = e.hello(&h.peer(p), &taken).await;
+        assert!(is_rej(&r, &RejCode::BadSession), "{:?}", r.as_ref().err());
+    }
+    assert_eq!(
+        h.identities_held(&e),
+        held,
+        "free identities' hellos naming an open session's id leave nothing behind"
+    );
+    let mut sessions = Vec::new();
+    for _ in 0..h.session_cap() {
+        sessions.push(open(h, &e, 1).await);
+    }
+    for _ in 0..4 {
+        let r = e.hello(&h.peer(1), &h.hello()).await;
+        assert!(
+            is_rej(&r, &RejCode::BadSession),
+            "past the cap: {:?}",
+            r.as_ref().err()
+        );
+    }
+    sessions.clear();
+    drop(holder);
+    assert_eq!(
+        h.identities_held(&e),
+        0,
+        "hellos refused past the cap leave nothing behind"
+    );
+    for _ in 0..h.session_cap() {
+        let s = e.hello(&h.peer(1), &h.hello()).await;
+        sessions.push(s.expect("refused hellos hold no place under the session cap"));
+    }
+}
+
+/// Nor do refused requests of a peer with no account, for another video's file or past a
+/// full global cap: an account is created by an admission, and none was made.
+async fn refused_requests_keep_nothing<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 4);
+    let mut filler = open(h, &e, 0).await;
+    assert_eq!(serve(h, &mut filler, 0, 4), 4, "the global cap is full");
+    let held = h.identities_held(&e);
+    for p in 1..=255u8 {
+        let mut s = open(h, &e, p).await;
+        assert!(!s.admit(&h.chunk_of(1, 0)), "another video's file");
+    }
+    assert_eq!(
+        h.identities_held(&e),
+        held,
+        "free identities' requests for another video's file leave nothing behind"
+    );
+    for p in 1..=255u8 {
+        let mut s = open(h, &e, p).await;
+        assert!(!s.admit(&h.chunk(0)), "the global cap is full");
+    }
+    assert_eq!(
+        h.identities_held(&e),
+        held,
+        "free identities' requests refused by the full global cap leave nothing behind"
+    );
+}
+
+/// Free identities whose payments are refused, for whatever reason, leave nothing behind:
+/// a refused token is not claimed, so one serves them all. Such a peer has no account, so
+/// its double spend then keeps no ban.
+async fn refused_payments_keep_nothing<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut refusals = vec![
+        (
+            "bad-mint".to_owned(),
+            h.token_at("https://other-mint.example", 4).await,
+            RejCode::BadMint,
+        ),
+        ("underpaid".to_owned(), h.token(3).await, RejCode::Underpaid),
+        ("overpaid".to_owned(), h.token(5).await, RejCode::Overpaid),
+    ];
+    for kind in [
+        BadToken::WrongUnit,
+        BadToken::TwoMints,
+        BadToken::TooManyProofs,
+        BadToken::Locked,
+        BadToken::NoDleq,
+        BadToken::BadDleq,
+        BadToken::Garbage,
+        BadToken::Forged,
+    ] {
+        let token = h.bad_token(kind, 4).await;
+        refusals.push((format!("bad-token ({kind:?})"), token, RejCode::BadToken));
+    }
+    let mut peers = 0..=255u8;
+    for (what, token, code) in &refusals {
+        for p in peers.by_ref().take(23) {
+            let mut s = open(h, &e, p).await;
+            let r = s
+                .pay(&Pay {
+                    upto_chunk: 4,
+                    token: token.clone(),
+                })
+                .await;
+            assert!(is_rej(&r, code), "refused {what}: {r:?}");
+        }
+        assert_eq!(
+            h.identities_held(&e),
+            0,
+            "free identities' payments refused {what} leave nothing behind"
+        );
+    }
+    let spent = h.token(4).await;
+    assert!(h.steal(&spent).await, "someone else spent it");
+    let mut s = open(h, &e, 1).await;
+    let r = s
+        .pay(&Pay {
+            upto_chunk: 4,
+            token: spent,
+        })
+        .await;
+    assert!(is_rej(&r, &RejCode::Spent), "{r:?}");
+    drop(s);
+    assert_eq!(
+        h.identities_held(&e),
+        0,
+        "a peer whose payments were all refused has no account: its double spend keeps no ban"
     );
 }
 

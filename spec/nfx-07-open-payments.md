@@ -67,7 +67,8 @@ payment-enforced after release, so no mechanism pretends otherwise.
 
 **Messages.**
 - **`hello`** (watcher→seeder) opens a session for a video. A seeder that does not serve
-  the video refuses it with `unknown-video`.
+  the video refuses it with `unknown-video`, unless the peer is banned: a banned peer's
+  `hello` is refused `banned`, whatever video it names (§3).
 - **`quote`** (seeder→watcher) replies with the *binding* price; the beacon's
   `price_hint` was advisory. It also carries the account's position, so a watcher can
   resume after a reconnect. A watcher takes one quote per session and refuses a second.
@@ -107,7 +108,9 @@ payment-enforced after release, so no mechanism pretends otherwise.
 - An **account** is (peer, video). It numbers that peer's chunks of that video and
   holds its position: `served`, `accepted_upto` and `spent_total`, all per account.
   - It is created by its first admission or payment. A `hello` alone creates nothing,
-    and the quote then reports zeros.
+    and the quote then reports zeros. Nothing refused creates one: a refused `hello`,
+    request or `pay` leaves no account. A refused `hello` also holds no place under the
+    session cap and leaves no session id open.
   - It persists across the peer's sessions. A new `hello` continues the account; it
     never opens a fresh window.
   - A `hello` for an account with a payment in progress waits while a payment holds the
@@ -899,3 +902,8 @@ therefore loses nothing:
     request or `hello`, `mint-unavailable` with every proof taken back, the session's end,
     nor a new session's quote, on any of its videos.
   - §4: after a proof found spent, the client still takes back the proofs left unspent.
+  - §2: a banned peer's `hello` is refused `banned` whatever video it names, one the
+    seeder does not serve included.
+  - §3: nothing refused creates an account: a refused `hello`, request or `pay` leaves
+    none, and a refused `hello` holds no place under the session cap and leaves no session
+    id open.
