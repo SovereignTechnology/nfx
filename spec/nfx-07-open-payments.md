@@ -178,8 +178,11 @@ payment-enforced after release, so no mechanism pretends otherwise.
   inputs (10001). An expired keyset (12003) is one too, but CDK sends the same code and
   detail whether the inputs' keyset expired or the outputs', and an inputs' expiry does
   not stop a first request the mint reserved before it: every 12003 is therefore
-  settled so only once a NUT-07 check shows no input pending, and leaves the swap
-  unknown while one is. Any other answer leaves the swap unknown.
+  settled so only once a NUT-07 check shows an input spent, or none pending, and leaves
+  the swap unknown while one is pending and none is spent. An input spent shows that the
+  first request is not waiting to sign: a mint refuses a request holding a spent input
+  whole, and one it has reserved spends all its inputs at once, when it signs. Any other
+  answer leaves the swap unknown.
   Undecided swaps therefore end, and cost a payer who parks them its proofs.
 - A seeder SHOULD keep a bounded cache of proofs it has seen spent. It then refuses a
   replayed one (`spent`, with a ban) without asking the mint.
@@ -428,7 +431,8 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     `window` bounds what one refusal makes it pay ahead.
 
   A quote dishonest about the account stops the watcher paying that seeder; one refused
-  for its price, its `window` or its mints does not.
+  for its price, its `window` or its mints does not, nor a second quote on an open
+  session, refused (§2) whatever it claims.
 - **Owe every request sent,** except one the seeder answers with `refuse`. A refused
   request is always un-owed; if it was already paid for, that payment becomes credit. A
   request the watcher abandons stays owed; if the seeder never saw it, the payment
@@ -468,12 +472,12 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     the payment, which settles it as accepted. A quote equal to the ledger leaves it
     waiting. Any other quote is dishonest (above). A mint refuses a swap holding a spent
     proof whole, so the reclaim checks the proofs' states first (NUT-07) and takes back
-    the inputs left, every one unspent, in a reclaim of their own, whether or not a keyset
-    has expired (the 12003 case below). While any of those inputs is pending, the reclaim
-    is incomplete (below) until the mint finishes the request that reserved it or rolls it
-    back, and the payment awaits a quote once the reclaim completes. CDK 0.18.1's own
-    revoke (`SendSaga::revoke`) does not do this: finding a proof spent, it takes nothing
-    back, so a watcher built on it must.
+    the inputs left, every one unspent (after a 12003, those not lost to the expiry: the
+    case below), in a reclaim of their own. While any of those inputs is pending, the
+    reclaim is incomplete (below) until the mint finishes the request that reserved it or
+    rolls it back, and the payment awaits a quote once the reclaim completes. CDK
+    0.18.1's own revoke (`SendSaga::revoke`) does not do this: finding a proof spent, it
+    takes nothing back, so a watcher built on it must.
   - So a seeder that keeps a payment without crediting it has taken that one payment,
     and gets nothing more. This holds whether it refuses and then claims, or answers
     `mint-unavailable` after a swap that went through. A seeder that credits it late (§3)
@@ -544,10 +548,13 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     as above. A `pay` still buffered on a dropped connection can reach the seeder after
     the watcher's next `hello`, and be credited after that session's quote.
 - **Pay nothing after stopping,** at the end of a session included, nor ahead after a
-  refusal. Nothing undoes a stop, a later `ack` that matches its payment included.
-  Reclaiming is not paying: a stopped watcher still reclaims a live session's payment
-  that is refused, or unanswered after the wait, finishes its incomplete reclaims, and
-  reclaims a closed session's unsettled payment after the wait.
+  refusal. Nothing undoes a stop: not a later `ack` that matches its payment, a refused
+  request or `hello`, a `mint-unavailable` answer with every proof taken back, the
+  session's end, nor a new session's quote, taken or not, on any of the seeder's videos.
+  A watcher that has stopped awaits no quote. Reclaiming is not paying: a stopped watcher
+  still reclaims a live session's payment that is refused, or unanswered after the wait,
+  finishes its incomplete reclaims, and reclaims a closed session's unsettled payment
+  after the wait.
 
 ## 4. HTTPS (origin) payment surface
 
@@ -876,13 +883,19 @@ therefore loses nothing:
     in the deadline's second or later are not used, a swap's outcome settled in it is
     late, and a payment not sent by then is not rechecked; a retry's `spent` with its
     outputs unsigned leaves nothing unknown.
+  - §3: a swap refused 12003 is settled once a NUT-07 check shows an input spent, or none
+    pending (was: "no input pending"): an input spent shows that the first request is not
+    waiting to sign.
   - §3a: a reclaim that finds a proof spent checks the proofs' states first (NUT-07), a
     swap holding a spent proof being refused whole, and takes back the inputs left, every
-    one unspent, whether or not a keyset has expired; an input pending keeps it incomplete
-    until the mint finishes or rolls back its request; CDK 0.18.1's `SendSaga::revoke`
-    does not do this.
+    one unspent (after a 12003, those not lost to the expiry); an input pending keeps it
+    incomplete until the mint finishes or rolls back its request; CDK 0.18.1's
+    `SendSaga::revoke` does not do this.
   - §3a: a quote names the watcher's mint only by its exact URL; a dishonest quote stops
-    the watcher, and one refused for its price, `window` or mints does not; a quote equal
-    to the ledger leaves an incomplete reclaim incomplete; a stopped watcher pays nothing
-    ahead after a refusal, and nothing undoes a stop, a later matching `ack` included.
+    the watcher, and one refused for its price, `window` or mints does not, nor a second
+    quote on an open session, whatever it claims; a quote equal to the ledger leaves an
+    incomplete reclaim incomplete; a stopped watcher pays nothing ahead after a refusal,
+    awaits no quote, and nothing undoes its stop: not a later matching `ack`, a refused
+    request or `hello`, `mint-unavailable` with every proof taken back, the session's end,
+    nor a new session's quote, on any of its videos.
   - §4: after a proof found spent, the client still takes back the proofs left unspent.

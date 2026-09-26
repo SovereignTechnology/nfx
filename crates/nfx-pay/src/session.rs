@@ -125,7 +125,9 @@ pub trait SeederSession {
 /// security stage) and [`crate::mock::MockViewer`]. It keeps time on the harness's clock.
 #[allow(async_fn_in_trait)]
 pub trait Viewer {
-    /// A ledger for another video of the same seeder, sharing this one's standing.
+    /// A ledger for another video of the same seeder, sharing this one's standing: one made
+    /// after a stop is stopped too. Making it changes nothing in the standing: it restores
+    /// no `mint-unavailable` tries.
     fn sibling(&self) -> Self
     where
         Self: Sized;
@@ -140,7 +142,11 @@ pub trait Viewer {
     ///
     /// Also `Err`, without stopping: a price over this viewer's cap, a `window` over its
     /// ceiling or no mint it holds tokens from, by the mint's exact URL (on every session, a
-    /// resumed one included), or a session already open.
+    /// resumed one included), or a session already open: a second quote on it is refused
+    /// unread, whatever it claims.
+    ///
+    /// A quote does not undo a stop: taken or not, it leaves a viewer that has stopped
+    /// paying the seeder paying it nothing, on this session and every later one.
     fn quote(&mut self, quote: &Quote) -> Result<(), String>;
 
     /// The seeder refused this ledger's `hello`, so no session opened. `banned` stops the
@@ -182,11 +188,12 @@ pub trait Viewer {
     /// - If any proof is found spent, the payment **awaits a quote**: nothing more is paid
     ///   to the seeder until a quote shows it accepted ([`Viewer::awaiting_quote`]). A mint
     ///   refuses a swap holding a spent proof whole, so the reclaim checks the proofs'
-    ///   states first (NUT-07) and takes back the proofs left, every one unspent, in a
-    ///   reclaim of their own, whether or not a keyset has expired. While any of them is
-    ///   pending, the reclaim is incomplete, until the mint finishes or rolls back the
+    ///   states first (NUT-07) and takes back the proofs left, every one unspent (after a
+    ///   12003, those not lost to the expiry), in a reclaim of their own. While any of them
+    ///   is pending, the reclaim is incomplete, until the mint finishes or rolls back the
     ///   request that reserved it, and the payment awaits a quote once it completes.
-    /// - After `mint-unavailable` with every proof reclaimed, it may pay again.
+    /// - After `mint-unavailable` with every proof reclaimed, it may pay again, unless it
+    ///   has stopped: nothing undoes a stop.
     /// - After any other code, it stops.
     ///
     /// A reclaim the mint cannot serve yet blocks every payment until it completes.
@@ -211,8 +218,9 @@ pub trait Viewer {
     /// were found spent, awaiting a quote that shows it accepted (the watcher opens a new
     /// session for this video), or the standing has used its three `mint-unavailable`
     /// tries (any new session's quote restores them). A quote equal to the ledger leaves a
-    /// payment waiting, and the watcher paying nothing. A viewer that has stopped awaits no
-    /// quote: no new session makes it pay.
+    /// payment waiting, and the watcher paying nothing. A viewer whose standing has stopped
+    /// paying the seeder (not merely awaiting a quote) awaits no quote, whatever it holds:
+    /// no new session makes it pay.
     fn awaiting_quote(&self) -> bool;
 }
 
@@ -380,9 +388,11 @@ pub trait Harness {
     fn dialled(&self, url: &str) -> bool;
 
     /// Hold the seeder's swap requests until [`Harness::release_swaps`], on a slow link
-    /// between the seeder and the mint: none reaches the mint, and a `pay` waits. The mint
-    /// is not held: a third party's claim ([`Harness::steal`]) and a watcher's reclaim reach
-    /// it and are processed at once.
+    /// between the seeder and the mint: none reaches the mint, and a `pay` waits. Only its
+    /// swap requests are held: its reads of swap state (NUT-07, NUT-09) go through, and so
+    /// do its key requests unless [`Harness::hold_key_fetches`] holds them. The mint is not
+    /// held: a third party's claim ([`Harness::steal`]) and a watcher's reclaim reach it and
+    /// are processed at once.
     fn hold_swaps(&self);
     /// The seeder's swap requests reach the mint and are processed at once, but their
     /// responses are held on the link back until [`Harness::release_swaps`]: processed, and
@@ -391,8 +401,10 @@ pub trait Harness {
     /// Hold only the seeder's next swap request (a black hole for one request, on its link
     /// to the mint), and let the ones after it through at once.
     fn hold_next_swap(&self);
-    /// The seeder's key requests go unanswered until [`Harness::release_swaps`], on the
-    /// same slow link (keys it has already fetched may be cached by the engine).
+    /// The seeder's key requests go unanswered until [`Harness::release_swaps`], on a slow
+    /// link between the seeder and the mint (keys it has already fetched may be cached by
+    /// the engine). Its swap requests and its reads of swap state go through, unless
+    /// something else holds them.
     fn hold_key_fetches(&self);
     /// Run the oldest held swap, or deliver the oldest held response, and keep holding
     /// the rest.

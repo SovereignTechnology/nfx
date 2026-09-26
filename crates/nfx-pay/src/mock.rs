@@ -201,12 +201,14 @@ struct Ledger {
     forged: HashSet<u64>,
     next: u64,
     /// The seeder's swap requests are held on their way to the mint
-    /// ([`Harness::hold_swaps`]): third parties' claims and watchers' reclaims are not.
+    /// ([`Harness::hold_swaps`]): its reads of swap state, third parties' claims and
+    /// watchers' reclaims are not.
     hold: bool,
     /// Hold only the seeder's next swap request.
     hold_next: bool,
     /// The responses to the seeder's swaps are held on their way back.
     hold_responses: bool,
+    /// The seeder's key requests go unanswered ([`Harness::hold_key_fetches`]).
     hold_keys: bool,
     down: bool,
     dialled: HashSet<String>,
@@ -378,10 +380,19 @@ impl MockNetwork {
         self.fresh_proofs(amount.count_ones().max(1) as usize)
     }
 
-    /// A fresh token worth `amount` sat from `mint`.
+    /// A fresh token worth `amount` sat from `mint`, of fresh proofs only: the wallets'
+    /// older ones ([`Harness::fund_older_keyset`]) fund the watchers' payments alone.
     #[must_use]
     pub fn issue(&self, mint: &str, amount: u64) -> String {
-        self.draw(mint, amount, &[]).0
+        let proofs = self.proofs_for(amount);
+        self.mint_token(TokenInfo {
+            proofs,
+            mints: vec![mint.to_owned()],
+            amount,
+            unit: "sat",
+            locked: false,
+            dleq: Dleq::Valid,
+        })
     }
 
     /// A token worth `amount` sat from `mint`, as a wallet selects it: `old` proofs it
@@ -2281,6 +2292,48 @@ pub enum ViewerFlaw {
     /// Takes a quote equal to its ledger as cancelling its incomplete reclaim: it pays
     /// again, and the proofs it never took back are left for the seeder to claim.
     QuoteAtLedgerDropsReclaim,
+    /// Takes a new session's honest quote as leave to pay again: the quote clears the
+    /// standing's stop, as it restores the tries.
+    QuoteClearsStop,
+    /// Says it awaits a quote for a payment found spent after its standing has stopped,
+    /// though no new session makes it pay.
+    AwaitingLostWhenStopped,
+    /// Accepts an ack whose `accepted_upto` matches the payment but whose `spent_total` is
+    /// its ledger's, as if the payment were free.
+    AckSpentAtLedger,
+    /// Takes the session's end as the end of its stop: the next session pays again.
+    EndClearsStop,
+    /// Takes a `hello` refused with a code other than `banned` as a fresh start with the
+    /// seeder: it clears the standing's stop.
+    HelloRefusedClearsStop,
+    /// Takes a request refused after the stop as leave to pay ahead: the refusal clears the
+    /// standing's stop.
+    RefusalClearsStop,
+    /// Takes `mint-unavailable`, every proof taken back, as leave to pay again even once
+    /// stopped: it clears the standing's stop.
+    UnavailableClearsStop,
+    /// Gives a ledger made after the stop, for another video, a standing of its own: not
+    /// stopped.
+    SiblingAfterStopUnstopped,
+    /// Takes a `hello` refused with a code other than `banned` as settling this ledger's
+    /// payment found spent: it pays again, with no quote showing that payment.
+    HelloRefusedForgivesLost,
+    /// Drops this ledger's incomplete reclaims on a `hello` refused with a code other than
+    /// `banned`: it pays again, and never takes back the proofs it left out.
+    HelloRefusedDropsReclaim,
+    /// Reads a second quote on the open session before refusing it: it stops on one
+    /// dishonest about the account, where it refuses it unread.
+    SecondQuoteReadFirst,
+    /// Stops on a resumed session's quote over its price cap, where it only refuses it.
+    ResumedCapRefusalStops,
+    /// Stops on a resumed session's quote naming no mint it holds, where it only refuses it.
+    ResumedMintRefusalStops,
+    /// Stops on a resumed session's quote whose `window` is over its ceiling, where it only
+    /// refuses it.
+    ResumedCeilingRefusalStops,
+    /// Restores the standing's three tries when it makes a ledger for another video, before
+    /// any session of it quotes.
+    SiblingRestoresTries,
 }
 
 /// (peer, video index): one account.
@@ -3268,8 +3321,8 @@ impl Inner {
     /// A swap refused because a keyset expired (CDK 12003): its inputs' or its outputs',
     /// which the answer does not say. An inputs' expiry does not stop a first request the
     /// mint reserved before it, so a restore of its outputs settles it only once a NUT-07
-    /// check shows no input pending. `None`: not yet (an input pending, or a read
-    /// unanswered).
+    /// check shows an input spent (the first request is then not waiting to sign) or none
+    /// pending. `None`: not yet (an input pending and none spent, or a read unanswered).
     fn restore_unless_pending(
         &self,
         token: &str,
@@ -5772,6 +5825,9 @@ impl Viewer for MockViewer {
         let id = {
             let mut st = self.standing();
             st.next_ledger += 1;
+            if self.has(ViewerFlaw::SiblingRestoresTries) {
+                st.unavailable = 0;
+            }
             st.next_ledger
         };
         Self::ledger(
@@ -5781,7 +5837,11 @@ impl Viewer for MockViewer {
             self.max_price,
             self.flaw,
             id,
-            self.standing.clone(),
+            if self.has(ViewerFlaw::SiblingAfterStopUnstopped) && self.standing().stopped {
+                Arc::new(Mutex::new(Standing::default()))
+            } else {
+                self.standing.clone()
+            },
         )
     }
 
@@ -5789,13 +5849,16 @@ impl Viewer for MockViewer {
         if self.has(ViewerFlaw::QuoteResetsFirst) {
             self.standing().unavailable = 0;
         }
-        if self.quote.is_some() && !self.has(ViewerFlaw::AcceptsSecondQuote) {
+        let read_first = self.has(ViewerFlaw::SecondQuoteReadFirst);
+        if self.quote.is_some() && !self.has(ViewerFlaw::AcceptsSecondQuote) && !read_first {
             return Err("one quote per session".into());
         }
         let resumed = self.requested > 0 || self.acked > 0;
         let skip_cap = resumed && self.has(ViewerFlaw::SkipsCapOnResume);
         if quote.price_per_chunk > self.max_price && !skip_cap {
-            if self.has(ViewerFlaw::CapRefusalStops) {
+            if self.has(ViewerFlaw::CapRefusalStops)
+                || (resumed && self.has(ViewerFlaw::ResumedCapRefusalStops))
+            {
                 self.halt();
             }
             return Err("price above this viewer's cap".into());
@@ -5803,6 +5866,9 @@ impl Viewer for MockViewer {
         let skip_ceiling = resumed && self.has(ViewerFlaw::SkipsCeilingOnResume);
         if quote.window > WINDOW_CEILING && !self.has(ViewerFlaw::NoWindowCeiling) && !skip_ceiling
         {
+            if resumed && self.has(ViewerFlaw::ResumedCeilingRefusalStops) {
+                self.halt();
+            }
             return Err("window above this viewer's ceiling".into());
         }
         // Its mint's URL, byte for byte (NFX-07 §2), or as a flaw reads it.
@@ -5826,6 +5892,9 @@ impl Viewer for MockViewer {
             quote.mints.iter().any(names)
         };
         if !holds && !(resumed && self.has(ViewerFlaw::MintCheckFirstOnly)) {
+            if resumed && self.has(ViewerFlaw::ResumedMintRefusalStops) {
+                self.halt();
+            }
             return Err("no mint this viewer holds tokens from".into());
         }
         // A quote showing an unsettled payment accepted, both fields, settles it.
@@ -5885,9 +5954,16 @@ impl Viewer for MockViewer {
             self.halt();
             return Err("the quote disagrees with this viewer's ledger".into());
         }
+        if read_first && self.quote.is_some() {
+            return Err("one quote per session".into());
+        }
         if self.has(ViewerFlaw::ForgivesLost) {
             let id = self.id;
             self.standing().lost.retain(|(l, _)| *l != id);
+        }
+        if self.has(ViewerFlaw::QuoteClearsStop) {
+            self.standing().stopped = false;
+            self.halted = false;
         }
         // A new session: `mint-unavailable` answers are counted afresh.
         self.standing().unavailable = 0;
@@ -5897,6 +5973,18 @@ impl Viewer for MockViewer {
     }
 
     fn hello_refused(&mut self, rej: &Rej) {
+        if rej.code != RejCode::Banned {
+            let id = self.id;
+            if self.has(ViewerFlaw::HelloRefusedClearsStop) {
+                self.standing().stopped = false;
+            }
+            if self.has(ViewerFlaw::HelloRefusedForgivesLost) {
+                self.standing().lost.retain(|(l, _)| *l != id);
+            }
+            if self.has(ViewerFlaw::HelloRefusedDropsReclaim) {
+                self.standing().reclaiming.retain(|(l, _)| *l != id);
+            }
+        }
         if self.has(ViewerFlaw::HelloRefusalReclaims) {
             let id = self.id;
             let mine: Vec<(u64, Pending)> = {
@@ -5950,6 +6038,9 @@ impl Viewer for MockViewer {
             self.requested = self.requested.saturating_sub(1);
         }
         self.pay_ahead = true;
+        if self.has(ViewerFlaw::RefusalClearsStop) {
+            self.standing().stopped = false;
+        }
         if self.has(ViewerFlaw::RefusalResetsUnavailable) {
             self.standing().unavailable = 0;
         }
@@ -6020,7 +6111,10 @@ impl Viewer for MockViewer {
                             && ack.spent_total < self.spent + p.amount)
                         || (self.has(ViewerFlaw::AckAcceptsSpentBelowLedger)
                             && ack.accepted_upto == p.upto
-                            && ack.spent_total < self.spent))
+                            && ack.spent_total < self.spent)
+                        || (self.has(ViewerFlaw::AckSpentAtLedger)
+                            && ack.accepted_upto == p.upto
+                            && ack.spent_total == self.spent))
             }
             None => self.has(ViewerFlaw::AcceptsUnsolicitedAck),
         };
@@ -6080,6 +6174,13 @@ impl Viewer for MockViewer {
         if !(was_halted && self.has(ViewerFlaw::RejNoReclaimWhenStopped)) {
             self.reclaim(self.id, p, false);
         }
+        if self.has(ViewerFlaw::UnavailableClearsStop)
+            && rej.code == RejCode::MintUnavailable
+            && !self.reclaim_incomplete()
+            && !self.awaiting(false)
+        {
+            self.standing().stopped = false;
+        }
         if rej.code != RejCode::MintUnavailable || self.has(ViewerFlaw::StopsOnOutage) {
             self.halt();
         } else if self.has(ViewerFlaw::UnavailablePerLedger) {
@@ -6123,6 +6224,9 @@ impl Viewer for MockViewer {
 
     fn end(&mut self) {
         self.quote = None;
+        if self.has(ViewerFlaw::EndClearsStop) {
+            self.standing().stopped = false;
+        }
         if self.has(ViewerFlaw::EndResetsBudget) {
             self.standing().unavailable = 0;
         }
@@ -6151,8 +6255,11 @@ impl Viewer for MockViewer {
 
     fn awaiting_quote(&self) -> bool {
         let tries_used = self.out_of_tries() && !self.has(ViewerFlaw::BudgetNotSignalled);
-        (!self.halted() || self.has(ViewerFlaw::AwaitingQuoteWhenStopped))
-            && (self.awaiting(!self.has(ViewerFlaw::AwaitingQuoteAnyLedger)) || tries_used)
+        let lost = self.awaiting(!self.has(ViewerFlaw::AwaitingQuoteAnyLedger));
+        if self.has(ViewerFlaw::AwaitingLostWhenStopped) {
+            return lost || (!self.halted() && tries_used);
+        }
+        (!self.halted() || self.has(ViewerFlaw::AwaitingQuoteWhenStopped)) && (lost || tries_used)
     }
 }
 
