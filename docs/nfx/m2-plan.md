@@ -40,7 +40,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [eighteenth](reviews/2026-09-24-m2.0-eighteenth-audit.md),
 [nineteenth](reviews/2026-09-24-m2.0-nineteenth-audit.md),
 [twentieth](reviews/2026-09-24-m2.0-twentieth-audit.md),
-[twenty-first](reviews/2026-09-24-m2.0-twenty-first-audit.md)). sovtech's bar for the push
+[twenty-first](reviews/2026-09-24-m2.0-twenty-first-audit.md),
+[twenty-second](reviews/2026-09-24-m2.0-twenty-second-audit.md)). sovtech's bar for the push
 is zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -80,10 +81,18 @@ is zero findings, confirmed after the sixth:
     restores going down, a rotation after the outputs were derived, an expiry), reads
     answered on the reader's next poll, dial records;
   - honest seeder and viewer engines, with a validated configuration.
-- **Suite:** `nfx_pay::adversary` has 62 scenarios, each under a timeout, two of them
-  threaded, run twice (the second time with reads as round trips), and **each of 319
-  planted defects fails its scenario**, every surviving mutant from all twenty-one
+- **Suite:** `nfx_pay::adversary` has 63 scenarios, each under a timeout, three of them
+  threaded, run twice (the second time with reads as round trips), and **each of 336
+  planted defects fails its scenario**, every surviving mutant from all twenty-two
   audits among them.
+- **Since the twenty-second audit:**
+  - an entry takes its read's place in the step that finds one free, so entries on
+    threads cannot all read; no read is sent or counted at an entry's deadline; a
+    `hello` that waited for a payment is served only by a read sent after its wait;
+  - after a 12003, spent inputs a restore shows the watcher's own are back, and the rest
+    are decided per proof; proofs listed expired are never paid with;
+  - the payment side of coverage, reads of swaps in flight, and a mixed token under an
+    expired active keyset are pinned.
 - **Since the twenty-first audit:**
   - a read serves only entries whose undecided swaps it covered, fixed as it is sent;
     reads count against their own account alone; a round-trip read reaches the mint
