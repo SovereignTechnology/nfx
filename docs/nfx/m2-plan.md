@@ -41,7 +41,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [nineteenth](reviews/2026-09-24-m2.0-nineteenth-audit.md),
 [twentieth](reviews/2026-09-24-m2.0-twentieth-audit.md),
 [twenty-first](reviews/2026-09-24-m2.0-twenty-first-audit.md),
-[twenty-second](reviews/2026-09-24-m2.0-twenty-second-audit.md)). sovtech's bar for the push
+[twenty-second](reviews/2026-09-24-m2.0-twenty-second-audit.md),
+[twenty-third](reviews/2026-09-24-m2.0-twenty-third-audit.md)). sovtech's bar for the push
 is zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -81,10 +82,20 @@ is zero findings, confirmed after the sixth:
     restores going down, a rotation after the outputs were derived, an expiry), reads
     answered on the reader's next poll, dial records;
   - honest seeder and viewer engines, with a validated configuration.
-- **Suite:** `nfx_pay::adversary` has 63 scenarios, each under a timeout, three of them
-  threaded, run twice (the second time with reads as round trips), and **each of 336
-  planted defects fails its scenario**, every surviving mutant from all twenty-two
-  audits among them.
+- **Suite:** `nfx_pay::adversary` has 63 scenarios, each on its own thread under a
+  real-time timeout, three of them threaded, run twice (the second time with reads as
+  round trips), and **each of 362 planted defects fails an assertion in its scenario**
+  (a hang is not a catch), every surviving mutant from all twenty-three audits among them.
+- **Since the twenty-third audit:**
+  - a waited `hello`'s floor is taken as it finds the turn free; a read's coverage is fixed
+    as its place is taken, and exactly those swaps are sent;
+  - after a 12003, each spent input is decided on its own and the unspent ones per proof,
+    whatever the spent ones were; an unanswered NUT-07 check leaves the reclaim incomplete;
+    an honest watcher never pays with proofs listed expired;
+  - the mock's keysets follow CDK: an expired active keyset takes the proofs already
+    issued with it, and expired inputs are refused before anything is reserved;
+  - deterministic meeting points for outcomes racing a deadline and for split admissions;
+    a blocked engine fails its scenario rather than hanging CI.
 - **Since the twenty-second audit:**
   - an entry takes its read's place in the step that finds one free, so entries on
     threads cannot all read; no read is sent or counted at an entry's deadline; a
