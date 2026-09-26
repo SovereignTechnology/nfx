@@ -30,17 +30,17 @@ by path, would escape every check here. The money crates are locked whole
 (check-locked.sh), and the only workspace crates in their closure are each other: within
 one crate, an unpinned module could change how a pinned one compiles.
 
-`compiled` also checks, without pins, on the money crates' own build: every target of
-nfx-pay and nfx-pay-wire yields rustc's dep-info (a target without it fails), and every
-file it lists is tracked; every target reads only its own crate's files, except
-nfx-pay-wire's integration tests, which may read the pay/1 vectors.
+`compiled` also checks, without pins, on the money crates' own build:
+- every target of nfx-pay and nfx-pay-wire yields rustc's dep-info (a target without it
+  fails), and every file it lists is tracked; every target reads only its own crate's
+  files, except nfx-pay-wire's integration tests, which may read the pay/1 vectors;
+- no file outside nfx-pay and nfx-node's locked paths names `nfx_pay`;
+- the suite, the mutants and the pay/1 vector tests each ran, and reported exactly the
+  number of tests their pinned sources declare. A test runner that runs nothing fails.
 
 Out of scope, and why: code in other crates. It may compile a pinned file (by
 `#[path]`, say), but it cannot change one, and a copy of money logic written anywhere is
 a code change this lock was never able to see (check-locked.sh).
-- no file outside nfx-pay and nfx-node's locked paths names `nfx_pay`;
-- the suite, the mutants and the pay/1 vector tests each ran, and reported exactly the
-  number of tests their pinned sources declare. A test runner that runs nothing fails.
 """
 
 import hashlib

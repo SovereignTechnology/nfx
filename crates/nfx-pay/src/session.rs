@@ -219,6 +219,12 @@ pub enum MintEvent {
     /// is refused (12003), except one whose inputs the mint had already reserved: that one
     /// still signs.
     ExpireInputKeyset,
+    /// The mint reserves the next request's inputs, as [`Harness::hold_next_swap_reserving`]
+    /// asks, and then their keyset expires (an older one, the payer's): that request still
+    /// signs when it is released, while a retry or a reclaim of those inputs is refused
+    /// (12003). A mint refuses an already-expired input before reserving it (CDK checks
+    /// before it reserves), so this is the only order in which such a request signs.
+    ExpireInputKeysetOnceReserved,
 }
 
 /// Token shapes a seeder must refuse as `bad-token` (NFX-07 §3).
@@ -406,6 +412,15 @@ pub trait Harness {
     /// until `n` reads have reached it (`n` 0: none waits): entries on threads then meet
     /// at the mint, as a real engine's can.
     fn gather_state_reads(&self, n: usize, wait: Duration);
+    /// The clock moves by `by` between the next swap outcome's arrival and its settlement:
+    /// an outcome arriving just before its payment's deadline and settled just after, as on
+    /// another thread.
+    fn advance_during_next_land(&self, by: Duration);
+    /// An engine that admits in two steps (a check, then a count) has its admissions wait
+    /// between the steps, in real time and at most `wait`, until `n` have checked (`n` 0:
+    /// none waits): admissions on threads then meet there. An engine that admits in one step
+    /// has nowhere to wait, and ignores it.
+    fn gather_admissions(&self, n: usize, wait: Duration);
     /// `engine`'s sweep runs, to its end, during the next read of a swap's state: two
     /// learners at once.
     fn sweep_during_next_read(&self, engine: &Self::Engine);
@@ -418,9 +433,14 @@ pub trait Harness {
     /// The mint's active keyset lists a `final_expiry` (NUT-02) `after` from now, or none.
     fn keyset_expires_in(&self, after: Option<Duration>);
     /// The mint's active keyset expires, and stays active (CDK does not rotate an expired
-    /// keyset): outputs derived from it are refused (12003), while proofs of older keysets
-    /// stay valid, until [`Harness::rotate_keyset`].
+    /// keyset): outputs derived from it, and every proof it issued since the last rotation
+    /// (those a wallet already holds included), are refused (12003), while proofs of older
+    /// keysets stay valid, until [`Harness::rotate_keyset`].
     fn expire_active_keyset(&self);
+    /// The watchers' wallets hold `amount` sat (0: none) in proofs of an older keyset than
+    /// the active one, which a wallet spends first (CDK selects an inactive keyset's proofs
+    /// first): their next payments draw on them.
+    fn fund_older_keyset(&self, amount: u64);
     /// The keyset of the first `proofs` of `token`'s proofs expires: an older keyset, whose
     /// proofs a wallet spends first, while the rest of the token's stay good.
     fn expire_keyset_of(&self, token: &str, proofs: usize);

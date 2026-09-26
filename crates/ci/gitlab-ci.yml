@@ -44,6 +44,8 @@ variables:
 lock:
   stage: check
   image: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
+  # A hang fails in bounded time (each scenario is also timed out on its own thread).
+  timeout: 30m
   variables:
     GIT_STRATEGY: clone
     GIT_CHECKOUT: "true"
@@ -58,6 +60,7 @@ lock:
 check:
   stage: check
   image: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
+  timeout: 90m
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends python3 python3-venv xz-utils
     - curl -sSfLo /tmp/node.txz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"

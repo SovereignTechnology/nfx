@@ -10,18 +10,29 @@ use nfx_pay::mock::{MockHarness, SeederFlaw as S, ViewerFlaw as V};
 macro_rules! catches {
     ($($test:ident: $harness:expr => $scenario:ident),* $(,)?) => {
         $(
-            #[tokio::test]
-            async fn $test() {
-                let run = tokio::spawn(async { adversary::$scenario(&$harness).await });
-                // A scenario that hangs on the defect has caught it too: the suite's own
-                // runner fails a hung scenario.
-                match tokio::time::timeout(std::time::Duration::from_secs(10), run).await {
-                    Err(_hung) => {}
-                    Ok(joined) => assert!(
-                        joined.as_ref().is_err_and(tokio::task::JoinError::is_panic),
+            #[test]
+            fn $test() {
+                // On a thread of its own, waited for in real time, so a defect that blocks
+                // the thread is timed out too. The defect must fail an assertion: a hang names
+                // no behaviour, so it is not a catch.
+                let (done, answer) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("a runtime")
+                            .block_on(async { adversary::$scenario(&$harness).await })
+                    }));
+                    let _ = done.send(run);
+                });
+                match answer.recv_timeout(std::time::Duration::from_secs(10)) {
+                    Ok(Ok(())) => panic!(
                         "{} did not catch the planted defect",
                         stringify!($scenario)
                     ),
+                    Ok(Err(_caught)) => {}
+                    Err(_) => panic!("{} hung on the planted defect", stringify!($scenario)),
                 }
             }
         )*
@@ -379,4 +390,30 @@ catches!(
     viewer_expired_restore_needs_every_proof: v(V::ExpiredRestoreNeedsEveryProof) => a_viewer_reclaims_a_refused_payment,
     viewer_mixed_active_expired_writes_off: v(V::MixedActiveExpiredWritesOff) => a_viewer_reclaims_a_refused_payment,
     viewer_pays_with_expired_proofs: v(V::PaysWithExpiredProofs) => a_viewer_reclaims_a_refused_payment,
+    floor_at_latest_free: r(S::FloorAtLatestFree) => a_late_outcome_is_credited_never_banned,
+    floor_at_look: r(S::FloorAtLook) => a_late_outcome_is_credited_never_banned,
+    floor_first_free_only: r(S::FloorFirstFreeOnly) => a_late_outcome_is_credited_never_banned,
+    floor_ignored_past_two: r(S::FloorIgnoredPastTwo) => a_late_outcome_is_credited_never_banned,
+    waited_counts_after_floor: r(S::WaitedCountsAfterFloor) => a_late_outcome_is_credited_never_banned,
+    covers_set_after_send: s(S::CoversSetAfterSend) => concurrent_entries_read_two_a_second,
+    covers_set_after_send_round_trip: r(S::CoversSetAfterSend) => concurrent_entries_read_two_a_second,
+    in_time_once: r(S::InTimeOnce) => a_late_outcome_is_credited_never_banned,
+    viewer_expired_spent_any_own: v(V::ExpiredSpentAnyOwn) => a_viewer_reclaims_a_refused_payment,
+    viewer_expired_pending_is_lost: v(V::ExpiredPendingIsLost) => a_viewer_reclaims_a_refused_payment,
+    viewer_expired_foreign_keeps_rest: v(V::ExpiredForeignKeepsRest) => a_viewer_reclaims_a_refused_payment,
+    viewer_expired_check_down_is_unspent: v(V::ExpiredCheckDownIsUnspent) => a_viewer_reclaims_a_refused_payment,
+    late_credit_frees_all: s(S::LateCreditFreesAll) => a_late_outcome_is_credited_never_banned,
+    late_credit_frees_all_round_trip: r(S::LateCreditFreesAll) => a_late_outcome_is_credited_never_banned,
+    completes_at_debt_ttl: s(S::CompletesAtDebtTtl) => bans_expire_and_state_stays_bounded,
+    signed_needs_states: s(S::SignedNeedsStates) => a_late_outcome_is_credited_never_banned,
+    signed_needs_states_round_trip: r(S::SignedNeedsStates) => a_late_outcome_is_credited_never_banned,
+    complete_refused_is_nothing: s(S::CompleteRefusedIsNothing) => bans_expire_and_state_stays_bounded,
+    ban_needs_served: s(S::BanNeedsServed) => a_double_spend_bans_the_peer,
+    viewer_served_off_by_one: v(V::ServedOffByOne) => a_viewer_refuses_quotes_it_cannot_honour,
+    wakes_one_drops_rest: s(S::WakesOneDropsRest) => one_accounts_payments_are_serialised,
+    wakes_one_drops_rest_round_trip: r(S::WakesOneDropsRest) => one_accounts_payments_are_serialised,
+    refusal_keeps_turn: s(S::RefusalKeepsTurn) => one_accounts_payments_are_serialised,
+    land_stale_clock: s(S::LandStaleClock) => racing_outcomes_settle_once,
+    land_stale_clock_round_trip: r(S::LandStaleClock) => racing_outcomes_settle_once,
+    admit_split_lock: s(S::AdmitSplitLock) => concurrent_admission_is_atomic,
 );

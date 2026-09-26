@@ -290,7 +290,7 @@ checks run in this order:
      (NUT-09 restore), which it derives deterministically (NUT-13) for this. In that
      order, a swap processed between the two reads shows as signed. A watcher waiting
      on that payment (§3a) waits on this.
-     - Outputs signed: a claim, whatever the first read said.
+     - Outputs signed: a claim, whatever the first read said, an unanswered one included.
      - Outputs unsigned with an input spent: nothing. The swap is atomic, so it can no
        longer go through.
      - Outputs of a keyset that has expired: a restore no longer shows them (CDK skips an
@@ -324,15 +324,19 @@ checks run in this order:
        that waited into a new second included), whatever becomes of it. An entry takes
        its read's place in the same step that finds a place free, before sending it, so
        entries at once, on however many threads, cannot all find a place and all read.
-       No read is sent at or past its entry's deadline: none is sent then, and none
-       counted.
-     - What a read covers is fixed when it is sent: the account's swaps undecided then,
-       an answer lost or a swap abandoned in flight alike.
+       No read is sent at or past its entry's deadline, judged at every look (an entry
+       that waited into its deadline included): none is sent then, and none counted.
+     - What a read covers is fixed as its place is taken: the account's swaps undecided
+       then, an answer lost or a swap abandoned in flight alike, and exactly those are
+       sent. So an entry that looks while it is under way waits for it, if it covers what
+       that entry needs.
      - A read serves an entry of its account when it covered every swap undecided for
        the account as the entry comes: not one sent before a swap became unknown. And it
        is the entry's own proofs' read, or any read for a `hello`, or any read once two
        were sent that second; but for a `hello` that waited for a payment, only a read
-       sent after its wait ended. So two entries at once share one read, and its result;
+       sent after its wait ended (when it found the account's turn free), past two or
+       not. The reads sent before still count toward the second's two. So two entries at
+       once share one read, and its result, hellos woken by one payment included;
        a `hello` that waited for a payment reads after it; a watcher paying again after
        its reclaim, with other proofs, reads afresh; and a flood of hellos, or of
        payments whatever their proofs, costs the mint two reads a second.
@@ -352,7 +356,8 @@ checks run in this order:
        The converse holds too: the reads are round trips, and a response that lands
        while they are made has settled the swap, so their result then changes nothing.
      - A claim is credited to the account, whether or not its peer has been banned
-       since, and the watcher's next quote shows it (§3a).
+       since, and the watcher's next quote shows it (§3a). It frees from the global count
+       exactly the chunks it covers: the account's chunks beyond it are still unpaid.
      - A spent or invalid outcome bans nobody.
      - A late outcome is never an `ack`: the payment was already answered.
 
@@ -437,12 +442,14 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     and retried.
   - A reclaim refused because a keyset has expired (CDK 12003, the same code whether it is
     the proofs' keyset or the reclaim's outputs', checked before anything else) is
-    decided by a NUT-07 check. An input pending: incomplete. An input spent: the watcher
-    restores its own outputs, and one its own earlier reclaim took back (that reclaim's
-    answer lost) is back, not lost; any other spent input is as a reclaim that found
-    proofs spent (above). The inputs left, every one unspent, are decided per proof, by
-    the `final_expiry` the mint lists for each proof's keyset against the watcher's own
-    clock (a wallet spends an older keyset's proofs first, so one token may hold both):
+    decided by a NUT-07 check. An input pending, or the check unanswered: incomplete. An
+    input spent: the watcher restores its own outputs, and decides each spent input on
+    its own. One its own earlier reclaim took back (that reclaim's answer lost) is back,
+    not lost; any other makes the payment as a reclaim that found proofs spent (above).
+    Whatever the spent inputs were, the inputs left, every one unspent, are decided per
+    proof, by the `final_expiry` the mint lists for each proof's keyset against the
+    watcher's own clock (a wallet spends an older keyset's proofs first, so one token may
+    hold both):
     those past it are lost to the expiry, not taken by the seeder, and the rest are taken
     back in a reclaim of their own; then the watcher pays again. That reclaim, refused
     in turn because the mint's active keyset has expired too, leaves the whole reclaim
@@ -776,3 +783,12 @@ therefore loses nothing:
     the rest are decided per proof; a reclaim of the good proofs refused for want of an
     active keyset leaves the whole reclaim incomplete; proofs listed expired are dropped,
     never paid with.
+- Draft 2026-09-26 (M2.0 twenty-third audit, `docs/nfx/reviews/2026-09-24-m2.0-twenty-third-audit.md`).
+  - §3: a read's coverage is fixed as its place is taken, and exactly those swaps are sent;
+    time left is judged at every look; a waited `hello` is served only by a read sent after
+    its wait ended, past two or not, and the reads before still count; signed outputs are
+    a claim even with the NUT-07 check unanswered; a late claim frees exactly the chunks
+    it covers.
+  - §3a: after a 12003, each spent input is decided on its own; the unspent ones are
+    decided per proof whatever the spent ones were; an unanswered NUT-07 check leaves the
+    reclaim incomplete.
