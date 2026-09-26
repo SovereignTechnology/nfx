@@ -48,9 +48,21 @@ service that needs no mint code.
   exactly `key_price`. The keyholder swaps it (NUT-03) before answering. Or a bolt11
   invoice flow, at the keyholder's option.
 - `W` is a fresh per-video pubkey the watcher made.
-- Success returns the key, `root`, and a **certificate**: the creator's BIP-340
-  signature over `canon({ v: 1, type: "nfx-cert", a, watcher: W, not_after })`.
-  Vouchers (NFX-08 §5) become certificates issued at zero cost.
+- Success returns the key, `root`, and a **certificate**: a BIP-340 signature over
+  `canon({ v: 1, type: "nfx-cert", a, watcher: W, not_after })` by the manifest's
+  `cert_key`. `cert_key` is a pubkey the creator names in the manifest for exactly
+  this, so a hosted keyholder holds a delegated key, never the creator's identity
+  key; the creator may set it to its own key when it runs the keyholder itself.
+  `not_after` is required (absent or 0 is an invalid certificate). Vouchers
+  (NFX-08 §5) become certificates issued at zero cost.
+- **Rules carried over from NFX-08/09, not optional:** `payment` is exact
+  (`underpaid`/`overpaid`); the keyholder answers a retried request with the same
+  proofs, or the same `W`, with the same response for 10 min, because a response can
+  drop after the swap; `keyholder` and each `pay_mints` entry follow the mint URL
+  grammar of NFX-07 §2 (`https`, no userinfo; loopback `http` only where a deployment
+  allows it), and a manifest violating that is not a valid licensed manifest for M3
+  readers, whatever M1 readers ignore. `key_price` 0 is allowed and means a
+  registration wall: keys and certificates for free.
 
 The creator has the money in hand when the response leaves. There is no accrual, no
 `claim`, no escrow table. **This is the creator's entire income path**, in both
@@ -60,9 +72,16 @@ Open videos have no keyholder and no key; they are free, with zaps.
 
 ### 2. Seeders serve certificate holders
 
-A `hello` on `nfx/pay/1` (NFX-07 §2) carries the certificate. For a licensed video a
-seeder serves only a presenter whose certificate verifies against the creator named
-in `a` and whose `W` signs the session; anyone else gets `refuse`. That ends the
+A `hello` on `nfx/pay/1` (NFX-07 §2) carries the certificate and a signature by `W`
+over `canon({ type: "nfx-hello", a, session, seeder })`, where `seeder` is the
+transport identity the watcher is talking to (the iroh endpoint id, or the peer id on
+NFX-10). A certificate alone is bearer; binding `W` to the session **and** the seeder
+is what stops a captured `hello` being replayed to another seeder or session. For a
+licensed video a seeder serves only a presenter whose certificate verifies against the
+manifest's `cert_key`, is not past `not_after`, and whose `hello` signature verifies
+under `W`; anyone else gets `refuse`. Verifiers check the `type` field: a certificate
+and a voucher are both creator-family signatures over canonical JSON, and the type is
+their domain separation. That ends the
 leeching of encrypted bytes by non-buyers, an NFX-08 §1 cost the split design could
 not close. A watcher sharing its key can still share it; that is physics (NFX-08 §1)
 and unchanged.
@@ -81,16 +100,23 @@ names. The creator never touches delivery money and takes no percentage of it.
 holding and serving the video, in batches:
 
 - A willing seeder adds an `ask` to the beacon it already publishes:
-  `{ rate, period, mint }`, sats per period (1 h to 30 d) and the mint it takes
-  payment from. The beacon is signed, so the ask is signed. Beacon content admits
+  `{ rate, period, mint }`, sats per period (`rate` ≥ 1; `period` 1 h to 30 d;
+  `mint` by the NFX-07 §2 URL grammar). The beacon also carries the seeder's iroh
+  tickets, so the ask binds the seeder's Nostr key to the transport identities the
+  creator will challenge and pay on `nfx/bill/1`; a payout goes only to a peer whose
+  transport identity the signed beacon named. The beacon is signed, so the ask is signed. Beacon content admits
   extra fields (NFX-03 §4, `beacon-content.schema.json`).
 - The creator **assigns** with a signed `{ a, seeder, rate, period, term }` copying
   the ask. Ask plus assignment is the contract; neither side is bound to terms it did
   not sign. Anyone holding the key may ask, a watcher included; a seeder without the
   key gets a certificate with the assignment.
 - Each period the creator's daemon **challenges**: `{ nonce, file, offset, length }`
-  for a random file of the hash list, and compares the bytes returned with its own
-  copy. The creator holds the files, so verification is a byte comparison against
+  for a random file among those the ask claims to hold (a partial seeder is
+  challenged on its renditions only), and compares the bytes returned with its own
+  copy. A challenge is signed by the creator in `a`, so nobody else can make a seeder
+  serve on demand; `length` is 1 to 64 KiB and never 0, `offset + length` is within
+  the file, and a seeder answers at most one challenge per file per period, so a
+  challenge is neither trivially passed nor a bandwidth drain. The creator holds the files, so verification is a byte comparison against
   sha256-named content: no Merkle proof, no second hash tree, no public randomness.
   It also fetches from the seeder's advertised endpoints under throwaway identities.
 - A period that passes is paid `rate` as one ordinary token, from the mint the ask
@@ -162,7 +188,7 @@ they are deferred until flat retainers prove insufficient for popular videos.
 
 | Document | Change | Frozen? |
 |---|---|---|
-| NFX-02 | changelog: `mode`, `keyholder` (URL), `pay_mints` (list); `split`/`cashu_key` carried and ignored | yes; additive, no bump |
+| NFX-02 | changelog: `mode`, `keyholder` (URL), `pay_mints` (list), `cert_key` (pubkey); `split`/`cashu_key` carried and ignored (`cashu_key` may be any valid point, e.g. `cert_key`) | yes; additive, no bump |
 | NFX-03 | `ask` beacon content field | yes; additive |
 | NFX-07 | `hello` carries a certificate; licensed pointer now to the keyholder | Draft (M2) |
 | NFX-08 | §3 escrow → the keyholder; §4 becomes the license call above; §4 differences 1–3 and §4.1 removed; §5 vouchers → certificates; §6 removed | Draft (M3) |
