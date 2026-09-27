@@ -2760,6 +2760,131 @@ pub enum ViewerFlaw {
     /// Once stopped, and holding no session's quote, leaves closed sessions' payments
     /// unsettled: a watcher refused `banned` never reclaims them.
     StoppedNoSessionSkipsUnsettled,
+    /// Holding no session's quote, takes a reclaim that finds proofs spent as every proof
+    /// back: it pays again at its next session, and a seeder that refuses its `hello`s takes
+    /// a payment each round.
+    NoSessionSpentIsBack,
+    /// Holding no session's quote, drops a reclaim the mint cannot serve yet: it pays again
+    /// at its next session, and never takes back the proofs.
+    NoSessionBlockedDropped,
+    /// Holding no session's quote, reclaims a closed session's payment at 180 s but keeps
+    /// the standing's slot held: every proof back, it never pays again.
+    NoSessionReclaimKeepsSlot,
+    /// On a quote it refuses over its price cap, its `window` or its mints, from a ledger
+    /// with nothing requested or acknowledged, clears the standing's stop: a new video's
+    /// first quote is leave to pay again.
+    FreshRefusalClearsStop,
+    /// On a quote it refuses over its price cap, its `window` or its mints, from a ledger
+    /// with nothing requested or acknowledged, forgives every video's payment found spent.
+    FreshRefusalForgivesAll,
+    /// On a quote it refuses over its price cap, its `window` or its mints, from a ledger
+    /// with nothing requested or acknowledged, drops every video's incomplete reclaim.
+    FreshRefusalDropsAllReclaims,
+    /// On a quote it refuses over its price cap, its `window` or its mints, from a ledger
+    /// with nothing requested or acknowledged, frees the slot any video's unsettled payment
+    /// holds.
+    FreshRefusalFreesAnySlot,
+    /// On a quote it takes from a ledger with nothing requested or acknowledged, forgives
+    /// every video's payment found spent: a new video's first quote settles them.
+    FreshTakenForgivesAll,
+    /// On a quote it takes from a ledger with nothing requested or acknowledged, drops every
+    /// video's incomplete reclaim.
+    FreshTakenDropsAllReclaims,
+    /// On a quote it refuses over its price cap, its `window` or its mints, forgives the
+    /// other videos' payments found spent.
+    OtherRefusalForgivesLost,
+    /// On a quote it refuses over its price cap, its `window` or its mints, drops the other
+    /// videos' incomplete reclaims.
+    OtherRefusalDropsReclaims,
+    /// On a quote it refuses over its price cap, its `window` or its mints, frees the slot
+    /// another video's unsettled payment holds.
+    RefusalFreesOtherSlot,
+    /// Drops this ledger's incomplete reclaim on an unsolicited ack, which stops it: the
+    /// seeder claims the proofs it left out.
+    UnsolicitedAckDropsReclaim,
+    /// Drops this ledger's incomplete reclaim on an unsolicited `rej`, which stops it: the
+    /// seeder claims the proofs it left out.
+    UnsolicitedRejDropsReclaim,
+    /// Drops this ledger's incomplete reclaim on a dishonest quote, which stops it: the
+    /// seeder claims the proofs it left out.
+    DishonestQuoteDropsReclaim,
+    /// Forgets this ledger's payment a dropped connection left unsettled on a dishonest
+    /// quote, which stops it: never reclaimed, it is the seeder's to claim.
+    DishonestQuoteForgetsUnsettled,
+    /// Holding no session's quote, takes proofs found spent as the seeder's without
+    /// restoring its own outputs: its own reclaim, its answer lost, leaves the payment
+    /// awaiting a quote that never comes.
+    NoSessionSkipsRestore,
+    /// Holding no session's quote, takes a reclaim refused because a proof's keyset expired
+    /// as proofs found spent: the payment awaits a quote, though the seeder took nothing.
+    NoSessionExpiredIsSpent,
+    /// Holding no session's quote, takes a reclaim refused as pending as proofs found spent:
+    /// the payment awaits a quote before the mint has decided anything.
+    NoSessionPendingIsSpent,
+    /// Holding no session's quote, files a payment found spent under the ledger that
+    /// reclaimed it: another video's payment no longer awaits a quote on its own ledger.
+    NoSessionLostUnderSelf,
+    /// Holding no session's quote, files a retried reclaim under the ledger that retried
+    /// it: another video's payment no longer awaits a quote on its own ledger.
+    NoSessionRetryAsSelf,
+    /// Once stopped, and holding no session's quote, drops a reclaim the mint cannot serve
+    /// yet: the seeder claims the proofs once the mint is back.
+    StoppedNoSessionBlockedDropped,
+    /// Counts a payment's 180 s from the session's end, not from sending it: a dropped
+    /// connection lengthens the wait.
+    EndRestartsWait,
+    /// Starts the 180 s of every closed session's payment again on a quote it refuses over
+    /// its price cap, its `window` or its mints.
+    RefusedQuoteRestartsWait,
+    /// Starts the 180 s of this ledger's closed session's payment again on a refused
+    /// `hello`.
+    HelloRefusalRestartsWait,
+    /// Starts the 180 s of every closed session's payment again when it makes a ledger for
+    /// another video.
+    SiblingRestartsWait,
+    /// Starts the 180 s of this ledger's closed session's payment again on a refused
+    /// request.
+    RefusalRestartsWait,
+    /// Starts the 180 s of this ledger's closed session's payment again on a second quote on
+    /// the open session, which it refuses.
+    SecondQuoteRestartsWait,
+    /// On a second quote on the open session, which it refuses, from a ledger with nothing
+    /// requested or acknowledged, forgives every video's payment found spent.
+    FreshSecondQuoteForgivesAll,
+    /// On a second quote on the open session, which it refuses, drops the other videos'
+    /// incomplete reclaims.
+    SecondQuoteDropsOtherReclaims,
+    /// Out of `mint-unavailable` tries, does not finish its incomplete reclaims: the seeder
+    /// claims the proofs of the third try once the mint is back.
+    OutOfTriesSkipsReclaim,
+    /// Starts the 180 s of this ledger's closed session's payment again on a `hello`
+    /// refused `banned`.
+    BannedHelloRestartsWait,
+    /// Holding no session's quote, takes proofs found spent, its restore unanswered, as its
+    /// own reclaim's: every proof back, it pays again after a seeder's claim.
+    NoSessionRestoreDownIsBack,
+    /// Holding no session's quote, takes proofs found spent, its restore unanswered, as the
+    /// seeder's: its own reclaim, its answer lost, leaves the payment awaiting a quote.
+    NoSessionRestoreDownIsSpent,
+    /// Counts each retry of a reclaim the mint cannot serve yet as a `mint-unavailable`
+    /// answer: a mint outage uses up the standing's tries.
+    RetryCountsATry,
+    /// Once stopped, forgets the payment in flight when its session ends: never reclaimed,
+    /// it is the seeder's to claim.
+    StoppedEndForgetsPending,
+    /// Holding no session's quote, says a payment awaits a quote on this ledger when
+    /// another video's does: the watcher opens sessions whose quotes cannot settle it.
+    NoSessionAwaitingAnyLedger,
+    /// Holding no session's quote, retries a reclaim refused because a proof's keyset
+    /// expired instead of deciding it per proof: the good proofs wait for a session, and the
+    /// seeder claims them meanwhile.
+    NoSessionExpiredRetried,
+    /// Holding no session's quote, writes a token off whole to the expiry when one of its
+    /// proofs' keysets has expired: the good proofs are never taken back.
+    NoSessionExpiredTokenWhole,
+    /// Holding no session's quote, takes a reclaim completing as a new session: it restores
+    /// the standing's three `mint-unavailable` tries, and another video pays again.
+    NoSessionReclaimRestoresTries,
 }
 
 /// Why a viewer refuses a quote without stopping, for the flaws that act on the refusal.
@@ -6258,8 +6383,9 @@ impl MockViewer {
     }
 
     /// What a flawed viewer does on a quote it refuses for `why`, which settles nothing: it
-    /// lets go of what it waits on, takes the word of the quote, pays ahead, or restores the
-    /// standing's tries. The honest viewer does none of it.
+    /// lets go of what it waits on, takes the word of the quote, pays ahead, restores the
+    /// standing's tries, or starts a closed session's 180 s again. The honest viewer does
+    /// none of it.
     fn on_refused_quote(&mut self, why: Refusal, quote: &Quote) {
         use ViewerFlaw as F;
         // A second quote restoring the tries is `QuoteResetsFirst`, which acts on every quote.
@@ -6311,6 +6437,49 @@ impl MockViewer {
         };
         let [lost, reclaim, slot, stop, settles, ahead] = flaws.map(|f| self.has(f));
         self.lets_go(lost, reclaim, slot, stop);
+        // Beyond this ledger's: every video's, from a new video's ledger, or the other
+        // videos'; and the 180 s of closed sessions' payments.
+        let fresh = self.requested == 0 && self.acked == 0;
+        let id = self.id;
+        if matches!(why, Refusal::Second) {
+            self.lets_go_of(
+                |_| true,
+                fresh && self.has(F::FreshSecondQuoteForgivesAll),
+                false,
+                false,
+                false,
+            );
+            self.lets_go_of(
+                |l| l != id,
+                false,
+                self.has(F::SecondQuoteDropsOtherReclaims),
+                false,
+                false,
+            );
+            if self.has(F::SecondQuoteRestartsWait) {
+                self.restart_wait(false);
+            }
+        } else {
+            if fresh {
+                self.lets_go_of(
+                    |_| true,
+                    self.has(F::FreshRefusalForgivesAll),
+                    self.has(F::FreshRefusalDropsAllReclaims),
+                    self.has(F::FreshRefusalFreesAnySlot),
+                    self.has(F::FreshRefusalClearsStop),
+                );
+            }
+            self.lets_go_of(
+                |l| l != id,
+                self.has(F::OtherRefusalForgivesLost),
+                self.has(F::OtherRefusalDropsReclaims),
+                self.has(F::RefusalFreesOtherSlot),
+                false,
+            );
+            if self.has(F::RefusedQuoteRestartsWait) {
+                self.restart_wait(true);
+            }
+        }
         if settles {
             if self.settle_by_quote(quote, |st| &mut st.unsettled, false, false, false, false) {
                 self.free_slot(self.id);
@@ -6326,11 +6495,11 @@ impl MockViewer {
         }
     }
 
-    /// What a flawed viewer lets go of on an input that settles nothing (a quote it refuses,
-    /// a refused request, a ledger made for another video, a timeout with no payment on the
-    /// session): this ledger's payment found spent, its incomplete reclaim, the slot its
-    /// closed session's payment holds, or the standing's stop. The honest viewer lets go of
-    /// none of them.
+    /// What a flawed viewer lets go of on an input that settles nothing (a quote it refuses
+    /// or finds dishonest, a refused request, an unsolicited ack or `rej`, a ledger made for
+    /// another video, a timeout with no payment on the session): this ledger's payment found
+    /// spent, its incomplete reclaim, the slot its closed session's payment holds, or the
+    /// standing's stop. The honest viewer lets go of none of them.
     fn lets_go(&self, lost: bool, reclaim: bool, slot: bool, stop: bool) {
         let id = self.id;
         let unsettled = self.pending.is_none();
@@ -6346,6 +6515,47 @@ impl MockViewer {
         }
         if stop {
             st.stopped = false;
+        }
+    }
+
+    /// As [`MockViewer::lets_go`], for the entries of every ledger `of` picks: the slot is
+    /// freed when one of them holds it with a closed session's payment.
+    fn lets_go_of(
+        &self,
+        of: impl Fn(u64) -> bool,
+        lost: bool,
+        reclaim: bool,
+        slot: bool,
+        stop: bool,
+    ) {
+        let mut st = self.standing();
+        if lost {
+            st.lost.retain(|(l, _)| !of(*l));
+        }
+        if reclaim {
+            st.reclaiming.retain(|(l, _)| !of(*l));
+        }
+        if slot
+            && let Some(l) = st.in_flight
+            && of(l)
+            && st.unsettled.iter().any(|(x, _)| *x == l)
+        {
+            st.in_flight = None;
+        }
+        if stop {
+            st.stopped = false;
+        }
+    }
+
+    /// Start the 180 s of this ledger's closed session's payment again, or of every
+    /// ledger's ([`ViewerFlaw::RefusedQuoteRestartsWait`] and the like only: the honest
+    /// viewer counts them from sending).
+    fn restart_wait(&self, all: bool) {
+        let (now, id) = (self.clock.now(), self.id);
+        for (l, p) in &mut self.standing().unsettled {
+            if all || *l == id {
+                p.sent_at = now;
+            }
         }
     }
 
@@ -6376,7 +6586,10 @@ impl MockViewer {
             }
             // Spent may be this watcher's own reclaim, gone through unanswered: a restore
             // of its outputs shows which.
-            Reclaim::SomeSpent if !self.has(ViewerFlaw::ReclaimNoRestore) => {
+            Reclaim::SomeSpent
+                if !self.has(ViewerFlaw::ReclaimNoRestore)
+                    && !(self.quote.is_none() && self.has(ViewerFlaw::NoSessionSkipsRestore)) =>
+            {
                 match self
                     .net
                     .restore_reclaim(token, self.has(ViewerFlaw::ReclaimRestoreAny))
@@ -6414,6 +6627,16 @@ impl MockViewer {
                         }
                     }
                     Some(false) => Reclaim::SomeSpent,
+                    None if self.quote.is_none()
+                        && self.has(ViewerFlaw::NoSessionRestoreDownIsBack) =>
+                    {
+                        Reclaim::All
+                    }
+                    None if self.quote.is_none()
+                        && self.has(ViewerFlaw::NoSessionRestoreDownIsSpent) =>
+                    {
+                        Reclaim::SomeSpent
+                    }
                     None if self.has(ViewerFlaw::ReclaimRestoreDownIsBack) => Reclaim::All,
                     None if self.has(ViewerFlaw::ReclaimRestoreDownIsSpent) => Reclaim::SomeSpent,
                     None => Reclaim::Blocked,
@@ -6421,7 +6644,17 @@ impl MockViewer {
             }
             outcome => outcome,
         };
+        let no_session = self.quote.is_none();
         match outcome {
+            Reclaim::Expired if no_session && self.has(ViewerFlaw::NoSessionExpiredIsSpent) => {
+                Reclaim::SomeSpent
+            }
+            Reclaim::Pending if no_session && self.has(ViewerFlaw::NoSessionPendingIsSpent) => {
+                Reclaim::SomeSpent
+            }
+            Reclaim::Expired if no_session && self.has(ViewerFlaw::NoSessionExpiredRetried) => {
+                Reclaim::Blocked
+            }
             Reclaim::SomeSpent
                 if self.has(ViewerFlaw::IgnoresReclaimOutcome)
                     || (retry && self.has(ViewerFlaw::RetryIgnoresSpent)) =>
@@ -6442,7 +6675,10 @@ impl MockViewer {
                     self.has(ViewerFlaw::OutputsExpiryFirst) && self.net.active_expired();
                 let decided = if outputs_first || expired == 0 {
                     Reclaim::Blocked
-                } else if good == 0 || self.has(ViewerFlaw::ExpiredTokenWhole) {
+                } else if good == 0
+                    || self.has(ViewerFlaw::ExpiredTokenWhole)
+                    || (no_session && self.has(ViewerFlaw::NoSessionExpiredTokenWhole))
+                {
                     Reclaim::Expired
                 } else if self.has(ViewerFlaw::ExpiredNeedsEveryProof) {
                     Reclaim::Blocked
@@ -6468,13 +6704,35 @@ impl MockViewer {
     /// that ledger; a mint that is down leaves the reclaim to finish later. Either way
     /// nothing is paid to the seeder until then.
     fn reclaim(&mut self, ledger: u64, p: Pending, retry: bool) {
+        let no_session = self.quote.is_none();
         match self.take_back(&p.token, retry) {
+            Reclaim::All | Reclaim::Expired
+                if no_session && self.has(ViewerFlaw::NoSessionReclaimRestoresTries) =>
+            {
+                self.standing().unavailable = 0;
+            }
             // Expired: lost to the expiry, not taken by the seeder. Nothing is left to wait
             // for, and the seeder is owed no blame: the watcher pays again.
             Reclaim::All | Reclaim::Expired => {}
+            Reclaim::SomeSpent if no_session && self.has(ViewerFlaw::NoSessionSpentIsBack) => {}
+            Reclaim::SomeSpent if no_session && self.has(ViewerFlaw::NoSessionLostUnderSelf) => {
+                self.standing().lost.push((self.id, p));
+            }
+            Reclaim::Blocked | Reclaim::Pending
+                if no_session && self.has(ViewerFlaw::NoSessionBlockedDropped) => {}
+            Reclaim::Blocked | Reclaim::Pending
+                if no_session
+                    && self.halted()
+                    && self.has(ViewerFlaw::StoppedNoSessionBlockedDropped) => {}
             Reclaim::SomeSpent if self.has(ViewerFlaw::LostIsFinal) => self.halt(),
             Reclaim::SomeSpent => self.standing().lost.push((ledger, p)),
-            Reclaim::Blocked | Reclaim::Pending => self.standing().reclaiming.push((ledger, p)),
+            Reclaim::Blocked | Reclaim::Pending => {
+                let mut st = self.standing();
+                if retry && self.has(ViewerFlaw::RetryCountsATry) {
+                    st.unavailable += 1;
+                }
+                st.reclaiming.push((ledger, p));
+            }
         }
     }
 
@@ -6501,7 +6759,9 @@ impl MockViewer {
             retry
         };
         for (ledger, p) in retry {
-            let ledger = if self.has(ViewerFlaw::RetryAsSelf) {
+            let ledger = if self.has(ViewerFlaw::RetryAsSelf)
+                || (self.quote.is_none() && self.has(ViewerFlaw::NoSessionRetryAsSelf))
+            {
                 self.id
             } else {
                 ledger
@@ -6551,7 +6811,9 @@ impl MockViewer {
             old
         };
         for (ledger, p) in old {
-            self.free_slot(ledger);
+            if !(self.quote.is_none() && self.has(ViewerFlaw::NoSessionReclaimKeepsSlot)) {
+                self.free_slot(ledger);
+            }
             let owner = if self.has(ViewerFlaw::CatchUpFilesUnderSelf) {
                 self.id
             } else {
@@ -6584,6 +6846,9 @@ impl MockViewer {
     fn pay_when(&mut self, threshold: u64, last: bool) -> Result<Option<Pay>, String> {
         let stop_holds = !(last && self.has(ViewerFlaw::LastPayIgnoresStop));
         if self.halted() && stop_holds && self.has(ViewerFlaw::StoppedSkipsReclaim) {
+            return Ok(None);
+        }
+        if self.has(ViewerFlaw::OutOfTriesSkipsReclaim) && self.out_of_tries() {
             return Ok(None);
         }
         // Reclaiming is not paying: a stopped viewer still catches up, and so does one that
@@ -6745,6 +7010,9 @@ impl Viewer for MockViewer {
             self.has(ViewerFlaw::SiblingFreesSlot),
             false,
         );
+        if self.has(ViewerFlaw::SiblingRestartsWait) {
+            self.restart_wait(true);
+        }
         let id = {
             let mut st = self.standing();
             st.next_ledger += 1;
@@ -6883,11 +7151,31 @@ impl Viewer for MockViewer {
             honest = true;
         }
         if !honest && !self.has(ViewerFlaw::TrustsQuote) {
+            self.lets_go(
+                false,
+                self.has(ViewerFlaw::DishonestQuoteDropsReclaim),
+                false,
+                false,
+            );
+            if self.has(ViewerFlaw::DishonestQuoteForgetsUnsettled) {
+                let id = self.id;
+                self.standing().unsettled.retain(|(l, _)| *l != id);
+                self.free_slot(id);
+            }
             self.halt();
             return Err("the quote disagrees with this viewer's ledger".into());
         }
         if read_first && self.quote.is_some() {
             return Err("one quote per session".into());
+        }
+        if !resumed {
+            self.lets_go_of(
+                |_| true,
+                self.has(ViewerFlaw::FreshTakenForgivesAll),
+                self.has(ViewerFlaw::FreshTakenDropsAllReclaims),
+                false,
+                false,
+            );
         }
         if self.has(ViewerFlaw::ForgivesLost) {
             let id = self.id;
@@ -6906,6 +7194,9 @@ impl Viewer for MockViewer {
 
     fn hello_refused(&mut self, rej: &Rej) {
         if rej.code != RejCode::Banned {
+            if self.has(ViewerFlaw::HelloRefusalRestartsWait) {
+                self.restart_wait(false);
+            }
             if self.has(ViewerFlaw::HelloRefusalPaysAhead) {
                 self.pay_ahead = true;
             }
@@ -6941,6 +7232,9 @@ impl Viewer for MockViewer {
         if self.has(ViewerFlaw::HelloRefusedResetsBudget) {
             self.standing().unavailable = 0;
         }
+        if rej.code == RejCode::Banned && self.has(ViewerFlaw::BannedHelloRestartsWait) {
+            self.restart_wait(false);
+        }
         let stops = if self.has(ViewerFlaw::HelloRefusalStops) {
             rej.code != RejCode::BadSession
         } else if self.has(ViewerFlaw::UnknownHelloRefusalStops) {
@@ -6973,6 +7267,9 @@ impl Viewer for MockViewer {
             self.requested = self.requested.saturating_sub(1);
         }
         self.pay_ahead = true;
+        if self.has(ViewerFlaw::RefusalRestartsWait) {
+            self.restart_wait(false);
+        }
         self.lets_go(
             self.has(ViewerFlaw::RefusalForgivesLost),
             false,
@@ -7067,7 +7364,15 @@ impl Viewer for MockViewer {
                             && ack.accepted_upto == p.upto
                             && ack.spent_total == self.spent))
             }
-            None => self.has(ViewerFlaw::AcceptsUnsolicitedAck),
+            None => {
+                self.lets_go(
+                    false,
+                    self.has(ViewerFlaw::UnsolicitedAckDropsReclaim),
+                    false,
+                    false,
+                );
+                self.has(ViewerFlaw::AcceptsUnsolicitedAck)
+            }
         };
         if ok || self.has(ViewerFlaw::IgnoresBadAck) {
             if ok && self.has(ViewerFlaw::AckClearsStop) {
@@ -7117,6 +7422,12 @@ impl Viewer for MockViewer {
                 }
                 return;
             }
+            self.lets_go(
+                false,
+                self.has(ViewerFlaw::UnsolicitedRejDropsReclaim),
+                false,
+                false,
+            );
             if !self.has(ViewerFlaw::UnsolicitedRejIgnored) {
                 self.halt();
             }
@@ -7191,12 +7502,17 @@ impl Viewer for MockViewer {
         if self.has(ViewerFlaw::EndResetsBudget) {
             self.standing().unavailable = 0;
         }
-        if let Some(p) = self.pending.take() {
+        if let Some(mut p) = self.pending.take() {
+            if self.has(ViewerFlaw::EndRestartsWait) {
+                p.sent_at = self.clock.now();
+            }
             if self.has(ViewerFlaw::EndReclaimsNow) {
                 self.free_slot(self.id);
                 self.reclaim(self.id, p, false);
                 self.halt();
-            } else if self.has(ViewerFlaw::EndForgetsPending) {
+            } else if self.has(ViewerFlaw::EndForgetsPending)
+                || (self.has(ViewerFlaw::StoppedEndForgetsPending) && self.halted())
+            {
                 self.free_slot(self.id);
             } else {
                 if self.has(ViewerFlaw::EndClearsInFlight) {
@@ -7216,7 +7532,9 @@ impl Viewer for MockViewer {
 
     fn awaiting_quote(&self) -> bool {
         let tries_used = self.out_of_tries() && !self.has(ViewerFlaw::BudgetNotSignalled);
-        let lost = self.awaiting(!self.has(ViewerFlaw::AwaitingQuoteAnyLedger));
+        let any = self.has(ViewerFlaw::AwaitingQuoteAnyLedger)
+            || (self.quote.is_none() && self.has(ViewerFlaw::NoSessionAwaitingAnyLedger));
+        let lost = self.awaiting(!any);
         if self.has(ViewerFlaw::AwaitingLostWhenStopped) {
             return lost || (!self.halted() && tries_used);
         }

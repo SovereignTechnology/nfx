@@ -158,7 +158,8 @@ pub trait Viewer {
     /// resumed one included), or a session already open: a second quote on it is refused
     /// unread, whatever it claims. A quote refused so is not taken, and settles nothing: the
     /// payment in flight, a payment awaiting a quote and an incomplete reclaim stay as they
-    /// were, and so do the `mint-unavailable` tries.
+    /// were, and so do the `mint-unavailable` tries. Taken or refused, a quote settles
+    /// nothing of the seeder's other videos: their payments stay as they were.
     ///
     /// A quote does not undo a stop: taken or not, it leaves a viewer that has stopped
     /// paying the seeder paying it nothing, on this session and every later one.
@@ -183,12 +184,20 @@ pub trait Viewer {
     /// in flight toward the seeder at a time, across its videos, and none is made:
     /// - once the viewer has stopped, ahead after a refusal included;
     /// - while a reclaim is incomplete or a payment awaits a quote;
-    /// - after three `mint-unavailable` answers in a row, until a new session's quote.
+    /// - after three `mint-unavailable` answers in a row (a reclaim retried while the mint
+    ///   is down is none), until a new session's accepted quote.
     ///
     /// It first finishes incomplete reclaims, and reclaims a payment a closed session left
     /// unsettled once it is 180 s old, whichever of the seeder's videos it was for. It
     /// does so even when the viewer has stopped, and when it holds no session's quote
-    /// (between sessions, or its `hello` or quote refused): reclaiming is not paying.
+    /// (between sessions, or its `hello` or quote refused), and when out of its
+    /// `mint-unavailable` tries: reclaiming is not paying. A reclaim done with no session,
+    /// or from another video's ledger, ends as one done in a session on the payment's own:
+    /// proofs found spent (after a restore of its own outputs) leave the payment awaiting a
+    /// quote on its own ledger, a mint that cannot serve it yet or a proof pending leaves it
+    /// incomplete, and with every proof back or lost to the expiry the viewer pays again at
+    /// its next session. A closed session's payment is reclaimed 180 s after it was sent,
+    /// whatever came since.
     async fn due(&mut self) -> Result<Option<Pay>, String>;
 
     /// The payment for every chunk still owed, when the session ends.
@@ -235,7 +244,7 @@ pub trait Viewer {
     /// Whether paying waits for a new session: this ledger holds a payment whose proofs
     /// were found spent, awaiting a quote that shows it accepted (the watcher opens a new
     /// session for this video), or the standing has used its three `mint-unavailable`
-    /// tries (any new session's quote restores them). A quote equal to the ledger leaves a
+    /// tries (any new session's accepted quote restores them). A quote equal to the ledger leaves a
     /// payment waiting, and the watcher paying nothing. A viewer whose standing has stopped
     /// paying the seeder (not merely awaiting a quote) awaits no quote, whatever it holds:
     /// no new session makes it pay.
