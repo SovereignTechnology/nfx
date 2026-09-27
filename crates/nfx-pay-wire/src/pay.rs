@@ -156,6 +156,12 @@ impl RejCode {
         }
     }
 
+    /// Every code this version knows, in the order its table lists them: for a check that
+    /// must cover each.
+    pub fn known() -> impl Iterator<Item = Self> {
+        CODES.iter().map(|(_, code)| code.clone())
+    }
+
     /// The code for its wire form: a known code, or `Other` for one this version does not
     /// know.
     #[must_use]

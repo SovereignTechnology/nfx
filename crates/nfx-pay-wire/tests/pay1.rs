@@ -120,4 +120,12 @@ fn pay1_writers_refuse_what_their_readers_would() {
             .to_line()
             .is_ok()
     );
+    // Every code it knows is one of them, written and read back as itself.
+    let known: Vec<RejCode> = RejCode::known().collect();
+    assert_eq!(known.len(), 15);
+    for code in known {
+        assert!(!matches!(code, RejCode::Other(_)), "{code:?}");
+        assert_eq!(RejCode::from_code(code.as_str()), code);
+        assert!(rej(code).to_line().is_ok());
+    }
 }
