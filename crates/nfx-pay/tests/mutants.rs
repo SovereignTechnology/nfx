@@ -657,4 +657,6 @@ catches!(
     spent_total_before_amount_round_trip: r(S::SpentTotalBeforeAmount) => an_overflowing_claim_is_underpaid,
     spent_total_peer_wide: s(S::SpentTotalPeerWide) => an_overflowing_claim_is_underpaid,
     spent_total_peer_wide_round_trip: r(S::SpentTotalPeerWide) => an_overflowing_claim_is_underpaid,
+    viewer_ack_refuses_pay_ahead: v(V::AckRefusesPayAhead) => a_viewer_pays_ahead_only_after_a_refusal,
+    viewer_due_errs_on_credit: v(V::DueErrsOnCredit) => a_viewer_pays_ahead_only_after_a_refusal,
 );

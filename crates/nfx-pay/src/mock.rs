@@ -2447,6 +2447,13 @@ pub enum ViewerFlaw {
     /// Restores the standing's three tries when it makes a ledger for another video, before
     /// any session of it quotes.
     SiblingRestoresTries,
+    /// Refuses the seeder's honest ack of a payment ahead of what it requested, as if the
+    /// ack did not match, and stops: after a refusal it pays ahead (NFX-07 §3a), and then
+    /// stops paying the seeder that took the payment.
+    AckRefusesPayAhead,
+    /// Fails `due()` while its ledger holds credit (chunks paid for beyond those it
+    /// requested), where it answers that nothing is due: the pair stalls on its credit.
+    DueErrsOnCredit,
 }
 
 /// (peer, video index): one account.
@@ -5991,6 +5998,9 @@ impl MockViewer {
         }
         let unpaid = self.requested.saturating_sub(self.acked);
         let credit = self.acked.saturating_sub(self.requested);
+        if credit > 0 && !last && self.has(ViewerFlaw::DueErrsOnCredit) {
+            return Err("the ledger holds credit".into());
+        }
         let ahead = if !may_ahead {
             0
         } else if self.has(ViewerFlaw::PayAheadUnbounded) {
@@ -6357,6 +6367,16 @@ impl Viewer for MockViewer {
                 self.spent += p.amount;
                 return Ok(());
             }
+        }
+        if self.has(ViewerFlaw::AckRefusesPayAhead)
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.upto > self.requested)
+        {
+            self.take_pending();
+            self.halt();
+            return Err("an ack that does not match what was paid".into());
         }
         let expected = self.take_pending();
         // Short of the payment's upto, though above the ledger.

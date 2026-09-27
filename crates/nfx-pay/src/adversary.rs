@@ -8,6 +8,12 @@
 //! **Run it with [`adversary_suite!`](crate::adversary_suite)**, which emits one test per
 //! scenario from the list kept here: a runner cannot choose a subset. The list is pinned
 //! with the locked paths, so weakening the suite is a reviewed change.
+//!
+//! Every check names what it requires: an assertion, or an `expect` whose message says it.
+//! A bare `unwrap` names nothing, and its panic is never counted as the suite failing
+//! ([`Ran::failed_the_suite`]), so a defect caught only there would survive: they are
+//! denied here.
+#![deny(clippy::unwrap_used)]
 
 use std::future::{Future, poll_fn};
 use std::pin::{Pin, pin};
@@ -2756,12 +2762,12 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.restore_outage(true);
     h.lose_next_swap_response();
     let r = s.pay(&pay).await;
@@ -2770,7 +2776,7 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
     v.rej(&r.expect_err("mint-unavailable")).await;
     h.restore_outage(false);
     v.requested();
-    let _ = v.due().await.unwrap();
+    let _ = v.due().await.expect("due answers after mint-unavailable");
     drop(s);
     v.end();
     let s = open(h, &e, 1).await;
@@ -4417,8 +4423,10 @@ pub async fn an_honest_watcher_streams_two_videos_at_once<H: Harness>(h: &H) {
     let mut s1 = open_on(h, &e, 1, 1).await;
     let mut v0 = h.viewer(1);
     let mut v1 = v0.sibling();
-    v0.quote(s0.quote()).unwrap();
-    v1.quote(s1.quote()).unwrap();
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
     let (mut f0, mut f1): (Option<Pay>, Option<Pay>) = (None, None);
     for i in 0..20u16 {
         for (s, v, video, in_flight) in [
@@ -4431,9 +4439,10 @@ pub async fn an_honest_watcher_streams_two_videos_at_once<H: Harness>(h: &H) {
             );
             v.requested();
             if let Some(pay) = in_flight.take() {
-                v.ack(&s.pay(&pay).await.expect("accepted")).unwrap();
+                v.ack(&s.pay(&pay).await.expect("accepted"))
+                    .expect("each video's honest ack is taken");
             }
-            *in_flight = v.due().await.unwrap();
+            *in_flight = v.due().await.expect("due answers on each video");
         }
     }
     assert!(!v0.stopped() && !v1.stopped());
@@ -6878,16 +6887,29 @@ pub async fn a_viewer_pays_for_every_request_and_no_more<H: Harness>(h: &H) {
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(2);
     v.quote(s.quote()).expect("an acceptable quote");
-    assert!(v.due().await.unwrap().is_none(), "nothing requested yet");
+    assert!(
+        v.due()
+            .await
+            .expect("due answers before any request")
+            .is_none(),
+        "nothing requested yet"
+    );
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("half the window is due");
+    let pay = v
+        .due()
+        .await
+        .expect("due answers with two chunks requested")
+        .expect("half the window is due");
     assert_eq!(pay.upto_chunk, 2, "never ahead of what was requested");
     v.requested();
     assert!(
-        v.due().await.unwrap().is_none(),
+        v.due()
+            .await
+            .expect("due answers with a payment in flight")
+            .is_none(),
         "one payment in flight at a time"
     );
     let ack = s.pay(&pay).await.expect("the viewer paid exactly");
@@ -6901,17 +6923,25 @@ pub async fn a_viewer_pays_for_every_request_and_no_more<H: Harness>(h: &H) {
     serve(h, &mut crowd, 0, 4);
     let mut s = open(h, &e, 2).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote())
+        .expect("an honest quote is accepted at a full cap");
     for i in 0..4 {
         v.requested();
         assert!(!s.admit(&h.chunk(i)), "the cap is full");
         v.refused();
     }
     assert!(
-        v.last_pay().await.unwrap().is_none(),
+        v.last_pay()
+            .await
+            .expect("last_pay answers after refusals")
+            .is_none(),
         "refused requests are not owed"
     );
-    let ahead = v.due().await.unwrap().expect("refused, it pays ahead");
+    let ahead = v
+        .due()
+        .await
+        .expect("due answers after a refusal")
+        .expect("refused, it pays ahead");
     assert_eq!(
         ahead.upto_chunk, 2,
         "half the window, nothing for the refusals"
@@ -6924,7 +6954,7 @@ pub async fn a_viewer_owes_nothing_for_refused_requests<H: Harness>(h: &H) {
     let e = h.engine(1, 8, 3);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..4 {
         v.requested();
         if !s.admit(&h.chunk(i)) {
@@ -6944,7 +6974,7 @@ pub async fn a_viewer_owes_nothing_for_refused_requests<H: Harness>(h: &H) {
     let e = h.engine(1, 8, 3);
     let mut s = open(h, &e, 2).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     let admitted = (0..4)
         .filter(|i| {
             v.requested();
@@ -6952,32 +6982,56 @@ pub async fn a_viewer_owes_nothing_for_refused_requests<H: Harness>(h: &H) {
         })
         .count();
     assert_eq!(admitted, 3, "the fourth is refused");
-    let pay = v.due().await.unwrap().expect("half the window is due");
+    let pay = v
+        .due()
+        .await
+        .expect("due answers with four chunks requested")
+        .expect("half the window is due");
     assert_eq!(pay.upto_chunk, 4);
-    v.ack(&s.pay(&pay).await.expect("accepted")).unwrap();
+    v.ack(&s.pay(&pay).await.expect("accepted"))
+        .expect("the honest ack is taken before the refusal");
     v.refused();
     v.requested();
     assert!(s.admit(&h.chunk(3)), "the retry is served from the credit");
     assert!(
-        v.last_pay().await.unwrap().is_none(),
+        v.last_pay()
+            .await
+            .expect("last_pay answers holding credit")
+            .is_none(),
         "nothing more is owed"
     );
 }
 
-/// A viewer pays ahead only right after a refusal. Once the cap frees it goes back to
-/// paying for what it requested, and ends holding no credit.
+/// A viewer pays ahead only right after a refusal. It checks the seeder's ack of that
+/// payment like any other, takes the honest one, and holding the credit it answers `due`
+/// with nothing owed (NFX-07 §3a). Once the cap frees it goes back to paying for what it
+/// requested, and ends holding no credit.
 pub async fn a_viewer_pays_ahead_only_after_a_refusal<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 4);
     let mut crowd = open(h, &e, 9).await;
     assert_eq!(serve(h, &mut crowd, 0, 4), 4, "the cap is full");
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote())
+        .expect("an honest quote is accepted at a full cap");
     v.requested();
     assert!(!s.admit(&h.chunk(0)));
     v.refused();
-    let ahead = v.due().await.unwrap().expect("refused, it pays ahead");
-    v.ack(&s.pay(&ahead).await.expect("accepted")).unwrap();
+    let ahead = v
+        .due()
+        .await
+        .expect("due answers after a refusal")
+        .expect("refused, it pays ahead");
+    v.ack(&s.pay(&ahead).await.expect("accepted"))
+        .expect("the seeder's honest ack of a pay-ahead is taken");
+    assert!(!v.stopped(), "its pay-ahead acked, it goes on paying");
+    assert!(
+        v.due()
+            .await
+            .expect("holding credit, due answers")
+            .is_none(),
+        "its credit covers what it requested: nothing is due"
+    );
     crowd
         .pay(&Pay {
             upto_chunk: 4,
@@ -6997,10 +7051,14 @@ pub async fn a_viewer_pays_ahead_only_after_a_refusal<H: Harness>(h: &H) {
     // Half a window, rounded down: on a window of 5, two chunks ahead.
     let s = open(h, &h.engine(1, 5, 1000), 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
     v.refused();
-    let ahead = v.due().await.unwrap().expect("pays ahead");
+    let ahead = v
+        .due()
+        .await
+        .expect("due answers after a refusal")
+        .expect("pays ahead");
     assert_eq!(ahead.upto_chunk, 2, "never beyond half the window");
 }
 
@@ -7010,7 +7068,7 @@ async fn resumed_viewer<H: Harness>(h: &H) -> (H::Viewer, Quote) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(2);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     stream(h, &mut s, &mut v, 0, 4).await;
     drop(s);
     v.end();
@@ -7101,7 +7159,11 @@ pub async fn a_viewer_refuses_quotes_it_cannot_honour<H: Harness>(h: &H) {
     );
     v.requested();
     v.refused();
-    let ahead = v.due().await.unwrap().expect("refused, it pays ahead");
+    let ahead = v
+        .due()
+        .await
+        .expect("due answers after a refusal")
+        .expect("refused, it pays ahead");
     assert!(
         ahead.upto_chunk <= ceiling.div_ceil(2),
         "half its ceiling at most: {}",
@@ -7173,7 +7235,7 @@ pub async fn a_viewer_stops_on_a_wrong_or_unsolicited_ack<H: Harness>(h: &H) {
     let mut unsolicited = h.viewer(1);
     unsolicited
         .quote(open(h, &h.engine(1, 2, 1000), 1).await.quote())
-        .unwrap();
+        .expect("an honest quote is accepted");
     assert!(
         unsolicited
             .ack(&Ack {
@@ -7193,16 +7255,19 @@ pub async fn a_viewer_stops_on_a_wrong_or_unsolicited_ack<H: Harness>(h: &H) {
         let e = h.engine(1, 2, 1000);
         let mut s = open(h, &e, 1).await;
         let mut v = h.viewer(1);
-        v.quote(s.quote()).unwrap();
+        v.quote(s.quote()).expect("an honest quote is accepted");
         assert!(s.admit(&h.chunk(0)));
         v.requested();
-        let pay = v.due().await.unwrap().expect("due");
-        let mut ack = s.pay(&pay).await.unwrap();
+        let pay = v.due().await.expect("due answers").expect("due");
+        let mut ack = s.pay(&pay).await.expect("an honest payment is accepted");
         tamper(&mut ack);
         assert!(v.ack(&ack).is_err());
         assert!(v.stopped());
         v.requested();
-        assert!(v.due().await.unwrap().is_none(), "no more payments");
+        assert!(
+            v.due().await.expect("due answers once stopped").is_none(),
+            "no more payments"
+        );
     }
     // With 4 chunks acknowledged at 1 sat each, a payment up to chunk 8 (4 sat) acked short
     // of it, though above the ledger: at chunk 5 with the payment's total, at chunk 5 with
@@ -7254,18 +7319,27 @@ pub async fn a_viewer_stops_on_a_wrong_or_unsolicited_ack<H: Harness>(h: &H) {
         let e = h.engine(1, 8, 1000);
         let mut s = open(h, &e, 1).await;
         let mut v = h.viewer(1);
-        v.quote(s.quote()).unwrap();
+        v.quote(s.quote()).expect("an honest quote is accepted");
         for i in 0..4 {
             assert!(s.admit(&h.chunk(i)));
             v.requested();
         }
-        let first = v.due().await.unwrap().expect("due");
-        v.ack(&s.pay(&first).await.expect("accepted")).unwrap(); // the ledger: 4, 4
+        let first = v
+            .due()
+            .await
+            .expect("due answers with four chunks requested")
+            .expect("due");
+        v.ack(&s.pay(&first).await.expect("accepted"))
+            .expect("the honest ack of the first payment is taken"); // the ledger: 4, 4
         for i in 4..8 {
             assert!(s.admit(&h.chunk(i)));
             v.requested();
         }
-        let pay = v.due().await.unwrap().expect("due");
+        let pay = v
+            .due()
+            .await
+            .expect("due answers with eight chunks requested")
+            .expect("due");
         assert_eq!(pay.upto_chunk, 8);
         let ack = s.pay(&pay).await.expect("accepted");
         assert_eq!(
@@ -7309,9 +7383,9 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     for code in codes {
         let s = open(h, &h.engine(7, 2, 1000), 1).await;
         let mut v = h.viewer(7);
-        v.quote(s.quote()).unwrap();
+        v.quote(s.quote()).expect("an honest quote is accepted");
         v.requested();
-        let pay = v.due().await.unwrap().expect("due");
+        let pay = v.due().await.expect("due answers").expect("due");
         v.rej(&Rej {
             code: code.clone(),
             detail: None,
@@ -7327,10 +7401,10 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     // the watcher itself: a restore of its outputs shows they are back, and it pays on.
     let s = open(h, &h.engine(1, 4, 1000), 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
     v.requested();
-    let first = v.due().await.unwrap().expect("due");
+    let first = v.due().await.expect("due answers").expect("due");
     h.lose_next_reclaim_response();
     v.rej(&Rej {
         code: RejCode::MintUnavailable,
@@ -7342,19 +7416,23 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
         "the unanswered reclaim went through"
     );
     assert!(
-        v.due().await.unwrap().is_some() && !v.awaiting_quote(),
+        v.due()
+            .await
+            .expect("due answers after its own reclaim went through")
+            .is_some()
+            && !v.awaiting_quote(),
         "its own reclaim is not a loss: it pays again"
     );
     // An unanswered restore says nothing: not that its own reclaim took the proofs...
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.mint_outage(true);
     let rej = s.pay(&pay).await.expect_err("mint-unavailable");
     h.mint_outage(false);
@@ -7363,7 +7441,10 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     v.rej(&rej).await;
     v.requested();
     assert!(
-        v.due().await.unwrap().is_none(),
+        v.due()
+            .await
+            .expect("due answers with its reclaim incomplete")
+            .is_none(),
         "the reclaim is still incomplete"
     );
     assert!(
@@ -7374,16 +7455,17 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     let again = v
         .due()
         .await
-        .unwrap()
+        .expect("due answers once the restore is answered")
         .expect("its proofs are back: it pays again");
-    v.ack(&s.pay(&again).await.expect("accepted")).unwrap();
+    v.ack(&s.pay(&again).await.expect("accepted"))
+        .expect("the honest ack is taken");
     // ...nor that they are back, when the seeder kept them.
     let s = open(h, &h.engine(1, 4, 1000), 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
     v.requested();
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     assert!(h.steal(&pay.token).await, "the seeder keeps it");
     h.restore_outage(true);
     v.rej(&Rej {
@@ -7393,12 +7475,19 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     .await;
     v.requested();
     assert!(
-        v.due().await.unwrap().is_none(),
+        v.due()
+            .await
+            .expect("due answers while the restore goes unanswered")
+            .is_none(),
         "nothing more is paid while the restore goes unanswered"
     );
     h.restore_outage(false);
     assert!(
-        v.due().await.unwrap().is_none() && v.awaiting_quote(),
+        v.due()
+            .await
+            .expect("due answers once the restore is answered")
+            .is_none()
+            && v.awaiting_quote(),
         "then it awaits a quote"
     );
     // A reclaim refused because the proofs' keyset expired (CDK 12003) is decided by a
@@ -7407,12 +7496,12 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.before_next_swap(MintEvent::ExpireKeyset);
     let rej = s
         .pay(&pay)
@@ -7426,7 +7515,10 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
         v.requested();
     }
     assert!(
-        v.due().await.unwrap().is_some(),
+        v.due()
+            .await
+            .expect("due answers after the proofs' keyset expired")
+            .is_some(),
         "the proofs lost to the expiry, it pays again"
     );
     // A reclaim whose answer is lost, and whose outputs' keyset expires before the retry:
@@ -7437,12 +7529,12 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.mint_outage(true);
     let rej = s.pay(&pay).await.expect_err("the mint is down");
     h.mint_outage(false);
@@ -7454,7 +7546,11 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
         v.requested();
     }
     assert!(
-        v.due().await.unwrap().is_none() && v.awaiting_quote(),
+        v.due()
+            .await
+            .expect("due answers after the outputs' keyset expired")
+            .is_none()
+            && v.awaiting_quote(),
         "it awaits a quote, paying nothing more"
     );
     // A 12003 may be the reclaim's outputs' keyset: the mint's active one expired, and kept
@@ -7464,12 +7560,12 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.rotate_keyset(); // its proofs now of an older keyset
     h.expire_active_keyset();
     let rej = s.pay(&pay).await.expect_err("no keyset to swap to");
@@ -7481,11 +7577,14 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
         v.requested();
     }
     assert!(
-        v.due().await.unwrap().is_none(),
+        v.due()
+            .await
+            .expect("due answers with its reclaim incomplete")
+            .is_none(),
         "its reclaim incomplete, it pays nothing more"
     );
     h.rotate_keyset();
-    let next = v.due().await.unwrap();
+    let next = v.due().await.expect("due answers once the mint rotates");
     assert!(
         h.claimed_all(&pay.token).await,
         "once the mint rotates, it takes its proofs back"
@@ -7498,7 +7597,7 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
@@ -7506,7 +7605,7 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     let pay = v
         .due()
         .await
-        .unwrap()
+        .expect("due answers in the active keyset's proofs")
         .expect("due, in proofs of the active keyset");
     h.expire_active_keyset();
     let rej = s.pay(&pay).await.expect_err("no keyset to swap to");
@@ -7522,7 +7621,10 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
         v.requested();
     }
     assert!(
-        v.due().await.unwrap().is_some(),
+        v.due()
+            .await
+            .expect("due answers after the active keyset expired")
+            .is_some(),
         "its proofs lost to the expiry, it pays again, with an older keyset's proofs"
     );
     h.rotate_keyset();
@@ -7533,36 +7635,43 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
     assert!(
-        v.due().await.unwrap().is_none(),
+        v.due()
+            .await
+            .expect("due answers holding only expired proofs")
+            .is_none(),
         "its only proofs are listed expired: worth nothing, never paid with"
     );
     h.rotate_keyset();
     let pay = v
         .due()
         .await
-        .unwrap()
+        .expect("due answers once the mint rotates")
         .expect("once the mint rotates, it pays, in proofs of the new keyset");
     let ack = s.pay(&pay).await.expect("swapped");
     assert_eq!((ack.accepted_upto, ack.spent_total), (2, 2));
-    v.ack(&ack).unwrap();
+    v.ack(&ack).expect("the honest ack is taken");
     // A token of two keysets, one expired (a wallet spends an older keyset's proofs first):
     // decided per proof. The expired one is lost; the other is taken back, and the watcher
     // pays again.
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..3 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due: 3 sat, two proofs");
+    let pay = v
+        .due()
+        .await
+        .expect("due answers")
+        .expect("due: 3 sat, two proofs");
     h.expire_keyset_of(&pay.token, 1);
     let rej = s
         .pay(&pay)
@@ -7579,7 +7688,7 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     let next = v
         .due()
         .await
-        .unwrap()
+        .expect("due answers after a proof's keyset expired")
         .expect("complete, the seeder having taken nothing: it pays again");
     // Never with the proof lost to the expiry: it is worth nothing, and a payment holding
     // it would be refused (12003) and answered `mint-unavailable`.
@@ -7588,7 +7697,7 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
         .await
         .expect("its payment holds no proof listed expired: swapped");
     assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
-    v.ack(&ack).unwrap();
+    v.ack(&ack).expect("the honest ack is taken");
 
     // The same token, its good proof's reclaim going through with the answer lost: the
     // retry is refused (12003) with that proof spent. A restore shows it the watcher's own,
@@ -7597,12 +7706,16 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..3 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due: 3 sat, two proofs");
+    let pay = v
+        .due()
+        .await
+        .expect("due answers")
+        .expect("due: 3 sat, two proofs");
     h.expire_keyset_of(&pay.token, 1);
     let rej = s
         .pay(&pay)
@@ -7617,7 +7730,10 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     );
     assert!(s.admit(&h.chunk(3)));
     v.requested();
-    let next = v.due().await.unwrap();
+    let next = v
+        .due()
+        .await
+        .expect("due answers after a proof's keyset expired");
     assert!(
         !v.awaiting_quote(),
         "the seeder took nothing: its own reclaim has the good proof, the other is lost to the expiry"
@@ -7630,12 +7746,16 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..3 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due: 3 sat, two proofs");
+    let pay = v
+        .due()
+        .await
+        .expect("due answers")
+        .expect("due: 3 sat, two proofs");
     h.expire_keyset_of(&pay.token, 1);
     h.rotate_keyset(); // the good proof now of an older keyset
     h.expire_active_keyset();
@@ -7646,11 +7766,20 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     assert!(s.admit(&h.chunk(3)));
     v.requested();
     assert!(
-        v.due().await.unwrap().is_none(),
+        v.due()
+            .await
+            .expect("due answers with its reclaim incomplete")
+            .is_none(),
         "the good proof not yet taken back: the reclaim is incomplete, and it pays nothing"
     );
     h.rotate_keyset();
-    assert!(v.due().await.unwrap().is_some(), "then it pays again");
+    assert!(
+        v.due()
+            .await
+            .expect("due answers once the mint rotates")
+            .is_some(),
+        "then it pays again"
+    );
     assert!(
         h.claimed_any(&pay.token).await && !h.claimed_all(&pay.token).await,
         "the good proof taken back, the expired one left"
@@ -7663,11 +7792,15 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for _ in 0..3 {
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due: 3 sat, two proofs");
+    let pay = v
+        .due()
+        .await
+        .expect("due answers")
+        .expect("due: 3 sat, two proofs");
     assert!(h.steal_one(&pay.token).await, "the seeder keeps one proof");
     h.lose_next_reclaim_response();
     v.rej(&Rej {
@@ -7682,7 +7815,11 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     h.expire_keyset_of(&pay.token, 1);
     v.requested();
     assert!(
-        v.due().await.unwrap().is_none() && v.awaiting_quote(),
+        v.due()
+            .await
+            .expect("due answers after a spent input not its own")
+            .is_none()
+            && v.awaiting_quote(),
         "a spent input not its own: it awaits a quote, paying nothing more"
     );
     drop(s);
@@ -7694,9 +7831,13 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
         let e = h.engine(7, 2, 1000);
         let s = open(h, &e, 1).await;
         let mut v = h.viewer(7);
-        v.quote(s.quote()).unwrap();
+        v.quote(s.quote()).expect("an honest quote is accepted");
         v.requested();
-        let pay = v.due().await.unwrap().expect("due: 7 sat, three proofs");
+        let pay = v
+            .due()
+            .await
+            .expect("due answers")
+            .expect("due: 7 sat, three proofs");
         assert!(h.steal_one(&pay.token).await, "the seeder keeps one proof");
         if expire {
             h.expire_keyset_of(&pay.token, 1);
@@ -7722,12 +7863,12 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
         let e = h.engine(1, 4, 1000);
         let mut s = open(h, &e, 1).await;
         let mut v = h.viewer(1);
-        v.quote(s.quote()).unwrap();
+        v.quote(s.quote()).expect("an honest quote is accepted");
         for i in 0..2 {
             assert!(s.admit(&h.chunk(i)));
             v.requested();
         }
-        let pay = v.due().await.unwrap().expect("due");
+        let pay = v.due().await.expect("due answers").expect("due");
         h.hold_next_swap_reserving();
         let (r, ()) = both(s.pay(&pay), async {
             yield_once().await;
@@ -7740,7 +7881,11 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
         h.state_check_outage(check_down);
         v.rej(&rej).await;
         assert!(
-            !v.stopped() && v.due().await.unwrap().is_none(),
+            !v.stopped()
+                && v.due()
+                    .await
+                    .expect("due answers with an input pending")
+                    .is_none(),
             "a 12003 with an input pending, or its check unanswered ({check_down}): the reclaim \
              is incomplete, and nothing is paid"
         );
@@ -7751,7 +7896,11 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
             "the reserved request signed"
         );
         assert!(
-            v.due().await.unwrap().is_none() && v.awaiting_quote(),
+            v.due()
+                .await
+                .expect("due answers once found spent")
+                .is_none()
+                && v.awaiting_quote(),
             "found spent by the seeder's request: it awaits a quote"
         );
         drop(s);
@@ -7795,9 +7944,9 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
 pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
     let s = open(h, &h.engine(3, 2, 1000), 1).await;
     let mut v = h.viewer(3);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     v.timeout().await;
     h.advance(Duration::from_secs(179));
     v.timeout().await;
@@ -7815,15 +7964,21 @@ pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
 
     let mut s = open(h, &h.engine(1, 2, 1000), 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     assert!(s.admit(&h.chunk(0)));
     v.requested();
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     let _lost = s.pay(&pay).await.expect("swapped and acknowledged");
     h.advance(Duration::from_secs(180));
     v.timeout().await;
     assert!(v.stopped() && !s.banned());
-    assert!(v.last_pay().await.unwrap().is_none(), "not paid twice");
+    assert!(
+        v.last_pay()
+            .await
+            .expect("last_pay answers after the timeout")
+            .is_none(),
+        "not paid twice"
+    );
 }
 
 /// A payment left unsettled by a dropped connection, never seen by the seeder, is
@@ -7832,30 +7987,37 @@ pub async fn a_viewer_settles_a_lost_payment_after_180_s<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let lost = v.due().await.unwrap().expect("due");
+    let lost = v.due().await.expect("due answers").expect("due");
     drop(s);
     v.end();
     let mut s = open(h, &e, 1).await;
     v.quote(s.quote()).expect("the seeder never saw it");
     h.advance(Duration::from_secs(179));
-    assert!(v.due().await.unwrap().is_none(), "still waiting at 179 s");
+    assert!(
+        v.due()
+            .await
+            .expect("due answers with a lost payment at 179 s")
+            .is_none(),
+        "still waiting at 179 s"
+    );
     assert!(!h.claimed_any(&lost.token).await, "and not reclaimed");
     h.advance(Duration::from_secs(1));
     let again = v
         .due()
         .await
-        .unwrap()
+        .expect("due answers at 180 s")
         .expect("reclaimed at 180 s, then paid again");
     assert!(
         h.claimed_all(&lost.token).await,
         "the lost proofs came back"
     );
-    v.ack(&s.pay(&again).await.expect("accepted")).unwrap();
+    v.ack(&s.pay(&again).await.expect("accepted"))
+        .expect("the honest ack is taken");
     assert!(!v.stopped());
 }
 
@@ -7868,12 +8030,12 @@ pub async fn a_viewer_settles_only_on_an_exact_match<H: Harness>(h: &H) {
         let e = h.engine(1, 4, 1000);
         let mut s = open(h, &e, 1).await;
         let mut v = h.viewer(1);
-        v.quote(s.quote()).unwrap();
+        v.quote(s.quote()).expect("an honest quote is accepted");
         for i in 0..2 {
             assert!(s.admit(&h.chunk(i)));
             v.requested();
         }
-        v.due().await.unwrap().expect("due");
+        v.due().await.expect("due answers").expect("due");
         drop(s);
         v.end();
         let mut q = open(h, &e, 1).await.quote().clone();
@@ -7890,10 +8052,10 @@ pub async fn a_viewer_settles_only_on_an_exact_match<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
     v.requested();
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     assert!(h.steal(&pay.token).await, "the seeder keeps it");
     v.rej(&Rej {
         code: RejCode::MintUnavailable,
@@ -7914,10 +8076,10 @@ pub async fn a_viewer_settles_only_on_an_exact_match<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
     v.requested();
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     assert!(h.steal(&pay.token).await, "the seeder keeps it");
     v.rej(&Rej {
         code: RejCode::MintUnavailable,
@@ -7932,7 +8094,7 @@ pub async fn a_viewer_settles_only_on_an_exact_match<H: Harness>(h: &H) {
         v.quote(&q).is_err(),
         "spent_total alone does not settle a payment awaiting a quote"
     );
-    assert!(v.stopped() && v.due().await.unwrap().is_none());
+    assert!(v.stopped() && v.due().await.expect("due answers once stopped").is_none());
 
     // The same for a payment whose reclaim is incomplete: both fields, on its own video.
     for lie in ["spent only", "upto only", "another video"] {
@@ -7940,11 +8102,13 @@ pub async fn a_viewer_settles_only_on_an_exact_match<H: Harness>(h: &H) {
         let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
         let mut v0 = h.viewer(1);
         let mut v1 = v0.sibling();
-        v0.quote(s0.quote()).unwrap();
-        v1.quote(s1.quote()).unwrap();
+        v0.quote(s0.quote())
+            .expect("video 0's honest quote is accepted");
+        v1.quote(s1.quote())
+            .expect("video 1's honest quote is accepted");
         v0.requested();
         v0.requested();
-        let pay = v0.due().await.unwrap().expect("due");
+        let pay = v0.due().await.expect("due answers").expect("due");
         h.mint_outage(true);
         v0.rej(&Rej {
             code: RejCode::MintUnavailable,
@@ -7972,7 +8136,10 @@ pub async fn a_viewer_settles_only_on_an_exact_match<H: Harness>(h: &H) {
         h.mint_outage(false);
         v0.requested();
         assert!(
-            v0.due().await.unwrap().is_none(),
+            v0.due()
+                .await
+                .expect("due answers with its reclaim incomplete")
+                .is_none(),
             "{lie}: nothing more is paid"
         );
     }
@@ -8029,11 +8196,11 @@ pub async fn a_lying_seeder_takes_at_most_one_payment<H: Harness>(h: &H) {
         let e = h.engine(1, 4, 1000);
         let s = open(h, &e, 1).await;
         let mut v = h.viewer(1);
-        v.quote(s.quote()).unwrap();
+        v.quote(s.quote()).expect("an honest quote is accepted");
         for _ in 0..2 {
             v.requested();
         }
-        let pay = v.due().await.unwrap().expect("due");
+        let pay = v.due().await.expect("due answers").expect("due");
         assert!(h.steal(&pay.token).await, "the seeder swapped it");
         v.rej(&Rej {
             code: code.clone(),
@@ -8043,7 +8210,11 @@ pub async fn a_lying_seeder_takes_at_most_one_payment<H: Harness>(h: &H) {
         assert!(v.stopped(), "{code:?} after a swap: nothing more is paid");
         v.requested();
         assert!(
-            v.due().await.unwrap().is_none() && v.last_pay().await.unwrap().is_none(),
+            v.due().await.expect("due answers once stopped").is_none()
+                && v.last_pay()
+                    .await
+                    .expect("last_pay answers once stopped")
+                    .is_none(),
             "never paid again ({code:?})"
         );
         // A quote that does not show the payment leaves it lost, however honest.
@@ -8053,18 +8224,22 @@ pub async fn a_lying_seeder_takes_at_most_one_payment<H: Harness>(h: &H) {
             .expect("a quote equal to the ledger");
         v.requested();
         assert!(
-            v.stopped() && v.due().await.unwrap().is_none(),
+            v.stopped()
+                && v.due()
+                    .await
+                    .expect("due answers after a quote equal to the ledger")
+                    .is_none(),
             "still nothing paid: the seeder kept that one payment ({code:?})"
         );
     }
 
     let s = open(h, &h.engine(1, 4, 1000), 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for _ in 0..2 {
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     assert!(h.steal(&pay.token).await, "the seeder swapped it");
     h.mint_outage(true);
     v.rej(&Rej {
@@ -8079,30 +8254,43 @@ pub async fn a_lying_seeder_takes_at_most_one_payment<H: Harness>(h: &H) {
     v.requested();
     v.refused();
     assert!(
-        v.due().await.unwrap().is_none(),
+        v.due()
+            .await
+            .expect("due answers after a refusal, its reclaim incomplete")
+            .is_none(),
         "no pay-ahead while a reclaim is incomplete"
     );
     assert!(
-        v.last_pay().await.unwrap().is_none(),
+        v.last_pay()
+            .await
+            .expect("last_pay answers with its reclaim incomplete")
+            .is_none(),
         "no payment at session end either"
     );
     h.mint_outage(false);
     assert!(
-        v.due().await.unwrap().is_none() && v.stopped(),
+        v.due()
+            .await
+            .expect("due answers once the mint is back")
+            .is_none()
+            && v.stopped(),
         "the retried reclaim finds the proofs spent: lost, and stopped"
     );
 
     let s = open(h, &h.engine(1, 4, 1000), 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for _ in 0..2 {
         v.requested();
     }
-    v.due().await.unwrap().expect("due");
+    v.due().await.expect("due answers").expect("due");
     v.requested();
     v.refused();
     assert!(
-        v.due().await.unwrap().is_none(),
+        v.due()
+            .await
+            .expect("due answers after a refusal, a payment in flight")
+            .is_none(),
         "one payment in flight at a time, refusal or not"
     );
     // A seeder that keeps part of a payment and answers `mint-unavailable`: the reclaim
@@ -8110,10 +8298,14 @@ pub async fn a_lying_seeder_takes_at_most_one_payment<H: Harness>(h: &H) {
     // nothing more is paid.
     let s = open(h, &h.engine(3, 4, 1000), 1).await;
     let mut v = h.viewer(3);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
     v.requested();
-    let pay = v.due().await.unwrap().expect("due: 6 sat, two proofs");
+    let pay = v
+        .due()
+        .await
+        .expect("due answers")
+        .expect("due: 6 sat, two proofs");
     assert!(h.steal_one(&pay.token).await, "the seeder keeps one proof");
     v.rej(&Rej {
         code: RejCode::MintUnavailable,
@@ -8126,7 +8318,13 @@ pub async fn a_lying_seeder_takes_at_most_one_payment<H: Harness>(h: &H) {
     );
     assert!(v.awaiting_quote(), "part of it was kept: it awaits a quote");
     v.requested();
-    assert!(v.due().await.unwrap().is_none(), "and nothing more is paid");
+    assert!(
+        v.due()
+            .await
+            .expect("due answers awaiting a quote")
+            .is_none(),
+        "and nothing more is paid"
+    );
 }
 
 /// A seeder that refuses every request, while acknowledging every payment, gets at most
@@ -8136,14 +8334,15 @@ pub async fn a_refusing_seeder_takes_at_most_half_a_window<H: Harness>(h: &H) {
     let e = h.engine(price, window, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(price);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     let mut paid = 0;
     for _ in 0..100 {
         v.requested();
         v.refused();
-        if let Some(pay) = v.due().await.unwrap() {
+        if let Some(pay) = v.due().await.expect("due answers after each refusal") {
             let ack = s.pay(&pay).await.expect("the seeder takes it");
-            v.ack(&ack).unwrap();
+            v.ack(&ack)
+                .expect("the seeder's honest ack of a pay-ahead is taken");
             paid = ack.spent_total;
         }
     }
@@ -8162,7 +8361,7 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     let mu = Rej {
         code: RejCode::MintUnavailable,
         detail: None,
@@ -8170,7 +8369,7 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     v.requested();
     v.requested();
     let mut tries = 0;
-    while let Some(pay) = v.due().await.unwrap() {
+    while let Some(pay) = v.due().await.expect("due answers between tries") {
         tries += 1;
         assert!(tries <= 3, "more than three tries");
         v.rej(&mu).await;
@@ -8184,26 +8383,38 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     assert!(v.awaiting_quote(), "and it says a new session is needed");
     v.requested();
     assert!(
-        v.last_pay().await.unwrap().is_none(),
+        v.last_pay()
+            .await
+            .expect("last_pay answers out of tries")
+            .is_none(),
         "not even at the session's end"
     );
     drop(s);
     v.end();
     s = open(h, &e, 1).await;
-    v.quote(s.quote()).unwrap();
-    let pay = v.due().await.unwrap().expect("a new session, a new try");
+    v.quote(s.quote())
+        .expect("a new session's honest quote is accepted");
+    let pay = v
+        .due()
+        .await
+        .expect("due answers in a new session")
+        .expect("a new session, a new try");
     v.ack(&s.pay(&pay).await.expect("this time the seeder takes it"))
-        .unwrap();
+        .expect("the honest ack is taken");
     // Refusals in between reset nothing, and pay-ahead is held to the count too.
     let e = h.engine(1, 4, 1000);
     let s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     let mut tries = 0;
     for _ in 0..10 {
         v.requested();
         v.refused();
-        if v.due().await.unwrap().is_some() {
+        if v.due()
+            .await
+            .expect("due answers after each refusal")
+            .is_some()
+        {
             tries += 1;
             v.rej(&mu).await;
         }
@@ -8213,11 +8424,16 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     let e = h.engine(1, 4, 1000);
     let s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
     v.requested();
     let mut tries = 0;
-    while v.due().await.unwrap().is_some() {
+    while v
+        .due()
+        .await
+        .expect("due answers after each refused hello")
+        .is_some()
+    {
         tries += 1;
         assert!(tries <= 3, "more than three tries");
         v.rej(&mu).await;
@@ -8231,12 +8447,17 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     let e = h.engine(1, 4, 1000);
     let s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
     v.requested();
     let mut tries = 0;
     for _ in 0..10 {
-        while v.due().await.unwrap().is_some() {
+        while v
+            .due()
+            .await
+            .expect("due answers between second quotes")
+            .is_some()
+        {
             tries += 1;
             assert!(tries <= 3, "more than three tries");
             v.rej(&mu).await;
@@ -8249,18 +8470,25 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
     let mut v0 = h.viewer(1);
     let mut v1 = v0.sibling();
-    v0.quote(s0.quote()).unwrap();
-    v1.quote(s1.quote()).unwrap();
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
     v1.requested();
     v1.requested();
     let mut tries = 0;
-    while v1.due().await.unwrap().is_some() {
+    while v1.due().await.expect("due answers on video 1").is_some() {
         tries += 1;
         v1.rej(&mu).await;
     }
     drop(s0);
     v0.end();
-    while v1.due().await.unwrap().is_some() {
+    while v1
+        .due()
+        .await
+        .expect("due answers after video 0's session ends")
+        .is_some()
+    {
         tries += 1;
         assert!(tries <= 3, "more than three tries");
         v1.rej(&mu).await;
@@ -8273,13 +8501,17 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     let e = h.engine(1, 4, 1000);
     let s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
     v.requested();
     let mut tries = 0;
     for _ in 0..20 {
         h.mint_outage(false);
-        if v.due().await.unwrap().is_some() {
+        if v.due()
+            .await
+            .expect("due answers as the mint comes and goes")
+            .is_some()
+        {
             tries += 1;
             h.mint_outage(true);
             v.rej(&mu).await;
@@ -8293,19 +8525,32 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
     let mut v0 = h.viewer(1);
     let mut v1 = v0.sibling();
-    v0.quote(s0.quote()).unwrap();
-    v1.quote(s1.quote()).unwrap();
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
     v0.requested();
     v0.requested();
     v1.requested();
     v1.requested();
     for on_one in [false, false, true] {
         let v = if on_one { &mut v1 } else { &mut v0 };
-        v.due().await.unwrap().expect("a try");
+        v.due()
+            .await
+            .expect("due answers on either video")
+            .expect("a try");
         v.rej(&mu).await;
     }
     assert!(
-        v0.due().await.unwrap().is_none() && v1.due().await.unwrap().is_none(),
+        v0.due()
+            .await
+            .expect("video 0's due answers out of tries")
+            .is_none()
+            && v1
+                .due()
+                .await
+                .expect("video 1's due answers out of tries")
+                .is_none(),
         "three tries across both videos"
     );
 
@@ -8313,28 +8558,41 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     let e = h.engine(1, 8, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..6u16 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
     for _ in 0..2 {
-        v.due().await.unwrap().expect("a try");
+        v.due()
+            .await
+            .expect("due answers between tries")
+            .expect("a try");
         v.rej(&mu).await;
     }
-    let pay = v.due().await.unwrap().expect("a third try");
+    let pay = v
+        .due()
+        .await
+        .expect("due answers for a third try")
+        .expect("a third try");
     v.ack(&s.pay(&pay).await.expect("this one is taken"))
-        .unwrap();
+        .expect("the honest ack is taken");
     for i in 6..10u16 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
     for _ in 0..2 {
-        v.due().await.unwrap().expect("tries again after the ack");
+        v.due()
+            .await
+            .expect("due answers after the ack")
+            .expect("tries again after the ack");
         v.rej(&mu).await;
     }
     assert!(
-        v.due().await.unwrap().is_some(),
+        v.due()
+            .await
+            .expect("due answers for a third try after the ack")
+            .is_some(),
         "the ack reset the count: a third try"
     );
 
@@ -8373,25 +8631,46 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
     let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
     let mut v0 = h.viewer(1);
     let mut v1 = v0.sibling();
-    v0.quote(s0.quote()).unwrap();
-    v1.quote(s1.quote()).unwrap();
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
     for _ in 0..2 {
         v0.requested();
         v1.requested();
     }
-    let p0 = v0.due().await.unwrap().expect("due on video 0");
+    let p0 = v0
+        .due()
+        .await
+        .expect("video 0's due answers")
+        .expect("due on video 0");
     assert!(
-        v1.due().await.unwrap().is_none(),
+        v1.due()
+            .await
+            .expect("video 1's due answers with video 0's payment in flight")
+            .is_none(),
         "one payment in flight toward a seeder, across its videos"
     );
     v1.end();
-    v1.quote(open_on(h, &e, 1, 1).await.quote()).unwrap();
+    v1.quote(open_on(h, &e, 1, 1).await.quote())
+        .expect("video 1's next honest quote is accepted");
     assert!(
-        v1.due().await.unwrap().is_none() && v1.last_pay().await.unwrap().is_none(),
+        v1.due()
+            .await
+            .expect("video 1's due answers after its session ends")
+            .is_none()
+            && v1
+                .last_pay()
+                .await
+                .expect("video 1's last_pay answers after its session ends")
+                .is_none(),
         "video 1's session ending, or ending again, frees nothing: video 0's is in flight"
     );
     assert!(
-        v0.last_pay().await.unwrap().is_none(),
+        v0.last_pay()
+            .await
+            .expect("video 0's last_pay answers with its payment in flight")
+            .is_none(),
         "nor is anything paid over video 0's own payment"
     );
     assert!(h.steal(&p0.token).await, "the seeder keeps it");
@@ -8402,7 +8681,15 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
         "it awaits video 0's quote, not video 1's"
     );
     assert!(
-        v1.due().await.unwrap().is_none() && v1.last_pay().await.unwrap().is_none(),
+        v1.due()
+            .await
+            .expect("video 1's due answers with video 0's payment lost")
+            .is_none()
+            && v1
+                .last_pay()
+                .await
+                .expect("video 1's last_pay answers with video 0's payment lost")
+                .is_none(),
         "so nothing is paid on video 1 either"
     );
     v1.end();
@@ -8417,23 +8704,32 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
     let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
     let mut v0 = h.viewer(1);
     let mut v1 = v0.sibling();
-    v0.quote(s0.quote()).unwrap();
-    v1.quote(s1.quote()).unwrap();
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
     for _ in 0..2 {
         v0.requested();
         v1.requested();
     }
-    let p0 = v0.due().await.unwrap().expect("due on video 0");
+    let p0 = v0
+        .due()
+        .await
+        .expect("video 0's due answers")
+        .expect("due on video 0");
     h.mint_outage(true);
     v0.rej(&mu).await;
     assert!(
-        v1.due().await.unwrap().is_none(),
+        v1.due()
+            .await
+            .expect("video 1's due answers with video 0's reclaim incomplete")
+            .is_none(),
         "a reclaim incomplete on video 0 holds back video 1"
     );
     h.mint_outage(false);
     v1.due()
         .await
-        .unwrap()
+        .expect("video 1's due answers once video 0's reclaim completes")
         .expect("once it completes, video 1 pays");
     assert!(
         h.claimed_all(&p0.token).await && !h.steal(&p0.token).await,
@@ -8446,11 +8742,17 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
     let (s0, mut s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
     let mut v0 = h.viewer(1);
     let mut v1 = v0.sibling();
-    v0.quote(s0.quote()).unwrap();
-    v1.quote(s1.quote()).unwrap();
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
     v0.requested();
     v0.requested();
-    let unread = v0.due().await.unwrap().expect("due on video 0");
+    let unread = v0
+        .due()
+        .await
+        .expect("video 0's due answers")
+        .expect("due on video 0");
     drop(s0);
     v0.end();
     for i in 0..2 {
@@ -8459,20 +8761,24 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
     }
     h.advance(Duration::from_secs(179));
     assert!(
-        v1.due().await.unwrap().is_none(),
+        v1.due()
+            .await
+            .expect("video 1's due answers at 179 s")
+            .is_none(),
         "video 0's payment is in flight for 180 s"
     );
     h.advance(SECOND);
     let paid = v1
         .due()
         .await
-        .unwrap()
+        .expect("video 1's due answers at 180 s")
         .expect("then video 1 reclaims it, and pays");
     assert!(
         h.claimed_all(&unread.token).await && !h.steal(&unread.token).await,
         "video 0's unread payment came back"
     );
-    v1.ack(&s1.pay(&paid).await.expect("accepted")).unwrap();
+    v1.ack(&s1.pay(&paid).await.expect("accepted"))
+        .expect("video 1's honest ack is taken");
 
     // A reclaim retried from video 1 that finds video 0's proofs spent leaves video 0's
     // payment awaiting video 0's quote, which settles it.
@@ -8480,14 +8786,20 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
     let (mut s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
     let mut v0 = h.viewer(1);
     let mut v1 = v0.sibling();
-    v0.quote(s0.quote()).unwrap();
-    v1.quote(s1.quote()).unwrap();
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
     for i in 0..2 {
         assert!(s0.admit(&h.chunk_of(0, i)));
         v0.requested();
     }
     v1.requested();
-    let late = v0.due().await.unwrap().expect("due on video 0");
+    let late = v0
+        .due()
+        .await
+        .expect("video 0's due answers")
+        .expect("due on video 0");
     h.hold_swap_responses();
     let (r, ()) = both(s0.pay(&late), async {
         yield_once().await;
@@ -8499,7 +8811,13 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
     v0.rej(&rej).await;
     h.mint_outage(false);
     h.release_swaps().await;
-    assert!(v1.due().await.unwrap().is_none(), "video 1 retries it");
+    assert!(
+        v1.due()
+            .await
+            .expect("video 1's due answers on its retried reclaim")
+            .is_none(),
+        "video 1 retries it"
+    );
     assert!(
         v0.awaiting_quote() && !v1.awaiting_quote(),
         "found spent: video 0's payment awaits video 0's quote"
@@ -8515,7 +8833,8 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
     let s1 = open_on(h, &e, 1, 1).await;
     let v0 = h.viewer(1);
     let mut v1 = v0.sibling();
-    v1.quote(s1.quote()).unwrap();
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
     v1.rej(&mu).await;
     assert!(
         v0.stopped() && v1.stopped(),
@@ -8527,11 +8846,17 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
     let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
     let mut v0 = h.viewer(1);
     let mut v1 = v0.sibling();
-    v0.quote(s0.quote()).unwrap();
-    v1.quote(s1.quote()).unwrap();
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
     v0.requested();
     v0.requested();
-    let p0 = v0.due().await.unwrap().expect("due on video 0");
+    let p0 = v0
+        .due()
+        .await
+        .expect("video 0's due answers")
+        .expect("due on video 0");
     drop(s0);
     v0.end();
     v1.requested();
@@ -8541,7 +8866,10 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
         detail: None,
     });
     assert!(
-        v1.due().await.unwrap().is_none(),
+        v1.due()
+            .await
+            .expect("video 1's due answers after a refused hello")
+            .is_none(),
         "a refused hello leaves video 0's payment holding the slot"
     );
     v1.end();
@@ -8558,21 +8886,33 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
     let (mut s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
     let mut v0 = h.viewer(1);
     let mut v1 = v0.sibling();
-    v0.quote(s0.quote()).unwrap();
-    v1.quote(s1.quote()).unwrap();
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
     for i in 0..2 {
         assert!(s0.admit(&h.chunk_of(0, i)));
         v0.requested();
     }
     v1.requested();
-    let unread = v0.due().await.unwrap().expect("due on video 0");
+    let unread = v0
+        .due()
+        .await
+        .expect("video 0's due answers")
+        .expect("due on video 0");
     v0.end();
     s0.pay(&unread)
         .await
         .expect("the seeder reads it late, and credits it");
     drop(s0);
     h.advance(Duration::from_secs(180));
-    assert!(v1.due().await.unwrap().is_none(), "video 1 catches up");
+    assert!(
+        v1.due()
+            .await
+            .expect("video 1's due answers on its catch-up")
+            .is_none(),
+        "video 1 catches up"
+    );
     assert!(
         v0.awaiting_quote() && !v1.awaiting_quote(),
         "found spent: it awaits video 0's quote"
@@ -8588,20 +8928,29 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
     let (mut s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
     let mut v0 = h.viewer(1);
     let mut v1 = v0.sibling();
-    v0.quote(s0.quote()).unwrap();
-    v1.quote(s1.quote()).unwrap();
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
     for i in 0..2 {
         assert!(s0.admit(&h.chunk_of(0, i)));
         v0.requested();
     }
-    let unheard = v0.due().await.unwrap().expect("due on video 0");
+    let unheard = v0
+        .due()
+        .await
+        .expect("video 0's due answers")
+        .expect("due on video 0");
     s0.pay(&unheard).await.expect("the seeder swaps and acks");
     drop(s0);
     v0.end();
     h.advance(Duration::from_secs(180));
     h.mint_outage(true);
     assert!(
-        v1.due().await.unwrap().is_none(),
+        v1.due()
+            .await
+            .expect("video 1's due answers on a blocked catch-up")
+            .is_none(),
         "video 1 catches up; the reclaim is blocked"
     );
     h.mint_outage(false);
@@ -8615,23 +8964,35 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
     let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
     let mut v0 = h.viewer(1);
     let mut v1 = v0.sibling();
-    v0.quote(s0.quote()).unwrap();
-    v1.quote(s1.quote()).unwrap();
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
     v0.requested();
     v0.requested();
-    let kept = v0.due().await.unwrap().expect("due on video 0");
+    let kept = v0
+        .due()
+        .await
+        .expect("video 0's due answers")
+        .expect("due on video 0");
     assert!(h.steal(&kept.token).await, "the seeder swapped it");
     drop(s0);
     v0.end();
     h.advance(Duration::from_secs(180));
     h.mint_outage(true);
     assert!(
-        v1.due().await.unwrap().is_none(),
+        v1.due()
+            .await
+            .expect("video 1's due answers on a blocked catch-up")
+            .is_none(),
         "the catch-up's reclaim is blocked"
     );
     h.mint_outage(false);
     assert!(
-        v1.due().await.unwrap().is_none(),
+        v1.due()
+            .await
+            .expect("video 1's due answers on its retried reclaim")
+            .is_none(),
         "the retry finds it spent"
     );
     assert!(
@@ -8648,7 +9009,7 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
 pub async fn a_stopped_viewer_pays_nothing<H: Harness>(h: &H) {
     let mut v = h.viewer(1);
     v.quote(open(h, &h.engine(1, 2, 1000), 1).await.quote())
-        .unwrap();
+        .expect("an honest quote is accepted");
     assert!(
         v.ack(&Ack {
             accepted_upto: 1,
@@ -8659,15 +9020,20 @@ pub async fn a_stopped_viewer_pays_nothing<H: Harness>(h: &H) {
     for _ in 0..3 {
         v.requested();
     }
-    assert!(v.due().await.unwrap().is_none());
-    assert!(v.last_pay().await.unwrap().is_none());
+    assert!(v.due().await.expect("due answers once stopped").is_none());
+    assert!(
+        v.last_pay()
+            .await
+            .expect("last_pay answers once stopped")
+            .is_none()
+    );
     // Reclaiming is not paying: a stopped viewer still finishes its reclaim.
     let s = open(h, &h.engine(1, 4, 1000), 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
     v.requested();
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.mint_outage(true);
     v.rej(&Rej {
         code: RejCode::Underpaid,
@@ -8676,7 +9042,10 @@ pub async fn a_stopped_viewer_pays_nothing<H: Harness>(h: &H) {
     .await;
     assert!(v.stopped());
     h.mint_outage(false);
-    assert!(v.due().await.unwrap().is_none(), "it pays nothing");
+    assert!(
+        v.due().await.expect("due answers once stopped").is_none(),
+        "it pays nothing"
+    );
     assert!(
         h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
         "but it took its proofs back"
@@ -8688,11 +9057,17 @@ pub async fn a_stopped_viewer_pays_nothing<H: Harness>(h: &H) {
         let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
         let mut v0 = h.viewer(1);
         let mut v1 = v0.sibling();
-        v0.quote(s0.quote()).unwrap();
-        v1.quote(s1.quote()).unwrap();
+        v0.quote(s0.quote())
+            .expect("video 0's honest quote is accepted");
+        v1.quote(s1.quote())
+            .expect("video 1's honest quote is accepted");
         v0.requested();
         v0.requested();
-        let pay = v0.due().await.unwrap().expect("due on video 0");
+        let pay = v0
+            .due()
+            .await
+            .expect("video 0's due answers")
+            .expect("due on video 0");
         assert!(
             v1.ack(&Ack {
                 accepted_upto: 1,
@@ -8722,11 +9097,17 @@ pub async fn a_stopped_viewer_pays_nothing<H: Harness>(h: &H) {
     let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
     let mut v0 = h.viewer(1);
     let mut v1 = v0.sibling();
-    v0.quote(s0.quote()).unwrap();
-    v1.quote(s1.quote()).unwrap();
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
     v0.requested();
     v0.requested();
-    let unread = v0.due().await.unwrap().expect("due on video 0");
+    let unread = v0
+        .due()
+        .await
+        .expect("video 0's due answers")
+        .expect("due on video 0");
     drop(s0);
     v0.end();
     assert!(
@@ -8738,7 +9119,13 @@ pub async fn a_stopped_viewer_pays_nothing<H: Harness>(h: &H) {
     );
     assert!(v0.stopped() && v1.stopped(), "the standing is stopped");
     h.advance(Duration::from_secs(180));
-    assert!(v1.due().await.unwrap().is_none(), "it pays nothing");
+    assert!(
+        v1.due()
+            .await
+            .expect("video 1's due answers once stopped")
+            .is_none(),
+        "it pays nothing"
+    );
     assert!(
         h.claimed_all(&unread.token).await && !h.steal(&unread.token).await,
         "but video 0's unsettled payment came back"
@@ -9048,13 +9435,13 @@ async fn stream_on<H: Harness>(
         v.requested();
         if let Some(pay) = in_flight.take() {
             let ack = s.pay(&pay).await.expect("honest payments are accepted");
-            v.ack(&ack).unwrap();
+            v.ack(&ack).expect("each honest ack is taken");
         }
-        in_flight = v.due().await.unwrap();
+        in_flight = v.due().await.expect("due answers while streaming");
     }
     if let Some(pay) = in_flight {
         let ack = s.pay(&pay).await.expect("honest payments are accepted");
-        v.ack(&ack).unwrap();
+        v.ack(&ack).expect("the last honest ack is taken");
     }
 }
 
@@ -9063,9 +9450,9 @@ async fn stream<H: Harness>(h: &H, s: &mut Session<H>, v: &mut H::Viewer, from: 
 }
 
 async fn pay_the_tail<H: Harness>(s: &mut Session<H>, v: &mut H::Viewer) -> Option<Ack> {
-    let pay = v.last_pay().await.unwrap()?;
+    let pay = v.last_pay().await.expect("last_pay answers")?;
     let ack = s.pay(&pay).await.expect("the tail is paid");
-    v.ack(&ack).unwrap();
+    v.ack(&ack).expect("the tail's honest ack is taken");
     Some(ack)
 }
 
@@ -9076,7 +9463,7 @@ pub async fn an_honest_pair_streams_a_whole_video<H: Harness>(h: &H) {
     let e = h.engine(price, 8, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(price * 3);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     stream(h, &mut s, &mut v, 0, chunks).await;
     let tail = pay_the_tail::<H>(&mut s, &mut v)
         .await
@@ -9093,7 +9480,7 @@ pub async fn an_honest_pair_resumes_after_a_reconnect<H: Harness>(h: &H) {
     let e = h.engine(price, 8, 1000);
     let mut v = h.viewer(price);
     let mut s = open(h, &e, 1).await;
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     stream(h, &mut s, &mut v, 0, 10).await;
     drop(s);
     v.end();
@@ -9118,19 +9505,20 @@ pub async fn an_honest_pair_waits_out_a_slow_mint<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.hold_swaps();
     let (ack, ()) = both(s.pay(&pay), async {
         yield_once().await;
         h.release_swaps().await;
     })
     .await;
-    v.ack(&ack.expect("acknowledged once swapped")).unwrap();
+    v.ack(&ack.expect("acknowledged once swapped"))
+        .expect("the honest ack is taken once swapped");
     assert!(!v.stopped() && !s.banned());
     stream(h, &mut s, &mut v, 2, 20).await;
 }
@@ -9142,29 +9530,41 @@ pub async fn an_honest_pair_rides_out_a_mint_outage<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
     h.mint_outage(true);
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v
+        .due()
+        .await
+        .expect("due answers while the mint is down")
+        .expect("due");
     let rej = s.pay(&pay).await.expect_err("the mint is down");
     assert_eq!(rej.code, RejCode::MintUnavailable);
     v.rej(&rej).await;
     assert!(!v.stopped() && !s.banned());
     assert!(
-        v.due().await.unwrap().is_none(),
+        v.due()
+            .await
+            .expect("due answers with its reclaim incomplete")
+            .is_none(),
         "nothing more until its reclaim completes"
     );
     h.mint_outage(false);
-    let again = v.due().await.unwrap().expect("paid again once reclaimed");
+    let again = v
+        .due()
+        .await
+        .expect("due answers once the mint is back")
+        .expect("paid again once reclaimed");
     assert_ne!(again.token, pay.token, "with fresh proofs");
     assert!(
         h.claimed_all(&pay.token).await,
         "the first proofs came back"
     );
-    v.ack(&s.pay(&again).await.expect("accepted")).unwrap();
+    v.ack(&s.pay(&again).await.expect("accepted"))
+        .expect("the honest ack is taken");
     stream(h, &mut s, &mut v, 2, 20).await;
 
     // A request the mint holds after reserving its inputs (NUT-07 `PENDING`, as CDK does
@@ -9174,12 +9574,12 @@ pub async fn an_honest_pair_rides_out_a_mint_outage<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.hold_next_swap_reserving();
     let (r, ()) = both(s.pay(&pay), async {
         yield_once().await;
@@ -9189,12 +9589,22 @@ pub async fn an_honest_pair_rides_out_a_mint_outage<H: Harness>(h: &H) {
     let rej = r.expect_err("no answer within 60 s");
     v.rej(&rej).await;
     assert!(
-        !v.stopped() && v.due().await.unwrap().is_none(),
+        !v.stopped()
+            && v.due()
+                .await
+                .expect("due answers with its reclaim refused as pending")
+                .is_none(),
         "nothing paid while its reclaim is refused as pending"
     );
     e.sweep().await;
     h.release_swaps().await;
-    assert!(v.due().await.unwrap().is_none() && v.awaiting_quote());
+    assert!(
+        v.due()
+            .await
+            .expect("due answers once found spent")
+            .is_none()
+            && v.awaiting_quote()
+    );
     drop(s);
     v.end();
     let mut s = open(h, &e, 1).await;
@@ -9207,18 +9617,24 @@ pub async fn an_honest_pair_rides_out_a_mint_outage<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.hold_next_swap_reserving();
     h.time_out_next_swap();
     let rej = s.pay(&pay).await.expect_err("mint-unavailable");
     v.rej(&rej).await;
     h.release_swaps().await;
-    assert!(v.due().await.unwrap().is_none() && v.awaiting_quote());
+    assert!(
+        v.due()
+            .await
+            .expect("due answers once found spent")
+            .is_none()
+            && v.awaiting_quote()
+    );
     drop(s);
     v.end();
     let s = open(h, &e, 1).await;
@@ -9235,12 +9651,12 @@ pub async fn an_honest_pair_rides_out_a_mint_outage<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.hold_next_swap_reserving();
     let (r, ()) = both(s.pay(&pay), async {
         yield_once().await;
@@ -9252,7 +9668,7 @@ pub async fn an_honest_pair_rides_out_a_mint_outage<H: Harness>(h: &H) {
     let again = v
         .due()
         .await
-        .unwrap()
+        .expect("due answers once the reserved request is rolled back")
         .expect("its proofs came back: it pays again");
     assert!(h.claimed_all(&pay.token).await, "taken back by its reclaim");
     v.ack(
@@ -9260,7 +9676,7 @@ pub async fn an_honest_pair_rides_out_a_mint_outage<H: Harness>(h: &H) {
             .await
             .expect("the abandoned swap can no longer go through: swapped"),
     )
-    .unwrap();
+    .expect("the honest ack is taken");
     assert!(!v.stopped() && !s.banned());
     drop(s);
     v.end();
@@ -9272,12 +9688,12 @@ pub async fn an_honest_pair_rides_out_a_mint_outage<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.hold_next_swap();
     let (r, ()) = both(s.pay(&pay), async {
         yield_once().await;
@@ -9291,13 +9707,17 @@ pub async fn an_honest_pair_rides_out_a_mint_outage<H: Harness>(h: &H) {
         h.claimed_all(&pay.token).await,
         "the watcher took its proofs back"
     );
-    let again = v.due().await.unwrap().expect("paid again");
+    let again = v
+        .due()
+        .await
+        .expect("due answers once its reclaim went through")
+        .expect("paid again");
     v.ack(
         &s.pay(&again)
             .await
             .expect("the held swap can no longer go through: swapped"),
     )
-    .unwrap();
+    .expect("the honest ack is taken");
     stream(h, &mut s, &mut v, 2, 10).await;
     h.release_swaps().await;
     pay_the_tail::<H>(&mut s, &mut v).await;
@@ -9319,12 +9739,12 @@ pub async fn an_honest_pair_survives_a_dropped_connection<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut v = h.viewer(1);
     let mut s = open(h, &e, 1).await;
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.hold_swaps();
     poll_once(s.pay(&pay)).await;
     drop(s);
@@ -9351,12 +9771,12 @@ pub async fn an_honest_pair_survives_a_fast_reconnect<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut v = h.viewer(1);
     let mut s = open(h, &e, 1).await;
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.hold_swaps();
     poll_once(s.pay(&pay)).await;
     drop(s);
@@ -9387,12 +9807,12 @@ pub async fn an_honest_pair_survives_a_reordered_payment<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut v = h.viewer(1);
     let mut old = open(h, &e, 1).await;
-    v.quote(old.quote()).unwrap();
+    v.quote(old.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(old.admit(&h.chunk(i)));
         v.requested();
     }
-    let buffered = v.due().await.unwrap().expect("due");
+    let buffered = v.due().await.expect("due answers").expect("due");
     v.end();
     let mut s = open(h, &e, 1).await;
     v.quote(s.quote()).expect("the seeder has not read it yet");
@@ -9406,7 +9826,10 @@ pub async fn an_honest_pair_survives_a_reordered_payment<H: Harness>(h: &H) {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
         assert!(
-            v.due().await.unwrap().is_none(),
+            v.due()
+                .await
+                .expect("due answers with a payment unsettled")
+                .is_none(),
             "nothing more while it is unsettled"
         );
     }
@@ -9416,7 +9839,10 @@ pub async fn an_honest_pair_survives_a_reordered_payment<H: Harness>(h: &H) {
         !v.stopped(),
         "no payment of this session is unanswered: a timeout changes nothing"
     );
-    assert!(v.due().await.unwrap().is_none(), "reclaimed at 180 s");
+    assert!(
+        v.due().await.expect("due answers at 180 s").is_none(),
+        "reclaimed at 180 s"
+    );
     assert!(v.awaiting_quote(), "found spent, so it awaits a quote");
     drop(s);
     v.end();
@@ -9445,12 +9871,12 @@ pub async fn an_honest_pair_survives_a_refused_hello<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut v = h.viewer(1);
     let mut s = open(h, &e, 1).await;
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.hold_swaps();
     poll_once(s.pay(&pay)).await;
     v.end();
@@ -9498,10 +9924,16 @@ pub async fn an_honest_pair_survives_a_refused_hello<H: Harness>(h: &H) {
         "unknown-video, or an unknown code: nothing changes"
     );
     let s = open(h, &e, 1).await;
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
     v.requested();
-    assert!(v.due().await.unwrap().is_some(), "and it pays as usual");
+    assert!(
+        v.due()
+            .await
+            .expect("due answers after a refused hello")
+            .is_some(),
+        "and it pays as usual"
+    );
     let other_video = h.viewer(1);
     let mut banned = other_video.sibling();
     banned.hello_refused(&Rej {
@@ -9518,10 +9950,10 @@ pub async fn an_honest_pair_survives_a_refused_hello<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut v = h.viewer(1);
     let s = open(h, &e, 1).await;
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
     v.requested();
-    let earlier = v.due().await.unwrap().expect("due");
+    let earlier = v.due().await.expect("due answers").expect("due");
     drop(s);
     v.end();
     let s = open(h, &e, 1).await;
@@ -9541,10 +9973,10 @@ pub async fn an_honest_pair_survives_a_refused_hello<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut v = h.viewer(1);
     let s = open(h, &e, 1).await;
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
     v.requested();
-    let earlier = v.due().await.unwrap().expect("due");
+    let earlier = v.due().await.expect("due answers").expect("due");
     drop(s);
     v.end();
     let s = open(h, &e, 1).await;
@@ -9558,7 +9990,10 @@ pub async fn an_honest_pair_survives_a_refused_hello<H: Harness>(h: &H) {
         "unsolicited: the watcher stops"
     );
     h.advance(Duration::from_secs(180));
-    assert!(v.due().await.unwrap().is_none(), "it pays nothing");
+    assert!(
+        v.due().await.expect("due answers once stopped").is_none(),
+        "it pays nothing"
+    );
     assert!(
         h.claimed_all(&earlier.token).await && !h.steal(&earlier.token).await,
         "and reclaims the earlier payment after the wait"
@@ -9653,12 +10088,12 @@ pub async fn an_honest_pair_survives_a_late_mint<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut v = h.viewer(1);
     let mut s = open(h, &e, 1).await;
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.hold_swap_responses();
     let (r, ()) = both(s.pay(&pay), async {
         yield_once().await;
@@ -9676,7 +10111,11 @@ pub async fn an_honest_pair_survives_a_late_mint<H: Harness>(h: &H) {
     v.quote(s.quote())
         .expect("the seeder cannot learn the outcome yet: an honest quote");
     assert!(
-        v.awaiting_quote() && v.due().await.unwrap().is_none(),
+        v.awaiting_quote()
+            && v.due()
+                .await
+                .expect("due answers awaiting a quote")
+                .is_none(),
         "still waiting, and paying nothing"
     );
     h.restore_outage(false);
@@ -9705,12 +10144,12 @@ pub async fn an_honest_pair_survives_a_late_mint<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.hold_swap_responses();
     h.lose_next_swap_response();
     let (r, ()) = both(s.pay(&pay), async {
@@ -9747,12 +10186,12 @@ pub async fn an_honest_pair_survives_a_late_mint<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.time_out_next_swap();
     h.mint_outage(true);
     let r = s.pay(&pay).await;
@@ -9784,12 +10223,12 @@ pub async fn an_honest_pair_survives_a_late_mint<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
     }
-    let pay = v.due().await.unwrap().expect("due");
+    let pay = v.due().await.expect("due answers").expect("due");
     h.time_out_next_swap();
     h.mint_outage(true);
     let r = s.pay(&pay).await;
@@ -9829,15 +10268,20 @@ pub async fn a_paying_watcher_gets_through_a_full_cap<H: Harness>(h: &H) {
     }
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(price);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote())
+        .expect("an honest quote is accepted at a full cap");
     let mut served = 0u64;
     for i in 0..40u16 {
         v.requested();
         if !s.admit(&h.chunk(i)) {
             v.refused();
-            let pay = v.due().await.unwrap().expect("refused, it pays ahead");
+            let pay = v
+                .due()
+                .await
+                .expect("due answers after a refusal")
+                .expect("refused, it pays ahead");
             v.ack(&s.pay(&pay).await.expect("a pre-payment is accepted"))
-                .unwrap();
+                .expect("the seeder's honest ack of a pay-ahead is taken");
             v.requested();
             assert!(
                 s.admit(&h.chunk(i)),
@@ -9845,9 +10289,9 @@ pub async fn a_paying_watcher_gets_through_a_full_cap<H: Harness>(h: &H) {
             );
         }
         served += 1;
-        if let Some(pay) = v.due().await.unwrap() {
+        if let Some(pay) = v.due().await.expect("due answers, holding credit or not") {
             v.ack(&s.pay(&pay).await.expect("honest payments are accepted"))
-                .unwrap();
+                .expect("each honest ack is taken");
         }
     }
     pay_the_tail::<H>(&mut s, &mut v).await;
@@ -10854,7 +11298,7 @@ async fn older_proofs_reclaimed_after_rotation<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
@@ -10862,7 +11306,7 @@ async fn older_proofs_reclaimed_after_rotation<H: Harness>(h: &H) {
     let pay = v
         .due()
         .await
-        .unwrap()
+        .expect("due answers")
         .expect("due, in the older keyset's proofs");
     let rej = s.pay(&pay).await.expect_err("no keyset to swap to");
     assert_eq!(rej.code, RejCode::MintUnavailable);
@@ -10873,7 +11317,7 @@ async fn older_proofs_reclaimed_after_rotation<H: Harness>(h: &H) {
     );
     h.rotate_keyset();
     h.fund_older_keyset(0);
-    let _ = v.due().await.unwrap();
+    let _ = v.due().await.expect("due answers once the mint rotates");
     assert!(
         h.claimed_all(&pay.token).await,
         "once the mint rotates, the older keyset's proofs (never expired) are taken back"
@@ -10888,7 +11332,7 @@ async fn older_proofs_swapped_after_rotation<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     for i in 0..2 {
         assert!(s.admit(&h.chunk(i)));
         v.requested();
@@ -10896,7 +11340,7 @@ async fn older_proofs_swapped_after_rotation<H: Harness>(h: &H) {
     let pay = v
         .due()
         .await
-        .unwrap()
+        .expect("due answers")
         .expect("due, in the older keyset's proofs");
     h.expire_active_keyset();
     h.rotate_keyset();
@@ -10905,7 +11349,7 @@ async fn older_proofs_swapped_after_rotation<H: Harness>(h: &H) {
         .await
         .expect("the older keyset never expired: swapped to the new active keyset");
     assert_eq!((ack.accepted_upto, ack.spent_total), (2, 2));
-    v.ack(&ack).unwrap();
+    v.ack(&ack).expect("the honest ack is taken");
     h.fund_older_keyset(0);
 }
 
@@ -10918,9 +11362,13 @@ async fn foreign_rest_taken_back_after_rotation<H: Harness>(h: &H) {
     let e = h.engine(7, 2, 1000);
     let s = open(h, &e, 1).await;
     let mut v = h.viewer(7);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
-    let pay = v.due().await.unwrap().expect("due: 7 sat, three proofs");
+    let pay = v
+        .due()
+        .await
+        .expect("due answers")
+        .expect("due: 7 sat, three proofs");
     assert!(h.steal_one(&pay.token).await, "the seeder keeps one proof");
     h.expire_keyset_of(&pay.token, 1);
     h.rotate_keyset(); // the other two now of an older keyset, still good
@@ -10936,12 +11384,19 @@ async fn foreign_rest_taken_back_after_rotation<H: Harness>(h: &H) {
     );
     v.requested();
     assert!(
-        v.due().await.unwrap().is_none(),
+        v.due()
+            .await
+            .expect("due answers with its reclaim incomplete")
+            .is_none(),
         "nothing is paid meanwhile"
     );
     h.rotate_keyset();
     assert!(
-        v.due().await.unwrap().is_none() && v.awaiting_quote(),
+        v.due()
+            .await
+            .expect("due answers once the mint rotates")
+            .is_none()
+            && v.awaiting_quote(),
         "a spent input not its own: it awaits a quote"
     );
     assert!(
@@ -10956,22 +11411,25 @@ async fn last_pay_never_with_expired_proofs<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut v = h.viewer(1);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     assert!(s.admit(&h.chunk(0)));
     v.requested();
     h.expire_active_keyset();
     assert!(
-        v.last_pay().await.unwrap().is_none(),
+        v.last_pay()
+            .await
+            .expect("last_pay answers holding only expired proofs")
+            .is_none(),
         "its only proofs are listed expired: never paid with, at the end either"
     );
     h.rotate_keyset();
     let pay = v
         .last_pay()
         .await
-        .unwrap()
+        .expect("last_pay answers once the mint rotates")
         .expect("once the mint rotates, it pays the tail");
     let ack = s.pay(&pay).await.expect("swapped");
-    v.ack(&ack).unwrap();
+    v.ack(&ack).expect("the tail's honest ack is taken");
 }
 
 /// A `hello` waits while any payment holds its account's turn, each to its own deadline,
@@ -11400,18 +11858,27 @@ async fn a_settling_quote_matches_both_fields<H: Harness>(h: &H) {
             let e = h.engine(1, 4, 1000);
             let mut s = open(h, &e, 1).await;
             let mut v = h.viewer(1);
-            v.quote(s.quote()).unwrap();
+            v.quote(s.quote()).expect("an honest quote is accepted");
             for i in 0..2 {
                 assert!(s.admit(&h.chunk(i)));
                 v.requested();
             }
-            let first = v.due().await.unwrap().expect("due");
-            v.ack(&s.pay(&first).await.expect("accepted")).unwrap(); // the ledger: 2, 2
+            let first = v
+                .due()
+                .await
+                .expect("due answers with two chunks requested")
+                .expect("due");
+            v.ack(&s.pay(&first).await.expect("accepted"))
+                .expect("the honest ack of the first payment is taken"); // the ledger: 2, 2
             for i in 2..4 {
                 assert!(s.admit(&h.chunk(i)));
                 v.requested();
             }
-            let second = v.due().await.unwrap().expect("due");
+            let second = v
+                .due()
+                .await
+                .expect("due answers with four chunks requested")
+                .expect("due");
             assert_eq!(second.upto_chunk, 4);
             let unavailable = Rej {
                 code: RejCode::MintUnavailable,
@@ -11482,9 +11949,13 @@ async fn a_pending_rest_keeps_the_reclaim_incomplete<H: Harness>(h: &H, expire: 
     let e = h.engine(7, 2, 1000);
     let s = open(h, &e, 1).await;
     let mut v = h.viewer(7);
-    v.quote(s.quote()).unwrap();
+    v.quote(s.quote()).expect("an honest quote is accepted");
     v.requested();
-    let pay = v.due().await.unwrap().expect("due: 7 sat, three proofs");
+    let pay = v
+        .due()
+        .await
+        .expect("due answers")
+        .expect("due: 7 sat, three proofs");
     assert!(h.steal_one(&pay.token).await, "the seeder keeps one proof");
     assert!(
         h.reserve_rest(&pay.token).await,
@@ -11499,12 +11970,19 @@ async fn a_pending_rest_keeps_the_reclaim_incomplete<H: Harness>(h: &H, expire: 
     })
     .await;
     assert!(
-        !v.awaiting_quote() && v.due().await.unwrap().is_none(),
+        !v.awaiting_quote()
+            && v.due()
+                .await
+                .expect("due answers with the rest pending")
+                .is_none(),
         "the inputs left are pending: the reclaim is incomplete, not settled as found spent"
     );
     h.roll_back_reserved();
     v.requested();
-    let _ = v.due().await.unwrap();
+    let _ = v
+        .due()
+        .await
+        .expect("due answers once the request is rolled back");
     assert!(
         !h.steal(&pay.token).await,
         "once the mint rolled the request back, the watcher took the rest back"
@@ -11576,7 +12054,7 @@ async fn held_expired_proofs_never_paid_with<H: Harness>(h: &H) {
         let e = h.engine(1, 4, 1000);
         let mut s = open(h, &e, 1).await;
         let mut v = h.viewer(1);
-        v.quote(s.quote()).unwrap();
+        v.quote(s.quote()).expect("an honest quote is accepted");
         for i in 0..2 {
             assert!(s.admit(&h.chunk(i)));
             v.requested();
@@ -11584,14 +12062,14 @@ async fn held_expired_proofs_never_paid_with<H: Harness>(h: &H) {
         let first = v
             .due()
             .await
-            .unwrap()
+            .expect("due answers")
             .expect("due, in the older keyset's proofs");
         v.ack(
             &s.pay(&first)
                 .await
                 .expect("the older keyset is good: swapped"),
         )
-        .unwrap();
+        .expect("the honest ack is taken");
         h.expire_older_keyset(); // the proofs the wallet still holds of it expire too
         for i in 2..4 {
             assert!(s.admit(&h.chunk(i)));
@@ -11603,13 +12081,13 @@ async fn held_expired_proofs_never_paid_with<H: Harness>(h: &H) {
             (v.due().await, "its payment")
         };
         let pay = pay
-            .unwrap()
+            .expect("its payment answers")
             .expect("due, in proofs of a keyset not expired");
         let ack = s.pay(&pay).await.unwrap_or_else(|rej| {
             panic!("{which} holds no proof of the expired older keyset: swapped: {rej:?}")
         });
         assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
-        v.ack(&ack).unwrap();
+        v.ack(&ack).expect("the honest ack is taken");
         h.fund_older_keyset(0);
     }
 }
@@ -11627,7 +12105,7 @@ async fn older_proofs_reclaimed_into_an_expiring_keyset<H: Harness>(h: &H) {
         let e = h.engine(1, 4, 1000);
         let mut s = open(h, &e, 1).await;
         let mut v = h.viewer(1);
-        v.quote(s.quote()).unwrap();
+        v.quote(s.quote()).expect("an honest quote is accepted");
         for i in 0..2 {
             assert!(s.admit(&h.chunk(i)));
             v.requested();
@@ -11635,7 +12113,7 @@ async fn older_proofs_reclaimed_into_an_expiring_keyset<H: Harness>(h: &H) {
         let pay = v
             .due()
             .await
-            .unwrap()
+            .expect("due answers")
             .expect("due, in the older keyset's proofs");
         let rej = s
             .pay(&pay)
@@ -11653,7 +12131,11 @@ async fn older_proofs_reclaimed_into_an_expiring_keyset<H: Harness>(h: &H) {
         );
         if !lost {
             assert!(
-                !v.awaiting_quote() && v.due().await.unwrap().is_some(),
+                !v.awaiting_quote()
+                    && v.due()
+                        .await
+                        .expect("due answers with every proof back")
+                        .is_some(),
                 "every proof back: it pays again"
             );
             continue;
@@ -11661,7 +12143,11 @@ async fn older_proofs_reclaimed_into_an_expiring_keyset<H: Harness>(h: &H) {
         h.advance(h.account_ttl());
         h.expire_active_keyset();
         assert!(
-            v.due().await.unwrap().is_none() && v.awaiting_quote(),
+            v.due()
+                .await
+                .expect("due answers once its reclaim's outputs expired")
+                .is_none()
+                && v.awaiting_quote(),
             "its reclaim's outputs expired unrestored: the proofs are treated as found spent, \
              whatever their own keyset, and it awaits a quote"
         );
@@ -11674,7 +12160,8 @@ async fn older_proofs_reclaimed_into_an_expiring_keyset<H: Harness>(h: &H) {
             (0, 0),
             "the seeder never swapped it"
         );
-        v.quote(s.quote()).unwrap();
+        v.quote(s.quote())
+            .expect("a quote equal to the ledger is honest");
         assert!(
             v.awaiting_quote(),
             "a quote equal to the ledger leaves it waiting: the concession's cost"
