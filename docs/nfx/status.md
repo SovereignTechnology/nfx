@@ -392,7 +392,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
      parallel lenses with each finding verified by a skeptic,
      [twenty-fourth](reviews/2026-09-24-m2.0-twenty-fourth-audit.md),
      [twenty-fifth](reviews/2026-09-24-m2.0-twenty-fifth-audit.md),
-     [twenty-sixth](reviews/2026-09-24-m2.0-twenty-sixth-audit.md)). **sovtech's bar for the push
+     [twenty-sixth](reviews/2026-09-24-m2.0-twenty-sixth-audit.md),
+     [twenty-seventh](reviews/2026-09-24-m2.0-twenty-seventh-audit.md)). **sovtech's bar for the push
      is zero findings** (re-confirmed after the sixth). The lock's guarantee is now
      stated in `crates/ci/check-locked.sh`: the money crates' files and build inputs, and
      every target of theirs, failing closed; other crates are out of scope. With sovtech's OK, the minimum role for GitLab pipeline variables on
@@ -407,7 +408,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        - `quote` carries the account's position, so a watcher can resume.
        - HTTPS origins take one payment per request.
      - The suite has 63 scenarios, run twice (the second time with the mint's reads as
-       round trips), each on its own thread under a real-time timeout, and each of 603
+       round trips), each on its own thread under a real-time timeout, and each of 782
        planted defects fails an assertion of the suite (a hang, a panic raised
        elsewhere, or a runtime panic of Rust's own, is not a catch).
      - A swap with no answer is decided by reading its inputs (NUT-07), then its outputs
@@ -423,10 +424,12 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
      - The lock pins both money crates whole, nfx-pay and nfx-pay-wire, and their
        dependency closure, and refuses build-environment tricks. After the build it
        verifies what every target of theirs compiled (failing closed on a target without
-       dep-info), and that the money tests all ran. Code in other crates is out of its
+       dep-info), and that the money tests all ran, building in a directory made for the
+       run; the CI job refuses a checkout holding untracked or ignored paths, so a
+       restored cache cannot stand in for the build. Code in other crates is out of its
        scope, as the check itself states.
    - **Next:**
-     - a twenty-seventh independent audit, until one reports nothing;
+     - a twenty-eighth independent audit, until one reports nothing;
      - sovtech's OK to push M2.0 (given, once the audits are clean);
      - the testnet mint: sovtech approved its deployment once its runbook's checks
        are clean (a private record);

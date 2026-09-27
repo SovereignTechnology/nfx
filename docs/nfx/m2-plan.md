@@ -45,7 +45,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [twenty-third](reviews/2026-09-24-m2.0-twenty-third-audit.md),
 [twenty-fourth](reviews/2026-09-24-m2.0-twenty-fourth-audit.md),
 [twenty-fifth](reviews/2026-09-24-m2.0-twenty-fifth-audit.md),
-[twenty-sixth](reviews/2026-09-24-m2.0-twenty-sixth-audit.md)). sovtech's bar for the push
+[twenty-sixth](reviews/2026-09-24-m2.0-twenty-sixth-audit.md),
+[twenty-seventh](reviews/2026-09-24-m2.0-twenty-seventh-audit.md)). sovtech's bar for the push
 is zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -60,7 +61,7 @@ is zero findings, confirmed after the sixth:
     one payment.
   - Configuration minimums and bounded per-identity state.
   - At most 64 proofs per payment; `detail` is printable ASCII; `window` is 2 to 64.
-  - HTTPS origins take one payment per request.
+  - HTTPS origins take one payment per request, and a lying origin at most one payment.
 - **Vectors:** `pay1.json` holds 22 valid lines, 3 loopback-only and 74 invalid, each
   checked by the reference reader `spec/test-vectors/pay1.py`. It and the Rust reader
   agreed on every one of 244,149 probe and fuzz cases in the ninth audit.
@@ -87,9 +88,21 @@ is zero findings, confirmed after the sixth:
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 63 scenarios, each on its own thread under a
   real-time timeout, three of them threaded, run twice (the second time with reads as
-  round trips), and **each of 603 planted defects fails a named check in its scenario**
+  round trips), and **each of 782 planted defects fails a named check in its scenario**
   (a hang, a panic raised outside the suite, a runtime panic of Rust's own, or a bare
-  unwrap, is not a catch), every surviving mutant from all twenty-six audits among them.
+  unwrap, is not a catch), every surviving mutant from all twenty-seven audits among them.
+- **Since the twenty-seventh audit:**
+  - a payment whose turn comes in its deadline's second runs no checks; a `pay` dropped
+    before its swap, at any stage, leaves no account and frees the turn only if it held
+    it, waking what waits; so does every refusal; a `hello` refused or dropped on any
+    path keeps nothing (NFX-07 §3);
+  - nothing but its quote or the reclaim settles what the watcher waits on, whatever
+    comes between rounds or on another video; it reclaims with or without a session, a
+    stopped watcher included, 180 s after sending (NFX-07 §3a);
+  - NFX-07 §4: a lying origin takes one payment; a `503` with every proof back uses no
+    try;
+  - the lock job refuses untracked build output and builds in a fresh directory; the
+    runner refuses `unwrap` in any form.
 - **Since the twenty-sixth audit:**
   - deadlines on one clock: a refusal is the answer only if the checks reached it by the
     deadline, keys that come in its second are not used, an outcome settled then is late,
