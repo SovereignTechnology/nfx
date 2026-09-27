@@ -455,10 +455,14 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   - Keep one payment in flight toward a seeder at a time, across its videos.
   - After three `mint-unavailable` answers in a row, pay that seeder nothing more until a
     new session's accepted quote. Each answer costs the watcher a reclaim and a new token
-    at the mint, whose input fees are the watcher's; an `ack` resets the count, and
-    nothing else does: not a refused quote, a refused `hello`, another video's session
-    ending, or a reclaim completing. A watcher SHOULD back off before reopening sessions with a seeder whose
-    sessions keep ending so, since each new session restores the three tries.
+    at the mint, whose input fees are the watcher's; only those answers count (a reclaim
+    retried while the mint is down is none). An `ack` resets the count, and nothing else
+    does: not a refused quote, a refused `hello`, another video's session ending, or a
+    reclaim completing. Out of tries, it still finishes its incomplete
+    reclaims and reclaims a closed session's payment after the wait: reclaiming is not
+    paying. A watcher SHOULD back off before reopening sessions with a seeder whose
+    sessions keep ending so, since each new session's accepted quote restores the three
+    tries.
 - **Answers belong to their session.** A `rej` answers the payment sent on its session.
   One that answers no payment is unsolicited, and stops the watcher paying that seeder,
   as an unsolicited `ack` does. A refused `hello` opens no session and answers no
@@ -466,9 +470,10 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   earlier session left unsettled is settled only by a quote or by the 180 s reclaim
   below. A quote the watcher refuses (for its price, its `window` or its mints, or a
   second quote on an open session) is not taken, so it settles nothing, and neither does
-  a refused request or `hello`, nor a ledger made for another video: each leaves the
-  payment in flight, a payment awaiting a quote and an incomplete reclaim as they were,
-  and undoes no stop.
+  a refused request or `hello`, nor a ledger made for another video. A quote settles only
+  its own video's payments: taken or refused, it settles nothing of another video's. Each
+  of these leaves the payment in flight, a payment awaiting a quote and an incomplete
+  reclaim as they were, and undoes no stop.
 - **Check every `ack`.** `accepted_upto` must equal the payment's `upto_chunk`, and
   `spent_total` the ledger plus its face value. An inconsistent or unsolicited ack stops
   the watcher paying that seeder.
@@ -544,6 +549,12 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     quote equal to the ledger leaves the reclaim incomplete. The watcher retries the
     reclaim whether or not it holds a session with the seeder, so a seeder that refuses
     its `hello`s or its quotes cannot hold the reclaim off and claim the proofs meanwhile.
+    A reclaim done with no session, or from another video's ledger, ends as one done in
+    a session on the payment's own, by every rule of this bullet: proofs found spent
+    (after a restore of its own outputs) leave the payment awaiting a quote on its own
+    ledger, a mint that cannot serve it yet or a proof pending leaves it incomplete, and
+    with every proof back or lost to the expiry the watcher pays again at its next
+    session.
   - After `mint-unavailable` the watcher pays again once every proof is confirmed
     reclaimed or lost to the expiry (the 12003 case above), or the payment is settled by
     a quote. After any other code it stops paying
@@ -554,23 +565,24 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     180 s the watcher reclaims and stops.
   - A dropped connection does not shorten the wait. A quote for the payment's video
     settles it as accepted only if its `accepted_upto` **and** `spent_total` both equal
-    the ledger plus the payment. Otherwise the watcher reclaims it after 180 s, from
-    whichever of the seeder's videos it is still watching, with a session open or not,
-    and carries on if every proof came back. Until then it is the standing's payment in
-    flight.
+    the ledger plus the payment. Otherwise the watcher reclaims it 180 s after sending
+    it, whatever came since (the drop, a new session, a refused quote, request or
+    `hello`, another video's ledger), from whichever of the seeder's videos it is still
+    watching, with a session open or not, and carries on if every proof came back. Until
+    then it is the standing's payment in flight.
   - Either way, a reclaim that finds proofs spent leaves the payment awaiting a quote,
     as above. A `pay` still buffered on a dropped connection can reach the seeder after
     the watcher's next `hello`, and be credited after that session's quote.
 - **Pay nothing after stopping,** at the end of a session included, nor ahead after a
   refusal. Nothing undoes a stop: not a later `ack` that matches its payment, a refused
   request or `hello`, a `mint-unavailable` answer with every proof taken back, the
-  session's end, a second quote on an open session, a new session's quote, taken or
-  refused (for its price, its `window` or its mints), on any of the seeder's videos, nor
-  a ledger made for another video.
-  A watcher that has stopped awaits no quote. Reclaiming is not paying: a stopped watcher
-  still reclaims a live session's payment that is refused, or unanswered after the wait,
-  finishes its incomplete reclaims, and reclaims a closed session's unsettled payment
-  after the wait.
+  session's end, a second quote on an open session, a new session's quote on any of the
+  seeder's videos (a new video's first included), taken or refused (for its price, its
+  `window` or its mints), nor a ledger made for another video.
+  A watcher that has stopped awaits no quote. Reclaiming is not paying: whatever stopped
+  it, a stopped watcher still reclaims a live session's payment that is refused, or
+  unanswered after the wait, finishes its incomplete reclaims, and reclaims a closed
+  session's unsettled payment after the wait, counted from sending.
 
 ## 4. HTTPS (origin) payment surface
 
@@ -586,17 +598,22 @@ therefore loses nothing:
     from other mints are refused) when payment is missing or refused;
   - `503` when the mint cannot be reached.
 
-  On any refusal the client reclaims its proofs, as in §3a. A refusal is a `402`
-  answering a request that carried a payment, or a `503`.
+  On any refusal the client reclaims its proofs, as in §3a. A refusal is any answer but
+  `200` to a request that carried a payment: a `402`, a `503`, or any other status, known
+  or not. A paid request left with no answer, its connection dropped included, is
+  reclaimed 180 s after it was sent, as §3a reclaims an unanswered payment, and is then
+  refused like any other. The client keeps one paid request in flight to an origin at a
+  time, as toward a seeder (§3a).
   - If the reclaim finds any proof spent, that payment is lost, though the proofs left
     unspent are still taken back (§3a), and the client pays that origin nothing more. An
     origin sends no quote, so nothing settles that payment later: an origin that claims a
-    payment and then refuses it takes that one payment.
+    payment and then refuses it, or leaves it unanswered, takes that one payment.
   - Otherwise the client pays that origin nothing until every proof is confirmed
     reclaimed, or lost to the expiry (§3a); a reclaim the mint cannot serve yet is
     retried. Then it may pay again: after a `402`, at the price that `402` names.
-  - After three payments in a row refused, `402` or `503` alike, it stops paying that
-    origin. A `200` resets the count, and nothing else does.
+  - After three paid requests in a row refused, whatever the answer or none, it stops
+    paying that origin. A `200` to a paid request resets the count, and nothing else
+    does.
 - Bans do not apply: the payer is anonymous, and spent proofs simply earn a `402`.
 - Origins MAY serve gratis (`price_hint` 0 or `free` beacons). The website's ad/default
   mode is exactly this (origin at price 0).
@@ -937,16 +954,27 @@ therefore loses nothing:
     checks, the ban's included, and is answered `mint-unavailable`: what the deadline rule
     implied, now said.
   - §3a: a quote the watcher refuses (for its price, `window` or mints, or a second quote on
-    an open session) is not taken and settles nothing; it, a refused request or `hello`, and
-    a ledger made for another video leave the payment in flight, a payment awaiting a
-    quote and an incomplete reclaim as they were, and undo no stop (a second quote, a
-    quote refused and a new video's ledger are now named among what does not undo one);
-    the watcher retries an incomplete reclaim, and reclaims a closed session's payment
-    after the wait, whether or not it holds a session with the seeder.
-  - §4: a refusal is a `402` answering a payment, or a `503`. One whose reclaim finds a
-    proof spent loses that payment, and the client pays that origin nothing more, so a
-    lying origin takes one payment (was: after a `503` only, and nothing said after a
-    `402`). With every proof back, confirmed reclaimed or lost to the expiry, it may pay
-    again (after a `402`, at the price that `402` names); after three payments in a row
-    refused, `402` or `503` alike, it stops paying that origin, and only a `200` resets
-    the count.
+    an open session) is not taken and settles nothing, and a quote, taken or refused,
+    settles nothing of another video's; these, a refused request or `hello`, and a ledger
+    made for another video leave the payment in flight, a payment awaiting a quote and an
+    incomplete reclaim as they were, and undo no stop (a second quote, a quote refused, a
+    new video's first quote and a new video's ledger are now named among what does not
+    undo one).
+  - §3a: the watcher retries an incomplete reclaim, and reclaims a closed session's
+    payment after the wait, whether or not it holds a session with the seeder; whatever
+    stopped the watcher, it still reclaims; a reclaim done with no session or from another video's
+    ledger ends as one done in a session on the payment's own; a closed session's payment
+    is reclaimed 180 s after sending, whatever came since (was: "after 180 s").
+  - §3a: each new session's accepted quote (was: each new session) restores the three
+    tries; only `mint-unavailable` answers use them, a reclaim retried while the mint is
+    down none; out of tries, the watcher still reclaims.
+  - §4: a refusal is any answer but `200` to a paid request (a `402`, a `503`, or any
+    other status, known or not), and a paid request left with no answer is reclaimed 180 s
+    after it was sent and is then refused like any other; the client keeps one paid
+    request in flight to an origin at a time. A refusal whose reclaim finds a proof spent
+    loses that payment, and the client pays that origin nothing more, so a lying origin
+    takes one payment (was: after a `503` only, and nothing said after a `402`, another
+    status or none). With every proof back, confirmed reclaimed or lost to the expiry, it
+    may pay again (after a `402`, at the price that `402` names); after three paid
+    requests in a row refused, it stops paying that origin, and only a `200` to a paid
+    request resets the count.
