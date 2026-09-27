@@ -44,7 +44,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [twenty-second](reviews/2026-09-24-m2.0-twenty-second-audit.md),
 [twenty-third](reviews/2026-09-24-m2.0-twenty-third-audit.md),
 [twenty-fourth](reviews/2026-09-24-m2.0-twenty-fourth-audit.md),
-[twenty-fifth](reviews/2026-09-24-m2.0-twenty-fifth-audit.md)). sovtech's bar for the push
+[twenty-fifth](reviews/2026-09-24-m2.0-twenty-fifth-audit.md),
+[twenty-sixth](reviews/2026-09-24-m2.0-twenty-sixth-audit.md)). sovtech's bar for the push
 is zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -86,9 +87,20 @@ is zero findings, confirmed after the sixth:
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 63 scenarios, each on its own thread under a
   real-time timeout, three of them threaded, run twice (the second time with reads as
-  round trips), and **each of 435 planted defects fails an assertion in its scenario**
-  (a hang, a panic raised outside the suite, or a runtime panic of Rust's own, is not a
-  catch), every surviving mutant from all twenty-five audits among them.
+  round trips), and **each of 603 planted defects fails a named check in its scenario**
+  (a hang, a panic raised outside the suite, a runtime panic of Rust's own, or a bare
+  unwrap, is not a catch), every surviving mutant from all twenty-six audits among them.
+- **Since the twenty-sixth audit:**
+  - deadlines on one clock: a refusal is the answer only if the checks reached it by the
+    deadline, keys that come in its second are not used, an outcome settled then is late,
+    and a payment dropped before its swap frees the turn at once (NFX-07 §3);
+  - a takeover is checked for the ban first and reads the abandoned swap; a `hello` checks
+    the ban as it arrives and as it answers;
+  - refusals keep nothing (no account, place or session id), a banned peer is refused
+    before all else, and `spent_total` stays within 2^53−1;
+  - the watcher refuses acks at or below its ledger, nothing undoes its stop, it names its
+    mint only by the exact URL, and it takes back the inputs left outside a 12003 too;
+  - the runner counts only named checks, and the suite has no bare unwrap.
 - **Since the twenty-fifth audit:**
   - a turn held past its deadline is freed at the deadline, however late its answer, its
     swap's outcome or a takeover (NFX-07 §3); a payment that takes a dead turn reads the

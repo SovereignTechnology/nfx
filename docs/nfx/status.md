@@ -391,7 +391,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
      [twenty-third](reviews/2026-09-24-m2.0-twenty-third-audit.md), the first run as four
      parallel lenses with each finding verified by a skeptic,
      [twenty-fourth](reviews/2026-09-24-m2.0-twenty-fourth-audit.md),
-     [twenty-fifth](reviews/2026-09-24-m2.0-twenty-fifth-audit.md)). **sovtech's bar for the push
+     [twenty-fifth](reviews/2026-09-24-m2.0-twenty-fifth-audit.md),
+     [twenty-sixth](reviews/2026-09-24-m2.0-twenty-sixth-audit.md)). **sovtech's bar for the push
      is zero findings** (re-confirmed after the sixth). The lock's guarantee is now
      stated in `crates/ci/check-locked.sh`: the money crates' files and build inputs, and
      every target of theirs, failing closed; other crates are out of scope. With sovtech's OK, the minimum role for GitLab pipeline variables on
@@ -406,7 +407,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        - `quote` carries the account's position, so a watcher can resume.
        - HTTPS origins take one payment per request.
      - The suite has 63 scenarios, run twice (the second time with the mint's reads as
-       round trips), each on its own thread under a real-time timeout, and each of 435
+       round trips), each on its own thread under a real-time timeout, and each of 603
        planted defects fails an assertion of the suite (a hang, a panic raised
        elsewhere, or a runtime panic of Rust's own, is not a catch).
      - A swap with no answer is decided by reading its inputs (NUT-07), then its outputs
@@ -425,7 +426,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        dep-info), and that the money tests all ran. Code in other crates is out of its
        scope, as the check itself states.
    - **Next:**
-     - a twenty-sixth independent audit, until one reports nothing;
+     - a twenty-seventh independent audit, until one reports nothing;
      - sovtech's OK to push M2.0 (given, once the audits are clean);
      - the testnet mint: sovtech approved its deployment once its runbook's checks
        are clean (a private record);
