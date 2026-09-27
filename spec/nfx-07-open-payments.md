@@ -37,9 +37,9 @@ payment-enforced after release, so no mechanism pretends otherwise.
 - **`session`** is exactly 32 lowercase hex characters (128 bits).
 - **`video`** is an NFX video address (NFX-01).
 - **`price_per_chunk`** (in **sat**) is at least 1, and **`window`** is 2 to 64: at
-  least 2, so a watcher paying at half the window never stalls the seeder, and at most
-  64, so one refusal makes a watcher pay ahead at most 32 chunks (§3a). A seeder that serves for
-  free does not quote; it serves without pay/1.
+  least 2, so a watcher paying once half the window is unpaid, rounded up (§3a), never
+  stalls the seeder, and at most 64, so one refusal makes a watcher pay ahead at most 32
+  chunks (§3a). A seeder that serves for free does not quote; it serves without pay/1.
 - **`mints`** holds 1 to 16 URLs. A mint URL is:
   - printable ASCII without space, `\` or `@`;
   - `https://`, then a host, then optionally `:` and a port of 1 to 5 digits (1 to 65535);
@@ -442,44 +442,54 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
 
   A quote dishonest about the account stops the watcher paying that seeder; one refused
   for its price, its `window` or its mints does not, nor a second quote on an open
-  session, refused (§2) whatever it claims.
+  session, refused (§2) whatever it claims: its price and `window` change nothing.
 - **Owe every request sent,** except one the seeder answers with `refuse`. A refused
   request is always un-owed; if it was already paid for, that payment becomes credit. A
   request the watcher abandons stays owed; if the seeder never saw it, the payment
   becomes pre-payment.
 - **Pay exactly the quoted price** for requested chunks.
-  - Pay before the account's unpaid count reaches `window`, so the seeder need not
-    stall.
+  - Pay once the account's unpaid count reaches half of `window`, rounded up, so the
+    seeder need not stall while a payment is in flight.
   - Never pay ahead of need, except right after a refusal. Then pay ahead up to half of
     `window`, rounded down, less any credit the video's ledger already holds, which the seeder serves
     whatever its cap. Credit on a video never grows beyond half its window, so a seeder
     that refuses everything takes at most half the watcher's ceiling, for each video the
     watcher asks it for.
-  - Keep one payment in flight toward a seeder at a time, across its videos.
-  - After three `mint-unavailable` answers in a row, pay that seeder nothing more until a
-    new session's accepted quote. Each answer costs the watcher a reclaim and a new token
-    at the mint, whose input fees are the watcher's; only those answers count (a reclaim
-    retried while the mint is down is none). An `ack` resets the count, and nothing else
-    does: not a refused quote, a refused `hello`, another video's session ending, or a
-    reclaim completing. Out of tries, it still finishes its incomplete
-    reclaims and reclaims a closed session's payment after the wait: reclaiming is not
-    paying. A watcher SHOULD back off before reopening sessions with a seeder whose
-    sessions keep ending so, since each new session's accepted quote restores the three
-    tries.
+  - Keep one payment in flight toward a seeder at a time, across its videos. One sent on a
+    live session holds that place until it is answered or its 180 s are up (below): a
+    second quote, a request refused or new, a timeout before then, a ledger made for
+    another video, or a quote on one, taken or refused, frees nothing.
+  - After three `mint-unavailable` answers to its payments in a row, pay that seeder
+    nothing more until a new session's accepted quote. Each answer costs the watcher a
+    reclaim and a new token at the mint, whose input fees are the watcher's; only those
+    answers count. Nothing else uses a try: not a reclaim, retried while the mint is down
+    or not, a closed session's payment reclaimed with every proof back or lost to the
+    expiry, a refused `hello` (whatever its code, `mint-unavailable` included) or quote, a
+    session's end, nor a timeout. An `ack` resets the count, as a new session's accepted
+    quote does, and nothing else does: not a refused quote, a refused `hello`, another
+    video's session ending, a timeout, or a reclaim completing, in a session or not. Out
+    of tries, it still finishes its incomplete reclaims and reclaims a closed session's
+    payment after the wait: reclaiming is not paying. A watcher SHOULD back off before
+    reopening sessions with a seeder whose sessions keep ending so, since each new
+    session's accepted quote restores the three tries.
 - **Answers belong to their session.** A `rej` answers the payment sent on its session.
   One that answers no payment is unsolicited, and stops the watcher paying that seeder,
   as an unsolicited `ack` does. A refused `hello` opens no session and answers no
-  payment: `banned` stops the watcher, and any other code changes nothing. A payment an
-  earlier session left unsettled is settled only by a quote or by the 180 s reclaim
-  below. A quote the watcher refuses (for its price, its `window` or its mints, or a
-  second quote on an open session) is not taken, so it settles nothing, and neither does
-  a refused request or `hello`, nor a ledger made for another video. A quote settles only
-  its own video's payments: taken or refused, it settles nothing of another video's. Each
-  of these leaves the payment in flight, a payment awaiting a quote and an incomplete
-  reclaim as they were, and undoes no stop.
+  payment: `banned` stops the watcher, and any other code, known or not,
+  `mint-unavailable` included, changes nothing. A payment an earlier session left
+  unsettled is settled only by a quote or by the 180 s reclaim below. A quote the watcher
+  refuses (for its price, its `window` or its mints, or a second quote on an open
+  session) is not taken, so it settles nothing, and neither does a refused request or
+  `hello`, nor a ledger made for another video. A quote settles only
+  its own video's payments: taken, refused or dishonest, it settles nothing of another
+  video's, even one showing that video's payment in both fields. Each of these leaves the
+  payment in flight, a payment awaiting a quote and an incomplete reclaim as they were,
+  and undoes no stop.
 - **Check every `ack`.** `accepted_upto` must equal the payment's `upto_chunk`, and
   `spent_total` the ledger plus its face value. An inconsistent or unsolicited ack stops
-  the watcher paying that seeder.
+  the watcher paying that seeder. An `ack` settles only the payment sent on its session:
+  an unsolicited one settles nothing, even one showing another video's payment in both
+  fields.
 - **Reclaim the proofs of every refused payment,** whatever the code, known or not, by
   swapping them back at the mint, to outputs the watcher derives deterministically
   (NUT-13). A reclaim left without an answer is retried, and a retry can find the proofs
@@ -560,12 +570,15 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     session.
   - After `mint-unavailable` the watcher pays again once every proof is confirmed
     reclaimed or lost to the expiry (the 12003 case above), or the payment is settled by
-    a quote. After any other code it stops paying
-    that seeder.
+    a quote. After any other code, known or not, it stops paying that seeder: one pay/1
+    sends only for a `hello` (`unknown-video`), or another spec's (NFX-11 §6), included.
 - **Wait 180 s from sending before reclaiming an unanswered payment**: a leg each for
   the `pay`'s delivery, the seeder's 60 s deadline and the answer's delivery (§2).
-  - On a live connection, for the payment sent on it, the seeder was unresponsive: after
-    180 s the watcher reclaims and stops.
+  - On a live connection, for the payment sent on it, the seeder was unresponsive: 180 s
+    after sending it, whatever came since (a second quote, a request refused or new, a
+    timeout before then, or anything on another video), the watcher reclaims and stops. A
+    reclaim the mint cannot serve yet is incomplete, and finished once it can, though the
+    watcher has stopped.
   - A dropped connection does not shorten the wait. A quote for the payment's video
     settles it as accepted only if its `accepted_upto` **and** `spent_total` both equal
     the ledger plus the payment. Otherwise the watcher reclaims it 180 s after sending
@@ -584,8 +597,10 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   `window` or its mints), nor a ledger made for another video.
   A watcher that has stopped awaits no quote. Reclaiming is not paying: whatever stopped
   it, a stopped watcher still reclaims a live session's payment that is refused, or
-  unanswered after the wait, finishes its incomplete reclaims, and reclaims a closed
-  session's unsettled payment after the wait, counted from sending.
+  unanswered after the wait, finishes its incomplete reclaims, from whichever of the
+  seeder's videos it is watching, and reclaims a closed session's unsettled payment after
+  the wait, counted from sending. A stop shortens no wait: whatever stopped it, and
+  whatever came after, it takes nothing back before 180 s from sending.
 
 ## 4. HTTPS (origin) payment surface
 
@@ -1058,3 +1073,24 @@ therefore loses nothing:
     serve no proof they are not for, and a keyset a proof names that the cache does not
     hold (one the mint started since, or an older one a wallet still spends) is fetched.
     What "the keys of that quoted mint" implied, now said.
+  - §2: `window` is at least 2 so that a watcher paying once half of it is unpaid, rounded
+    up, never stalls the seeder (was: "paying at half the window").
+  - §3a: the watcher pays once the account's unpaid count reaches half of `window`, rounded
+    up (was: "before the unpaid count reaches `window`"), as `Viewer::due` now says and the
+    suite has required.
+  - §3a: a quote, taken, refused or dishonest, and an unsolicited `ack` settle nothing of
+    another video's payment, even one showing it in both fields; a second quote's price
+    and `window` change nothing.
+  - §3a: a live session's payment is reclaimed 180 s after sending, whatever came since,
+    and holds the one place in flight until it is answered or reclaimed; a reclaim at
+    180 s the mint cannot serve yet stays incomplete. A stopped watcher takes nothing back
+    before 180 s from sending, whatever stopped it and whatever came after, and finishes
+    its incomplete reclaims from whichever of the seeder's videos it is watching.
+  - §3a: only a `mint-unavailable` answer to a payment uses a try, and only an `ack` or a
+    new session's accepted quote restores them: not a refused `hello` (`mint-unavailable`
+    included) or quote, a session's end, a timeout, or a closed session's payment
+    reclaimed with every proof back or lost to the expiry.
+  - §3a: after a payment refused with any code but `mint-unavailable`, known or not, one
+    pay/1 sends only for a `hello` or one of another spec's included, the watcher stops
+    paying that seeder; a `hello` refused with any code but `banned`, known or not, changes
+    nothing.
