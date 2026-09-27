@@ -6,7 +6,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use nfx_pay::adversary::{Ran, keep_panic, makes_a_check, rejoin, run_on_a_thread};
+use nfx_pay::adversary::{Ran, code_lines, keep_panic, makes_a_check, rejoin, run_on_a_thread};
 use std::hint::black_box as bb;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -353,6 +353,63 @@ fn only_the_code_of_a_line_makes_a_check() {
         "a line that does not exist"
     );
     assert!(!makes_a_check("assert!(x);", 0), "no line at all");
+}
+
+#[test]
+fn the_suite_makes_no_bare_unwrap() {
+    // clippy denies an `unwrap` call in the suite, but not one passed as a function
+    // (`map(Option::unwrap)`): its panic is raised in core, where no check counts it. So
+    // the suite's code, read as the line rule reads it, names neither word at all.
+    assert_eq!(
+        code_lines(SUITE).len(),
+        SUITE.lines().count(),
+        "the code of every line of the suite"
+    );
+    let found = bare_unwraps(SUITE);
+    assert!(
+        found.is_empty(),
+        "a bare unwrap in the suite, at lines {found:?}"
+    );
+    // Found as a call and as a function, never in a comment, a literal or a longer word.
+    let found = [
+        "let x = y.unwrap();",
+        "let n = [o].into_iter().map(Option::unwrap).sum::<u8>();",
+        "let f: fn(Option<u8>) -> u8 = Option::unwrap;",
+        "let x = Result::unwrap(r);",
+        "let e = r.unwrap_err();",
+        "let e = [r].map(Result::unwrap_err);",
+        "let x = <Option<u8>>::unwrap(o);",
+        "let x = y.r#unwrap();",
+    ];
+    for source in found {
+        assert!(bare_unwraps(source) == [1], "not found: {source}");
+    }
+    let not_found = [
+        "let x = y.unwrap_or(0);",
+        "let x = y.unwrap_or_else(f).unwrap_or_default();",
+        "let x = y.expect(\"named\"); // not y.unwrap()",
+        "/* y.unwrap() */ let x = 1;",
+        "let s = \"y.unwrap()\";",
+        "let s = r#\"Option::unwrap\"#;",
+        "let s = \"a\ny.unwrap()\";",
+        "/* a\nmap(Option::unwrap) */",
+    ];
+    for source in not_found {
+        assert!(bare_unwraps(source).is_empty(), "found: {source}");
+    }
+}
+
+/// The lines (from 1) of `source` whose code names `unwrap` or `unwrap_err` as a word.
+fn bare_unwraps(source: &str) -> Vec<usize> {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    (1..)
+        .zip(code_lines(source))
+        .filter(|(_, code)| {
+            code.split(|c| !is_ident(c))
+                .any(|w| w == "unwrap" || w == "unwrap_err")
+        })
+        .map(|(at, _)| at)
+        .collect()
 }
 
 fn a_behaviour() {

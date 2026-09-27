@@ -6,10 +6,15 @@
     locked.py facts               what the money crates are built from, from cargo
                                   metadata alone (nothing is compiled), against
                                   crates/ci/locked-compiled.txt
-    locked.py compiled [--pin]    the facts, then a build of nfx-pay and nfx-pay-wire alone:
-                                  check what the compiler read for every one of their
-                                  targets, and that the money tests really ran; --pin
-                                  rewrites the facts file.
+    locked.py compiled [--pin]    the facts, then a build of nfx-pay and nfx-pay-wire alone,
+                                  into a target directory made for this run (a fresh
+                                  temporary one, removed after): check what the compiler
+                                  read for every one of their targets, and that the money
+                                  tests really ran; --pin rewrites the facts file. Because
+                                  the build and the run use that directory, no build
+                                  directory git does not track can stand in for a compile or
+                                  a test binary; in CI a compiler artifact reported reused
+                                  (`fresh`) fails, so nothing carried in can be reused.
 
 The facts, one per line:
 - `build-script <crate>` and `proc-macro <crate>`: workspace crates that run code at build
@@ -30,7 +35,8 @@ by path, would escape every check here. The money crates are locked whole
 (check-locked.sh), and the only workspace crates in their closure are each other: within
 one crate, an unpinned module could change how a pinned one compiles.
 
-`compiled` also checks, without pins, on the money crates' own build:
+`compiled` also checks, without pins, on the money crates' own build (in a target
+directory made for the run, so the checkout's own is never read or trusted):
 - every target of nfx-pay and nfx-pay-wire yields rustc's dep-info (a target without it
   fails), and every file it lists is tracked; every target reads only its own crate's
   files, except nfx-pay-wire's integration tests, which may read the pay/1 vectors;
@@ -53,8 +59,10 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 
 REPO = pathlib.Path(
@@ -67,6 +75,8 @@ MONEY_USERS = [":!crates/nfx-pay", ":!crates/nfx-node/src/pay", ":!crates/nfx-no
 # Where `track_caller` may not appear: every money crate file but the suite's own.
 NOT_TRACK_CALLER = ["crates/nfx-pay", "crates/nfx-pay-wire", ":!crates/nfx-pay/src/adversary.rs"]
 BUILD = "money-build "
+# CI, as check-locked.sh recognises it: there the money build must be from scratch.
+IN_CI = bool(os.environ.get("CI") or os.environ.get("GITLAB_CI") or os.environ.get("CI_JOB_ID"))
 
 
 def fail(msg: str) -> None:
@@ -285,20 +295,35 @@ def compiled(pin: bool) -> None:
     found, meta, members = facts_now()
     if not pin:
         check_facts(found)
+    # The build and the test run go in a target directory made for this run alone, so no
+    # build directory left in the checkout (by a CI cache, a stale local build, or anything
+    # else git does not track) can stand in for a compile or a test binary. In CI a
+    # compiler artifact reported `fresh` means one was reused all the same, and fails.
+    build_dir = pathlib.Path(tempfile.mkdtemp(prefix="nfx-lock-target-"))
+    try:
+        compiled_in(pin, found, members, build_dir)
+    finally:
+        shutil.rmtree(build_dir, ignore_errors=True)
 
+
+def compiled_in(pin: bool, found: list[str], members: list[dict], build_dir: pathlib.Path) -> None:
+    target_dir = ["--target-dir", str(build_dir)]
     # What the money crates' own build compiled, target by target, failing closed.
     tracked = {(REPO / f).resolve() for f in run("git", "ls-files", "-z", cwd=REPO).split("\0") if f}
     money = {p["manifest_path"]: pathlib.Path(p["manifest_path"]).parent.resolve()
              for p in members if p["name"] in MONEY_CRATES}
     wire_dir = (CRATES / "nfx-pay-wire").resolve()
     out = run("cargo", "test", "-p", "nfx-pay", "-p", "nfx-pay-wire", "--all-targets", "--no-run",
-              "--locked", "--offline", "--message-format=json")
+              "--locked", "--offline", "--message-format=json", *target_dir)
     seen_targets = 0
     built = set()
     for line in out.splitlines():
         msg = json.loads(line)
         if msg.get("reason") != "compiler-artifact":
             continue
+        if IN_CI and msg.get("fresh"):
+            fail(f"a compiler artifact was reused, not built fresh, in CI: {msg['package_id']}; "
+                 "the money crates must be built from scratch (a stale build directory?)")
         name, version = package_of(msg["package_id"])
         built.add(f"{BUILD}{name} {version} {','.join(sorted(msg.get('features', []))) or '-'}")
         if msg["manifest_path"] not in money:
@@ -342,7 +367,7 @@ def compiled(pin: bool) -> None:
     # The money tests ran, all of them. `cargo test` exits 0 when a runner skips them.
     want = test_counts()
     out = subprocess.run(["cargo", "test", "--color", "never", "--locked", "--offline",
-                          "-p", "nfx-pay", "-p", "nfx-pay-wire",
+                          *target_dir, "-p", "nfx-pay", "-p", "nfx-pay-wire",
                           "--test", "adversary", "--test", "round_trip", "--test", "mutants",
                           "--test", "runner", "--test", "pay1"],
                          cwd=CRATES, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)

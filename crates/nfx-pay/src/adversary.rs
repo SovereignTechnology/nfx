@@ -12,7 +12,9 @@
 //! Every check names what it requires: an assertion, or an `expect` whose message says it.
 //! A bare `unwrap` names nothing, and its panic is never counted as the suite failing
 //! ([`Ran::failed_the_suite`]), so a defect caught only there would survive: they are
-//! denied here.
+//! denied here. clippy denies a call; `tests/runner.rs` refuses the words `unwrap` and
+//! `unwrap_err` anywhere in this file's code, so one passed as a function
+//! (`map(Option::unwrap)`), which clippy lets through, fails too.
 #![deny(clippy::unwrap_used)]
 
 use std::future::{Future, poll_fn};
@@ -201,13 +203,43 @@ enum Scan {
     RawStr(usize),
 }
 
+/// The code of every line of the Rust source `source`, in order: each line as
+/// [`makes_a_check`] reads it, its comments left out and its literals emptied.
+#[must_use]
+pub fn code_lines(source: &str) -> Vec<String> {
+    let mut lines = vec![Vec::new(); source.lines().count()];
+    scan_code(source.as_bytes(), u32::MAX, |at, code| {
+        let line = usize::try_from(at)
+            .ok()
+            .and_then(|at| lines.get_mut(at.checked_sub(1)?));
+        line.expect("code is on a line of the source")
+            .extend_from_slice(code);
+    });
+    lines
+        .iter()
+        .map(|l| String::from_utf8_lossy(l).into_owned())
+        .collect()
+}
+
 /// The code on line `line` (from 1) of the source `s`: its comments left out and its
 /// literals emptied, so literals and comments of any line, before it or on it, cannot pass
 /// for code.
 fn code_on(s: &[u8], line: u32) -> Vec<u8> {
+    let mut on = Vec::new();
+    scan_code(s, line, |at, code| {
+        if at == line {
+            on.extend_from_slice(code);
+        }
+    });
+    on
+}
+
+/// Scan the source `s` to the end of line `last` (from 1), handing `code` each piece of
+/// code with the line it is on.
+fn scan_code(s: &[u8], last: u32, mut code: impl FnMut(u32, &[u8])) {
     let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    let (mut i, mut at, mut scan, mut code) = (0, 1, Scan::Code, Vec::new());
-    while i < s.len() && at <= line {
+    let (mut i, mut at, mut scan) = (0, 1, Scan::Code);
+    while i < s.len() && at <= last {
         let (c, rest) = (s[i], &s[i..]);
         if c == b'\n' {
             at += 1;
@@ -235,19 +267,16 @@ fn code_on(s: &[u8], line: u32) -> Vec<u8> {
                     scan = Scan::RawStr(hashes);
                     i += word + hashes;
                 } else {
-                    if at == line {
-                        code.extend_from_slice(&rest[..word]);
-                    }
+                    code(at, &rest[..word]);
                     i += word - 1;
                 }
             }
             Scan::Code if c == b'\'' => match char_literal(rest) {
                 Some(len) => i += len - 1,
-                None if at == line => code.push(c),
-                None => {}
+                None => code(at, &[c]),
             },
-            Scan::Code if at == line => code.push(c),
-            Scan::Code | Scan::LineComment => {}
+            Scan::Code => code(at, &[c]),
+            Scan::LineComment => {}
             Scan::BlockComment(depth) if rest.starts_with(b"/*") => {
                 scan = Scan::BlockComment(depth + 1);
                 i += 1;
@@ -283,7 +312,6 @@ fn code_on(s: &[u8], line: u32) -> Vec<u8> {
         }
         i += 1;
     }
-    code
 }
 
 /// How long the character literal is that `rest` starts with, at its quote; `None` if the

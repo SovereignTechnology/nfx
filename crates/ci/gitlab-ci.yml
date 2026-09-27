@@ -35,12 +35,16 @@ variables:
 # variable (PATH, CI, PYTHONPATH and the rest included) reaches it. The image is pinned by
 # digest and already holds python3 (Debian's, for mercurial), so the job installs nothing
 # and has no before_script. lock-job.sh checks that the tree is exactly the pipeline's
-# commit.
+# commit and holds nothing untracked but the restored registry cache and index, and the
+# money crates are built and tested in a target directory made for the run, so a build
+# directory the cache carries in cannot be read (see the `cache` note below).
 #
 # What the repository cannot enforce, and the project's settings must: pipeline variables
 # restricted to no one (they outrank these variables, and a runner acts on some before any
 # script runs), and a pushed commit's lock job looked at before it counts (a `[skip ci]`
 # push runs no pipeline at all). docs/nfx/reviews/2026-09-24-m2.0-fifth-audit.md.
+# On a protected branch the cache is separate, so an unprotected branch cannot write the
+# archive the lock job restores; keep protected-branch caches separate in project settings.
 lock:
   stage: check
   image: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
@@ -80,9 +84,15 @@ check:
     # CI=true and an empty LOCKED_DIRS_UNLOCKED are set here, in the pinned file, so no
     # pipeline or project variable can switch the lock off (crates/ci/check-locked.sh).
     - CI=true LOCKED_DIRS_UNLOCKED= PYTHON=/opt/venv/bin/python crates/ci/check.sh
-  # Only downloaded archives and the index are cached, keyed by branch and Cargo.lock.
-  # Archives are checked against Cargo.lock and sources re-extracted every run; build
-  # output is never cached, so nothing one pipeline compiles can reach the next.
+  # This job caches only downloaded archives and the index, keyed by branch and
+  # Cargo.lock; it does not cache build output. But the cache is not a security boundary:
+  # the runner restores every entry of whatever archive matches the key, and another job
+  # (an earlier pipeline on the branch, or, if caches are shared, another unprotected
+  # branch) can write that archive with paths of its own, such as a build directory. So the
+  # verdict does not trust the checkout: the lock job refuses any untracked or ignored path
+  # but the registry cache and index (lock-job.sh), and the money crates are built and
+  # tested in a target directory made for the run, refusing any reused compile in CI
+  # (locked.py). Keep protected-branch caches separate in project settings.
   cache:
     key:
       prefix: cargo-$CI_COMMIT_REF_SLUG

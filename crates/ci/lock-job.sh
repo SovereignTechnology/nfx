@@ -5,9 +5,10 @@
 # runs it under `env -i` with literal paths, so no pipeline or project variable reaches it.
 # The `check` job runs everything else.
 #
-# Order: the pinned files and the environment; the cached archives; then what the money
-# crates are built from, read from cargo metadata before anything is compiled; then the
-# build and the money tests; then the pinned files again.
+# Order: the tree is the commit and holds nothing untracked; the pinned files and the
+# environment; the cached archives; then what the money crates are built from, read from
+# cargo metadata before anything is compiled; then the build and the money tests; then the
+# pinned files again.
 set -euo pipefail
 shopt -s inherit_errexit
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
@@ -16,6 +17,23 @@ fail() { printf 'lock job: %s\n' "$*" >&2; exit 1; }
 [ -n "${CI_COMMIT_SHA:-}" ] || fail "CI_COMMIT_SHA is not set"
 [ "$(git rev-parse HEAD)" = "$CI_COMMIT_SHA" ] || fail "HEAD is not $CI_COMMIT_SHA"
 git diff --quiet HEAD -- || fail "tracked files differ from $CI_COMMIT_SHA"
+# And it holds nothing git does not track: a build directory or anything else a CI cache
+# can carry into a fresh clone under a shared key (gitlab-ci.yml) is refused, so the
+# verdict rests only on tracked files. The one exception is the registry cache and index
+# a job restores; cargo has not run yet, so registry/src and the rest are not there to
+# allow. Renames and staged paths (any status but ?? and !!) cannot appear after the diff
+# check above; if one does, it fails here.
+while IFS= read -r -d '' entry; do
+  status=${entry:0:2} path=${entry:3}
+  case $status in
+    '??' | '!!')
+      case $path in
+        .cargo-home/registry/cache/* | .cargo-home/registry/index/*) ;;
+        *) fail "an untracked or ignored path is in the checkout: $path" ;;
+      esac ;;
+    *) fail "the working tree is not exactly $CI_COMMIT_SHA: ${entry@Q}" ;;
+  esac
+done < <(git status --porcelain=v1 -z --ignored --untracked-files=all)
 crates/ci/check-locked.sh
 crates/ci/check-locked.sh --sources
 (cd crates && cargo fetch --locked)
