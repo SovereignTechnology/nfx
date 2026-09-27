@@ -600,7 +600,8 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   unanswered after the wait, finishes its incomplete reclaims, from whichever of the
   seeder's videos it is watching, and reclaims a closed session's unsettled payment after
   the wait, counted from sending. A stop shortens no wait: whatever stopped it, and
-  whatever came after, it takes nothing back before 180 s from sending.
+  whatever came after, it reclaims no unanswered payment, live or left by a closed
+  session, before 180 s from sending.
 
 ## 4. HTTPS (origin) payment surface
 
@@ -1082,10 +1083,11 @@ therefore loses nothing:
     another video's payment, even one showing it in both fields; a second quote's price
     and `window` change nothing.
   - §3a: a live session's payment is reclaimed 180 s after sending, whatever came since,
-    and holds the one place in flight until it is answered or reclaimed; a reclaim at
-    180 s the mint cannot serve yet stays incomplete. A stopped watcher takes nothing back
-    before 180 s from sending, whatever stopped it and whatever came after, and finishes
-    its incomplete reclaims from whichever of the seeder's videos it is watching.
+    and holds the one place in flight until it is answered or its 180 s are up; a reclaim
+    at 180 s the mint cannot serve yet stays incomplete. A stopped watcher reclaims no
+    unanswered payment, live or left by a closed session, before 180 s from sending,
+    whatever stopped it and whatever came after, and finishes its incomplete reclaims from
+    whichever of the seeder's videos it is watching.
   - §3a: only a `mint-unavailable` answer to a payment uses a try, and only an `ack` or a
     new session's accepted quote restores them: not a refused `hello` (`mint-unavailable`
     included) or quote, a session's end, a timeout, or a closed session's payment
