@@ -5970,6 +5970,7 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
 
     a_ban_expires_on_its_own_session(h).await;
     a_lapsed_ban_refuses_no_takeover(h).await;
+    a_ban_lapsed_while_a_hello_waited_refuses_it_nothing(h).await;
 }
 
 /// Flaw `TakeoverBanNotAged`. A ban lasts `ban_ttl`, and a payment's turn, a turn it takes
@@ -6016,6 +6017,52 @@ async fn a_lapsed_ban_refuses_no_takeover<H: Harness>(h: &H) {
             .is_ok_and(|ack| (ack.accepted_upto, ack.spent_total) == (4, 4)),
         "the peer's ban lapsed before P2 took P1's dead turn over: P2 is acknowledged: {r:?}"
     );
+    h.release_swaps().await;
+}
+
+/// Flaw `HelloRecheckBanNotAged`. A ban lasts `ban_ttl`, and a `hello` checks the ban again
+/// as it answers, as it stands then (NFX-07 §3). P's swap is held at the mint, its watcher
+/// takes the proofs back, and its connection closes; a `hello` waits for P. A second later
+/// the peer is banned, for a double spend on its other video. The ban lapses with nothing
+/// more from the peer, while the `hello` waits: it takes P's dead turn over, and opens its
+/// session.
+async fn a_ban_lapsed_while_a_hello_waited_refuses_it_nothing<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 8).await;
+    let mut other = open_on(h, &e, 8, 1).await;
+    serve(h, &mut s, 0, 4);
+    h.hold_next_swap();
+    let p = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    poll_once(s.pay(&p)).await; // its connection closes, its swap in flight
+    assert!(h.steal(&p.token).await, "P's watcher takes the proofs back");
+    let (peer, hello) = (h.peer(8), h.hello());
+    let mut waiting = Box::pin(e.hello(&peer, &hello));
+    assert!(
+        poll_now(waiting.as_mut()).is_none(),
+        "the hello waits for P"
+    );
+    h.advance(SECOND);
+    let spent = h.token(1).await;
+    assert!(h.steal(&spent).await, "someone else spent it");
+    let r = other
+        .pay(&Pay {
+            upto_chunk: 1,
+            token: spent,
+        })
+        .await;
+    assert!(is_rej(&r, &RejCode::Spent), "{r:?}");
+    h.advance(h.ban_ttl());
+    let r = settle_on(h, waiting.as_mut(), 3);
+    assert!(
+        r.is_ok(),
+        "the peer's ban, earned while its hello waited, lapsed before the hello answered: it is \
+         not refused banned: {:?}",
+        r.as_ref().err()
+    );
+    drop((r, waiting));
     h.release_swaps().await;
 }
 

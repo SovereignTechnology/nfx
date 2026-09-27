@@ -696,4 +696,6 @@ catches!(
     waiting_counted_per_video_round_trip: r(S::WaitingCountedPerVideo) => the_deadline_frees_the_account,
     waiting_counted_across_peers: s(S::WaitingCountedAcrossPeers) => the_deadline_frees_the_account,
     waiting_counted_across_peers_round_trip: r(S::WaitingCountedAcrossPeers) => the_deadline_frees_the_account,
+    hello_recheck_ban_not_aged: s(S::HelloRecheckBanNotAged) => bans_expire_and_state_stays_bounded,
+    hello_recheck_ban_not_aged_round_trip: r(S::HelloRecheckBanNotAged) => bans_expire_and_state_stays_bounded,
 );

@@ -2165,6 +2165,9 @@ pub enum SeederFlaw {
     WaitingCountedPerVideo,
     /// Counts every peer's waiting `hello`s toward each peer's session cap.
     WaitingCountedAcrossPeers,
+    /// A `hello` checks the ban again as it answers without first expiring the bans past
+    /// `ban_ttl`.
+    HelloRecheckBanNotAged,
 }
 
 /// A defect planted in a mock viewer, to prove the adversary suite catches it.
@@ -5008,7 +5011,13 @@ impl SeederEngine for MockEngine {
         } else {
             wait.done(&mut st);
         }
-        e.age(&mut st);
+        if e.has(SeederFlaw::HelloRecheckBanNotAged) {
+            let bans = st.banned.clone(); // its debt ages, its bans do not
+            e.age(&mut st);
+            st.banned = bans;
+        } else {
+            e.age(&mut st);
+        }
         // The ban again, as it answers: after its wait and its reads.
         let waited = floor.is_some() || took_over;
         let recheck = !(!waited && e.has(SeederFlaw::HelloRecheckOnlyAfterWait))
