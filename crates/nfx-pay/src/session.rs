@@ -139,7 +139,8 @@ pub trait SeederSession {
 pub trait Viewer {
     /// A ledger for another video of the same seeder, sharing this one's standing: one made
     /// after a stop is stopped too. Making it changes nothing in the standing: it restores
-    /// no `mint-unavailable` tries.
+    /// no `mint-unavailable` tries, undoes no stop, and leaves the payment in flight, a
+    /// payment awaiting a quote and an incomplete reclaim as they were.
     fn sibling(&self) -> Self
     where
         Self: Sized;
@@ -155,7 +156,9 @@ pub trait Viewer {
     /// Also `Err`, without stopping: a price over this viewer's cap, a `window` over its
     /// ceiling or no mint it holds tokens from, by the mint's exact URL (on every session, a
     /// resumed one included), or a session already open: a second quote on it is refused
-    /// unread, whatever it claims.
+    /// unread, whatever it claims. A quote refused so is not taken, and settles nothing: the
+    /// payment in flight, a payment awaiting a quote and an incomplete reclaim stay as they
+    /// were, and so do the `mint-unavailable` tries.
     ///
     /// A quote does not undo a stop: taken or not, it leaves a viewer that has stopped
     /// paying the seeder paying it nothing, on this session and every later one.
@@ -170,7 +173,9 @@ pub trait Viewer {
 
     /// The seeder answered a request with `refuse`. It is not owed, and if it was already
     /// paid for, that payment becomes credit. The next [`Viewer::due`] may pay ahead, up
-    /// to half a window less the credit already held.
+    /// to half a window less the credit already held. It settles nothing: the payment in
+    /// flight, a payment awaiting a quote, an incomplete reclaim and a stop stay as they
+    /// were.
     fn refused(&mut self);
 
     /// The payment due now, if any. It covers requested chunks at the quoted price, made
@@ -182,7 +187,8 @@ pub trait Viewer {
     ///
     /// It first finishes incomplete reclaims, and reclaims a payment a closed session left
     /// unsettled once it is 180 s old, whichever of the seeder's videos it was for. It
-    /// does so even when the viewer has stopped: reclaiming is not paying.
+    /// does so even when the viewer has stopped, and when it holds no session's quote
+    /// (between sessions, or its `hello` or quote refused): reclaiming is not paying.
     async fn due(&mut self) -> Result<Option<Pay>, String>;
 
     /// The payment for every chunk still owed, when the session ends.

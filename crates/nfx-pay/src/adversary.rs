@@ -8154,6 +8154,65 @@ pub async fn a_viewer_pays_ahead_only_after_a_refusal<H: Harness>(h: &H) {
         .expect("due answers after a refusal")
         .expect("pays ahead");
     assert_eq!(ahead.upto_chunk, 2, "never beyond half the window");
+
+    // Only a refused request lets it pay ahead.
+    nothing_but_a_refused_request_lets_it_pay_ahead(h).await;
+}
+
+/// Only a refused request lets the watcher pay ahead: after anything else between its
+/// payments ([`BETWEEN_ROUNDS`], a refused request aside), it pays for the chunks it
+/// requested, and nothing ahead. Nor does a ledger made for another video start out paying
+/// ahead, even when a request of the video it was made from was refused.
+async fn nothing_but_a_refused_request_lets_it_pay_ahead<H: Harness>(h: &H) {
+    for event in BETWEEN_ROUNDS {
+        if matches!(
+            event,
+            "a refused request" | "a ledger made for another video"
+        ) {
+            continue;
+        }
+        let e = h.engine(1, 4, 1000);
+        let s = open(h, &e, 1).await;
+        let mut v = h.viewer(1);
+        v.quote(s.quote()).expect("an honest quote is accepted");
+        let s = bring_about(h, &e, s, &mut v, event, true).await;
+        v.requested();
+        v.requested();
+        let pay = v
+            .due()
+            .await
+            .expect("due answers with two chunks requested")
+            .expect("due");
+        assert_eq!(
+            pay.upto_chunk, 2,
+            "{event} is no refused request: it pays for the chunks it requested, and nothing \
+             ahead"
+        );
+        drop(s);
+    }
+    let e = h.engine(1, 4, 1000);
+    let s0 = open_on(h, &e, 1, 0).await;
+    let mut v0 = h.viewer(1);
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    v0.requested();
+    v0.refused();
+    let mut v1 = v0.sibling();
+    let s1 = open_on(h, &e, 1, 1).await;
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
+    v1.requested();
+    v1.requested();
+    let pay = v1
+        .due()
+        .await
+        .expect("video 1's due answers with two chunks requested")
+        .expect("due on video 1");
+    assert_eq!(
+        pay.upto_chunk, 2,
+        "a ledger made for another video pays for the chunks it requested, and nothing ahead: \
+         video 0's refusal is video 0's"
+    );
 }
 
 /// A viewer that has streamed 4 chunks and ended its session, and the quote its next
@@ -9030,6 +9089,164 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     // incomplete. And good proofs the wallet holds are kept when it drops the expired ones.
     a_pending_rest_keeps_the_reclaim_incomplete(h, false).await;
     good_held_proofs_kept_beside_expired(h).await;
+
+    // A seeder that refuses the watcher's sessions cannot hold its reclaims off.
+    a_reclaim_needs_no_session(h).await;
+}
+
+/// `due` finishes an incomplete reclaim, and reclaims a closed session's payment once it is
+/// 180 s old, whether or not the watcher holds a session: between sessions, after a `hello`
+/// or a quote is refused, and once a `hello` refused `banned` has stopped it, when no
+/// session follows. It does so for any of the seeder's videos, from a ledger with no session
+/// too. So a seeder that refuses the watcher's sessions cannot hold the reclaim off and
+/// claim the proofs meanwhile.
+async fn a_reclaim_needs_no_session<H: Harness>(h: &H) {
+    let unavailable = Rej {
+        code: RejCode::MintUnavailable,
+        detail: None,
+    };
+    for after in [
+        "the session's end",
+        "a refused hello",
+        "a refused quote",
+        "a hello refused banned",
+    ] {
+        let e = h.engine(1, 4, 1000);
+        let s = open(h, &e, 1).await;
+        let mut v = h.viewer(1);
+        v.quote(s.quote()).expect("a fair quote");
+        v.requested();
+        v.requested();
+        let pay = v.due().await.expect("due answers").expect("due");
+        h.mint_outage(true);
+        v.rej(&unavailable).await;
+        drop(s);
+        v.end();
+        match after {
+            "a refused hello" => v.hello_refused(&Rej {
+                code: RejCode::BadSession,
+                detail: None,
+            }),
+            "a hello refused banned" => v.hello_refused(&Rej {
+                code: RejCode::Banned,
+                detail: None,
+            }),
+            "a refused quote" => {
+                let s = open(h, &e, 1).await;
+                let mut dear = s.quote().clone();
+                dear.price_per_chunk = 2;
+                assert!(v.quote(&dear).is_err(), "over its price cap: refused");
+                drop(s);
+                v.end();
+            }
+            _ => {}
+        }
+        h.mint_outage(false);
+        assert!(
+            v.due()
+                .await
+                .expect("due answers with no session")
+                .is_none(),
+            "with no session, nothing is paid"
+        );
+        assert!(
+            h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
+            "after {after}, with no session, due finished the incomplete reclaim: the seeder \
+             cannot claim the proofs"
+        );
+    }
+    // A closed session's payment the seeder never read: reclaimed at 180 s with no session
+    // open, and not before; stopped by a `hello` refused `banned` too.
+    for banned in [false, true] {
+        let how = if banned {
+            "stopped, with no session"
+        } else {
+            "with no session"
+        };
+        let e = h.engine(1, 4, 1000);
+        let s = open(h, &e, 1).await;
+        let mut v = h.viewer(1);
+        v.quote(s.quote()).expect("a fair quote");
+        v.requested();
+        v.requested();
+        let unread = v.due().await.expect("due answers").expect("due");
+        drop(s);
+        v.end();
+        if banned {
+            v.hello_refused(&Rej {
+                code: RejCode::Banned,
+                detail: None,
+            });
+        }
+        h.advance(Duration::from_secs(179));
+        assert!(
+            v.due()
+                .await
+                .expect("due answers with no session, at 179 s")
+                .is_none()
+                && !h.claimed_any(&unread.token).await,
+            "{how}, not reclaimed before 180 s"
+        );
+        h.advance(SECOND);
+        assert!(
+            v.due()
+                .await
+                .expect("due answers with no session, at 180 s")
+                .is_none(),
+            "{how}, nothing is paid"
+        );
+        assert!(
+            h.claimed_all(&unread.token).await && !h.steal(&unread.token).await,
+            "{how}, due reclaimed the closed session's payment at 180 s"
+        );
+    }
+    // Another video's too: a ledger holding no session finishes video 0's incomplete
+    // reclaim, and reclaims video 0's closed session's payment at 180 s.
+    for kind in ["an incomplete reclaim", "a closed session's payment"] {
+        let e = h.engine(1, 4, 1000);
+        let s0 = open_on(h, &e, 1, 0).await;
+        let mut v0 = h.viewer(1);
+        let mut v1 = v0.sibling();
+        v0.quote(s0.quote())
+            .expect("video 0's honest quote is accepted");
+        v0.requested();
+        v0.requested();
+        let pay = v0
+            .due()
+            .await
+            .expect("video 0's due answers")
+            .expect("due on video 0");
+        if kind == "an incomplete reclaim" {
+            h.mint_outage(true);
+            v0.rej(&unavailable).await;
+            h.mint_outage(false);
+        } else {
+            drop(s0);
+            v0.end();
+            h.advance(Duration::from_secs(179));
+            assert!(
+                v1.due()
+                    .await
+                    .expect("video 1's due answers with no session, at 179 s")
+                    .is_none()
+                    && !h.claimed_any(&pay.token).await,
+                "video 1, with no session, waits 180 s before it reclaims video 0's closed \
+                 session's payment"
+            );
+            h.advance(SECOND);
+        }
+        assert!(
+            v1.due()
+                .await
+                .expect("video 1's due answers with no session")
+                .is_none(),
+            "video 1 holds no session: nothing is paid"
+        );
+        assert!(
+            h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
+            "video 1, with no session, took back video 0's proofs: {kind}"
+        );
+    }
 }
 
 /// A viewer waits exactly 180 s for an answer on a live connection, then reclaims its
@@ -9240,6 +9457,69 @@ pub async fn a_viewer_settles_only_on_an_exact_match<H: Harness>(h: &H) {
 
     a_settling_quote_matches_both_fields(h).await;
     a_quote_at_the_ledger_leaves_the_reclaim_incomplete(h).await;
+    a_refused_quote_settles_nothing(h).await;
+}
+
+/// A quote the watcher refuses, for its price, its `window` or its mints, or as a second
+/// quote on the open session, is not taken, so it settles nothing, even one showing the
+/// payment: unsettled, awaiting a quote, or being reclaimed. The seeder's refused quote
+/// claims the payment it never credited, and its next quote shows the ledger without it:
+/// the watcher takes that one.
+async fn a_refused_quote_settles_nothing<H: Harness>(h: &H) {
+    let unavailable = Rej {
+        code: RejCode::MintUnavailable,
+        detail: None,
+    };
+    for list in ["unsettled", "awaiting a quote", "reclaiming"] {
+        for why in [
+            "for its price",
+            "for its window",
+            "for its mints",
+            "as a second quote",
+        ] {
+            let e = h.engine(1, 4, 1000);
+            let s = open(h, &e, 1).await;
+            let mut v = h.viewer(1);
+            v.quote(s.quote()).expect("an honest quote is accepted");
+            v.requested();
+            v.requested();
+            let pay = v.due().await.expect("due answers").expect("due");
+            match list {
+                "unsettled" => {}
+                "awaiting a quote" => {
+                    assert!(h.steal(&pay.token).await, "the seeder keeps it");
+                    v.rej(&unavailable).await;
+                }
+                _ => {
+                    h.mint_outage(true);
+                    v.rej(&unavailable).await; // its reclaim cannot be sent: incomplete
+                    h.mint_outage(false);
+                }
+            }
+            drop(s);
+            v.end();
+            let s = open(h, &e, 1).await;
+            let mut claims = s.quote().clone();
+            (claims.accepted_upto, claims.spent_total) = (pay.upto_chunk, 2);
+            match why {
+                "for its price" => claims.price_per_chunk = 2,
+                "for its window" => claims.window = h.window_ceiling() + 1,
+                "for its mints" => claims.mints = vec![format!("{}/", h.mint())],
+                _ => v
+                    .quote(s.quote())
+                    .expect("a quote showing the ledger is taken"),
+            }
+            assert!(v.quote(&claims).is_err(), "refused {why}");
+            drop(s);
+            v.end();
+            let s = open(h, &e, 1).await;
+            assert!(
+                v.quote(s.quote()).is_ok(),
+                "{list}, refused {why}: a refused quote showing the payment settles nothing, \
+                 so the seeder's next quote, showing the ledger without it, is taken"
+            );
+        }
+    }
 }
 
 /// A quote equal to the ledger leaves an incomplete reclaim in place: the watcher pays
@@ -9419,6 +9699,204 @@ pub async fn a_lying_seeder_takes_at_most_one_payment<H: Harness>(h: &H) {
             .is_none(),
         "and nothing more is paid"
     );
+
+    // Nor does anything else that comes between its rounds settle a payment, free the one
+    // in flight or undo a stop.
+    nothing_else_settles_what_it_waits_on(h).await;
+}
+
+/// What can come between a seeder's rounds, for [`nothing_else_settles_what_it_waits_on`]:
+/// none of it settles anything.
+const BETWEEN_ROUNDS: [&str; 9] = [
+    "the session's end",
+    "a quote over its price cap",
+    "a quote with a window over its ceiling",
+    "a quote naming no mint it holds",
+    "a second quote on the open session",
+    "a refused request",
+    "a refused hello",
+    "a ledger made for another video",
+    "a timeout with no payment on the session",
+];
+
+/// Bring `event` about on the watcher `v`, whose session with engine `e` is `s`, and return
+/// the session it holds then: `s`, or a new one whose quote, showing the ledger, it was
+/// given, and took unless `take` is false.
+async fn bring_about<H: Harness>(
+    h: &H,
+    e: &H::Engine,
+    s: Session<H>,
+    v: &mut H::Viewer,
+    event: &str,
+    take: bool,
+) -> Session<H> {
+    match event {
+        "a second quote on the open session" => {
+            assert!(v.quote(s.quote()).is_err(), "one quote per session");
+            return s;
+        }
+        "a refused request" => {
+            v.requested();
+            v.refused();
+            return s;
+        }
+        "a ledger made for another video" => {
+            let _other_video = v.sibling();
+            return s;
+        }
+        "a timeout with no payment on the session" => {
+            v.timeout().await;
+            return s;
+        }
+        _ => {}
+    }
+    drop(s);
+    v.end();
+    match event {
+        "the session's end" => {}
+        "a refused hello" => {
+            // With each code but `banned`, which stops the watcher.
+            for code in [
+                RejCode::BadSession,
+                RejCode::UnknownVideo,
+                RejCode::Other("a-later-code".into()),
+            ] {
+                v.hello_refused(&Rej { code, detail: None });
+            }
+        }
+        _ => {
+            let refused = open(h, e, 1).await;
+            let mut q = refused.quote().clone();
+            match event {
+                "a quote over its price cap" => q.price_per_chunk = 2,
+                "a quote with a window over its ceiling" => q.window = h.window_ceiling() + 1,
+                _ => q.mints = vec![format!("{}/", h.mint())],
+            }
+            assert!(v.quote(&q).is_err(), "{event}: refused");
+            drop(refused);
+            v.end();
+        }
+    }
+    let s = open(h, e, 1).await;
+    let taken = v.quote(s.quote());
+    if take {
+        taken.expect("a quote showing the ledger is taken");
+    }
+    s
+}
+
+/// A payment is settled only by a quote that shows it or by its reclaim, and nothing undoes
+/// a stop, whatever else comes between the seeder's rounds ([`BETWEEN_ROUNDS`]): the
+/// session's end, a quote the watcher refuses for its price, its `window` or its mints, a
+/// second quote on the open session, a refused request or `hello`, a ledger made for
+/// another video, or a timeout with no payment on the session. So a seeder that keeps every
+/// payment, round after round, takes one in all: whether it answers `mint-unavailable`, the
+/// proofs found spent or claimed once the mint is back (the watcher's reclaim left
+/// incomplete meanwhile), or answers a wrong `ack`, which stops the watcher. And a payment
+/// a dropped connection left unsettled stays the one in flight: nothing is paid over it,
+/// nor is it reclaimed, before 180 s.
+async fn nothing_else_settles_what_it_waits_on<H: Harness>(h: &H) {
+    let unavailable = Rej {
+        code: RejCode::MintUnavailable,
+        detail: None,
+    };
+    for waits in ["found spent", "an incomplete reclaim", "a stop"] {
+        let holds = match waits {
+            "found spent" => "leaves a payment found spent awaiting a quote that shows it",
+            "an incomplete reclaim" => "leaves an incomplete reclaim incomplete",
+            _ => "undoes no stop",
+        };
+        for event in BETWEEN_ROUNDS {
+            let e = h.engine(1, 4, 1000);
+            let mut s = open(h, &e, 1).await;
+            let mut v = h.viewer(1);
+            v.quote(s.quote()).expect("an honest quote is accepted");
+            let mut taken = 0;
+            for _ in 0..3 {
+                v.requested();
+                v.requested();
+                let pay = v.due().await.expect("due answers, round after round");
+                if let Some(pay) = &pay {
+                    match waits {
+                        "found spent" => {
+                            assert!(h.steal(&pay.token).await, "the seeder keeps it");
+                            taken += 1;
+                            v.rej(&unavailable).await;
+                        }
+                        "an incomplete reclaim" => {
+                            h.mint_outage(true);
+                            v.rej(&unavailable).await;
+                        }
+                        _ => {
+                            assert!(h.steal(&pay.token).await, "the seeder keeps it");
+                            taken += 1;
+                            let wrong = Ack {
+                                accepted_upto: pay.upto_chunk + 1,
+                                spent_total: 0,
+                            };
+                            assert!(
+                                v.ack(&wrong).is_err() && v.stopped(),
+                                "a wrong ack stops it"
+                            );
+                        }
+                    }
+                }
+                s = bring_about(h, &e, s, &mut v, event, waits != "a stop").await;
+                if let Some(pay) = pay
+                    && waits == "an incomplete reclaim"
+                {
+                    h.mint_outage(false);
+                    assert!(
+                        h.steal(&pay.token).await,
+                        "the seeder claims it once the mint is back"
+                    );
+                    taken += 1;
+                }
+            }
+            assert_eq!(
+                taken, 1,
+                "{event} {holds}, so the seeder that kept a payment takes that one alone"
+            );
+        }
+    }
+    // A payment a dropped connection left unsettled, kept by the seeder uncredited or never
+    // read: it holds the standing's one slot until its 180 s reclaim.
+    for kept in [true, false] {
+        for event in BETWEEN_ROUNDS {
+            let e = h.engine(1, 4, 1000);
+            let s = open(h, &e, 1).await;
+            let mut v = h.viewer(1);
+            v.quote(s.quote()).expect("an honest quote is accepted");
+            v.requested();
+            v.requested();
+            let unsettled = v.due().await.expect("due answers").expect("due");
+            drop(s);
+            v.end();
+            if kept {
+                assert!(
+                    h.steal(&unsettled.token).await,
+                    "the seeder keeps it, crediting nothing"
+                );
+            }
+            let s = open(h, &e, 1).await;
+            v.quote(s.quote())
+                .expect("a quote showing the ledger is taken");
+            let s = bring_about(h, &e, s, &mut v, event, true).await;
+            v.requested();
+            v.requested();
+            assert!(
+                v.due()
+                    .await
+                    .expect("due answers with a payment unsettled")
+                    .is_none()
+                    && (kept || !h.claimed_any(&unsettled.token).await),
+                "{event} frees nothing: the payment a dropped connection left unsettled (kept: \
+                 {kept}) is still the one in flight, so nothing is paid over it, nor is it \
+                 reclaimed, before 180 s"
+            );
+            drop(s);
+        }
+    }
 }
 
 /// A seeder that refuses every request, while acknowledging every payment, gets at most
@@ -9450,7 +9928,8 @@ pub async fn a_refusing_seeder_takes_at_most_half_a_window<H: Harness>(h: &H) {
 /// A seeder that answers every payment `mint-unavailable` without swapping gets three
 /// tries a session: each try costs the watcher a reclaim and a new token at the mint, so
 /// the budget bounds those costs. A new session's accepted quote starts the count again,
-/// and an ack resets it; nothing else does, a ledger made for another video included.
+/// and an ack resets it; nothing else does, a ledger made for another video or a quote
+/// refused on one included.
 pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
@@ -9711,6 +10190,41 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
         tries, 3,
         "three tries, ledgers made for other videos or not"
     );
+
+    // Nor does a quote refused for its price, its window or its mints: it is no new
+    // session's accepted quote, on another video either.
+    for why in ["its price", "its window", "its mints"] {
+        let e = h.engine(1, 4, 1000);
+        let s0 = open_on(h, &e, 1, 0).await;
+        let mut v0 = h.viewer(1);
+        let mut v1 = v0.sibling();
+        v0.quote(s0.quote())
+            .expect("video 0's honest quote is accepted");
+        v0.requested();
+        v0.requested();
+        for _ in 0..3 {
+            v0.due()
+                .await
+                .expect("due answers on video 0")
+                .expect("a try");
+            v0.rej(&mu).await;
+        }
+        let s1 = open_on(h, &e, 1, 1).await;
+        let mut q = s1.quote().clone();
+        match why {
+            "its price" => q.price_per_chunk = 2,
+            "its window" => q.window = h.window_ceiling() + 1,
+            _ => q.mints = vec![format!("{}/", h.mint())],
+        }
+        assert!(v1.quote(&q).is_err(), "video 1's quote refused for {why}");
+        assert!(
+            v0.due()
+                .await
+                .expect("due answers on video 0 out of tries")
+                .is_none(),
+            "three tries, a quote refused for {why} on another video or not"
+        );
+    }
 }
 
 /// A watcher's standing with a seeder spans its videos: one payment in flight toward the
@@ -10212,7 +10726,26 @@ pub async fn a_stopped_viewer_pays_nothing<H: Harness>(h: &H) {
         .is_err()
     );
     assert!(v0.stopped() && v1.stopped(), "the standing is stopped");
-    h.advance(Duration::from_secs(180));
+    h.advance(Duration::from_secs(179));
+    assert!(
+        v1.due()
+            .await
+            .expect("video 1's due answers once stopped, at 179 s")
+            .is_none()
+            && !h.claimed_any(&unread.token).await,
+        "stopped, it still waits 180 s from sending before it reclaims video 0's unsettled \
+         payment"
+    );
+    assert!(
+        v0.due()
+            .await
+            .expect("video 0's due answers once stopped, with no session, at 179 s")
+            .is_none()
+            && !h.claimed_any(&unread.token).await,
+        "stopped, it waits 180 s on video 0 too, before it reclaims video 0's own unsettled \
+         payment"
+    );
+    h.advance(SECOND);
     assert!(
         v1.due()
             .await
@@ -10385,10 +10918,11 @@ async fn a_stopped_viewer_awaits_no_quote<H: Harness>(h: &H) {
     );
 }
 
-/// Nothing after the stop undoes it: not the session's end, a refused `hello`, a new
-/// session's quote, taken or not, nor a ledger made for another video. Stopped by an
-/// unsolicited ack, the watcher reconnects, and the seeder quotes its ledger honestly: it
-/// pays nothing more, by `due` or by `last_pay`, on either video.
+/// Nothing after the stop undoes it: not a second quote on the open session, the session's
+/// end, a refused `hello`, a new session's quote, refused for its price, its `window` or its
+/// mints, or taken, nor a ledger made for another video. Stopped by an unsolicited ack, the
+/// watcher reconnects, and the seeder quotes its ledger honestly: it pays nothing more, by
+/// `due` or by `last_pay`, on either video.
 async fn a_new_session_leaves_the_standing_stopped<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
@@ -10410,6 +10944,10 @@ async fn a_new_session_leaves_the_standing_stopped<H: Harness>(h: &H) {
             && v.stopped(),
         "a second ack is unsolicited: refused, and it stops"
     );
+    assert!(
+        v.quote(s.quote()).is_err() && v.stopped(),
+        "a second quote on the open session is refused, and leaves the standing stopped"
+    );
     drop(s);
     v.end();
     assert!(v.stopped(), "the session's end leaves the standing stopped");
@@ -10421,6 +10959,21 @@ async fn a_new_session_leaves_the_standing_stopped<H: Harness>(h: &H) {
         v.stopped(),
         "a hello refused bad-session leaves the standing stopped"
     );
+    for why in ["its price", "its window", "its mints"] {
+        let s = open(h, &e, 1).await;
+        let mut q = s.quote().clone();
+        match why {
+            "its price" => q.price_per_chunk = 2,
+            "its window" => q.window = h.window_ceiling() + 1,
+            _ => q.mints = vec![format!("{}/", h.mint())],
+        }
+        assert!(
+            v.quote(&q).is_err() && v.stopped(),
+            "a new session's quote refused for {why} leaves the standing stopped"
+        );
+        drop(s);
+        v.end();
+    }
     let mut s = open(h, &e, 1).await;
     assert_eq!(
         (s.quote().accepted_upto, s.quote().spent_total),
@@ -13092,13 +13645,19 @@ async fn a_hello_that_took_a_turn_over_checks_its_session_id<H: Harness>(h: &H) 
     );
 }
 
-/// A quote settles a payment only when `spent_total` is the ledger plus the payment: with a
-/// payment already acknowledged, a quote showing the new payment's `upto` with `spent_total`
-/// inflated, or with the ledger's earlier spend dropped (a resync down), settles nothing and
-/// is dishonest, whether the payment is unsettled, awaiting a quote, or being reclaimed.
+/// A quote settles a payment only when `spent_total` is the ledger plus the payment, and
+/// `accepted_upto` the payment's: with a payment already acknowledged, a quote showing the
+/// new payment's `upto` with `spent_total` inflated, or with the ledger's earlier spend
+/// dropped (a resync down), settles nothing and is dishonest, and so does one showing the
+/// right `spent_total` with an `accepted_upto` above the payment's, whether the payment is
+/// unsettled, awaiting a quote, or being reclaimed.
 async fn a_settling_quote_matches_both_fields<H: Harness>(h: &H) {
     for list in ["unsettled", "awaiting a quote", "reclaiming"] {
-        for (lie, spent) in [("inflated", 5u64), ("the ledger dropped", 2)] {
+        for (lie, upto, spent) in [
+            ("inflated", 4, 5u64),
+            ("the ledger dropped", 4, 2),
+            ("upto above the payment", 6, 4),
+        ] {
             let e = h.engine(1, 4, 1000);
             let mut s = open(h, &e, 1).await;
             let mut v = h.viewer(1);
@@ -13145,11 +13704,15 @@ async fn a_settling_quote_matches_both_fields<H: Harness>(h: &H) {
             drop(s);
             v.end();
             let mut q = open(h, &e, 1).await.quote().clone();
-            (q.accepted_upto, q.spent_total) = (4, spent); // honest would be (4, 4)
+            (q.accepted_upto, q.spent_total) = (upto, spent); // honest would be (4, 4)
+            let wrong = if upto == 4 {
+                "whose spent_total is not the ledger plus the payment"
+            } else {
+                "whose accepted_upto is above the payment's"
+            };
             assert!(
                 v.quote(&q).is_err() && v.stopped(),
-                "{list}, {lie}: a quote whose spent_total is not the ledger plus the payment \
-                 settles nothing, and is dishonest"
+                "{list}, {lie}: a quote {wrong} settles nothing, and is dishonest"
             );
         }
     }
