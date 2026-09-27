@@ -590,32 +590,63 @@ Every paid request pays for itself. An origin extends no credit, keeps no counte
 therefore loses nothing:
 
 - `GET /<sha256>` with header `X-NFX-Pay: cashuB…`, a token worth exactly one chunk at
-  the origin's price.
+  the origin's price. A paid request is a `GET` for the whole file, with no `Range`
+  header, and the client follows no redirect with it. It is sent over HTTPS only, since
+  anyone who reads a token can spend it (plain HTTP to a loopback host only where a
+  deployment permits it, as for a mint, §2).
+- The client pays only at a price within its own price cap, and only with a token of a
+  mint the origin names, by its exact URL (§2), as it takes a quote (§3a): it pays no
+  price above the cap, whether a beacon's `price_hint` or a `402` names it.
 - The origin runs the checks of §3 (structure, mint, DLEQ, exact amount), swaps, and
-  only then responds:
+  only then responds. It SHOULD hold the file's verified bytes before it swaps (from its
+  store, or pulled and verified, NFX-05 §6.2), and answer a miss with nothing swapped (a
+  `404` or a `5xx`, NFX-05 §6.1), so that the client's reclaim finds every proof back.
+  It answers within 60 s of the request's arrival, its pull and its swap included, as a
+  seeder answers a `pay` (§3): a swap with no outcome by then it abandons (it sends no
+  further swap request for those proofs) and answers `503`. It answers:
   - `200` with the file once the swap has succeeded;
   - `402` with `X-NFX-Price: <sat>` and `X-NFX-Mints: <comma list>` (non-empty; proofs
     from other mints are refused) when payment is missing or refused;
-  - `503` when the mint cannot be reached.
+  - `503` when the mint cannot be reached, or the swap has no outcome by the deadline.
 
-  On any refusal the client reclaims its proofs, as in §3a. A refusal is any answer but
-  `200` to a request that carried a payment: a `402`, a `503`, or any other status, known
-  or not. A paid request left with no answer, its connection dropped included, is
-  reclaimed 180 s after it was sent, as §3a reclaims an unanswered payment, and is then
-  refused like any other. The client keeps one paid request in flight to an origin at a
-  time, as toward a seeder (§3a).
+  A paid request is **served** only by a `200` whose body is the requested file, whole:
+  its sha256 is the one requested (NFX-05 §4). Any other answer is a refusal: a `200`
+  that does not verify, one cut short included (its connection dropped during the
+  body), a `402`, a `503`, a redirect, or any other status, known or not. On any refusal
+  the client reclaims its proofs, as in §3a. A paid request left with no answer (no
+  status), its connection dropped before one included, is reclaimed 180 s after it was
+  sent, as §3a reclaims an unanswered payment, and is then refused like any other: the
+  client waits that long for a status, and one that comes later changes nothing. The
+  client keeps one paid request in flight to an origin at a time, as toward a seeder
+  (§3a).
   - If the reclaim finds any proof spent, that payment is lost, though the proofs left
-    unspent are still taken back (§3a), and the client pays that origin nothing more. An
-    origin sends no quote, so nothing settles that payment later: an origin that claims a
-    payment and then refuses it, or leaves it unanswered, takes that one payment.
+    unspent are still taken back (§3a), and the client pays that origin nothing more. It
+    pays it nothing more after a `200` that does not verify either, whatever the reclaim
+    finds: that origin answered as if it had taken the payment. An origin sends no quote,
+    so nothing settles that payment later: an origin that claims a payment and does not
+    serve it takes that one payment, at a price within the client's cap.
   - Otherwise the client pays that origin nothing until every proof is confirmed
     reclaimed, or lost to the expiry (§3a); a reclaim the mint cannot serve yet is
-    retried. Then it may pay again: after a `402`, at the price that `402` names.
-  - A `503`, or no answer, with every proof back uses none of the tries below: the mint
-    may be down, so the client pays that origin again later, and SHOULD back off.
-  - After three paid requests in a row refused otherwise (a `402`, or any status but
-    `200` and `503`), it stops paying that origin. A `200` to a paid request resets the
-    count, and nothing else does.
+    retried. The refusal then uses one of three tries, whatever the answer or none. With
+    a try left, the client may pay again: after a `402`, at the price that `402` names,
+    if within its cap.
+  - Out of tries, the client pays that origin nothing until a back-off of its choosing,
+    never zero, has passed, and then has three tries again. It SHOULD at least double the
+    back-off each time its tries run out. A served paid request resets the tries and the
+    back-off, and nothing else does. So an origin that refuses with every proof back (an
+    honest one whose mint is down, or that lacks a file for now, NFX-05 §6.1) is never
+    dropped for good, and costs the client a reclaim per refusal, at most three in a row
+    before each back-off.
+  - Even from an honest origin, a payment its swap took is lost if the client does not
+    get its `200` whole in time: the answer is lost, cut short or late, a proxy in front
+    of the origin answers first (a proxy SHOULD wait out the origin's deadline), or an
+    abandoned swap lands after the deadline. Nothing tells the client it was served. A
+    stated concession, as §3a's: the client keeps its bound, and pays that origin nothing
+    more.
+- The client keeps a standing per origin (the host and port it pays) for as long as it
+  keeps the wallet it pays from: whether it has stopped paying it, the paid request in
+  flight and its reclaim, the tries left and the back-off. Names are free, as identities
+  are (§3): a lying origin takes one payment per name the client pays.
 - Bans do not apply: the payer is anonymous, and spent proofs simply earn a `402`.
 - Origins MAY serve gratis (`price_hint` 0 or `free` beacons). The website's ad/default
   mode is exactly this (origin at price 0).
@@ -981,3 +1012,21 @@ therefore loses nothing:
     with every proof back, uses no try, and the client pays again later, backing off;
     after three paid requests in a row refused otherwise, it stops paying that origin, and
     only a `200` to a paid request resets the count.
+- Draft 2026-09-27 (M2.0 twenty-eighth audit, `docs/nfx/reviews/2026-09-24-m2.0-twenty-eighth-audit.md`).
+  - §4: a paid request is served only by a `200` whose body is the requested file, whole
+    (its sha256); one that does not verify, cut short included, is a refusal after which
+    the client pays that origin nothing more, whatever its reclaim finds (was: any `200`
+    was no refusal, and reset the count). Every refusal whose reclaim ends with every
+    proof back or lost to the expiry, none spent, uses one of three tries, whatever the
+    answer or none (was: a `503` or no answer with every proof back used none). Out of
+    tries, the client pays that origin nothing until a back-off of its choosing, never
+    zero, has passed, then has three tries again, and SHOULD at least double the
+    back-off each time (was: it stopped paying that origin for good); only a served
+    request resets the tries and the back-off. The client pays only within its price
+    cap, and with a token of a mint the origin names (was: at whatever price a `402`
+    named); it asks for the whole file, over HTTPS only, follows no redirect with a
+    payment, waits 180 s for a status and ignores one that comes later, and keeps a
+    standing per origin. The origin SHOULD hold the file's verified bytes before it
+    swaps and answer a miss with nothing swapped, and it answers within 60 s, abandoning
+    a swap with no outcome then (`503`). A payment an honest origin's swap took is lost
+    when the client does not get its `200` whole in time: a stated concession.
