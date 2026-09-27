@@ -156,20 +156,24 @@ pub trait Viewer {
     /// Also `Err`, without stopping: a price over this viewer's cap, a `window` over its
     /// ceiling or no mint it holds tokens from, by the mint's exact URL (on every session, a
     /// resumed one included), or a session already open: a second quote on it is refused
-    /// unread, whatever it claims. A quote refused so is not taken, and settles nothing: the
-    /// payment in flight, a payment awaiting a quote and an incomplete reclaim stay as they
-    /// were, and so do the `mint-unavailable` tries. Taken or refused, a quote settles
-    /// nothing of the seeder's other videos: their payments stay as they were.
+    /// unread, whatever it claims, its price and `window` included. A quote refused so is not
+    /// taken, and settles nothing: the payment in flight, a payment awaiting a quote and an
+    /// incomplete reclaim stay as they were, and so do the `mint-unavailable` tries, none
+    /// used and none restored. Taken, refused or dishonest, a quote settles nothing of the
+    /// seeder's other videos, even one showing their payment in both fields: their payments
+    /// stay as they were.
     ///
     /// A quote does not undo a stop: taken or not, it leaves a viewer that has stopped
     /// paying the seeder paying it nothing, on this session and every later one.
     fn quote(&mut self, quote: &Quote) -> Result<(), String>;
 
     /// The seeder refused this ledger's `hello`, so no session opened. `banned` stops the
-    /// viewer; any other code changes nothing. It never touches a payment.
+    /// viewer; any other code, known or not, `mint-unavailable` included, changes nothing:
+    /// it uses no `mint-unavailable` try. It never touches a payment.
     fn hello_refused(&mut self, rej: &Rej);
 
-    /// A request was sent. It is owed unless the seeder refuses it.
+    /// A request was sent. It is owed unless the seeder refuses it. It leaves the payment in
+    /// flight as it was, its place and its 180 s from sending included.
     fn requested(&mut self);
 
     /// The seeder answered a request with `refuse`. It is not owed, and if it was already
@@ -180,12 +184,16 @@ pub trait Viewer {
     fn refused(&mut self);
 
     /// The payment due now, if any. It covers requested chunks at the quoted price, made
-    /// before the unpaid count reaches the window, or pays ahead after a refusal. One is
-    /// in flight toward the seeder at a time, across its videos, and none is made:
+    /// once the unpaid count reaches half the window, rounded up, so a payment in flight
+    /// never stalls the seeder, or pays ahead after a refusal. One is in flight toward the
+    /// seeder at a time, across its videos, and none is made:
     /// - once the viewer has stopped, ahead after a refusal included;
     /// - while a reclaim is incomplete or a payment awaits a quote;
-    /// - after three `mint-unavailable` answers in a row (a reclaim retried while the mint
-    ///   is down is none), until a new session's accepted quote.
+    /// - after three `mint-unavailable` answers to its payments in a row, until a new
+    ///   session's accepted quote. Nothing else uses a try: not a reclaim, retried while the
+    ///   mint is down or not, a closed session's payment reclaimed with every proof back or
+    ///   lost to the expiry, a refused `hello` or quote, a session's end, nor a timeout. Only
+    ///   an ack or a new session's accepted quote restores them.
     ///
     /// It first finishes incomplete reclaims, and reclaims a payment a closed session left
     /// unsettled once it is 180 s old, whichever of the seeder's videos it was for. It
@@ -197,7 +205,7 @@ pub trait Viewer {
     /// quote on its own ledger, a mint that cannot serve it yet or a proof pending leaves it
     /// incomplete, and with every proof back or lost to the expiry the viewer pays again at
     /// its next session. A closed session's payment is reclaimed 180 s after it was sent,
-    /// whatever came since.
+    /// whatever came since, and not before, whatever stopped the viewer.
     async fn due(&mut self) -> Result<Option<Pay>, String>;
 
     /// The payment for every chunk still owed, when the session ends.
@@ -205,7 +213,9 @@ pub trait Viewer {
 
     /// The seeder's `ack`. `Err`: it is unsolicited, or does not match the payment
     /// (`accepted_upto`, `spent_total`), one at or below the ledger included; the viewer
-    /// stops paying this seeder. An ack that matches does not undo a stop.
+    /// stops paying this seeder. An ack settles only the payment sent on its session: an
+    /// unsolicited one settles nothing, even one showing another video's payment in both
+    /// fields. An ack that matches does not undo a stop.
     fn ack(&mut self, ack: &Ack) -> Result<(), String>;
 
     /// The seeder's `rej` answering this ledger's payment, sent on this session, whatever
@@ -221,14 +231,18 @@ pub trait Viewer {
     ///   request that reserved it, and the payment awaits a quote once it completes.
     /// - After `mint-unavailable` with every proof reclaimed, it may pay again, unless it
     ///   has stopped: nothing undoes a stop.
-    /// - After any other code, it stops.
+    /// - After any other code, known or not, one pay/1 sends only for a `hello` or another
+    ///   spec's included, it stops.
     ///
     /// A reclaim the mint cannot serve yet blocks every payment until it completes.
     async fn rej(&mut self, rej: &Rej);
 
     /// No answer has come on this live session to the payment sent on it. Before 180 s
-    /// from sending this does nothing. From then, the viewer reclaims the proofs and stops.
-    /// A payment an earlier session left unsettled is not this call's.
+    /// from sending this does nothing, whatever came since and whether or not the viewer has
+    /// stopped: it reclaims nothing, frees no slot, and uses or restores no try. From then,
+    /// the viewer reclaims the proofs and stops; a reclaim the mint cannot serve yet is
+    /// incomplete, and finished later. With no payment on the session it changes nothing. A
+    /// payment an earlier session left unsettled is not this call's.
     async fn timeout(&mut self);
 
     /// The session ended (its connection closed). The ledger stays, and a payment in
