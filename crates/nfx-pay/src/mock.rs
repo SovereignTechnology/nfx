@@ -2168,6 +2168,107 @@ pub enum SeederFlaw {
     /// A `hello` checks the ban again as it answers without first expiring the bans past
     /// `ban_ttl`.
     HelloRecheckBanNotAged,
+    /// Creates an empty account for a peer with none whose payment is dropped while it
+    /// waits for another payment's turn.
+    WaitingDropCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment is dropped during its
+    /// read of the account's unknown swaps.
+    DropInReadCreatesAccount,
+    /// Creates an empty account for a peer with none whose `hello`, arriving past a
+    /// payment's deadline, takes its dead turn over.
+    LateHelloTakeoverCreatesAccount,
+    /// Creates an empty account for a peer whose `hello`, having waited for no payment, it
+    /// refuses `banned` as it answers, on a video the peer has none on.
+    UnwaitedBannedHelloCreatesAccount,
+    /// Creates an empty account for a peer with none whose `hello`, having waited for no
+    /// payment, it refuses as it answers, its session id opened while it read.
+    UnwaitedRecheckIdCreatesAccount,
+    /// A payment refused `overpaid` frees the turn, and wakes none of what waits for it.
+    OverpaidWakesNone,
+    /// A payment refused `bad-token` for an invalid DLEQ frees the turn, and wakes none of
+    /// what waits for it.
+    BadDleqWakesNone,
+    /// A payment refused `mint-unavailable` for a keyset too near its expiry frees the
+    /// turn, and wakes none of what waits for it.
+    KeysetWakesNone,
+    /// A payment refused `mint-unavailable` while an earlier swap's outcome is unknown frees
+    /// the turn, and wakes none of what waits for it.
+    UnknownOutcomeWakesNone,
+    /// A payment refused as its account's watermark is read again, before its swap is sent,
+    /// frees the turn, and wakes none of what waits for it.
+    RecheckWakesNone,
+    /// A payment refused as its account's watermark is read again, before its swap is sent,
+    /// keeps its account's turn to its deadline.
+    RecheckKeepsTurn,
+    /// A payment dropped during its read of its account's unknown swaps frees the turn, and
+    /// wakes none of what waits for it.
+    DropInReadWakesNone,
+    /// A payment dropped during its read of its account's unknown swaps frees the turn
+    /// without noting the reads of that second sent by then: one sent before the drop serves
+    /// a `hello` that waited.
+    DropInReadNoFloor,
+    /// Creates an empty account for a peer with none whose `hello` is dropped while it waits
+    /// for a payment.
+    WaitingHelloDropCreatesAccount,
+    /// Creates an empty account for a peer with none whose `hello` is dropped during its
+    /// read of the account's unknown swaps.
+    HelloDropInReadCreatesAccount,
+    /// Keeps a `hello` dropped during its read counted toward its peer's session cap, for
+    /// good.
+    HelloDropInReadCounted,
+    /// A `hello` that comes past a payment's deadline, the turn still held, waits instead
+    /// of taking the turn over at once: it takes it over only once something wakes it.
+    NoTakeoverAtArrival,
+    /// Creates an empty account for a peer whose `hello`, having taken a dead turn over, it
+    /// refuses `banned` as it answers, on a video the peer has none on.
+    TakeoverBannedHelloCreatesAccount,
+    /// A `hello` that waited for no payment checks the ban again as it answers without first
+    /// expiring the bans past `ban_ttl`.
+    UnwaitedRecheckBanNotAged,
+    /// A `hello` that waited for no payment checks its session id again before the ban as
+    /// it answers: a banned peer's `hello` whose id was opened while it read is refused
+    /// `bad-session`.
+    UnwaitedRecheckIdBeforeBan,
+    /// Creates an empty account for a peer with none whose `hello`, having taken a dead turn
+    /// over, it refuses as it answers, its session id opened while it waited.
+    TakeoverRecheckIdCreatesAccount,
+    /// Counts a `hello` it refuses as it answers, having taken a dead turn over, its session
+    /// id opened while it waited, toward the peer's session cap, for good.
+    TakeoverRecheckIdCounted,
+    /// Gives the session id of a `hello` it refuses as it answers, having taken a dead turn
+    /// over, the id opened while it waited, to that `hello`'s peer: the id stays open once
+    /// its holder closes.
+    TakeoverRecheckIdTakesId,
+    /// A `hello` that took a dead turn over checks its session id again before the ban as it
+    /// answers: a banned peer's `hello` whose id was opened while it waited is refused
+    /// `bad-session`.
+    TakeoverRecheckIdBeforeBan,
+    /// A payment that took a dead turn over, dropped before its swap is sent, holds the turn
+    /// to its deadline.
+    TakeoverDropHoldsTurn,
+    /// A payment that took a dead turn over, dropped before its swap is sent, frees the
+    /// turn, and wakes none of what waits for it.
+    TakeoverDropWakesNone,
+    /// A payment that took a dead turn over, refused, keeps the turn to its deadline.
+    TakeoverRefusalKeepsTurn,
+    /// A payment that took a dead turn over, refused, frees the turn, and wakes none of what
+    /// waits for it.
+    TakeoverRefusalWakesNone,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead turn
+    /// over, is dropped before its swap is sent.
+    TakeoverPayDropCreatesAccount,
+    /// Keeps a `hello` that waited for a payment, dropped during its read, counted toward its
+    /// peer's session cap, for good.
+    WaitedHelloDropInReadCounted,
+    /// Creates an empty account for a peer with none whose `hello`, having waited for a
+    /// payment, is dropped during its read.
+    WaitedHelloDropInReadCreatesAccount,
+    /// Keeps a `hello` that took a dead turn over, dropped during its read, counted toward
+    /// its peer's session cap, for good.
+    TakeoverHelloDropInReadCounted,
+    /// Creates an empty account for a peer with none whose `hello`, having taken a dead turn
+    /// over, is dropped during its read.
+    TakeoverHelloDropInReadCreatesAccount,
 }
 
 /// A defect planted in a mock viewer, to prove the adversary suite catches it.
@@ -2565,6 +2666,12 @@ struct PayRecord {
     waker: Option<Waker>,
     /// The swap once sent: what settles it, its token and its output set.
     swap: Option<(Settle, String, u64)>,
+    /// In its read of its account's unknown swaps ([`SeederFlaw::DropInReadCreatesAccount`]
+    /// and the like only).
+    reading: bool,
+    /// Refused as its account's watermark was read again ([`SeederFlaw::RecheckWakesNone`]
+    /// and [`SeederFlaw::RecheckKeepsTurn`] only).
+    rechecked: bool,
 }
 
 #[derive(Default)]
@@ -4207,6 +4314,8 @@ impl Inner {
                 finished: false,
                 waker: None,
                 swap: None,
+                reading: false,
+                rechecked: false,
             },
         );
         id
@@ -4339,6 +4448,9 @@ impl Inner {
                         now >= deadline
                     };
                     let takeover = expired
+                        && !(!waited
+                            && claim.is_none()
+                            && self.has(SeederFlaw::NoTakeoverAtArrival))
                         && !self.has(SeederFlaw::NoTakeover)
                         && !self.has(SeederFlaw::NoDeadline)
                         && !(claim.is_some() && self.has(SeederFlaw::PayNoTakeover));
@@ -4348,7 +4460,9 @@ impl Inner {
                             self.abandon(st, key, holder)
                         });
                         took_over = true;
-                        if claim.is_none() && self.has(SeederFlaw::HelloTakeoverCreatesAccount) {
+                        let creates = self.has(SeederFlaw::HelloTakeoverCreatesAccount)
+                            || (!waited && self.has(SeederFlaw::LateHelloTakeoverCreatesAccount));
+                        if claim.is_none() && creates {
                             self.account(&mut st, key);
                         }
                         if !waited && claim.is_none() && self.has(SeederFlaw::LateArrivalWaited) {
@@ -4721,9 +4835,13 @@ struct PayGuard {
     id: u64,
     /// The future answered, not dropped on the way.
     answered: bool,
-    /// Its refusal keeps the turn ([`SeederFlaw::StaleKeepsTurn`] and
-    /// [`SeederFlaw::BannedKeepsTurn`] only).
+    /// Its refusal keeps the turn ([`SeederFlaw::StaleKeepsTurn`] and the like only).
     kept: bool,
+    /// Its refusal wakes none of what waits for the turn ([`SeederFlaw::OverpaidWakesNone`]
+    /// and the like only).
+    quiet: bool,
+    /// It took a dead turn over.
+    took: bool,
 }
 
 impl Drop for PayGuard {
@@ -4735,7 +4853,7 @@ impl Drop for PayGuard {
             };
             r.finished = true;
             r.waker = None;
-            let (key, sent, landed) = (r.key, r.sent, r.landed);
+            let (key, sent, landed, reading) = (r.key, r.sent, r.landed, r.reading);
             if sent && !landed && self.e.has(SeederFlaw::DropAbandonsInFlight) {
                 r.abandoned = true;
             }
@@ -4755,6 +4873,7 @@ impl Drop for PayGuard {
                     || self.kept
                     || self.e.has(SeederFlaw::RefusalKeepsTurn)
                     || (dropped && self.e.has(SeederFlaw::DropHoldsTurn))
+                    || (dropped && self.took && self.e.has(SeederFlaw::TakeoverDropHoldsTurn))
                 {
                     Vec::new()
                 } else if forgets && st.paying.get(&key).is_some_and(|h| h.pay != self.id) {
@@ -4763,23 +4882,33 @@ impl Drop for PayGuard {
                 } else if dropped && self.e.has(SeederFlaw::DropFreesAnyTurn) {
                     self.e.free_turn(&mut st, key);
                     st.waiting.remove(&key).unwrap_or_default()
-                } else if dropped && self.e.has(SeederFlaw::DropFreesWithoutFloor) {
+                } else if dropped
+                    && (self.e.has(SeederFlaw::DropFreesWithoutFloor)
+                        || (reading && self.e.has(SeederFlaw::DropInReadNoFloor)))
+                {
                     if st.paying.get(&key).is_some_and(|h| h.pay == self.id) {
                         st.paying.remove(&key); // its floor not noted
                     }
                     st.waiting.remove(&key).unwrap_or_default()
                 } else {
                     let (e, flaw) = (&self.e, SeederFlaw::ReleaseFreedAfterDeadline);
+                    let held = st.paying.get(&key).is_some_and(|h| h.pay == self.id);
                     let wake = e.freeing(&mut st, key, self.id, flaw, |st| {
                         e.release_turn(st, key, self.id)
                     });
-                    if dropped && self.e.has(SeederFlaw::DropCreatesAccount) {
-                        self.e.account(&mut st, key);
+                    let creates = e.has(SeederFlaw::DropCreatesAccount)
+                        || (!held && e.has(SeederFlaw::WaitingDropCreatesAccount))
+                        || (reading && e.has(SeederFlaw::DropInReadCreatesAccount))
+                        || (self.took && e.has(SeederFlaw::TakeoverPayDropCreatesAccount));
+                    if dropped && creates {
+                        e.account(&mut st, key);
                     }
                     let quiet = if dropped {
                         self.e.has(SeederFlaw::DropWakesNone)
+                            || (reading && self.e.has(SeederFlaw::DropInReadWakesNone))
+                            || (self.took && self.e.has(SeederFlaw::TakeoverDropWakesNone))
                     } else {
-                        self.e.has(SeederFlaw::RefusalWakesNone)
+                        self.e.has(SeederFlaw::RefusalWakesNone) || self.quiet
                     };
                     if quiet { Vec::new() } else { wake }
                 }
@@ -4794,6 +4923,12 @@ struct HelloWait {
     e: Arc<Inner>,
     key: Key,
     counted: bool,
+    /// Past its wait, in its reads.
+    reading: bool,
+    /// It took a dead turn over.
+    took: bool,
+    /// It waited for a payment it did not take the turn over from.
+    waited: bool,
 }
 
 impl HelloWait {
@@ -4819,9 +4954,26 @@ impl HelloWait {
 
 impl Drop for HelloWait {
     fn drop(&mut self) {
-        if self.counted && !self.e.has(SeederFlaw::HelloWaitLeaksOnDrop) {
-            let e = self.e.clone();
-            let mut st = e.state();
+        if !self.counted {
+            return;
+        }
+        let e = self.e.clone();
+        let mut st = e.state();
+        let creates = if !self.reading {
+            e.has(SeederFlaw::WaitingHelloDropCreatesAccount)
+        } else {
+            e.has(SeederFlaw::HelloDropInReadCreatesAccount)
+                || (self.waited && e.has(SeederFlaw::WaitedHelloDropInReadCreatesAccount))
+                || (self.took && e.has(SeederFlaw::TakeoverHelloDropInReadCreatesAccount))
+        };
+        if creates {
+            e.account(&mut st, self.key);
+        }
+        let leaks = e.has(SeederFlaw::HelloWaitLeaksOnDrop)
+            || (self.reading && e.has(SeederFlaw::HelloDropInReadCounted))
+            || (self.waited && e.has(SeederFlaw::WaitedHelloDropInReadCounted))
+            || (self.took && e.has(SeederFlaw::TakeoverHelloDropInReadCounted));
+        if !leaks {
             self.done(&mut st);
         }
     }
@@ -4967,6 +5119,9 @@ impl SeederEngine for MockEngine {
             e: e.clone(),
             key,
             counted: true,
+            reading: false,
+            took: false,
+            waited: false,
         };
         if e.has(SeederFlaw::HelloReadsBeforeTurn) {
             e.learn_own(key, None, None, None).await;
@@ -4976,6 +5131,7 @@ impl SeederEngine for MockEngine {
         if !e.has(SeederFlaw::QuoteWithoutTurn) {
             (_, floor, took_over) = e.wait_turn_at(key, None).await;
         }
+        (wait.reading, wait.took, wait.waited) = (true, took_over, floor.is_some() && !took_over);
         if e.has(SeederFlaw::HelloBanCheckBeforeRead) {
             let mut st = e.state();
             e.age(&mut st);
@@ -5011,7 +5167,10 @@ impl SeederEngine for MockEngine {
         } else {
             wait.done(&mut st);
         }
-        if e.has(SeederFlaw::HelloRecheckBanNotAged) {
+        let waited = floor.is_some() || took_over;
+        if e.has(SeederFlaw::HelloRecheckBanNotAged)
+            || (!waited && e.has(SeederFlaw::UnwaitedRecheckBanNotAged))
+        {
             let bans = st.banned.clone(); // its debt ages, its bans do not
             e.age(&mut st);
             st.banned = bans;
@@ -5019,12 +5178,15 @@ impl SeederEngine for MockEngine {
             e.age(&mut st);
         }
         // The ban again, as it answers: after its wait and its reads.
-        let waited = floor.is_some() || took_over;
         let recheck = !(!waited && e.has(SeederFlaw::HelloRecheckOnlyAfterWait))
             && !e.has(SeederFlaw::HelloNoBanRecheck)
             && !e.has(SeederFlaw::HelloBanCheckBeforeRead)
             && !(took_over && e.has(SeederFlaw::HelloTakeoverSkipsBanRecheck));
-        if e.has(SeederFlaw::RecheckIdBeforeBan) && st.open.contains_key(&hello.session) {
+        if (e.has(SeederFlaw::RecheckIdBeforeBan)
+            || (!waited && e.has(SeederFlaw::UnwaitedRecheckIdBeforeBan))
+            || (took_over && e.has(SeederFlaw::TakeoverRecheckIdBeforeBan)))
+            && st.open.contains_key(&hello.session)
+        {
             return Err(rej(RejCode::BadSession, "that session is open"));
         }
         if recheck && e.peer_banned(&st, key) {
@@ -5034,7 +5196,10 @@ impl SeederEngine for MockEngine {
             if e.has(SeederFlaw::BannedHelloKeepsId) {
                 st.open.insert(hello.session.clone(), key);
             }
-            if e.has(SeederFlaw::BannedHelloCreatesAccount) {
+            if e.has(SeederFlaw::BannedHelloCreatesAccount)
+                || (!waited && e.has(SeederFlaw::UnwaitedBannedHelloCreatesAccount))
+                || (took_over && e.has(SeederFlaw::TakeoverBannedHelloCreatesAccount))
+            {
                 e.account(&mut st, key);
             }
             return Err(rej(RejCode::Banned, "this peer is banned"));
@@ -5048,13 +5213,20 @@ impl SeederEngine for MockEngine {
             && !e.has(SeederFlaw::HelloNoSessionRecheck)
             && !(!waited && e.has(SeederFlaw::IdRecheckOnlyAfterWait))
         {
-            if e.has(SeederFlaw::RecheckIdCounted) {
+            if e.has(SeederFlaw::RecheckIdCounted)
+                || (took_over && e.has(SeederFlaw::TakeoverRecheckIdCounted))
+            {
                 *st.hellos_waiting.entry(*peer).or_default() += 1;
             }
-            if e.has(SeederFlaw::RecheckIdTakesId) {
+            if e.has(SeederFlaw::RecheckIdTakesId)
+                || (took_over && e.has(SeederFlaw::TakeoverRecheckIdTakesId))
+            {
                 st.open.insert(hello.session.clone(), key);
             }
-            if e.has(SeederFlaw::RecheckIdCreatesAccount) {
+            if e.has(SeederFlaw::RecheckIdCreatesAccount)
+                || (!waited && e.has(SeederFlaw::UnwaitedRecheckIdCreatesAccount))
+                || (took_over && e.has(SeederFlaw::TakeoverRecheckIdCreatesAccount))
+            {
                 e.account(&mut st, key);
             }
             return Err(rej(RejCode::BadSession, "that session is open"));
@@ -5502,7 +5674,16 @@ impl MockSession {
         }
         let read_already = read_first || read_before_stale || read_before_amount;
         if !read_already && !(took_over && e.has(SeederFlaw::PayTakeoverSkipsRead)) {
+            let marked = e.has(SeederFlaw::DropInReadCreatesAccount)
+                || e.has(SeederFlaw::DropInReadWakesNone)
+                || e.has(SeederFlaw::DropInReadNoFloor);
+            if marked && let Some(r) = e.state().pays.get_mut(&id) {
+                r.reading = true;
+            }
             e.learn_here(self.key, proofs, deadline).await;
+            if marked && let Some(r) = e.state().pays.get_mut(&id) {
+                r.reading = false;
+            }
         }
         if e.has(SeederFlaw::KeysetAfterRead) && e.keyset_too_soon() {
             return Err(unavailable("the mint's keyset expires too soon to swap to"));
@@ -5541,7 +5722,13 @@ impl MockSession {
                 return Err(unavailable("no answer from the mint within 60 s"));
             }
             if !recheck_first && !e.has(SeederFlaw::RecheckBeforeRead) {
-                recheck(acked_now)?;
+                let checked = recheck(acked_now);
+                if checked.is_err()
+                    && (e.has(SeederFlaw::RecheckWakesNone) || e.has(SeederFlaw::RecheckKeepsTurn))
+                {
+                    r.rechecked = true;
+                }
+                checked?;
             }
             r.sent = true;
             r.swap = Some((settle.clone(), pay.token.clone(), outputs));
@@ -5687,6 +5874,8 @@ impl SeederSession for MockSession {
             id,
             answered: false,
             kept: false,
+            quiet: false,
+            took: false,
         };
         let mut took_over = false;
         if !self.e.has(SeederFlaw::ConcurrentPays) {
@@ -5707,13 +5896,30 @@ impl SeederSession for MockSession {
                 return Err(unavailable("the account's turn did not come within 60 s"));
             }
             took_over = taken;
+            record.took = taken;
         }
         let answer = self.pay_in_turn(pay, id, took_over).await;
         record.answered = true;
-        record.kept = answer.as_ref().is_err_and(|r| {
-            (r.code == RejCode::Stale && self.e.has(SeederFlaw::StaleKeepsTurn))
-                || (r.code == RejCode::Banned && self.e.has(SeederFlaw::BannedKeepsTurn))
-        });
+        let e = &self.e;
+        let rechecked = answer.is_err() && e.state().pays.get(&id).is_some_and(|r| r.rechecked);
+        let took_refused = took_over && answer.is_err();
+        record.kept = (rechecked && e.has(SeederFlaw::RecheckKeepsTurn))
+            || (took_refused && e.has(SeederFlaw::TakeoverRefusalKeepsTurn))
+            || answer.as_ref().is_err_and(|r| {
+                (r.code == RejCode::Stale && e.has(SeederFlaw::StaleKeepsTurn))
+                    || (r.code == RejCode::Banned && e.has(SeederFlaw::BannedKeepsTurn))
+            });
+        record.quiet = (rechecked && e.has(SeederFlaw::RecheckWakesNone))
+            || (took_refused && e.has(SeederFlaw::TakeoverRefusalWakesNone))
+            || answer.as_ref().is_err_and(|r| {
+                let detail = r.detail.as_deref();
+                (r.code == RejCode::Overpaid && e.has(SeederFlaw::OverpaidWakesNone))
+                    || (detail == Some("an invalid DLEQ") && e.has(SeederFlaw::BadDleqWakesNone))
+                    || (detail == Some("the mint's keyset expires too soon to swap to")
+                        && e.has(SeederFlaw::KeysetWakesNone))
+                    || (detail == Some("an earlier payment's outcome is not known yet")
+                        && e.has(SeederFlaw::UnknownOutcomeWakesNone))
+            });
         answer
     }
 

@@ -108,7 +108,7 @@ pub trait SeederSession {
     /// abandoned: no further request is sent for those proofs, and the account is
     /// released. Deadlines count whole seconds, and what comes in the deadline's second
     /// came after it: a payment whose turn comes then or later runs none of its checks, the
-    /// ban's included, keys that come then or later are not used, a swap's outcome settled
+    /// ban's included; keys that come then or later are not used, a swap's outcome settled
     /// then is late, and a payment whose swap is not sent by then is not rechecked. Its
     /// turn is freed at the deadline, however late this answer goes out, the swap's
     /// outcome comes, or another entry takes the turn over. A payment that takes a turn
