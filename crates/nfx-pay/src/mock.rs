@@ -2112,6 +2112,59 @@ pub enum SeederFlaw {
     /// Bounds the sum of the peer's `spent_total` over all its accounts, not each
     /// account's own.
     SpentTotalPeerWide,
+    /// Creates an empty account for a peer with none whose payment's deadline passed before
+    /// its swap was sent.
+    UnsentCreatesAccount,
+    /// A payment whose turn comes in its own deadline's second takes it, and runs its
+    /// checks then: a refusal they reach is its answer.
+    TurnAtDeadlineSecond,
+    /// Creates an empty account for a peer whose `hello` it refuses `banned` as it
+    /// answers, on a video the peer has none on.
+    BannedHelloCreatesAccount,
+    /// A payment dropped before its swap is sent frees the turn, and wakes none of what
+    /// waits for it.
+    DropWakesNone,
+    /// A payment dropped before its swap is sent frees its account's turn, whoever holds
+    /// it.
+    DropFreesAnyTurn,
+    /// A `hello` that took a dead turn over keeps its place under the session cap once it
+    /// is answered.
+    TakeoverHelloStaysCounted,
+    /// Creates an empty account for a peer with none whose payment is dropped before its
+    /// swap is sent.
+    DropCreatesAccount,
+    /// Creates an empty account for a peer with none whose `hello` takes a dead turn over.
+    HelloTakeoverCreatesAccount,
+    /// A `hello` checks its session id again as it answers only if it waited for a payment:
+    /// one that read without waiting opens an id opened while it read.
+    IdRecheckOnlyAfterWait,
+    /// A payment refused before its swap is sent frees the turn, and wakes none of what
+    /// waits for it.
+    RefusalWakesNone,
+    /// A payment answered at its deadline while it waits for the turn frees its account's
+    /// turn, whoever holds it.
+    TimeoutFreesAnyTurn,
+    /// A payment dropped before its swap is sent frees the turn without noting the reads of
+    /// that second sent by then: one sent before the drop serves a `hello` that waited.
+    DropFreesWithoutFloor,
+    /// Frees an account's turn, however it is freed, without noting the reads of that second
+    /// sent by then: one sent before a `hello`'s wait ended serves it.
+    FreeTurnNoFloor,
+    /// A payment refused `stale` keeps its account's turn to its deadline.
+    StaleKeepsTurn,
+    /// A payment refused `banned` keeps its account's turn to its deadline.
+    BannedKeepsTurn,
+    /// A payment dropped while it waits for the turn drops the wakers of what waits with it:
+    /// none is woken when the turn is freed.
+    WaitingDropForgetsWaiters,
+    /// A payment answered at its deadline while it waits for the turn drops the wakers of
+    /// what waits with it: none is woken when the turn is freed.
+    TimeoutForgetsWaiters,
+    /// Counts a `hello` waiting for a payment toward its peer's session cap on its own video
+    /// alone.
+    WaitingCountedPerVideo,
+    /// Counts every peer's waiting `hello`s toward each peer's session cap.
+    WaitingCountedAcrossPeers,
 }
 
 /// A defect planted in a mock viewer, to prove the adversary suite catches it.
@@ -2551,6 +2604,9 @@ struct State {
     /// The position a waiting `hello` noted as the payment it first waited for left the
     /// turn ([`SeederFlaw::QuoteAtFirstWake`] only).
     first_wake_position: HashMap<Key, (u64, u64, u64)>,
+    /// Hellos waiting for their account's turn, per account
+    /// ([`SeederFlaw::WaitingCountedPerVideo`] only).
+    hellos_waiting_per_account: HashMap<Key, usize>,
 }
 
 /// An account's own reads in one second: the second, each read sent in it, and how many had
@@ -4188,6 +4244,9 @@ impl Inner {
                 now >= h.deadline
             }
         }) && !self.has(SeederFlaw::FreedAfterDeadline);
+        if self.has(SeederFlaw::FreeTurnNoFloor) {
+            return;
+        }
         if let Some((at, reads, freed)) = st.own_reads.get_mut(&self.slot(key))
             && *at == now
             && !at_deadline
@@ -4286,6 +4345,9 @@ impl Inner {
                             self.abandon(st, key, holder)
                         });
                         took_over = true;
+                        if claim.is_none() && self.has(SeederFlaw::HelloTakeoverCreatesAccount) {
+                            self.account(&mut st, key);
+                        }
                         if !waited && claim.is_none() && self.has(SeederFlaw::LateArrivalWaited) {
                             let sent = st
                                 .own_reads
@@ -4297,9 +4359,14 @@ impl Inner {
                     }
                 }
                 // A payment whose own deadline has passed takes no turn.
+                let free = !st.paying.contains_key(&key);
                 let over = claim.and_then(|id| st.pays.get(&id)).is_some_and(|r| {
-                    r.abandoned
-                        || (now >= r.deadline && !self.has(SeederFlaw::TurnWaitPastDeadline))
+                    let past = if free && self.has(SeederFlaw::TurnAtDeadlineSecond) {
+                        now > r.deadline
+                    } else {
+                        now >= r.deadline
+                    };
+                    r.abandoned || (past && !self.has(SeederFlaw::TurnWaitPastDeadline))
                 });
                 if over && !self.has(SeederFlaw::NoDeadline) {
                     done = Some(false);
@@ -4651,6 +4718,9 @@ struct PayGuard {
     id: u64,
     /// The future answered, not dropped on the way.
     answered: bool,
+    /// Its refusal keeps the turn ([`SeederFlaw::StaleKeepsTurn`] and
+    /// [`SeederFlaw::BannedKeepsTurn`] only).
+    kept: bool,
 }
 
 impl Drop for PayGuard {
@@ -4672,16 +4742,43 @@ impl Drop for PayGuard {
                 Vec::new()
             } else {
                 st.pays.remove(&self.id);
+                let dropped = !self.answered;
+                let forgets = if dropped {
+                    self.e.has(SeederFlaw::WaitingDropForgetsWaiters)
+                } else {
+                    self.e.has(SeederFlaw::TimeoutForgetsWaiters)
+                };
                 if sent
+                    || self.kept
                     || self.e.has(SeederFlaw::RefusalKeepsTurn)
-                    || (!self.answered && self.e.has(SeederFlaw::DropHoldsTurn))
+                    || (dropped && self.e.has(SeederFlaw::DropHoldsTurn))
                 {
                     Vec::new()
+                } else if forgets && st.paying.get(&key).is_some_and(|h| h.pay != self.id) {
+                    st.waiting.remove(&key); // their wakers dropped, none woken
+                    Vec::new()
+                } else if dropped && self.e.has(SeederFlaw::DropFreesAnyTurn) {
+                    self.e.free_turn(&mut st, key);
+                    st.waiting.remove(&key).unwrap_or_default()
+                } else if dropped && self.e.has(SeederFlaw::DropFreesWithoutFloor) {
+                    if st.paying.get(&key).is_some_and(|h| h.pay == self.id) {
+                        st.paying.remove(&key); // its floor not noted
+                    }
+                    st.waiting.remove(&key).unwrap_or_default()
                 } else {
                     let (e, flaw) = (&self.e, SeederFlaw::ReleaseFreedAfterDeadline);
-                    e.freeing(&mut st, key, self.id, flaw, |st| {
+                    let wake = e.freeing(&mut st, key, self.id, flaw, |st| {
                         e.release_turn(st, key, self.id)
-                    })
+                    });
+                    if dropped && self.e.has(SeederFlaw::DropCreatesAccount) {
+                        self.e.account(&mut st, key);
+                    }
+                    let quiet = if dropped {
+                        self.e.has(SeederFlaw::DropWakesNone)
+                    } else {
+                        self.e.has(SeederFlaw::RefusalWakesNone)
+                    };
+                    if quiet { Vec::new() } else { wake }
                 }
             }
         };
@@ -4692,7 +4789,7 @@ impl Drop for PayGuard {
 /// A `hello` waiting for its account's turn, counted toward its peer's session cap.
 struct HelloWait {
     e: Arc<Inner>,
-    peer: PeerId,
+    key: Key,
     counted: bool,
 }
 
@@ -4702,10 +4799,16 @@ impl HelloWait {
             return;
         }
         self.counted = false;
-        if let Some(n) = st.hellos_waiting.get_mut(&self.peer) {
+        if let Some(n) = st.hellos_waiting.get_mut(&self.key.0) {
             *n = n.saturating_sub(1);
             if *n == 0 {
-                st.hellos_waiting.remove(&self.peer);
+                st.hellos_waiting.remove(&self.key.0);
+            }
+        }
+        if let Some(n) = st.hellos_waiting_per_account.get_mut(&self.key) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                st.hellos_waiting_per_account.remove(&self.key);
             }
         }
     }
@@ -4839,6 +4942,13 @@ impl SeederEngine for MockEngine {
             };
             let waiting = if e.has(SeederFlaw::HelloWaitUncapped) {
                 0
+            } else if e.has(SeederFlaw::WaitingCountedPerVideo) {
+                st.hellos_waiting_per_account
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(0)
+            } else if e.has(SeederFlaw::WaitingCountedAcrossPeers) {
+                st.hellos_waiting.values().sum()
             } else {
                 st.hellos_waiting.get(peer).copied().unwrap_or(0)
             };
@@ -4846,10 +4956,13 @@ impl SeederEngine for MockEngine {
                 return Err(rej(RejCode::BadSession, "too many open sessions"));
             }
             *st.hellos_waiting.entry(*peer).or_default() += 1;
+            if e.has(SeederFlaw::WaitingCountedPerVideo) {
+                *st.hellos_waiting_per_account.entry(key).or_default() += 1;
+            }
         }
         let mut wait = HelloWait {
             e: e.clone(),
-            peer: *peer,
+            key,
             counted: true,
         };
         if e.has(SeederFlaw::HelloReadsBeforeTurn) {
@@ -4890,7 +5003,11 @@ impl SeederEngine for MockEngine {
             e.learn_own(key, None, None, floor).await;
         }
         let mut st = e.state();
-        wait.done(&mut st);
+        if took_over && e.has(SeederFlaw::TakeoverHelloStaysCounted) {
+            wait.counted = false; // its place kept, for good
+        } else {
+            wait.done(&mut st);
+        }
         e.age(&mut st);
         // The ban again, as it answers: after its wait and its reads.
         let waited = floor.is_some() || took_over;
@@ -4908,6 +5025,9 @@ impl SeederEngine for MockEngine {
             if e.has(SeederFlaw::BannedHelloKeepsId) {
                 st.open.insert(hello.session.clone(), key);
             }
+            if e.has(SeederFlaw::BannedHelloCreatesAccount) {
+                e.account(&mut st, key);
+            }
             return Err(rej(RejCode::Banned, "this peer is banned"));
         }
         let id_open = st
@@ -4917,6 +5037,7 @@ impl SeederEngine for MockEngine {
         if id_open
             && !e.has(SeederFlaw::SessionIdAnyPeer)
             && !e.has(SeederFlaw::HelloNoSessionRecheck)
+            && !(!waited && e.has(SeederFlaw::IdRecheckOnlyAfterWait))
         {
             if e.has(SeederFlaw::RecheckIdCounted) {
                 *st.hellos_waiting.entry(*peer).or_default() += 1;
@@ -5403,6 +5524,9 @@ impl MockSession {
                 && !e.has(SeederFlaw::SendIgnoresDeadline);
             if r.abandoned || expired {
                 let wake = e.abandon(&mut st, self.key, id);
+                if e.has(SeederFlaw::UnsentCreatesAccount) {
+                    e.account(&mut st, self.key);
+                }
                 drop(st);
                 wake_all(wake);
                 return Err(unavailable("no answer from the mint within 60 s"));
@@ -5553,6 +5677,7 @@ impl SeederSession for MockSession {
             e: self.e.clone(),
             id,
             answered: false,
+            kept: false,
         };
         let mut took_over = false;
         if !self.e.has(SeederFlaw::ConcurrentPays) {
@@ -5561,6 +5686,14 @@ impl SeederSession for MockSession {
                 if self.e.has(SeederFlaw::TurnTimeoutCreatesAccount) {
                     self.e.account(&mut self.e.state(), self.key);
                 }
+                if self.e.has(SeederFlaw::TimeoutFreesAnyTurn) {
+                    let wake = {
+                        let mut st = self.e.state();
+                        self.e.free_turn(&mut st, self.key);
+                        st.waiting.remove(&self.key).unwrap_or_default()
+                    };
+                    wake_all(wake);
+                }
                 record.answered = true;
                 return Err(unavailable("the account's turn did not come within 60 s"));
             }
@@ -5568,6 +5701,10 @@ impl SeederSession for MockSession {
         }
         let answer = self.pay_in_turn(pay, id, took_over).await;
         record.answered = true;
+        record.kept = answer.as_ref().is_err_and(|r| {
+            (r.code == RejCode::Stale && self.e.has(SeederFlaw::StaleKeepsTurn))
+                || (r.code == RejCode::Banned && self.e.has(SeederFlaw::BannedKeepsTurn))
+        });
         answer
     }
 

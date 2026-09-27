@@ -107,7 +107,8 @@ pub trait SeederSession {
     /// with `mint-unavailable`, however its checks would have ended, and its swap is
     /// abandoned: no further request is sent for those proofs, and the account is
     /// released. Deadlines count whole seconds, and what comes in the deadline's second
-    /// came after it: keys that come then or later are not used, a swap's outcome settled
+    /// came after it: a payment whose turn comes then or later runs none of its checks, the
+    /// ban's included, keys that come then or later are not used, a swap's outcome settled
     /// then is late, and a payment whose swap is not sent by then is not rechecked. Its
     /// turn is freed at the deadline, however late this answer goes out, the swap's
     /// outcome comes, or another entry takes the turn over. A payment that takes a turn
@@ -120,7 +121,7 @@ pub trait SeederSession {
     /// **Cancel-safe:** once the swap is sent it completes, and is credited or banned on,
     /// even if this future is dropped (the connection closed). The account's turn is held
     /// until then, or until the deadline. Dropped before its swap is sent, the payment is
-    /// abandoned unswapped, and its turn is freed then.
+    /// abandoned unswapped: its turn is freed then, and it creates no account.
     async fn pay(&mut self, pay: &Pay) -> Result<Ack, Rej>;
 
     /// Whether this session's peer is banned.

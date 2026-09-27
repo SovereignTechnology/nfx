@@ -109,10 +109,10 @@ payment-enforced after release, so no mechanism pretends otherwise.
   holds its position: `served`, `accepted_upto` and `spent_total`, all per account.
   - It is created by its first admission or payment. A `hello` alone creates nothing,
     and the quote then reports zeros. Nothing refused creates one: a refused `hello`,
-    request or `pay` leaves no account. The one exception is a `pay` answered
-    `mint-unavailable` whose swap is later learnt as a claim: the claim creates the
-    account then (late outcomes, below). A refused `hello` also holds no place under the
-    session cap and leaves no session id open.
+    request or `pay` leaves no account, nor does a `pay` dropped before its swap is sent.
+    The one exception is a `pay` answered `mint-unavailable` whose swap is later learnt
+    as a claim: the claim creates the account then (late outcomes, below). A refused
+    `hello` also holds no place under the session cap and leaves no session id open.
   - It persists across the peer's sessions. A new `hello` continues the account; it
     never opens a fresh window.
   - A `hello` for an account with a payment in progress waits while a payment holds the
@@ -303,7 +303,8 @@ whatever it offers. The checks run in this order:
      no further swap request for those proofs), and releases the account's turn to
      whichever payment takes it next. Deadlines and the seeder's clock count whole
      seconds, and a deadline is as its second began: what comes in the deadline's second
-     came after it. So keys that come then or later are not used, and nothing that needs
+     came after it. So a payment whose turn comes then or later runs none of its checks,
+     the ban's included; keys that come then or later are not used, and nothing that needs
      them (DLEQ, amount) is judged; a swap's outcome the seeder settles then is late
      (below); and a payment whose swap is not sent by then is not rechecked against the
      watermark (step 5). Each is answered `mint-unavailable`. The turn is freed at the
@@ -913,3 +914,8 @@ therefore loses nothing:
     cap and leaves no session id open.
   - §3: an exact payment that would take its account's `spent_total` above 2^53−1 is
     `overpaid`, since no `ack` or quote could carry it.
+- Draft 2026-09-26 (M2.0 twenty-seventh audit, `docs/nfx/reviews/2026-09-24-m2.0-twenty-seventh-audit.md`).
+  - §3: a `pay` dropped before its swap is sent leaves no account, as a refused one does.
+  - §3: a payment whose turn comes in its deadline's second or later runs none of its
+    checks, the ban's included, and is answered `mint-unavailable`: what the deadline rule
+    implied, now said.
