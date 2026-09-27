@@ -61,7 +61,8 @@ is zero findings, confirmed after the sixth:
     one payment.
   - Configuration minimums and bounded per-identity state.
   - At most 64 proofs per payment; `detail` is printable ASCII; `window` is 2 to 64.
-  - HTTPS origins take one payment per request, and a lying origin at most one payment.
+  - HTTPS origins take one payment per request, and a lying origin at most one payment
+    per name the client pays, at a price within the client's price cap.
 - **Vectors:** `pay1.json` holds 22 valid lines, 3 loopback-only and 74 invalid, each
   checked by the reference reader `spec/test-vectors/pay1.py`. It and the Rust reader
   agreed on every one of 244,149 probe and fuzz cases in the ninth audit.
