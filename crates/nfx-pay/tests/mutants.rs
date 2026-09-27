@@ -49,8 +49,9 @@ fn v(flaw: V) -> MockHarness {
     MockHarness::with_viewer_flaw(flaw)
 }
 
-/// A flawed seeder whose mint answers reads on a later poll: for defects only an engine
-/// whose reads yield can have.
+/// A flawed seeder whose mint answers reads on a later poll: for defects the suite can show
+/// only where an engine's reads yield (an entry dropped during its read, a session id
+/// opened during it).
 fn r(flaw: S) -> MockHarness {
     MockHarness::with_seeder_flaw_round_trip(flaw)
 }
@@ -838,4 +839,41 @@ catches!(
     viewer_no_session_expired_retried: v(V::NoSessionExpiredRetried) => a_viewer_reclaims_a_refused_payment,
     viewer_no_session_expired_token_whole: v(V::NoSessionExpiredTokenWhole) => a_viewer_reclaims_a_refused_payment,
     viewer_no_session_reclaim_restores_tries: v(V::NoSessionReclaimRestoresTries) => an_unavailable_seeder_gets_three_tries_a_session,
+    turn_at_deadline_second_structure: s(S::TurnAtDeadlineSecondStructure) => a_seeder_answers_within_its_deadline,
+    turn_at_deadline_second_structure_round_trip: r(S::TurnAtDeadlineSecondStructure) => a_seeder_answers_within_its_deadline,
+    waited_pay_drop_creates_account: s(S::WaitedPayDropCreatesAccount) => a_hello_holds_no_state,
+    waited_pay_drop_creates_account_round_trip: r(S::WaitedPayDropCreatesAccount) => a_hello_holds_no_state,
+    waited_pay_drop_wakes_none: s(S::WaitedPayDropWakesNone) => the_deadline_frees_the_account,
+    waited_pay_drop_wakes_none_round_trip: r(S::WaitedPayDropWakesNone) => the_deadline_frees_the_account,
+    waited_pay_drop_no_floor: s(S::WaitedPayDropNoFloor) => the_deadline_frees_the_account,
+    waited_pay_drop_no_floor_round_trip: r(S::WaitedPayDropNoFloor) => the_deadline_frees_the_account,
+    unread_refusal_no_floor: s(S::UnreadRefusalNoFloor) => the_deadline_frees_the_account,
+    unread_refusal_no_floor_round_trip: r(S::UnreadRefusalNoFloor) => the_deadline_frees_the_account,
+    takeover_refusal_no_floor_round_trip: r(S::TakeoverRefusalNoFloor) => the_deadline_frees_the_account,
+    waited_recheck_ban_not_aged: s(S::WaitedRecheckBanNotAged) => bans_expire_and_state_stays_bounded,
+    waited_recheck_ban_not_aged_round_trip: r(S::WaitedRecheckBanNotAged) => bans_expire_and_state_stays_bounded,
+    unwaited_banned_hello_creates_account: s(S::UnwaitedBannedHelloCreatesAccount) => a_banned_peer_stays_banned,
+    unwaited_recheck_ban_not_aged: s(S::UnwaitedRecheckBanNotAged) => bans_expire_and_state_stays_bounded,
+    unknown_outcome_wakes_none: s(S::UnknownOutcomeWakesNone) => one_accounts_payments_are_serialised,
+    recheck_wakes_none: s(S::RecheckWakesNone) => one_accounts_payments_are_serialised,
+    keys_of_any_mint: s(S::KeysOfAnyMint) => foreign_and_lookalike_mints_are_refused,
+    keys_of_any_mint_round_trip: r(S::KeysOfAnyMint) => foreign_and_lookalike_mints_are_refused,
+    keys_kept_across_rotation: s(S::KeysKeptAcrossRotation) => foreign_and_lookalike_mints_are_refused,
+    keys_kept_across_rotation_round_trip: r(S::KeysKeptAcrossRotation) => foreign_and_lookalike_mints_are_refused,
+    waited_refusal_wakes_none: s(S::WaitedRefusalWakesNone) => one_accounts_payments_are_serialised,
+    waited_refusal_wakes_none_round_trip: r(S::WaitedRefusalWakesNone) => one_accounts_payments_are_serialised,
+    waited_refusal_keeps_turn: s(S::WaitedRefusalKeepsTurn) => one_accounts_payments_are_serialised,
+    waited_refusal_keeps_turn_round_trip: r(S::WaitedRefusalKeepsTurn) => one_accounts_payments_are_serialised,
+    waited_refusal_no_floor: s(S::WaitedRefusalNoFloor) => the_deadline_frees_the_account,
+    waited_refusal_no_floor_round_trip: r(S::WaitedRefusalNoFloor) => the_deadline_frees_the_account,
+    waited_refusal_creates_account: s(S::WaitedRefusalCreatesAccount) => a_hello_holds_no_state,
+    waited_refusal_creates_account_round_trip: r(S::WaitedRefusalCreatesAccount) => a_hello_holds_no_state,
+    takeover_refusal_creates_account: s(S::TakeoverRefusalCreatesAccount) => a_hello_holds_no_state,
+    takeover_refusal_creates_account_round_trip: r(S::TakeoverRefusalCreatesAccount) => a_hello_holds_no_state,
+    waited_no_keys_creates_account: s(S::WaitedNoKeysCreatesAccount) => a_hello_holds_no_state,
+    waited_no_keys_creates_account_round_trip: r(S::WaitedNoKeysCreatesAccount) => a_hello_holds_no_state,
+    waited_unsent_creates_account_round_trip: r(S::WaitedUnsentCreatesAccount) => a_hello_holds_no_state,
+    second_end_returns_synchronous: s(S::SecondEndReturns) => a_late_outcome_is_credited_never_banned,
+    pay_next_second_returns_synchronous: s(S::PayNextSecondReturns) => a_late_outcome_is_credited_never_banned,
+    waited_hello_reuses_earlier_read_synchronous: s(S::WaitedHelloReusesEarlierRead) => the_deadline_frees_the_account,
 );

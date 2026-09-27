@@ -240,7 +240,9 @@ whatever it offers. The checks run in this order:
 2. **The mint** is exactly a quoted URL, else `bad-mint`. Nothing is fetched from any
    mint before this check.
 3. **DLEQ.** Every proof's DLEQ proof verifies against the keys of that quoted mint
-   (fetched from it, then cached), else `bad-token`.
+   (fetched from it, then cached: keys cached for another mint serve it not, and a
+   keyset a proof names that the cache does not hold, such as one the mint started since,
+   is fetched), else `bad-token`.
 4. **The face value** exactly covers the new chunks. Short is `underpaid`, over is
    `overpaid`. A product above 2^53−1 is `underpaid`. An exact payment that would take
    the account's `spent_total` above 2^53−1 is `overpaid`: no `ack` or quote could carry
@@ -981,3 +983,8 @@ therefore loses nothing:
     with every proof back, uses no try, and the client pays again later, backing off;
     after three paid requests in a row refused otherwise, it stops paying that origin, and
     only a `200` to a paid request resets the count.
+- Draft 2026-09-27 (M2.0 twenty-eighth audit, `docs/nfx/reviews/2026-09-24-m2.0-twenty-eighth-audit.md`).
+  - §3: step 3's keys are cached per mint and per keyset: keys cached for another mint
+    serve no payment in this one, and a keyset a proof names that the cache does not hold
+    (one the mint started since, say) is fetched. What "the keys of that quoted mint"
+    implied, now said.
