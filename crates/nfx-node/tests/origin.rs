@@ -461,17 +461,28 @@ async fn pull_through_skips_a_liar_and_serves_verified_bytes_over_http() {
     assert_eq!(header(&r, "cache-control"), "no-store");
 
     server.abort();
+    assert!(
+        server.await.unwrap_err().is_cancelled(),
+        "the accept loop runs until it is aborted"
+    );
     drop(origin);
     drop(pull);
     for n in [seeder, liar] {
         n.shutdown().await.unwrap();
     }
-    Arc::try_unwrap(node)
-        .ok()
-        .unwrap()
-        .shutdown()
-        .await
-        .unwrap();
+    // Each connection's task holds the origin, and through it the node, until it sees its
+    // client close. Under load that can come after the last response, so wait for them.
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while Arc::strong_count(&node) > 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the server's connections let the node go within 60 s");
+    let Ok(node) = Arc::try_unwrap(node) else {
+        panic!("only the test holds the node once the server's connections are closed");
+    };
+    node.shutdown().await.unwrap();
 }
 
 /// An iroh endpoint whose one `meta` ticket names it (NFX-06 §2); nothing listens there.
