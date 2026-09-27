@@ -6989,14 +6989,14 @@ pub async fn a_viewer_owes_nothing_for_refused_requests<H: Harness>(h: &H) {
         .expect("half the window is due");
     assert_eq!(pay.upto_chunk, 4);
     v.ack(&s.pay(&pay).await.expect("accepted"))
-        .expect("the honest ack is taken before the refusal");
+        .expect("the honest ack is taken, overtaking the refusal");
     v.refused();
     v.requested();
     assert!(s.admit(&h.chunk(3)), "the retry is served from the credit");
     assert!(
         v.last_pay()
             .await
-            .expect("last_pay answers holding credit")
+            .expect("last_pay answers with every request paid for")
             .is_none(),
         "nothing more is owed"
     );
@@ -7030,7 +7030,7 @@ pub async fn a_viewer_pays_ahead_only_after_a_refusal<H: Harness>(h: &H) {
             .await
             .expect("holding credit, due answers")
             .is_none(),
-        "its credit covers what it requested: nothing is due"
+        "holding its pay-ahead as credit, it owes nothing: nothing is due"
     );
     crowd
         .pay(&Pay {
@@ -7455,7 +7455,7 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     let again = v
         .due()
         .await
-        .expect("due answers once the restore is answered")
+        .expect("due answers once the mint answers restores again")
         .expect("its proofs are back: it pays again");
     v.ack(&s.pay(&again).await.expect("accepted"))
         .expect("the honest ack is taken");
@@ -7485,7 +7485,7 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
     assert!(
         v.due()
             .await
-            .expect("due answers once the restore is answered")
+            .expect("due answers once the mint answers restores again")
             .is_none()
             && v.awaiting_quote(),
         "then it awaits a quote"
@@ -7898,7 +7898,7 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
         assert!(
             v.due()
                 .await
-                .expect("due answers once found spent")
+                .expect("due answers once the reserved request is signed")
                 .is_none()
                 && v.awaiting_quote(),
             "found spent by the seeder's request: it awaits a quote"
@@ -8138,7 +8138,7 @@ pub async fn a_viewer_settles_only_on_an_exact_match<H: Harness>(h: &H) {
         assert!(
             v0.due()
                 .await
-                .expect("due answers with its reclaim incomplete")
+                .expect("due answers once the mint is back")
                 .is_none(),
             "{lie}: nothing more is paid"
         );
@@ -8369,7 +8369,7 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     v.requested();
     v.requested();
     let mut tries = 0;
-    while let Some(pay) = v.due().await.expect("due answers between tries") {
+    while let Some(pay) = v.due().await.expect("due answers, tries left or not") {
         tries += 1;
         assert!(tries <= 3, "more than three tries");
         v.rej(&mu).await;
@@ -8431,7 +8431,7 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     while v
         .due()
         .await
-        .expect("due answers after each refused hello")
+        .expect("due answers, refused hellos or not")
         .is_some()
     {
         tries += 1;
@@ -8455,7 +8455,7 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
         while v
             .due()
             .await
-            .expect("due answers between second quotes")
+            .expect("due answers, second quotes or not")
             .is_some()
         {
             tries += 1;
@@ -8566,7 +8566,7 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     for _ in 0..2 {
         v.due()
             .await
-            .expect("due answers between tries")
+            .expect("due answers for the first two tries")
             .expect("a try");
         v.rej(&mu).await;
     }
@@ -8729,7 +8729,7 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
     h.mint_outage(false);
     v1.due()
         .await
-        .expect("video 1's due answers once video 0's reclaim completes")
+        .expect("video 1's due answers once the mint is back")
         .expect("once it completes, video 1 pays");
     assert!(
         h.claimed_all(&p0.token).await && !h.steal(&p0.token).await,
@@ -9601,7 +9601,7 @@ pub async fn an_honest_pair_rides_out_a_mint_outage<H: Harness>(h: &H) {
     assert!(
         v.due()
             .await
-            .expect("due answers once found spent")
+            .expect("due answers once the reserved request is signed")
             .is_none()
             && v.awaiting_quote()
     );
@@ -9631,7 +9631,7 @@ pub async fn an_honest_pair_rides_out_a_mint_outage<H: Harness>(h: &H) {
     assert!(
         v.due()
             .await
-            .expect("due answers once found spent")
+            .expect("due answers once the reserved request is signed")
             .is_none()
             && v.awaiting_quote()
     );

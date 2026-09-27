@@ -2452,7 +2452,9 @@ pub enum ViewerFlaw {
     /// stops paying the seeder that took the payment.
     AckRefusesPayAhead,
     /// Fails `due()` while its ledger holds credit (chunks paid for beyond those it
-    /// requested), where it answers that nothing is due: the pair stalls on its credit.
+    /// requested), where it answers that nothing is due or, right after a refusal, pays
+    /// ahead what that credit leaves of half the window, rounded down (NFX-07 §3a): the pair
+    /// stalls on its credit.
     DueErrsOnCredit,
 }
 
