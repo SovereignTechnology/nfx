@@ -669,6 +669,63 @@ fn is_rej<T>(r: &Result<T, Rej>, code: &RejCode) -> bool {
     matches!(r, Err(rej) if rej.code == *code)
 }
 
+/// Every refusal code the wire knows (NFX-11 §6: pay/1's, and those of the licensed mode,
+/// which shares its `rej`), then one it does not. The match names each, so the suite fails
+/// to build when the wire learns a code, until the code is listed here too.
+fn every_rej_code() -> Vec<RejCode> {
+    let codes = vec![
+        RejCode::Underpaid,
+        RejCode::Overpaid,
+        RejCode::BadMint,
+        RejCode::BadToken,
+        RejCode::Spent,
+        RejCode::Stale,
+        RejCode::Banned,
+        RejCode::BadSession,
+        RejCode::MintUnavailable,
+        RejCode::UnknownVideo,
+        RejCode::BadLock,
+        RejCode::PaymentRequired,
+        RejCode::BadVoucher,
+        RejCode::RootMismatch,
+        RejCode::BelowFee,
+        RejCode::Other("a-later-code".into()),
+    ];
+    for code in &codes {
+        match code {
+            RejCode::Underpaid
+            | RejCode::Overpaid
+            | RejCode::BadMint
+            | RejCode::BadToken
+            | RejCode::Spent
+            | RejCode::Stale
+            | RejCode::Banned
+            | RejCode::BadSession
+            | RejCode::MintUnavailable
+            | RejCode::UnknownVideo
+            | RejCode::BadLock
+            | RejCode::PaymentRequired
+            | RejCode::BadVoucher
+            | RejCode::RootMismatch
+            | RejCode::BelowFee
+            | RejCode::Other(_) => {}
+        }
+    }
+    codes
+}
+
+/// Every code a `hello` can be refused with but `banned`, which stops the watcher, known to
+/// the wire or not: `bad-session` first.
+fn hello_refusal_codes() -> Vec<RejCode> {
+    let mut codes = vec![RejCode::BadSession];
+    codes.extend(
+        every_rej_code()
+            .into_iter()
+            .filter(|c| !matches!(c, RejCode::Banned | RejCode::BadSession)),
+    );
+    codes
+}
+
 /// A payment to `upto` of `amount` claimed at the mint, its answer lost and its retry
 /// never reaching the mint: unknown to the seeder, and learnt by the account's next read.
 async fn lost_claim<H: Harness>(h: &H, s: &mut Session<H>, upto: u64, amount: u64) -> Pay {
@@ -9327,7 +9384,7 @@ async fn resumed_viewer<H: Harness>(h: &H) -> (H::Viewer, Quote) {
 
 /// A viewer refuses, without stopping, a quote over its cap, one naming no mint it holds,
 /// one whose `window` is over its ceiling, on a resumed session too, and a second quote in
-/// the same session, whatever it claims. It refuses, and stops on, a quote whose account
+/// the same session, whatever it claims: its price and `window` change nothing. It refuses, and stops on, a quote whose account
 /// position disagrees with its ledger, a lower one on resume included. Its mint is named by
 /// its exact URL only.
 pub async fn a_viewer_refuses_quotes_it_cannot_honour<H: Harness>(h: &H) {
@@ -9439,6 +9496,33 @@ pub async fn a_viewer_refuses_quotes_it_cannot_honour<H: Harness>(h: &H) {
     );
 
     a_quote_names_its_mint_by_its_exact_url(h).await;
+    a_second_quote_is_refused_unread(h).await;
+}
+
+/// A second quote on the open session is refused unread: a price within the viewer's cap
+/// and a larger `window` change nothing. The viewer pays at half the first quote's window,
+/// at its price, and the seeder takes the payment.
+async fn a_second_quote_is_refused_unread<H: Harness>(h: &H) {
+    let mut s = open(h, &h.engine(1, 4, 1000), 1).await;
+    let mut v = h.viewer(2);
+    v.quote(s.quote()).expect("an honest quote is accepted");
+    let mut second = s.quote().clone();
+    (second.price_per_chunk, second.window) = (2, 16);
+    assert!(v.quote(&second).is_err(), "one quote per session");
+    for i in 0..2 {
+        assert!(s.admit(&h.chunk(i)));
+        v.requested();
+    }
+    let pay = v.due().await.expect("due answers after a second quote");
+    let taken = match &pay {
+        Some(pay) => s.pay(pay).await.is_ok(),
+        None => false,
+    };
+    assert!(
+        taken,
+        "a second quote is refused unread: the viewer pays at half the first quote's window, \
+         at its price, and the seeder takes the payment"
+    );
 }
 
 /// A quote names the viewer's mint only by its exact URL (NFX-07 §2), wherever it stands in
@@ -9608,8 +9692,9 @@ pub async fn a_viewer_stops_on_a_wrong_or_unsolicited_ack<H: Harness>(h: &H) {
 }
 
 /// A viewer reclaims every proof of a refused payment, whatever the code, known or not,
-/// so a seeder that refuses and then claims gets nothing. It stops paying that seeder,
-/// except after `mint-unavailable`. Proofs its own unanswered reclaim took back are not
+/// so a seeder that refuses and then claims gets nothing. It stops paying that seeder
+/// after any code but `mint-unavailable`, one pay/1 sends only for a `hello` or another
+/// spec's included. Proofs its own unanswered reclaim took back are not
 /// lost: a restore of its outputs shows them. A refusal because a keyset expired is
 /// decided per proof, the watcher's own reclaims counted as back, and proofs listed
 /// expired, those the wallet still holds included, are never paid with, while the good ones
@@ -9617,19 +9702,9 @@ pub async fn a_viewer_stops_on_a_wrong_or_unsolicited_ack<H: Harness>(h: &H) {
 /// whether or not a keyset has expired. A reclaim goes to the mint's active keyset,
 /// whatever the proofs' own.
 pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
-    let codes = [
-        RejCode::Underpaid,
-        RejCode::Overpaid,
-        RejCode::BadMint,
-        RejCode::BadToken,
-        RejCode::Spent,
-        RejCode::Stale,
-        RejCode::Banned,
-        RejCode::BadSession,
-        RejCode::MintUnavailable,
-        RejCode::Other("some-future-code".into()),
-    ];
-    for code in codes {
+    // Every code, those pay/1 never sends for a payment and one the wire does not know
+    // included.
+    for code in every_rej_code() {
         let s = open(h, &h.engine(7, 2, 1000), 1).await;
         let mut v = h.viewer(7);
         v.quote(s.quote()).expect("an honest quote is accepted");
@@ -9644,7 +9719,19 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
             !h.steal(&pay.token).await,
             "every refused proof was taken back ({code:?})"
         );
-        assert_eq!(v.stopped(), code != RejCode::MintUnavailable, "{code:?}");
+        if code == RejCode::MintUnavailable {
+            assert!(
+                !v.stopped(),
+                "a payment refused mint-unavailable, every proof back: it pays that seeder again"
+            );
+        } else {
+            assert!(
+                v.stopped(),
+                "a payment refused {}: the watcher stops paying that seeder, whether or not pay/1 \
+                 sends that code for a payment",
+                code.as_str()
+            );
+        }
     }
     // A reclaim whose answer is lost is retried, and the retry finds the proofs spent by
     // the watcher itself: a restore of its outputs shows they are back, and it pays on.
@@ -10524,9 +10611,10 @@ async fn a_reclaim_with_no_session_ends_as_in_one<H: Harness>(h: &H) {
     }
 }
 
-/// A viewer waits exactly 180 s for an answer on a live connection, then reclaims its
-/// payment and stops. If the seeder had swapped it and the answer was lost, the viewer
-/// stops without paying those chunks again, and nobody is banned.
+/// A viewer waits exactly 180 s from sending for an answer on a live connection, whatever
+/// comes meanwhile, then reclaims its payment and stops. If the seeder had swapped it and
+/// the answer was lost, the viewer stops without paying those chunks again, and nobody is
+/// banned. A reclaim the mint cannot serve then is finished once it can.
 pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
     let s = open(h, &h.engine(3, 2, 1000), 1).await;
     let mut v = h.viewer(3);
@@ -10565,6 +10653,80 @@ pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
             .is_none(),
         "not paid twice"
     );
+
+    // The 180 s are counted from sending, whatever comes on the session meanwhile.
+    the_live_wait_counts_from_sending(h).await;
+
+    // A reclaim at 180 s the mint cannot serve yet stays incomplete, though the watcher has
+    // stopped, and is finished once the mint is back.
+    let s = open(h, &h.engine(1, 4, 1000), 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).expect("an honest quote is accepted");
+    v.requested();
+    v.requested();
+    let pay = v.due().await.expect("due answers").expect("due");
+    h.advance(Duration::from_secs(180));
+    h.mint_outage(true);
+    v.timeout().await;
+    h.mint_outage(false);
+    assert!(
+        v.due()
+            .await
+            .expect("due answers once stopped, the mint back")
+            .is_none()
+            && h.claimed_all(&pay.token).await
+            && !h.steal(&pay.token).await,
+        "unanswered at 180 s, the mint down: its reclaim is incomplete, not dropped, and is \
+         finished once the mint is back: the seeder cannot claim the proofs"
+    );
+}
+
+/// The 180 s of a live session's payment are counted from sending too, and nothing that
+/// comes before they are up starts them again: on the session, a second quote, a new or a
+/// refused request, or a timeout; a ledger made for another video, or anything in
+/// [`ON_ANOTHER_VIDEO`]. The seeder never answers the payment, and the event comes at 179 s:
+/// nothing is reclaimed then, and at 180 s the watcher reclaims it and stops.
+async fn the_live_wait_counts_from_sending<H: Harness>(h: &H) {
+    let on_the_session = [
+        "a second quote on the open session",
+        "a new request",
+        "a refused request",
+        "a timeout before 180 s",
+        "a ledger made for another video",
+    ];
+    for &event in on_the_session.iter().chain(&ON_ANOTHER_VIDEO) {
+        let e = h.engine(1, 4, 1000);
+        let s = open(h, &e, 1).await;
+        let mut v = h.viewer(1);
+        v.quote(s.quote()).expect("an honest quote is accepted");
+        v.requested();
+        v.requested();
+        let unanswered = v.due().await.expect("due answers").expect("due");
+        h.advance(Duration::from_secs(179));
+        let s = match event {
+            "a new request" => {
+                v.requested();
+                s
+            }
+            "a timeout before 180 s" => {
+                v.timeout().await;
+                s
+            }
+            _ => bring_about(h, &e, s, &mut v, event, true).await,
+        };
+        assert!(
+            !v.stopped() && !h.claimed_any(&unanswered.token).await,
+            "{event} at 179 s from sending: nothing is reclaimed yet, and nothing stops"
+        );
+        h.advance(SECOND);
+        v.timeout().await;
+        assert!(
+            v.stopped() && h.claimed_all(&unanswered.token).await,
+            "{event} starts no wait again: the live session's payment is reclaimed 180 s after \
+             it was sent, and the watcher stops"
+        );
+        drop(s);
+    }
 }
 
 /// A payment left unsettled by a dropped connection, never seen by the seeder, is
@@ -11112,11 +11274,7 @@ async fn bring_about<H: Harness>(
         "the session's end" => {}
         "a refused hello" => {
             // With each code but `banned`, which stops the watcher.
-            for code in [
-                RejCode::BadSession,
-                RejCode::UnknownVideo,
-                RejCode::Other("a-later-code".into()),
-            ] {
+            for code in hello_refusal_codes() {
                 v.hello_refused(&Rej { code, detail: None });
             }
         }
@@ -11287,7 +11445,8 @@ pub async fn a_refusing_seeder_takes_at_most_half_a_window<H: Harness>(h: &H) {
 /// tries a session: each try costs the watcher a reclaim and a new token at the mint, so
 /// the budget bounds those costs. A new session's accepted quote starts the count again,
 /// and an ack resets it; nothing else does, a ledger made for another video or a quote
-/// refused on one included. Out of tries, the watcher still finishes its reclaims.
+/// refused on one included. Only a `mint-unavailable` answer to a payment uses a try: a
+/// `hello` refused so uses none. Out of tries, the watcher still finishes its reclaims.
 pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
@@ -11351,29 +11510,37 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
         }
     }
     assert_eq!(tries, 3, "three tries, refusals or not");
-    // Nor do refused hellos.
-    let e = h.engine(1, 4, 1000);
-    let s = open(h, &e, 1).await;
-    let mut v = h.viewer(1);
-    v.quote(s.quote()).expect("an honest quote is accepted");
-    v.requested();
-    v.requested();
-    let mut tries = 0;
-    while v
-        .due()
-        .await
-        .expect("due answers, refused hellos or not")
-        .is_some()
-    {
-        tries += 1;
-        assert!(tries <= 3, "more than three tries");
-        v.rej(&mu).await;
-        v.hello_refused(&Rej {
-            code: RejCode::BadSession,
-            detail: None,
-        });
+    // Nor do refused hellos, whatever the code but `banned`, `mint-unavailable` included:
+    // only an answer to a payment uses a try.
+    for code in hello_refusal_codes() {
+        let e = h.engine(1, 4, 1000);
+        let s = open(h, &e, 1).await;
+        let mut v = h.viewer(1);
+        v.quote(s.quote()).expect("an honest quote is accepted");
+        v.requested();
+        v.requested();
+        let mut tries = 0;
+        while v
+            .due()
+            .await
+            .expect("due answers, refused hellos or not")
+            .is_some()
+        {
+            tries += 1;
+            assert!(tries <= 3, "more than three tries");
+            v.rej(&mu).await;
+            v.hello_refused(&Rej {
+                code: code.clone(),
+                detail: None,
+            });
+        }
+        assert_eq!(
+            tries,
+            3,
+            "three tries, hellos refused {} or not",
+            code.as_str()
+        );
     }
-    assert_eq!(tries, 3, "three tries, refused hellos or not");
     // Nor does a second quote on the open session, which is refused.
     let e = h.engine(1, 4, 1000);
     let s = open(h, &e, 1).await;
@@ -11586,6 +11753,141 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     // Out of tries, it still takes its proofs back; and a retry is no try.
     out_of_tries_it_still_reclaims(h).await;
     a_retried_reclaim_is_no_try(h).await;
+    // Nor does anything else use a try, or restore one, while tries are left.
+    only_an_unavailable_answer_uses_a_try(h).await;
+}
+
+/// Only a `mint-unavailable` answer to a payment uses a try, and only an ack or a new
+/// session's accepted quote restores them. With two used on video 0's live session, nothing
+/// else uses the third or gives back the others: video 1's session ending, a quote refused on
+/// video 1 (for its price, its `window` or its mints, or as a second quote), a second quote
+/// on video 0's session, a timeout with no payment on it, or one at 179 s from sending the
+/// second try (answered `mint-unavailable` after it), `hello`s refused on video 1 with every
+/// code but `banned`, nor video 0's closed session's payment, never answered, reclaimed at
+/// 180 s by video 1, which holds a session, with every proof back or lost to its keyset's
+/// expiry: one try is left.
+async fn only_an_unavailable_answer_uses_a_try<H: Harness>(h: &H) {
+    let mu = Rej {
+        code: RejCode::MintUnavailable,
+        detail: None,
+    };
+    let unanswered = "video 0's closed session's payment reclaimed with every proof back";
+    let expired = "video 0's closed session's payment lost to its keyset's expiry at 180 s";
+    for event in [
+        "video 1's session ending",
+        "video 1's quote over its price cap",
+        "video 1's quote with a window over its ceiling",
+        "video 1's quote naming no mint it holds",
+        "video 1's second quote",
+        "a second quote on video 0's session",
+        "a timeout with no payment on video 0's session",
+        "a timeout at 179 s from sending the second try",
+        "hellos refused on video 1",
+        unanswered,
+        expired,
+    ] {
+        let e = h.engine(1, 4, 1000);
+        let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
+        let mut v0 = h.viewer(1);
+        let mut v1 = v0.sibling();
+        // Video 1 takes its quote before the tries are used, where the event needs it.
+        let closed = event == unanswered || event == expired;
+        if matches!(event, "video 1's session ending" | "video 1's second quote") || closed {
+            v1.quote(s1.quote())
+                .expect("video 1's honest quote is accepted");
+        }
+        v0.quote(s0.quote())
+            .expect("video 0's honest quote is accepted");
+        v0.requested();
+        v0.requested();
+        // The second try's answer comes after the event, where the event needs it in flight.
+        let in_flight = event == "a timeout at 179 s from sending the second try";
+        for _ in 0..(if in_flight { 1 } else { 2 }) {
+            v0.due()
+                .await
+                .expect("video 0's due answers, tries left")
+                .expect("a try");
+            v0.rej(&mu).await;
+        }
+        let mut refused = s1.quote().clone();
+        let mut unread = None;
+        match event {
+            "video 1's session ending" => {
+                drop(s1);
+                v1.end();
+            }
+            "video 1's quote over its price cap" => refused.price_per_chunk = 2,
+            "video 1's quote with a window over its ceiling" => {
+                refused.window = h.window_ceiling() + 1;
+            }
+            "video 1's quote naming no mint it holds" => {
+                refused.mints = vec![format!("{}/", h.mint())];
+            }
+            "a second quote on video 0's session" => {
+                assert!(v0.quote(s0.quote()).is_err(), "one quote per session");
+            }
+            "a timeout with no payment on video 0's session" => v0.timeout().await,
+            "a timeout at 179 s from sending the second try" => {
+                v0.due()
+                    .await
+                    .expect("video 0's due answers, tries left")
+                    .expect("the second try");
+                h.advance(Duration::from_secs(179));
+                v0.timeout().await;
+                v0.rej(&mu).await;
+            }
+            "hellos refused on video 1" => {
+                for code in hello_refusal_codes() {
+                    v1.hello_refused(&Rej { code, detail: None });
+                }
+            }
+            "video 1's second quote" => {}
+            _ => {
+                let pay = v0
+                    .due()
+                    .await
+                    .expect("video 0's due answers, a try left")
+                    .expect("due on video 0: the payment is no try until answered");
+                drop(s0);
+                v0.end();
+                if event == expired {
+                    h.expire_keyset_of(&pay.token, 1);
+                } else {
+                    unread = Some(pay.token);
+                }
+                v1.requested();
+                v1.requested();
+                h.advance(Duration::from_secs(180));
+            }
+        }
+        if event.starts_with("video 1's quote") || event == "video 1's second quote" {
+            assert!(v1.quote(&refused).is_err(), "{event}: refused");
+        }
+        // Video 0 pays on; video 1 does once video 0's session has closed, reclaiming its
+        // payment first.
+        let payer = if closed { &mut v1 } else { &mut v0 };
+        let mut left = 0;
+        while payer
+            .due()
+            .await
+            .expect("due answers, tries left or not")
+            .is_some()
+        {
+            left += 1;
+            assert!(left <= 3, "more than three tries");
+            payer.rej(&mu).await;
+        }
+        if let Some(token) = unread {
+            assert!(
+                h.claimed_all(&token).await,
+                "video 1 reclaimed video 0's closed session's payment at 180 s, every proof back"
+            );
+        }
+        assert_eq!(
+            left, 1,
+            "{event} uses no try, and restores none: with two used, one is left"
+        );
+    }
 }
 
 /// Only a `mint-unavailable` answer uses a try: a reclaim retried while the mint is down is
@@ -11679,7 +11981,8 @@ async fn out_of_tries_it_still_reclaims<H: Harness>(h: &H) {
 
 /// A watcher's standing with a seeder spans its videos: one payment in flight toward the
 /// seeder at a time, a payment lost on one video holds back the others, and so does an
-/// incomplete reclaim.
+/// incomplete reclaim. A quote or ack on one video settles nothing of another's payment,
+/// and a payment in flight on a live session keeps its place whatever comes meanwhile.
 pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
     let mu = Rej {
         code: RejCode::MintUnavailable,
@@ -12057,13 +12360,247 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
         v0.awaiting_quote() && !v1.awaiting_quote(),
         "it awaits video 0's quote, not video 1's"
     );
+
+    // Nor does a quote or ack on video 1 settle video 0's payment, whatever it shows; and
+    // nothing but its answer frees the slot of a payment in flight on a live session.
+    another_videos_quote_or_ack_settles_nothing_of_it(h).await;
+    a_live_payment_holds_the_slot(h).await;
+}
+
+/// A payment in flight on a live session holds the standing's one slot until it is answered
+/// or its 180 s are up, whatever comes meanwhile: on its session, a second quote, a new or a
+/// refused request, or a timeout before 180 s; a ledger made for another video; video 1's
+/// first quote, taken; or anything in [`ON_ANOTHER_VIDEO`]. Video 1, holding a session with
+/// chunks owed, pays nothing over it, by `due` or by `last_pay`.
+async fn a_live_payment_holds_the_slot<H: Harness>(h: &H) {
+    let on_video_0 = [
+        "a second quote on the open session",
+        "a new request",
+        "a refused request",
+        "a timeout before 180 s",
+        "a ledger made for another video",
+        "video 1's first quote, taken",
+    ];
+    for &event in on_video_0.iter().chain(&ON_ANOTHER_VIDEO) {
+        let e = h.engine(1, 4, 1000);
+        let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
+        let mut v0 = h.viewer(1);
+        let mut v1 = v0.sibling();
+        if event != "video 1's first quote, taken" {
+            v1.quote(s1.quote())
+                .expect("video 1's honest quote is accepted");
+        }
+        v0.quote(s0.quote())
+            .expect("video 0's honest quote is accepted");
+        v0.requested();
+        v0.requested();
+        v0.due()
+            .await
+            .expect("video 0's due answers")
+            .expect("due on video 0");
+        let s0 = match event {
+            "a new request" => {
+                v0.requested();
+                s0
+            }
+            "a timeout before 180 s" => {
+                h.advance(Duration::from_secs(179));
+                v0.timeout().await;
+                s0
+            }
+            "video 1's first quote, taken" => {
+                v1.quote(s1.quote())
+                    .expect("video 1's first quote is taken");
+                s0
+            }
+            _ => bring_about(h, &e, s0, &mut v0, event, true).await,
+        };
+        v1.requested();
+        v1.requested();
+        assert!(
+            v1.due()
+                .await
+                .expect("video 1's due answers, video 0's payment in flight")
+                .is_none()
+                && v1
+                    .last_pay()
+                    .await
+                    .expect("video 1's last_pay answers, video 0's payment in flight")
+                    .is_none(),
+            "{event}: video 0's payment is still in flight on its live session, so video 1 \
+             pays nothing over it"
+        );
+        drop((s0, s1));
+    }
+}
+
+/// A quote or an ack on another video's ledger settles nothing of this video's payment, even
+/// one showing it in both fields: refused for its price, its `window` or its mints, or as a
+/// second quote, which leaves the watcher paying, or dishonest, or an unsolicited ack, which
+/// stop it; on a standing stopped before it or not. Video 0's payment awaits a quote, found
+/// spent, or its reclaim is incomplete, or its closed session left it unsettled, and video
+/// 1's quote or ack shows it: video 0 still awaits its own quote and pays nothing; the
+/// reclaim is finished once the mint is back; and the closed session's payment is still the
+/// one in flight, reclaimed 180 s after it was sent and not before. So a seeder that kept
+/// it takes that one payment.
+async fn another_videos_quote_or_ack_settles_nothing_of_it<H: Harness>(h: &H) {
+    let unavailable = Rej {
+        code: RejCode::MintUnavailable,
+        detail: None,
+    };
+    for stopped_before in [false, true] {
+        for waits in ["found spent", "an incomplete reclaim", "unsettled"] {
+            for by in [
+                "quote over its price cap",
+                "quote with a window over its ceiling",
+                "quote naming no mint it holds",
+                "second quote",
+                "dishonest quote",
+                "unsolicited ack",
+            ] {
+                let stops = stopped_before || matches!(by, "dishonest quote" | "unsolicited ack");
+                // A stopped watcher awaits no quote: a payment found spent is then beyond
+                // settling.
+                if stops && waits == "found spent" {
+                    continue;
+                }
+                let e = h.engine(1, 4, 1000);
+                let s0 = open_on(h, &e, 1, 0).await;
+                let mut v0 = h.viewer(1);
+                let mut v1 = v0.sibling();
+                v0.quote(s0.quote())
+                    .expect("video 0's honest quote is accepted");
+                v0.requested();
+                v0.requested();
+                let pay = v0
+                    .due()
+                    .await
+                    .expect("video 0's due answers")
+                    .expect("due on video 0");
+                let s0 = match waits {
+                    "found spent" => {
+                        assert!(h.steal(&pay.token).await, "the seeder keeps it");
+                        v0.rej(&unavailable).await;
+                        Some(s0)
+                    }
+                    "an incomplete reclaim" => {
+                        h.mint_outage(true);
+                        v0.rej(&unavailable).await; // its reclaim cannot be sent: incomplete
+                        Some(s0)
+                    }
+                    _ => {
+                        drop(s0);
+                        v0.end();
+                        None
+                    }
+                };
+                if stopped_before {
+                    let mut third = v0.sibling();
+                    third.hello_refused(&Rej {
+                        code: RejCode::Banned,
+                        detail: None,
+                    });
+                }
+                let s1 = open_on(h, &e, 1, 1).await;
+                let mut shows = s1.quote().clone();
+                (shows.accepted_upto, shows.spent_total) = (pay.upto_chunk, 2);
+                match by {
+                    "quote over its price cap" => shows.price_per_chunk = 2,
+                    "quote with a window over its ceiling" => {
+                        shows.window = h.window_ceiling() + 1;
+                    }
+                    "quote naming no mint it holds" => {
+                        shows.mints = vec![format!("{}/", h.mint())];
+                    }
+                    "second quote" | "unsolicited ack" => v1
+                        .quote(s1.quote())
+                        .expect("video 1's first quote, at its ledger, is taken"),
+                    _ => {}
+                }
+                let refused = if by == "unsolicited ack" {
+                    v1.ack(&Ack {
+                        accepted_upto: pay.upto_chunk,
+                        spent_total: 2,
+                    })
+                    .is_err()
+                } else {
+                    v1.quote(&shows).is_err()
+                };
+                assert!(
+                    refused,
+                    "video 1's {by}, showing video 0's payment: refused"
+                );
+                let before = if stopped_before {
+                    "stopped before it"
+                } else {
+                    "paying before it"
+                };
+                let settles_nothing = format!(
+                    "{waits}, the watcher {before}: video 1's {by}, showing video 0's payment, \
+                     settles nothing of it"
+                );
+                match waits {
+                    "found spent" => {
+                        v0.requested();
+                        assert!(
+                            v0.awaiting_quote()
+                                && v0
+                                    .due()
+                                    .await
+                                    .expect("video 0's due answers, its payment found spent")
+                                    .is_none(),
+                            "{settles_nothing}: video 0 still awaits its own quote, and pays \
+                             nothing"
+                        );
+                    }
+                    "an incomplete reclaim" => {
+                        h.mint_outage(false);
+                        v0.due()
+                            .await
+                            .expect("video 0's due answers once the mint is back");
+                        assert!(
+                            h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
+                            "{settles_nothing}: its reclaim is finished once the mint is back, \
+                             and the seeder cannot claim the proofs"
+                        );
+                    }
+                    _ => {
+                        let s = open_on(h, &e, 1, 0).await;
+                        v0.quote(s.quote())
+                            .expect("video 0's quote at the ledger is honest");
+                        v0.requested();
+                        h.advance(Duration::from_secs(179));
+                        assert!(
+                            v0.due()
+                                .await
+                                .expect("video 0's due answers at 179 s")
+                                .is_none()
+                                && !h.claimed_any(&pay.token).await,
+                            "{settles_nothing}: it is still the one in flight, so nothing is \
+                             paid over it, nor is it reclaimed, before 180 s from sending"
+                        );
+                        h.advance(SECOND);
+                        v0.due().await.expect("video 0's due answers at 180 s");
+                        assert!(
+                            h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
+                            "{settles_nothing}: it is reclaimed 180 s after it was sent, and the \
+                             seeder cannot claim the proofs"
+                        );
+                        drop(s);
+                    }
+                }
+                drop((s0, s1));
+            }
+        }
+    }
 }
 
 /// A stopped viewer pays nothing more, at the end of a session included, nor ahead after a
 /// refusal, and awaits no quote. Nothing undoes the stop: not a later honest ack, a refused
 /// request or `hello`, `mint-unavailable` with every proof taken back, the session's end, a
 /// new session's quote, nor a ledger made for another video. Reclaiming is not paying:
-/// whatever stopped it, it still takes back what is refused, unanswered or left unsettled.
+/// whatever stopped it, it still takes back what is refused, unanswered or left unsettled,
+/// never before 180 s from sending.
 pub async fn a_stopped_viewer_pays_nothing<H: Harness>(h: &H) {
     let mut v = h.viewer(1);
     v.quote(open(h, &h.engine(1, 2, 1000), 1).await.quote())
@@ -12217,8 +12754,194 @@ pub async fn a_stopped_viewer_pays_nothing<H: Harness>(h: &H) {
     a_stopped_viewer_awaits_no_quote(h).await;
     a_new_session_leaves_the_standing_stopped(h).await;
     an_unavailable_answer_leaves_the_standing_stopped(h).await;
-    // And whatever stopped it, it still takes its proofs back.
+    // And whatever stopped it, it still takes its proofs back, never before 180 s from
+    // sending.
     a_stopped_viewer_still_reclaims(h).await;
+    a_stopped_viewer_waits_from_sending(h).await;
+}
+
+/// Stop the standing of `v`, the watcher's ledger for video `video`, by `by`: an
+/// unsolicited ack or `rej` or a dishonest quote on a new session, or a `hello` refused
+/// `banned`. Return the session it opened, if any.
+async fn stop_by<H: Harness>(
+    h: &H,
+    e: &H::Engine,
+    v: &mut H::Viewer,
+    video: u8,
+    by: &str,
+) -> Option<Session<H>> {
+    if by == "a hello refused banned" {
+        v.hello_refused(&Rej {
+            code: RejCode::Banned,
+            detail: None,
+        });
+        return None;
+    }
+    let s = open_on(h, e, 1, video).await;
+    match by {
+        "a dishonest quote" => {
+            let mut lie = s.quote().clone();
+            (lie.accepted_upto, lie.spent_total) = (1, 1);
+            assert!(v.quote(&lie).is_err(), "a dishonest quote is refused");
+        }
+        "an unsolicited ack" => {
+            v.quote(s.quote()).expect("a quote at the ledger is honest");
+            assert!(
+                v.ack(&Ack {
+                    accepted_upto: 0,
+                    spent_total: 0
+                })
+                .is_err(),
+                "an unsolicited ack is refused"
+            );
+        }
+        _ => {
+            v.quote(s.quote()).expect("a quote at the ledger is honest");
+            v.rej(&Rej {
+                code: RejCode::BadSession,
+                detail: None,
+            })
+            .await;
+        }
+    }
+    Some(s)
+}
+
+/// Whatever stops the watcher, and whenever, it claims no proofs back before 180 s from
+/// sending: a stop shortens no wait. Stopped 60 s after sending by an unsolicited ack or
+/// `rej`, a dishonest quote or a `hello` refused `banned`, on another video's ledger or the
+/// payment's own, it does not reclaim a live session's payment at a timeout at 179 s, nor a
+/// closed session's at 179 s, and reclaims each at 180 s. Nor does anything that comes after
+/// the stop, in [`BETWEEN_ROUNDS`] or [`ON_ANOTHER_VIDEO`], shorten the wait or start it
+/// again.
+async fn a_stopped_viewer_waits_from_sending<H: Harness>(h: &H) {
+    let stops = [
+        "an unsolicited ack",
+        "an unsolicited rej",
+        "a dishonest quote",
+        "a hello refused banned",
+    ];
+    // A live session's payment on video 0, stopped from video 1.
+    for by in stops {
+        let e = h.engine(1, 4, 1000);
+        let s0 = open_on(h, &e, 1, 0).await;
+        let mut v0 = h.viewer(1);
+        let mut v1 = v0.sibling();
+        v0.quote(s0.quote())
+            .expect("video 0's honest quote is accepted");
+        v0.requested();
+        v0.requested();
+        let pay = v0
+            .due()
+            .await
+            .expect("video 0's due answers")
+            .expect("due on video 0");
+        h.advance(Duration::from_secs(60));
+        let _s1 = stop_by(h, &e, &mut v1, 1, by).await;
+        assert!(v0.stopped(), "{by} on video 1 stops the standing");
+        h.advance(Duration::from_secs(119));
+        v0.timeout().await;
+        assert!(
+            !h.claimed_any(&pay.token).await,
+            "stopped by {by} on video 1, 60 s after sending: the live session's payment is not \
+             reclaimed at a timeout at 179 s from sending"
+        );
+        h.advance(SECOND);
+        v0.timeout().await;
+        assert!(
+            h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
+            "stopped by {by} on video 1: the live session's payment is reclaimed 180 s after it \
+             was sent"
+        );
+    }
+    // A closed session's payment on video 0, stopped from video 1, then from video 0.
+    for video in [1, 0] {
+        for by in stops {
+            let e = h.engine(1, 4, 1000);
+            let s0 = open_on(h, &e, 1, 0).await;
+            let mut v0 = h.viewer(1);
+            let mut v1 = v0.sibling();
+            v0.quote(s0.quote())
+                .expect("video 0's honest quote is accepted");
+            v0.requested();
+            v0.requested();
+            let unread = v0
+                .due()
+                .await
+                .expect("video 0's due answers")
+                .expect("due on video 0");
+            drop(s0);
+            v0.end();
+            h.advance(Duration::from_secs(60));
+            let stopped = if video == 0 { &mut v0 } else { &mut v1 };
+            let _s = stop_by(h, &e, stopped, video, by).await;
+            assert!(v0.stopped(), "{by} on video {video} stops the standing");
+            h.advance(Duration::from_secs(119));
+            assert!(
+                v0.due()
+                    .await
+                    .expect("video 0's due answers once stopped, at 179 s")
+                    .is_none()
+                    && v1
+                        .due()
+                        .await
+                        .expect("video 1's due answers once stopped, at 179 s")
+                        .is_none()
+                    && !h.claimed_any(&unread.token).await,
+                "stopped by {by} on video {video}, 60 s after sending: the closed session's \
+                 payment is not reclaimed before 180 s from sending"
+            );
+            h.advance(SECOND);
+            assert!(
+                v0.due()
+                    .await
+                    .expect("video 0's due answers once stopped, at 180 s")
+                    .is_none()
+                    && h.claimed_all(&unread.token).await
+                    && !h.steal(&unread.token).await,
+                "stopped by {by} on video {video}: the closed session's payment is reclaimed 180 s \
+                 after it was sent"
+            );
+        }
+    }
+    // Stopped by an unsolicited ack, then anything at 179 s from sending.
+    for &event in BETWEEN_ROUNDS.iter().chain(&ON_ANOTHER_VIDEO) {
+        let e = h.engine(1, 4, 1000);
+        let s = open(h, &e, 1).await;
+        let mut v = h.viewer(1);
+        v.quote(s.quote()).expect("an honest quote is accepted");
+        v.requested();
+        v.requested();
+        let unread = v.due().await.expect("due answers").expect("due");
+        drop(s);
+        v.end();
+        let s = stop_by(h, &e, &mut v, 0, "an unsolicited ack")
+            .await
+            .expect("a session, its quote taken");
+        h.advance(Duration::from_secs(179));
+        let s = bring_about(h, &e, s, &mut v, event, false).await;
+        assert!(
+            v.due()
+                .await
+                .expect("due answers once stopped, at 179 s")
+                .is_none()
+                && !h.claimed_any(&unread.token).await,
+            "stopped, then {event} at 179 s from sending: the closed session's payment is not \
+             reclaimed before 180 s"
+        );
+        h.advance(SECOND);
+        assert!(
+            v.due()
+                .await
+                .expect("due answers once stopped, at 180 s")
+                .is_none()
+                && h.claimed_all(&unread.token).await
+                && !h.steal(&unread.token).await,
+            "stopped, then {event} at 179 s from sending: that starts no wait again, and the \
+             closed session's payment is reclaimed 180 s after it was sent"
+        );
+        drop(s);
+    }
 }
 
 /// Whatever stops the watcher, reclaiming is not paying. Stopped by an unsolicited ack, an
@@ -12226,7 +12949,7 @@ pub async fn a_stopped_viewer_pays_nothing<H: Harness>(h: &H) {
 /// closed session's payment
 /// 180 s after sending it, however long before that the stop came, and finishes an
 /// incomplete reclaim once the mint is back, one it retried with no session while the mint
-/// was down included.
+/// was down included, and from another video's ledger.
 async fn a_stopped_viewer_still_reclaims<H: Harness>(h: &H) {
     let unavailable = Rej {
         code: RejCode::MintUnavailable,
@@ -12360,6 +13083,49 @@ async fn a_stopped_viewer_still_reclaims<H: Harness>(h: &H) {
         h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
         "stopped while it was in flight, the payment its session's end left unsettled is \
          still reclaimed 180 s after it was sent"
+    );
+    // Stopped, it finishes an incomplete reclaim from another video's ledger too: video 0's
+    // session has closed, and video 1's due retries it once the mint is back.
+    let e = h.engine(1, 4, 1000);
+    let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
+    let mut v0 = h.viewer(1);
+    let mut v1 = v0.sibling();
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote is accepted");
+    v0.requested();
+    v0.requested();
+    let pay = v0
+        .due()
+        .await
+        .expect("video 0's due answers")
+        .expect("due on video 0");
+    h.mint_outage(true);
+    v0.rej(&unavailable).await;
+    drop(s0);
+    v0.end();
+    assert!(
+        v1.ack(&Ack {
+            accepted_upto: 1,
+            spent_total: 1
+        })
+        .is_err()
+            && v1.stopped(),
+        "an unsolicited ack on video 1 stops the standing"
+    );
+    h.mint_outage(false);
+    assert!(
+        v1.due()
+            .await
+            .expect("video 1's due answers once stopped, the mint back")
+            .is_none(),
+        "stopped, it pays nothing"
+    );
+    assert!(
+        h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
+        "stopped, video 1 finished video 0's incomplete reclaim once the mint was back: the \
+         seeder cannot claim the proofs"
     );
 }
 
@@ -13191,6 +13957,28 @@ pub async fn an_honest_pair_survives_a_refused_hello<H: Harness>(h: &H) {
             .is_some(),
         "and it pays as usual"
     );
+    // Nor does any other code but `banned`, whatever pay/1 sends it for.
+    for code in hello_refusal_codes() {
+        let mut v = h.viewer(1);
+        v.hello_refused(&Rej {
+            code: code.clone(),
+            detail: None,
+        });
+        let s = open(h, &h.engine(1, 4, 1000), 1).await;
+        v.quote(s.quote()).expect("an honest quote is accepted");
+        v.requested();
+        v.requested();
+        assert!(
+            !v.stopped()
+                && v.due()
+                    .await
+                    .expect("due answers after a refused hello")
+                    .is_some(),
+            "a hello refused {}: nothing changes, the watcher is not stopped, and it pays as \
+             usual",
+            code.as_str()
+        );
+    }
     let other_video = h.viewer(1);
     let mut banned = other_video.sibling();
     banned.hello_refused(&Rej {
@@ -13259,20 +14047,16 @@ pub async fn an_honest_pair_survives_a_refused_hello<H: Harness>(h: &H) {
     a_refused_hello_leaves_what_it_waits_on(h).await;
 }
 
-/// A `hello` refused `bad-session`, `unknown-video` or with a code the watcher does not know
-/// leaves what the watcher waits on: a payment found spent still awaits a quote, and a
-/// reclaim the mint cannot serve yet stays incomplete. On the next session, whose quote
-/// shows the ledger, it pays nothing, and it takes the proofs back once the mint answers.
+/// A `hello` refused with any code but `banned`, known to the wire or not, leaves what the
+/// watcher waits on: a payment found spent still awaits a quote, and a reclaim the mint
+/// cannot serve yet stays incomplete. On the next session, whose quote shows the ledger, it
+/// pays nothing, and it takes the proofs back once the mint answers.
 async fn a_refused_hello_leaves_what_it_waits_on<H: Harness>(h: &H) {
     let unavailable = Rej {
         code: RejCode::MintUnavailable,
         detail: None,
     };
-    for code in [
-        RejCode::BadSession,
-        RejCode::UnknownVideo,
-        RejCode::Other("a-later-code".into()),
-    ] {
+    for code in hello_refusal_codes() {
         let refusal = Rej {
             code: code.clone(),
             detail: None,
