@@ -611,9 +611,11 @@ therefore loses nothing:
   - Otherwise the client pays that origin nothing until every proof is confirmed
     reclaimed, or lost to the expiry (§3a); a reclaim the mint cannot serve yet is
     retried. Then it may pay again: after a `402`, at the price that `402` names.
-  - After three paid requests in a row refused, whatever the answer or none, it stops
-    paying that origin. A `200` to a paid request resets the count, and nothing else
-    does.
+  - A `503`, or no answer, with every proof back uses none of the tries below: the mint
+    may be down, so the client pays that origin again later, and SHOULD back off.
+  - After three paid requests in a row refused otherwise (a `402`, or any status but
+    `200` and `503`), it stops paying that origin. A `200` to a paid request resets the
+    count, and nothing else does.
 - Bans do not apply: the payer is anonymous, and spent proofs simply earn a `402`.
 - Origins MAY serve gratis (`price_hint` 0 or `free` beacons). The website's ad/default
   mode is exactly this (origin at price 0).
@@ -948,7 +950,7 @@ therefore loses nothing:
     cap and leaves no session id open.
   - §3: an exact payment that would take its account's `spent_total` above 2^53−1 is
     `overpaid`, since no `ack` or quote could carry it.
-- Draft 2026-09-26 (M2.0 twenty-seventh audit, `docs/nfx/reviews/2026-09-24-m2.0-twenty-seventh-audit.md`).
+- Draft 2026-09-27 (M2.0 twenty-seventh audit, `docs/nfx/reviews/2026-09-24-m2.0-twenty-seventh-audit.md`).
   - §3: a `pay` dropped before its swap is sent leaves no account, as a refused one does.
   - §3: a payment whose turn comes in its deadline's second or later runs none of its
     checks, the ban's included, and is answered `mint-unavailable`: what the deadline rule
@@ -962,9 +964,9 @@ therefore loses nothing:
     undo one).
   - §3a: the watcher retries an incomplete reclaim, and reclaims a closed session's
     payment after the wait, whether or not it holds a session with the seeder; whatever
-    stopped the watcher, it still reclaims; a reclaim done with no session or from another video's
-    ledger ends as one done in a session on the payment's own; a closed session's payment
-    is reclaimed 180 s after sending, whatever came since (was: "after 180 s").
+    stopped the watcher, it still reclaims; a reclaim done with no session or from another
+    video's ledger ends as one done in a session on the payment's own; a closed session's
+    payment is reclaimed 180 s after sending, whatever came since (was: "after 180 s").
   - §3a: each new session's accepted quote (was: each new session) restores the three
     tries; only `mint-unavailable` answers use them, a reclaim retried while the mint is
     down none; out of tries, the watcher still reclaims.
@@ -975,6 +977,7 @@ therefore loses nothing:
     loses that payment, and the client pays that origin nothing more, so a lying origin
     takes one payment (was: after a `503` only, and nothing said after a `402`, another
     status or none). With every proof back, confirmed reclaimed or lost to the expiry, it
-    may pay again (after a `402`, at the price that `402` names); after three paid
-    requests in a row refused, it stops paying that origin, and only a `200` to a paid
-    request resets the count.
+    may pay again (after a `402`, at the price that `402` names); a `503` or no answer,
+    with every proof back, uses no try, and the client pays again later, backing off;
+    after three paid requests in a row refused otherwise, it stops paying that origin, and
+    only a `200` to a paid request resets the count.
