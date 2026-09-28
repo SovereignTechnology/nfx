@@ -369,7 +369,9 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
     the seeder's period, verified by byte challenges against its own copy. **No mint
     extension anywhere**; NFX-09 is shelved as a Draft. `mode` is an additive manifest
     tag, so nothing frozen is bumped. M2 unchanged; M3 = keyholder + certificates, then
-    `mode: creator`. Awaiting sovtech's read of the four open questions; then NFX-13.
+    `mode: creator`. **Accepted 2026-09-27**: ecash + optional bolt11 at the keyholder; permanent or
+    renewable certificates per video; both modes ship in M3. Next: NFX-08 rewrite and
+    NFX-13.
 
 ## Not verified / known gaps
 

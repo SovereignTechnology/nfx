@@ -4,7 +4,7 @@ Date: 2026-09-25
 
 ## Status
 
-Proposed (sovtech's model, reached 2026-09-25 across four revisions; this record is
+Accepted 2026-09-27 (decisions below). Proposed (sovtech's model, reached 2026-09-25 across four revisions; this record is
 the fourth and replaces the earlier three). Master-plan ADRs are numbered from 0100 so
 that a harvest merge of the demo's 0009 onward never collides.
 
@@ -256,11 +256,19 @@ the shelved split needed a module.
   HTTP surface (the keyholder). No frozen document is bumped.
 - The M2.0 pay/1 work ships as planned and is the whole of `mode: seeder`.
 
-## Open questions for sovtech
+## Decisions (sovtech, 2026-09-27)
 
-1. Keyholder payment: ecash only, or bolt11 as well (needs a Lightning backend at the
-   keyholder)?
-2. Certificate lifetime: bound to the license forever, or `not_after` renewable at
-   zero cost (lets a creator revoke by not renewing)?
-3. Whether `mode: creator` ships in M3 with the keyholder, or as M3.5 after it.
-4. ADR numbering from 0100 on the master-plan side (this record).
+1. **Keyholder payment: both.** A keyholder accepts ecash (NUT-00 token from a
+   `pay_mints` mint) and MAY also offer bolt11. It advertises which it takes; ecash is
+   REQUIRED so that every keyholder works with a Lightning-less watcher, bolt11 is the
+   keyholder's option (it needs a Lightning backend).
+2. **Certificate lifetime: both, the creator's choice per video.** A *permanent*
+   license is a certificate with a far `not_after` (up to 100 years); a *renewable*
+   one has a short `not_after` and the keyholder re-issues it at zero cost to the same
+   `W`, so a creator can revoke by not renewing. `not_after` stays required in both
+   cases (pre-push review #2): "permanent" is a far date, never an absent field.
+3. **Milestone: options are the goal.** Both modes ship together in M3 as publish-time
+   choices, since the point is that a creator picks. Order inside M3: keyholder and
+   certificates first (both modes need them), then `mode: seeder` on licensed videos
+   (M2.0 plus a certificate check), then `mode: creator`.
+4. **Numbering:** master-plan ADRs are numbered from 0100.
