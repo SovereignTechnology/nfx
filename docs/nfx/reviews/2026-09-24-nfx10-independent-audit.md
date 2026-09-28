@@ -1,4 +1,4 @@
-# Independent audit: the NFX-10 mesh branch (`6f979e8..72c877a`, 2026-09-24)
+# Independent audit: the NFX-10 mesh branch (`9a5742c..6b09b86`, 2026-09-24)
 
 - **Auditor:** a fresh agent that did not read the author's review
   ([`2026-09-24-nfx10-m1.md`](2026-09-24-nfx10-m1.md)) until its findings were written.
