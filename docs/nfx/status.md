@@ -3,7 +3,7 @@
 **This file, not the demo's `docs/status.md` or the session handoffs (not published), is where work here
 resumes.** Those describe the Pear demo, a read-only mirror in this repository.
 
-Updated 2026-09-24 · `main` = `5d16d80` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
+Updated 2026-09-24 · `main` = `81a692e` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
 
 ## Where things stand
 
@@ -230,7 +230,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 
 - **Repository:** the private GitLab project. Every push
   was a fast-forward of `main` with sovtech's OK. The demo history, the spec commit
-  `8f3b9bd` and a merge of demo `main` `0e35347` are all in `main`.
+  `2e25df1` and a merge of demo `main` `6cd8765` are all in `main`.
 - **ADR numbering** is coordinated with the demo session. 0006 and 0008 are this
   repository's; the demo recorded both in its own `docs/status.md` and uses 0009 onward.
 - **A1 spikes: all four PASS.** One page each in [`spikes/`](spikes/):
@@ -258,7 +258,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 1. **Repository.** a local clone was cloned with `--no-local` from
    `spec/nfx-suite-m0`. Remotes: `origin` = the private GitLab project; `demo` = the private demo repository,
    fetch-only, tracking `main` only. Demo `main` is merged, so the
-   mirror is current as of `0e35347`.
+   mirror is current as of `6cd8765`.
 2. **The repository's working notes (not published)** and this file. Both state the read-only mirror rule and that
    the demo handoff is not the resume point.
 3. **CI.**

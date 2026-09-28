@@ -1,6 +1,6 @@
 # Review: M1 hardening — creator allow-list, gossip in `nfxd`, `Verified<T>`, NIP-42 (2026-09-24)
 
-Scope (on top of `8c2e704`, the desktop viewer):
+Scope (on top of `4372a51`, the desktop viewer):
 - `nfx-node::relay`: an optional creator allow-list (`ScopedRelay::with_creators`);
 - `nfx-node::node`, `::gossip`, `::origin`: gossip bootstrap by address,
   `Node::trusted` and `Node::learn_addr`, and relay-only nodes kept out of gossip;
