@@ -1,9 +1,9 @@
-# Independent security audit: `d9801d0..36589e2` (branch `desktop/app`, 2026-09-24)
+# Independent security audit: `6a92cfe..b676753` (branch `desktop/app`, 2026-09-24)
 
 - **Auditor:** a fresh agent that had not seen the author's reviews until its own
   findings were written. The lesson of the A2 audit was that such a pass catches what
   self-reviews miss, and it did so again.
-- **Commits:** `8c2e704` (desktop app, `Daemon::watch`) and `36589e2` (gossip in
+- **Commits:** `4372a51` (desktop app, `Daemon::watch`) and `b676753` (gossip in
   nfxd, creator allow-list, `Verified<T>`).
 - **Method:** `differential-review` and `sharp-edges`: risk triage per file, a deep read
   of the HIGH-risk files, and a trace into the pinned upstream crates (iroh 1.2.0,
