@@ -437,6 +437,9 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 
 ## Not verified / known gaps
 
+- **Lock pins before the public tips do not match.** The history was rewritten for
+  publication (names and URLs in pinned files changed), and only each branch tip was
+  re-pinned; an older commit's `crates/ci/locked.sha256` names the private history's files.
 - **GitLab CI's first real run failed only its last step.** Vectors,
   add-only, fmt, clippy, test and deny all passed on the shared runner. The WASM tests
   crashed Node: Debian bookworm's `nodejs` 18.20.4 aborts in V8 on the wasm32 test
