@@ -6,7 +6,7 @@ viewer** played it over iroh, once with sharing off and once with sharing on. **
 browser** found it by manifest address over Nostr and played it. Its origin was cut
 off after 3 s, and it played on over WebRTC from host-b's bridge. M1 is "a free
 end-to-end slice on testnet" (ADR 0008 §5): this run exercises all of it, built from
-`main` = `f781f37`. Hosts: host-b and laptop, as for the Phase A exit run.
+`main` = `02208a9`. Hosts: host-b and laptop, as for the Phase A exit run.
 
 ## Topology
 

@@ -1,8 +1,8 @@
 # Pre-push review — first push of the private GitLab project (2026-09-23)
 
-Scope: everything `main` carries that the private demo repository does not. That is commit `8f3b9bd`
+Scope: everything `main` carries that the private demo repository does not. That is commit `2e25df1`
 (NFX suite + ADR 0006: 20 files, +1717, docs/JSON/one Python script) plus the clean
-merge `468fe1e` of demo `main` (`0e35347`, already in the demo repository).
+merge `b6912e2` of demo `main` (`6cd8765`, already in the demo repository).
 
 Method: `differential-review` (triage + secrets + script surface), then `sharp-edges`
 over the spec's wire formats and money path. Codebase class: SMALL (20 files), no
@@ -12,7 +12,7 @@ executable code except `spec/test-vectors/generate.py`.
 
 | Check | Result |
 |---|---|
-| Merge is not an evil merge | `patch-id(8f3b9bd) == patch-id(diff demo/main..HEAD)` — MATCH |
+| Merge is not an evil merge | `patch-id(2e25df1) == patch-id(diff demo/main..HEAD)` — MATCH |
 | Mirrored demo paths untouched | `git diff demo/main -- packages docs/plan docs/lanes docs/handoff docs/status.md scripts` empty |
 | Hex strings in the diff | 19 distinct ≥64-hex strings; **19/19** are vector fields (hashes, pubkeys, ids, sigs, published throwaway secrets); 0 unexplained |
 | Published vector secrets | each equals `sha256("nfx-test-vector/<role>")` for creator/seeder/cashu — throwaway by construction, as NFX-11 §7 says |
@@ -22,7 +22,7 @@ executable code except `spec/test-vectors/generate.py`.
 Verdict: **no blocker for pushing.** Risk class LOW (documentation + deterministic
 vector generator).
 
-## Sharp edges in the spec as frozen at `8f3b9bd`
+## Sharp edges in the spec as frozen at `2e25df1`
 
 These are design footguns an implementer would fall into. None is a vulnerability
 in pushed code (nothing implements NFX yet); they feed the A0 amendments.

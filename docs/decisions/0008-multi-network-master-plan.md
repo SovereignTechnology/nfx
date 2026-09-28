@@ -33,8 +33,8 @@ decision left two things open:
   freeze, no archive.
 - **Track 2, the master plan** lives in a new repository, **the private GitLab project** on
   `gitlab.example.invalid` (a local clone). It was cloned from the demo at branch
-  `spec/nfx-suite-m0` (`8f3b9bd`) with full history, then merged with demo `main`
-  (`0e35347`). In the public repository the demo's history ends at the tag `demo-base`; later demo
+  `spec/nfx-suite-m0` (`2e25df1`) with full history, then merged with demo `main`
+  (`6cd8765`). In the public repository the demo's history ends at the tag `demo-base`; later demo
 commits are scrubbed like the rest before they are merged.
 
 ### 2. Brand-neutral wire token: `nfx`

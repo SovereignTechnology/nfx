@@ -231,7 +231,7 @@ Recorded so nobody re-derives them.
 | Open, seeder-managed (NFX-07) | seeder per chunk | the watcher pays for its own lies; `window` bounds the seeder | creator gets nothing enforceable; kept as `mode: seeder` on open videos |
 | **Decoupled** (this record, `mode: seeder`) | key + seeder per chunk | two products, nothing shared | — |
 | **Retainers** (this record, `mode: creator`) | key only | one period at risk each side; creator verifies against its own copy | — |
-| Delivery receipts | key only; the creator pays per delivery | receipts count only from certified keys, capped at `delivery_share × key_price` per key, so colluders always lose | more money code than retainers need; deferred. Full design: commit `bb3618e` of this file |
+| Delivery receipts | key only; the creator pays per delivery | receipts count only from certified keys, capped at `delivery_share × key_price` per key, so colluders always lose | more money code than retainers need; deferred. Full design: commit `1a516fa` of this file |
 | Split mint (NFX-08/09 as drafted) | key + one token per window, locked to the mint | P2PK to `redeem_pubkey`, atomic split with carry | needs a custom mint module nobody runs; "compatible mints" would be ours only; shelved |
 | Two-token split, no mint code | one token to the seeder, one P2PK to the creator | the creator's part is unstealable | nobody is obliged to deliver it: a seeder drops it at no cost |
 | Pledge to unlock | refundable pledges until a target | NUT-11 refund locktimes make an assurance contract | refund race after locktime; nothing moves before a target; not the model wanted |
