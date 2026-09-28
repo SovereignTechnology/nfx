@@ -193,6 +193,9 @@ def render_hashlist(hashlist: dict) -> bytes:
 
 
 def main() -> int:
+    # pay/1's nesting vectors go 2000 levels deep, past the default recursion limit of
+    # json's encoder on Python 3.11 (the CI image's); 3.12 passed only by accident.
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), 10_000))
     ap = argparse.ArgumentParser()
     ap.add_argument("--verify", action="store_true")
     args = ap.parse_args()
