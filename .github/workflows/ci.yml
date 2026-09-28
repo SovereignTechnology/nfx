@@ -1,0 +1,100 @@
+# NFX CI on GitHub Actions: the same two jobs as crates/ci/gitlab-ci.yml, in the same pinned
+# image. `lock` gives the money crates' verdict (crates/ci/check-locked.sh) under a clean
+# environment, installing nothing and restoring no cache, so nothing a branch or another job
+# leaves behind can stand in for the build. `check` runs everything else (crates/ci/check.sh).
+name: ci
+
+on:
+  push:
+    branches: ['**']   # branches only: a tag push (demo-base) runs nothing
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Every pushed commit runs in a group of its own, so each gets its lock verdict; only a
+# pull request's superseded runs are cancelled.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  CARGO_DENY_VERSION: "0.20.2"
+  CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+  WASM_PACK_VERSION: "0.13.1"
+  WASM_PACK_SHA256: "c539d91ccab2591a7e975bcf82c82e1911b03335c80aa83d67ad25ed2ad06539"
+  NODE_VERSION: "22.22.0"
+  NODE_SHA256: "9aa8e9d2298ab68c600bd6fb86a6c13bce11a4eca1ba9b39d79fa021755d7c37"
+
+jobs:
+  lock:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: lock
+        shell: bash
+        run: |
+          # A branch without the money-code lock (older ones) has nothing to verify here;
+          # where the lock exists, it runs and fails closed.
+          if [ ! -e crates/ci/locked.sha256 ] && [ ! -e crates/ci/lock-job.sh ]; then
+            echo "no money-code lock on this branch"; exit 0
+          fi
+          # System-wide, so it survives env -i (HOME=/root below).
+          git config --system --add safe.directory "$(pwd -P)"
+          /usr/bin/env -i PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME=/root RUSTUP_HOME=/usr/local/rustup CARGO_HOME="$(pwd -P)/.cargo-home" CI=true \
+            CI_COMMIT_SHA="$GITHUB_SHA" PYTHON=/usr/bin/python3 /bin/bash -p crates/ci/lock-job.sh
+
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update && apt-get install -y --no-install-recommends python3 python3-venv xz-utils
+          curl -sSfLo /tmp/node.txz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
+          echo "${NODE_SHA256}  /tmp/node.txz" | sha256sum -c -
+          mkdir -p /opt/node && tar -xJf /tmp/node.txz -C /opt/node --strip-components=1
+          echo /opt/node/bin >> "$GITHUB_PATH"
+          python3 -m venv /opt/venv && /opt/venv/bin/pip install coincurve==21.0.0 pynacl==1.6.2 blake3==1.0.9 jsonschema==4.26.0
+          rustup component add clippy rustfmt && rustup target add wasm32-unknown-unknown
+          curl -sSfLo /tmp/deny.tgz "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "${CARGO_DENY_SHA256}  /tmp/deny.tgz" | sha256sum -c -
+          tar -xzf /tmp/deny.tgz -C /tmp && install -m 0755 "/tmp/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny" /usr/local/bin/
+          curl -sSfLo /tmp/wasm-pack.tgz "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${WASM_PACK_VERSION}/wasm-pack-v${WASM_PACK_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "${WASM_PACK_SHA256}  /tmp/wasm-pack.tgz" | sha256sum -c -
+          tar -xzf /tmp/wasm-pack.tgz -C /tmp && install -m 0755 "/tmp/wasm-pack-v${WASM_PACK_VERSION}-x86_64-unknown-linux-musl/wasm-pack" /usr/local/bin/
+      - name: check
+        shell: bash
+        env:
+          CI: "true"
+          LOCKED_DIRS_UNLOCKED: ""
+          PYTHON: /opt/venv/bin/python
+        run: |
+          git config --system --add safe.directory "$(pwd -P)"
+          # The CI's own CARGO_HOME, inside the checkout: the lock refuses sources extracted
+          # anywhere else (crates/ci/check-locked.sh --sources).
+          export CARGO_HOME="$(pwd -P)/.cargo-home"
+          # The add-only check's base: the demo's last merged commit, tagged demo-base.
+          git rev-parse -q --verify refs/tags/demo-base >/dev/null || { echo "the demo-base tag is missing: push it"; exit 1; }
+          git update-ref refs/remotes/demo/main refs/tags/demo-base
+          crates/ci/check.sh
