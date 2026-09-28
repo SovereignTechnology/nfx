@@ -1,0 +1,71 @@
+# A probe: one command run from crates/ at the dispatched ref, for the audit rounds' quick
+# checks (a scenario, a planted mutant, where each mutant is caught), which run in CI and
+# never on a developer's machine. Dispatched by collaborators only:
+#   gh workflow run probe.yml --ref <branch> -f cmd='cargo test -p nfx-pay --test adversary' -f tag=<label>
+# The output is the job log and an artifact `probe-<tag>` holding output.txt and rc.txt.
+# It restores a build cache for speed; the verdict on the money crates is the `lock` job in
+# ci.yml, which never restores one.
+name: probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      cmd:
+        description: command to run from crates/
+        required: true
+      tag:
+        description: a label for the run and its artifact
+        required: true
+      timeout:
+        description: seconds
+        required: false
+        default: "3000"
+
+run-name: probe ${{ inputs.tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      CARGO_HOME: /opt/cargo-home
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /opt/cargo-home/registry
+            crates/target
+          key: probe-${{ hashFiles('crates/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: probe-${{ hashFiles('crates/Cargo.lock') }}-
+      - name: run
+        shell: bash
+        env:
+          CMD: ${{ inputs.cmd }}
+          T: ${{ inputs.timeout }}
+        run: |
+          rustup component add clippy rustfmt >/dev/null
+          cd crates
+          rc=0; timeout -k 10 "$T" bash -c "$CMD" > ../output.txt 2>&1 || rc=$?
+          echo "$rc" > ../rc.txt
+          cat ../output.txt
+          exit "$rc"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: probe-${{ inputs.tag }}
+          path: |
+            output.txt
+            rc.txt
+          retention-days: 7
