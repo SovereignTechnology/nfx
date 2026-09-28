@@ -6,6 +6,13 @@
 
 stages: [check]
 
+# A runner VM can be stopped under memory pressure, and that job
+# then fails as a runner system failure: requeue it rather than fail the pipeline.
+default:
+  retry:
+    max: 2
+    when: [runner_system_failure, stuck_or_timeout_failure]
+
 variables:
   GIT_DEPTH: "0"            # the add-only check needs the merge base with demo/main
   CARGO_HOME: $CI_PROJECT_DIR/.cargo-home
