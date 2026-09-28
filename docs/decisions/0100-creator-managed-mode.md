@@ -221,6 +221,31 @@ locked-directory rule of ADR 0008 §4.
 | Mint needs | standard | standard |
 | Cold retention | none | yes |
 
+### 10. Paths considered, and why they fell
+
+Recorded so nobody re-derives them.
+
+| Model | Watcher pays | Sound because | Fell because |
+|---|---|---|---|
+| Free + zaps (M1) | nothing | nothing to protect | creators unpaid |
+| Open, seeder-managed (NFX-07) | seeder per chunk | the watcher pays for its own lies; `window` bounds the seeder | creator gets nothing enforceable; kept as `mode: seeder` on open videos |
+| **Decoupled** (this record, `mode: seeder`) | key + seeder per chunk | two products, nothing shared | — |
+| **Retainers** (this record, `mode: creator`) | key only | one period at risk each side; creator verifies against its own copy | — |
+| Delivery receipts | key only; the creator pays per delivery | receipts count only from certified keys, capped at `delivery_share × key_price` per key, so colluders always lose | more money code than retainers need; deferred. Full design: commit `bb3618e` of this file |
+| Split mint (NFX-08/09 as drafted) | key + one token per window, locked to the mint | P2PK to `redeem_pubkey`, atomic split with carry | needs a custom mint module nobody runs; "compatible mints" would be ours only; shelved |
+| Two-token split, no mint code | one token to the seeder, one P2PK to the creator | the creator's part is unstealable | nobody is obliged to deliver it: a seeder drops it at no cost |
+| Pledge to unlock | refundable pledges until a target | NUT-11 refund locktimes make an assurance contract | refund race after locktime; nothing moves before a target; not the model wanted |
+| Pooled watcher pass | a period pass split by watch time | economics only | pool steering by fake watchers and seeders; not sound |
+| Mint-verified retention (this record's first draft) | key; the creator funds a pool at the mint | mint checks storage proofs | needed a creator-signed sha256→BLAKE3 mapping (NFX-05 names files by sha256, bao proofs verify BLAKE3 roots) and public randomness; the creator holding the bytes needs neither |
+
+Two constraints shaped every row. A **new Nostr kind** was ruled out because frozen
+NFX-04 §1 makes scoped relays refuse every kind but 38504, 20464 and NIP-09
+deletions, so anything new rides existing events as additive fields. And the mint
+requirements per mode are: `mode: seeder` and `mode: creator` alike need only a
+standard mint (NUT-03, 07, 09, 12, 13; NUT-11 nowhere), which our testnet mint
+(`cdk-mintd` 0.18.1) already is; only
+the shelved split needed a module.
+
 ## Consequences
 
 - Creators are paid for everything they sell, in hand, on any mint, with no custom
