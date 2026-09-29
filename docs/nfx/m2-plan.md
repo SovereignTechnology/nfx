@@ -59,7 +59,7 @@ is zero findings, confirmed after the sixth:
     connection (a 180 s wait, then the next quote or a reclaim settles them).
   - A reclaim that finds a proof spent leaves that payment awaiting a quote, and the
     watcher pays that seeder nothing until one shows it, so a lying seeder gets at most
-    one payment.
+    one payment per seeder identity the watcher pays.
   - Configuration minimums and bounded per-identity state.
   - At most 64 proofs per payment; `detail` is printable ASCII; `window` is 2 to 64.
   - HTTPS origins take one payment per request, and a lying origin at most one payment
