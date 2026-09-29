@@ -239,10 +239,11 @@ whatever it offers. The checks run in this order:
    - holding a proof that lacks a DLEQ proof (NUT-12).
 2. **The mint** is exactly a quoted URL, else `bad-mint`. Nothing is fetched from any
    mint before this check.
-3. **DLEQ.** Every proof's DLEQ proof verifies against the keys of that quoted mint
-   (fetched from it, then cached: keys cached for another mint serve it not, and a
-   keyset a proof names that the cache does not hold, such as one the mint started since,
-   is fetched), else `bad-token`.
+3. **DLEQ.** Every proof's DLEQ proof verifies against the keys of that quoted mint for
+   the keyset the proof names (fetched from it, then cached: keys cached for another mint
+   or another keyset serve it not, and a keyset a proof names that the cache does not
+   hold, such as one the mint started since or an older one a wallet still spends, is
+   fetched), else `bad-token`.
 4. **The face value** exactly covers the new chunks. Short is `underpaid`, over is
    `overpaid`. A product above 2^53−1 is `underpaid`. An exact payment that would take
    the account's `spent_total` above 2^53−1 is `overpaid`: no `ack` or quote could carry
@@ -1052,7 +1053,8 @@ therefore loses nothing:
     and, once it has swapped, keep the connection open for the whole `200`. A payment an
     honest origin's swap took is lost when the client does not get its `200` whole
     within its wait, whatever the cause, its causes named: a stated concession.
-  - §3: step 3's keys are cached per mint and per keyset: keys cached for another mint
-    serve no payment in this one, and a keyset a proof names that the cache does not hold
-    (one the mint started since, say) is fetched. What "the keys of that quoted mint"
-    implied, now said.
+  - §3: step 3 checks each proof's DLEQ against its quoted mint's keys for the keyset the
+    proof names, cached per mint and per keyset: keys cached for another mint or keyset
+    serve no proof they are not for, and a keyset a proof names that the cache does not
+    hold (one the mint started since, or an older one a wallet still spends) is fetched.
+    What "the keys of that quoted mint" implied, now said.
