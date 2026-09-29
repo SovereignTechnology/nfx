@@ -82,8 +82,37 @@ normal seeder upstream and a normal p2p-media-loader peer downstream.
 
 ### 3.1 HTTPS
 
-When fetching from a paying origin or HTTPS seeder, the player's HTTP request hooks
-(hls.js / p2p-media-loader) attach the NFX-07 §4 `X-NFX-*` headers.
+When fetching from a paying origin or HTTPS seeder, the player pays as NFX-07 §4 says,
+every client rule of it included. In a browser that means:
+
+- **The request.** A paid request is a `fetch` of `<base>/<sha256>` (NFX-07 §4), whichever
+  of NFX-05 §6's paths the player asked for, with `X-NFX-Pay`, `redirect: "manual"`,
+  `credentials: "omit"` and `cache: "no-store"`. So no redirect is followed, and one
+  shows as such (an `opaqueredirect` answer: a refusal, NFX-07 §4); no cookie goes, so
+  `Access-Control-Allow-Origin: *` admits it; and no copy in the HTTP cache answers it or
+  adds a conditional header. A service worker of the page's passes a request carrying
+  `X-NFX-Pay` to the network untouched, so no copy it holds answers one either. It is
+  never an `XMLHttpRequest`, which follows a redirect with the request's headers, the
+  token included: whatever loads the file (hls.js, p2p-media-loader), a paid load goes
+  through a loader that makes such a `fetch`.
+- **What the origin sends.** A cross-origin paid request is preceded by a CORS
+  preflight, and a `402`'s `X-NFX-Price` and `X-NFX-Mints` are readable only if exposed.
+  A browser can pay only an origin that sends what NFX-07 §4 says an origin serving
+  browsers SHOULD.
+- **What the page cannot see.** A `fetch` that fails (a network error, which is also how
+  a failed preflight, a redirect under `redirect: "error"` and an answer without
+  `Access-Control-Allow-Origin` look) is a paid request with no final status: the page
+  reclaims 180 s after sending, as NFX-07 §4 says, never sooner. A `402` whose price or
+  mints the page cannot read names none (NFX-07 §4).
+- **Standings.** NFX-07 §4's standings belong to the wallet the page pays from, and last
+  as long as it: every page paying from one wallet shares them, with one paid request in
+  flight to an origin among them all. They hold no proofs, so browser storage MAY keep
+  them. A paid request's proofs stay in the wallet, not in the page alone, set aside so
+  that no page spends them, until the request is served or its reclaim ends; so a page
+  closed with one in flight leaves the reclaim to the next page that opens the wallet,
+  180 s after sending or later. Browser storage cleared while the wallet lives
+  loses the standings: a lying origin the page had stopped paying then takes one payment
+  more, as a new name would (NFX-07 §4). A stated concession.
 
 ### 3.2 Paid browser mesh (M2)
 
@@ -180,3 +209,17 @@ NFX-05 byte formats.
   per account, and a refused upload request is answered with pay/1 `refuse`.
 - Draft 2026-09-24 (M2.0 sixth audit): §3.2 lists `refuse`, allows several pay sessions
   on one account as NFX-07 does, and holds the data channel to NFX-07 §2's delivery rule.
+- Draft 2026-09-29 (M2.0 twenty-ninth audit,
+  `docs/nfx/reviews/2026-09-24-m2.0-twenty-ninth-audit.md`): §3.1 says how a browser
+  pays an origin under NFX-07 §4. A paid request is a `fetch` of `<base>/<sha256>` that
+  follows no redirect (a redirect is a refusal), sends no credentials and is answered
+  from no cache, the page's service worker's included; never an `XMLHttpRequest`. The
+  page pays only an origin that sends what NFX-07 §4 now says an origin serving browsers
+  SHOULD (the preflight allowing `X-NFX-Pay`, `Access-Control-Allow-Origin` on every
+  answer, `X-NFX-Price` and `X-NFX-Mints` exposed). A failed `fetch` is a paid request
+  with no final status, reclaimed 180 s after sending; a `402` it cannot read names no
+  price. The standings belong to the wallet, shared by its pages and kept as long as it,
+  and a paid request's proofs stay set aside in the wallet until it ends. Browser storage
+  cleared while the wallet lives costs one payment more per lying origin: a stated
+  concession. (Was: the request hooks attach the headers, which a browser could not send
+  or read across origins, and hls.js's default loader follows a redirect with the token.)
