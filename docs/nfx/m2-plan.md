@@ -46,7 +46,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [twenty-fourth](reviews/2026-09-24-m2.0-twenty-fourth-audit.md),
 [twenty-fifth](reviews/2026-09-24-m2.0-twenty-fifth-audit.md),
 [twenty-sixth](reviews/2026-09-24-m2.0-twenty-sixth-audit.md),
-[twenty-seventh](reviews/2026-09-24-m2.0-twenty-seventh-audit.md)). sovtech's bar for the push
+[twenty-seventh](reviews/2026-09-24-m2.0-twenty-seventh-audit.md),
+[twenty-eighth](reviews/2026-09-24-m2.0-twenty-eighth-audit.md)). sovtech's bar for the push
 is zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -88,10 +89,25 @@ is zero findings, confirmed after the sixth:
     answered on the reader's next poll, dial records;
   - honest seeder and viewer engines, with a validated configuration.
 - **Suite:** `nfx_pay::adversary` has 63 scenarios, each on its own thread under a
-  real-time timeout, three of them threaded, run twice (the second time with reads as
-  round trips), and **each of 782 planted defects fails a named check in its scenario**
+  real-time timeout, three of them threaded, run on three harnesses (reads at once, as
+  round trips, and answered from another thread), waiting on answers and never on a count
+  of polls, and **each of 982 planted defects fails a named check in its scenario**
   (a hang, a panic raised outside the suite, a runtime panic of Rust's own, or a bare
-  unwrap, is not a catch), every surviving mutant from all twenty-seven audits among them.
+  unwrap, is not a catch), every surviving mutant from all twenty-eight audits among them.
+- **Since the twenty-eighth audit:**
+  - the honest mock caches keys per mint and per keyset, and NFX-07 §3 step 3 checks each
+    proof against the keys of the keyset it names; a turn in the deadline's second runs no
+    check; waited turns, refusals and drops free, wake and set the reads' floor on every path;
+  - a quote or ack on another video settles nothing of this one's payment; waits count from
+    sending, stopped or not; only mint-unavailable answers to payments use a try; every
+    refusal code stops the watcher but mint-unavailable; it pays once half the window is
+    unpaid (NFX-07 §2, §3a);
+  - NFX-07 §4: only a verified 200 serves a paid request; every other refusal with nothing
+    spent uses a try, and out of tries the client backs off rather than dropping the origin;
+    prices are capped;
+  - the suite waits on answers, not poll counts, and runs on a third harness whose reads are
+    answered from another thread;
+  - the repository is public, its history rewritten for privacy; CI runs on GitHub Actions.
 - **Since the twenty-seventh audit:**
   - a payment whose turn comes in its deadline's second runs no checks; a `pay` dropped
     before its swap, at any stage, leaves no account and frees the turn only if it held
