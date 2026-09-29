@@ -300,6 +300,9 @@ pub enum BadToken {
     NoDleq,
     /// An invalid DLEQ proof.
     BadDleq,
+    /// An invalid DLEQ proof, on proofs drawn as a wallet selects them: those of an older
+    /// keyset it holds first ([`Harness::fund_older_keyset`]).
+    OlderBadDleq,
     /// Not a token at all.
     Garbage,
     /// More than 64 proofs (input fees grow with the proof count).
@@ -432,14 +435,17 @@ pub trait Harness {
     fn hold_next_swap(&self);
     /// The seeder's key requests go unanswered until [`Harness::release_swaps`], on a slow
     /// link between the seeder and the mint. An engine uses the keys it holds without asking
-    /// (NFX-07 §3 step 3 caches them): a payment waits here only if its engine must fetch,
-    /// as at a mint it has fetched no keys from, or after [`Harness::forget_keys`]. Its swap
-    /// requests and its reads of swap state go through, unless something else holds them.
+    /// (NFX-07 §3 step 3 caches them), and may hold keys from its start or from any fetch,
+    /// for the payment's mint or for all it quotes: the suite holds keys only after
+    /// [`Harness::forget_keys`]. Its swap requests and its reads of swap state go through,
+    /// unless something else holds them.
     fn hold_key_fetches(&self);
-    /// `engine` drops the mint keys it holds, and nothing else: its next payment at each
-    /// mint fetches them again. A real engine's harness needs a seam in its key cache to
-    /// make it. One that ignores the request fails the scenarios that ask, at their checks
-    /// that a payment waits for its keys, rather than passing them untested.
+    /// `engine` drops the mint keys it holds, however it came by them (at its start, or by
+    /// any fetch), and nothing else: its next payment at a mint fetches that mint's keys
+    /// again, or waits for a request for them still unanswered. A real engine's harness
+    /// needs a seam in its key cache to make it. One that ignores the request fails the
+    /// scenarios that ask, at their checks that a payment asks for its keys, rather than
+    /// passing them untested.
     fn forget_keys(&self, engine: &Self::Engine);
     /// Run the oldest held swap, or deliver the oldest held response, and keep holding
     /// the rest.
@@ -486,8 +492,9 @@ pub trait Harness {
     /// the inputs are unspent again, those requests are never processed, and a client
     /// still waiting for one gets no answer.
     fn roll_back_reserved(&self);
-    /// Reads of swap state the mint has served (NUT-07 checks and NUT-09 restores), one
-    /// per request, however many swaps it covers.
+    /// Reads of swap state that have reached the mint (NUT-07 checks and NUT-09 restores),
+    /// one per request, however many swaps it covers: counted as each arrives, so one the
+    /// mint holds ([`Harness::gather_state_reads`]) counts while it waits there.
     fn state_reads(&self) -> u64;
     /// Key requests the seeder has sent the mint (NUT-01 and NUT-02), one per request,
     /// answered or held ([`Harness::hold_key_fetches`]).
@@ -500,8 +507,8 @@ pub trait Harness {
     /// harness's clock.
     fn unanswered_reads_take(&self, wait: Duration);
     /// Each read of swap state the mint serves waits, in real time and at most `wait`,
-    /// until `n` reads have reached it (`n` 0: none waits): entries on threads then meet
-    /// at the mint, as a real engine's can.
+    /// until `n` reads have reached it (`n` 0: none waits, and the reads waiting then go
+    /// on): entries on threads then meet at the mint, as a real engine's can.
     fn gather_state_reads(&self, n: usize, wait: Duration);
     /// The clock moves by `by` between the next swap outcome's arrival and its settlement:
     /// an outcome arriving just before its payment's deadline and settled just after, as on
@@ -527,8 +534,7 @@ pub trait Harness {
     fn sweep_during_next_read(&self, engine: &Self::Engine);
     /// The mint rotates its active keyset: every output set made so far belongs to the
     /// old one, and a swap to one of them is refused for good (CDK 12002), whatever its
-    /// inputs. Tokens issued from then on are of the new keyset, whose keys no seeder holds
-    /// yet.
+    /// inputs. Tokens issued from then on are of the new keyset.
     fn rotate_keyset(&self);
     /// The mint's keyset expires now, as [`MintEvent::ExpireKeyset`] does before a swap:
     /// proofs of older keysets ([`Harness::fund_older_keyset`]) stay valid.
