@@ -7,6 +7,9 @@
 //! - Swaps can be held (not processed), or processed with their responses held, and
 //!   released all at once or oldest first. Key requests can be held too.
 //! - The mint can be taken down.
+//! - The seeder's reads of swap state are answered in the poll that sends them, on the
+//!   reader's next poll, or from another thread that wakes the reader a few milliseconds
+//!   later, as a real mint's answer comes back.
 //! - The seeder and the viewers keep time on the harness's clock, so debt ages, deadlines
 //!   pass and answers can be late. Moving the clock wakes whatever waits on it.
 //!
@@ -316,9 +319,11 @@ struct Ledger {
     active_expired_since: Option<u64>,
     /// Ids of keysets that expired while active, since rotated out.
     expired_ranges: Vec<(u64, u64)>,
-    /// Reads of swap state are round trips: an engine's read answers on its next poll
-    /// ([`MockHarness::with_round_trip_reads`]).
-    round_trips: bool,
+    /// How the mint answers the seeder's reads of swap state.
+    read_answers: Answers,
+    /// Reads answered from another thread whose reader has not been woken yet
+    /// ([`Harness::answers_under_way`]).
+    under_way: usize,
     /// What happens just before the next swap request reaches the mint, in order.
     before_swap: Vec<MintEvent>,
     /// The output sets the mint signed, one per swap request and its retries (NUT-13):
@@ -382,6 +387,24 @@ impl Ledger {
         outputs != 0 && self.in_expired_keyset(outputs)
     }
 }
+
+/// How the mint answers the seeder's reads of swap state (NUT-07 checks and NUT-09
+/// restores).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Answers {
+    /// In the poll that sends the read.
+    #[default]
+    AtOnce,
+    /// On its reader's next poll ([`MockHarness::with_round_trip_reads`]).
+    NextPoll,
+    /// From another thread, [`WOKEN_AFTER`] after it is sent, waking its reader
+    /// ([`MockHarness::with_woken_reads`]).
+    Woken,
+}
+
+/// How long a read answered from another thread takes: a few milliseconds, as a real
+/// mint's answer takes to come back.
+const WOKEN_AFTER: Duration = Duration::from_millis(2);
 
 /// Every mock mint's ledger, shared.
 #[derive(Clone, Default)]
@@ -491,9 +514,47 @@ impl MockNetwork {
         self.ledger().tokens.get(token).cloned()
     }
 
-    /// Whether a read of swap state is a round trip, answered on its reader's next poll.
+    /// Whether a read of swap state is a round trip, answered on a later poll of its reader.
     fn round_trips(&self) -> bool {
-        self.ledger().round_trips
+        self.ledger().read_answers != Answers::AtOnce
+    }
+
+    /// A read's round trip, from its sending: back on its reader's next poll, or once another
+    /// thread has answered it and woken its reader ([`Answers::Woken`]).
+    async fn round_trip(&self) {
+        if self.ledger().read_answers != Answers::Woken {
+            return next_poll().await;
+        }
+        // Whether it is back, and the waker of its reader's last poll.
+        let back = Arc::new(Mutex::new((false, None::<Waker>)));
+        let mut sent = false;
+        poll_fn(|cx| {
+            let mut b = lock(&back);
+            if b.0 {
+                return Poll::Ready(());
+            }
+            b.1 = Some(cx.waker().clone());
+            drop(b);
+            if !sent {
+                sent = true;
+                self.ledger().under_way += 1;
+                let (net, back) = (self.clone(), back.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(WOKEN_AFTER);
+                    let waker = {
+                        let mut b = lock(&back);
+                        b.0 = true;
+                        b.1.take()
+                    };
+                    if let Some(w) = waker {
+                        w.wake();
+                    }
+                    net.ledger().under_way -= 1;
+                });
+            }
+            Poll::Pending
+        })
+        .await;
     }
 
     /// Fetch something (keys) from the mint at `url`, now.
@@ -4121,7 +4182,7 @@ impl Inner {
                         };
                         let reading =
                             Reading::start(self, slot, now, proofs.clone(), learnt.covers());
-                        next_poll().await;
+                        self.net.round_trip().await;
                         self.learn_apply(&learnt, by);
                         reading.back();
                     } else if let Some(learnt) = self.learn_read(Some(key), until) {
@@ -4148,8 +4209,8 @@ impl Inner {
                         reading.cover(learnt.covers());
                     }
                     if self.net.round_trips() {
-                        // Its result is applied when it is back, on the next poll.
-                        next_poll().await;
+                        // Its result is applied when it is back, on a later poll.
+                        self.net.round_trip().await;
                     }
                     if self.has(SeederFlaw::CoverageFixedAtBack) {
                         // Back: on the next poll, or once the mint answers on this thread.
@@ -5760,7 +5821,7 @@ impl SeederEngine for MockEngine {
 
     async fn sweep(&self) {
         if self.0.net.round_trips() {
-            next_poll().await;
+            self.0.net.round_trip().await;
         }
         self.0.learn(None, None, Learner::Sweep);
     }
@@ -5884,7 +5945,7 @@ impl SeederEngine for MockEngine {
                 .get(&key)
                 .is_some_and(|(at, ..)| *at == now);
             if !reuse && e.has_reads(key) {
-                next_poll().await; // the round trip, counted only once it is back
+                e.net.round_trip().await; // counted only once it is back
                 if let Some(learnt) = e.learn_read(Some(key), None) {
                     e.learn_apply(&learnt, Learner::Hello);
                     e.record_read(key, now, None, learnt.covers(), ReadState::Back);
@@ -8507,12 +8568,23 @@ impl MockHarness {
     }
 
     /// An honest harness whose mint answers each read of swap state on its reader's next
-    /// poll, as a real mint's round trips do: an engine whose reads yield passes the suite
-    /// too.
+    /// poll: the read spans polls of its entry, which the suite can then act between, with
+    /// no time passing.
     #[must_use]
     pub fn with_round_trip_reads() -> Self {
         let h = Self::default();
-        h.net.ledger().round_trips = true;
+        h.net.ledger().read_answers = Answers::NextPoll;
+        h
+    }
+
+    /// An honest harness whose mint answers each read of swap state from another thread, a
+    /// few milliseconds after it is sent, and wakes its reader, as a real mint's answer comes
+    /// back: at no count of polls. An engine whose reads are real round trips passes the
+    /// suite so.
+    #[must_use]
+    pub fn with_woken_reads() -> Self {
+        let h = Self::default();
+        h.net.ledger().read_answers = Answers::Woken;
         h
     }
 
@@ -8528,7 +8600,7 @@ impl MockHarness {
     #[must_use]
     pub fn with_seeder_flaw_round_trip(flaw: SeederFlaw) -> Self {
         let h = Self::with_seeder_flaw(flaw);
-        h.net.ledger().round_trips = true;
+        h.net.ledger().read_answers = Answers::NextPoll;
         h
     }
 
@@ -8832,6 +8904,10 @@ impl Harness for MockHarness {
 
     fn key_requests(&self) -> u64 {
         self.net.ledger().key_requests
+    }
+
+    fn answers_under_way(&self) -> bool {
+        self.net.ledger().under_way > 0
     }
 
     fn limit_state_reads(&self, max: Option<usize>) {

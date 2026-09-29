@@ -228,6 +228,7 @@ def test_counts() -> dict[str, int]:
     return {
         "adversary": scenarios,
         "round_trip": scenarios,  # the same suite, the mint answering reads on a later poll
+        "woken_reads": scenarios,  # the same suite, reads answered from another thread
         "mutants": len(re.findall(r"^\s+[a-z_0-9]+: [svr]\(", mutants, re.M)),
         "runner": len(re.findall(r"^#\[test\]$", runner, re.M)),
         "pay1": len(re.findall(r"^#\[test\]$", pay1, re.M)),
@@ -368,8 +369,8 @@ def compiled_in(pin: bool, found: list[str], members: list[dict], build_dir: pat
     want = test_counts()
     out = subprocess.run(["cargo", "test", "--color", "never", "--locked", "--offline",
                           *target_dir, "-p", "nfx-pay", "-p", "nfx-pay-wire",
-                          "--test", "adversary", "--test", "round_trip", "--test", "mutants",
-                          "--test", "runner", "--test", "pay1"],
+                          "--test", "adversary", "--test", "round_trip", "--test", "woken_reads",
+                          "--test", "mutants", "--test", "runner", "--test", "pay1"],
                          cwd=CRATES, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if out.returncode != 0:
         fail(f"the money tests failed:\n{out.stdout[-4000:]}")
