@@ -63,7 +63,7 @@ is zero findings, confirmed after the sixth:
   - Configuration minimums and bounded per-identity state.
   - At most 64 proofs per payment; `detail` is printable ASCII; `window` is 2 to 64.
   - HTTPS origins take one payment per request, and a lying origin at most one payment
-    per name the client pays, at a price within the client's price cap.
+    per name (base URL) the client pays, at a price within the client's price cap.
 - **Vectors:** `pay1.json` holds 22 valid lines, 3 loopback-only and 74 invalid, each
   checked by the reference reader `spec/test-vectors/pay1.py`. It and the Rust reader
   agreed on every one of 244,149 probe and fuzz cases in the ninth audit.
@@ -356,10 +356,10 @@ re-export.
 **M2.1: the security stage (one serial session).** It implements the locked paths
 against the suite:
 - the real engine on CDK, with exact amounts, a mint allowlist, DLEQ, and async NUT-03
-  swap with ban on a double spend;
+  swap with bans on a spent or invalid proof;
 - the viewer wallet: proof selection and storage, the key file, no plaintext proofs;
-- pay/1 over iroh, and the **per-session window gate on blob serving** (the
-  "per-member window gate" carried from A2);
+- pay/1 over iroh, and the **per-account window gate on blob serving** (the
+  "per-member window gate" carried from A2; the window is per account, NFX-07 §2);
 - the HTTPS 402 surface on the origin.
 
 Its outputs:
