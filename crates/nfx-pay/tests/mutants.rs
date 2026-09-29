@@ -1037,4 +1037,11 @@ catches!(
     next_second_unwoken: s(S::NextSecondUnwoken) => a_late_outcome_is_credited_never_banned,
     next_second_unwoken_round_trip: r(S::NextSecondUnwoken) => a_late_outcome_is_credited_never_banned,
     read_wait_unwoken_by_clock: r(S::ReadWaitUnwokenByClock) => a_late_outcome_is_credited_never_banned,
+    pay_next_second_unwoken: s(S::PayNextSecondUnwoken) => a_late_outcome_is_credited_never_banned,
+    pay_next_second_unwoken_round_trip: r(S::PayNextSecondUnwoken) => a_late_outcome_is_credited_never_banned,
+    pay_read_wait_unwoken_by_clock: r(S::PayReadWaitUnwokenByClock) => a_late_outcome_is_credited_never_banned,
+    pay_turn_without_the_clock: s(S::PayTurnNoClockWatch) => the_deadline_frees_the_account,
+    pay_turn_without_the_clock_round_trip: r(S::PayTurnNoClockWatch) => the_deadline_frees_the_account,
+    pay_read_wait_unwoken_by_return: r(S::PayReadWaitUnwokenByReturn) => a_late_outcome_is_credited_never_banned,
+    read_wait_unwoken_by_abandon: r(S::ReadWaitUnwokenByAbandon) => a_late_outcome_is_credited_never_banned,
 );

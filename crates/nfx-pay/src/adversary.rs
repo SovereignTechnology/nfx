@@ -4519,6 +4519,8 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
     a_turn_held_past_its_deadline_by_a_swap_was_freed_there_for_a_read_waiting(h).await;
     an_entry_waiting_for_the_next_second_is_woken_by_it(h).await;
     an_entry_waiting_for_a_read_is_woken_as_its_second_ends(h).await;
+    a_payment_waiting_for_a_read_is_woken_as_it_comes_back(h).await;
+    a_hello_waiting_for_a_read_is_woken_as_it_is_abandoned(h).await;
 }
 
 /// Outputs unsigned with an input spent are nothing, whatever the other inputs are: the
@@ -4831,6 +4833,7 @@ pub async fn the_deadline_frees_the_account<H: Harness>(h: &H) {
     a_waited_payment_dropped_waiting_to_read_frees_the_turn(h).await;
     a_takeover_dropped_before_its_swap_wakes_all_that_waits(h).await;
     hellos_behind_each_refusal_read_after_it(h).await;
+    a_payment_waiting_for_a_dead_turn_is_woken_by_its_deadline(h).await;
     no_retry_at_the_deadline(h).await; // last: the mint event it queues stays queued
 }
 
@@ -17638,6 +17641,46 @@ async fn a_takeover_reads_the_abandoned_swap<H: Harness>(h: &H) {
     }
 }
 
+/// Flaw `PayTurnNoClockWatch`. A turn held past its payment's deadline is taken over
+/// (NFX-07 §3), and that deadline wakes what waits for it: a payment as a `hello`. P1's
+/// swap is claimed at the mint, its answer held, and its connection closes. P2, for the same
+/// chunks, arrives 30 s later on a task of its own, polled only when it is woken, and waits
+/// for P1's turn. At P1's deadline P2 is woken, takes the turn over, learns P1's claim and
+/// is refused `stale`.
+async fn a_payment_waiting_for_a_dead_turn_is_woken_by_its_deadline<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut s2 = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    h.hold_swap_responses();
+    let p1 = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    poll_once(s.pay(&p1)).await; // its connection closes, its swap in flight
+    assert!(h.claimed_all(&p1.token).await, "the mint has P1's claim");
+    let p2 = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    h.advance(Duration::from_secs(30));
+    let r = woken_on_its_own_task(
+        h,
+        s2.pay(&p2),
+        async { h.advance(Duration::from_secs(30)) }, // P1's deadline
+        "P2 waits for P1's turn",
+        "P1's deadline wakes P2, waiting for its turn on a task of its own: it takes the turn \
+         over, and is answered",
+    )
+    .await;
+    assert!(
+        is_rej(&r, &RejCode::Stale),
+        "the woken P2 learnt P1's claim, which covers it: {r:?}"
+    );
+    assert!(!h.claimed_any(&p2.token).await, "P2 is not swapped");
+    h.release_swaps().await;
+}
+
 /// Flaws `DropHoldsTurn`, `DropWakesNone`, `DropFreesAnyTurn` and
 /// `WaitingDropForgetsWaiters`. A payment dropped before its swap is sent (its connection
 /// closed) is abandoned unswapped, and frees its account's turn then (NFX-07 §3), not at
@@ -18828,37 +18871,242 @@ async fn b_unknown_after_the_seconds_two<H: Harness>(h: &H, s: &mut Session<H>) 
     h.restore_outage(true);
 }
 
-/// Flaw `ReadWaitUnwokenByClock`, on the round-trip harness. An entry waiting for a read
-/// under way that would serve it waits no longer than the second (NFX-07 §3), and the
-/// second's end wakes it, whether that read has come back or not. A is a lost claim. A
-/// `hello` reads it and is never polled again; a second `hello`, on a task of its own,
-/// polled only when it is woken, waits for that read. The clock moves a second: the second
-/// `hello` reads A itself and quotes its claim, with nothing else polling it.
+/// `entry` on a task of its own, polled only when it is woken: once the engine has settled
+/// it still waits (`waiting` says why); `then` runs, and it is woken and answered, with
+/// nothing else polling it (`woken`). Its answer.
+async fn woken_on_its_own_task<H: Harness, F: Future>(
+    h: &H,
+    entry: F,
+    then: impl Future<Output = ()>,
+    waiting: &str,
+    woken: &str,
+) -> F::Output {
+    let done = AtomicBool::new(false);
+    let (out, ()) = both(own_task(marked(entry, &done)), async {
+        settle(h).await;
+        assert!(!is_set(&done), "{waiting}");
+        then.await;
+        assert!(settle_until(h, || is_set(&done)).await, "{woken}");
+    })
+    .await;
+    out
+}
+
+/// Flaws `ReadWaitUnwokenByClock` and `PayReadWaitUnwokenByClock`, on the round-trip
+/// harness. An entry waiting for a read under way that would serve it waits no longer than
+/// the second (NFX-07 §3), and the second's end wakes it, whether that read has come back
+/// or not: a `hello`, then a payment. A is a lost claim. A `hello` reads it and is never
+/// polled again; the entry, on a task of its own, polled only when it is woken, waits for
+/// that read. A payment reuses a read of other proofs only past the second's two, so before
+/// it arrives a payment of other proofs reads too, and its connection closes mid-read. The
+/// clock moves a second: the entry reads A itself and is answered, with nothing else
+/// polling it. The `hello` quotes A's claim; the payment, for A's chunks again, is
+/// `stale`.
 async fn an_entry_waiting_for_a_read_is_woken_as_its_second_ends<H: Harness>(h: &H) {
+    for pays in [false, true] {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        let mut other = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        lost_claim(h, &mut s, 4, 4).await;
+        h.advance(SECOND);
+        let (peer, one) = (h.peer(1), h.hello());
+        let mut stalled = Box::pin(e.hello(&peer, &one));
+        if poll_next(h, stalled.as_mut()).await.is_some() {
+            return; // synchronous reads: nothing is ever under way
+        }
+        if pays {
+            {
+                let dropped = Pay {
+                    upto_chunk: 4,
+                    token: h.token(4).await,
+                };
+                let mut paying = Box::pin(other.pay(&dropped));
+                assert!(
+                    poll_next(h, paying.as_mut()).await.is_none(),
+                    "its read is under way"
+                );
+            } // its connection closes: abandoned
+            let p = Pay {
+                upto_chunk: 4,
+                token: h.token(4).await,
+            };
+            let paid = woken_on_its_own_task(
+                h,
+                s.pay(&p),
+                async { h.advance(SECOND) }, // the first's read outlives its second
+                "the payment waits for the hello's read",
+                "the second's end wakes the payment waiting for a read sent in it, on a task of \
+                 its own: it reads A itself, and is answered",
+            )
+            .await;
+            assert!(
+                is_rej(&paid, &RejCode::Stale),
+                "the woken payment reads A's claim, which paid up to its chunk: stale, {paid:?}"
+            );
+        } else {
+            let two = h.hello();
+            let quoted = woken_on_its_own_task(
+                h,
+                e.hello(&peer, &two),
+                async { h.advance(SECOND) }, // the first's read outlives its second
+                "the second hello waits for the first's read",
+                "the second's end wakes the hello waiting for a read sent in it, on a task of \
+                 its own: it reads A itself, and is answered",
+            )
+            .await;
+            let q = quoted.expect("a hello").quote().clone();
+            assert_eq!(
+                (q.accepted_upto, q.spent_total),
+                (4, 4),
+                "the woken hello quotes A's claim"
+            );
+        }
+        drop(stalled);
+    }
+}
+
+/// Flaws `NextSecondUnwoken` and `PayNextSecondUnwoken`, on either harness. An entry that
+/// finds its second's two reads spent waits for the next second (NFX-07 §3), and the next
+/// second wakes it: a `hello`, then a payment. A and B as in
+/// [`b_unknown_after_the_seconds_two`]: the entry, on a task of its own, polled only when it
+/// is woken, waits for the next second to read B. The clock moves a second: the entry reads
+/// there and is answered, with nothing else polling it. Restores come back before the
+/// payment arrives, and it reads B as nothing and is swapped.
+async fn an_entry_waiting_for_the_next_second_is_woken_by_it<H: Harness>(h: &H) {
+    for pays in [false, true] {
+        let e = h.engine(1, 4, 1000);
+        a_first_read_learns_nothing(h, &e).await;
+        let mut s1 = open(h, &e, 1).await;
+        b_unknown_after_the_seconds_two(h, &mut s1).await;
+        if pays {
+            h.restore_outage(false);
+            let p = Pay {
+                upto_chunk: 4,
+                token: h.token(4).await,
+            };
+            let paid = woken_on_its_own_task(
+                h,
+                s1.pay(&p),
+                async { h.advance(SECOND) },
+                "the second's two reads spent: the payment waits for the next second to read B",
+                "the next second wakes the payment that waits for it, on a task of its own: it \
+                 reads B there, and is answered",
+            )
+            .await;
+            let ack = paid.expect("B read as nothing: the payment is swapped");
+            assert_eq!(
+                (ack.accepted_upto, ack.spent_total),
+                (4, 4),
+                "the woken payment reads B as nothing, and is swapped"
+            );
+        } else {
+            let (peer, hello) = (h.peer(1), h.hello());
+            let quoted = woken_on_its_own_task(
+                h,
+                e.hello(&peer, &hello),
+                async { h.advance(SECOND) },
+                "the second's two reads spent: the hello waits for the next second to read B",
+                "the next second wakes the hello that waits for it, on a task of its own: it \
+                 reads B there, and is answered",
+            )
+            .await;
+            drop(quoted.expect("a hello"));
+            h.restore_outage(false);
+        }
+        drop(s1);
+        h.release_swaps().await; // the given-up requests find their inputs spent
+    }
+}
+
+/// Flaw `PayReadWaitUnwokenByReturn`, on the round-trip harness. An entry waiting for a
+/// read under way that would serve it takes that read's result once it is back (NFX-07 §3),
+/// and its coming back wakes it. A is a lost claim. A `hello` reads it and is not polled
+/// again; a payment of other proofs reads too, and its connection closes mid-read: the
+/// second's two are spent. A payment for A's chunks again, on a task of its own, polled only
+/// when it is woken, waits for the `hello`'s read. The `hello` is polled, and its read comes
+/// back: the payment is woken, takes that read's result, A's claim, and is `stale`, with no
+/// time passing and no read of its own.
+async fn a_payment_waiting_for_a_read_is_woken_as_it_comes_back<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut other = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    lost_claim(h, &mut s, 4, 4).await;
+    h.advance(SECOND);
+    let (peer, one) = (h.peer(1), h.hello());
+    let mut first = Box::pin(e.hello(&peer, &one));
+    if poll_next(h, first.as_mut()).await.is_some() {
+        return; // synchronous reads: nothing is ever under way
+    }
+    {
+        let dropped = Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        };
+        let mut paying = Box::pin(other.pay(&dropped));
+        assert!(
+            poll_next(h, paying.as_mut()).await.is_none(),
+            "its read is under way"
+        );
+    } // its connection closes: abandoned
+    let p = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    let before = h.state_reads();
+    let paid = woken_on_its_own_task(
+        h,
+        s.pay(&p),
+        async {
+            let quoted = answer_of(h, first.as_mut()).await;
+            assert!(
+                quoted.is_some_and(|q| q.is_ok()),
+                "the first hello's read comes back: it is answered"
+            );
+        },
+        "the payment waits for the hello's read",
+        "the hello's read coming back wakes the payment waiting for it, on a task of its own: \
+         it takes that read's result, and is answered",
+    )
+    .await;
+    assert!(
+        is_rej(&paid, &RejCode::Stale),
+        "the woken payment takes the hello's read: A's claim, which paid up to its chunk: \
+         stale, {paid:?}"
+    );
+    assert_eq!(
+        h.state_reads(),
+        before,
+        "the woken payment sends no read of its own: it takes the hello's"
+    );
+}
+
+/// Flaw `ReadWaitUnwokenByAbandon`, on the round-trip harness. A read abandoned before it
+/// is back has no result, and an entry that waited for it reads itself while the second's
+/// two are not spent (NFX-07 §3): its abandoning wakes that entry. A is a lost claim. A
+/// `hello` reads it; a second `hello`, on a task of its own, polled only when it is woken,
+/// waits for that read. The first's connection closes: the second is woken, reads A itself
+/// in that second and quotes its claim, with no time passing.
+async fn a_hello_waiting_for_a_read_is_woken_as_it_is_abandoned<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     serve(h, &mut s, 0, 4);
     lost_claim(h, &mut s, 4, 4).await;
     h.advance(SECOND);
     let (peer, one, two) = (h.peer(1), h.hello(), h.hello());
-    let mut stalled = Box::pin(e.hello(&peer, &one));
-    if poll_next(h, stalled.as_mut()).await.is_some() {
+    let mut first = Box::pin(e.hello(&peer, &one));
+    if poll_next(h, first.as_mut()).await.is_some() {
         return; // synchronous reads: nothing is ever under way
     }
-    let done = AtomicBool::new(false);
-    let (quoted, ()) = both(own_task(marked(e.hello(&peer, &two), &done)), async {
-        settle(h).await;
-        assert!(
-            !is_set(&done),
-            "the second hello waits for the first's read"
-        );
-        h.advance(SECOND); // the first's read outlives its second
-        assert!(
-            settle_until(h, || is_set(&done)).await,
-            "the second's end wakes the hello waiting for a read sent in it, on a task of its \
-             own: it reads A itself, and is answered"
-        );
-    })
+    let quoted = woken_on_its_own_task(
+        h,
+        e.hello(&peer, &two),
+        async move { drop(first) }, // its connection closes: abandoned
+        "the second hello waits for the first's read",
+        "the first's read abandoned wakes the hello waiting for it, on a task of its own: it \
+         reads A itself, with no time passing, and is answered",
+    )
     .await;
     let q = quoted.expect("a hello").quote().clone();
     assert_eq!(
@@ -18866,39 +19114,6 @@ async fn an_entry_waiting_for_a_read_is_woken_as_its_second_ends<H: Harness>(h: 
         (4, 4),
         "the woken hello quotes A's claim"
     );
-    drop(stalled);
-}
-
-/// Flaw `NextSecondUnwoken`, on either harness. An entry that finds its second's two reads
-/// spent waits for the next second (NFX-07 §3), and the next second wakes it. A and B as in
-/// [`b_unknown_after_the_seconds_two`]: a `hello` on a task of its own, polled only when it
-/// is woken, waits for the next second to read B. The clock moves a second: the `hello`
-/// reads there and is answered, with nothing else polling it.
-async fn an_entry_waiting_for_the_next_second_is_woken_by_it<H: Harness>(h: &H) {
-    let e = h.engine(1, 4, 1000);
-    a_first_read_learns_nothing(h, &e).await;
-    let mut s1 = open(h, &e, 1).await;
-    b_unknown_after_the_seconds_two(h, &mut s1).await;
-    let (peer, hello) = (h.peer(1), h.hello());
-    let done = AtomicBool::new(false);
-    let (quoted, ()) = both(own_task(marked(e.hello(&peer, &hello), &done)), async {
-        settle(h).await;
-        assert!(
-            !is_set(&done),
-            "the second's two reads spent: the hello waits for the next second to read B"
-        );
-        h.advance(SECOND);
-        assert!(
-            settle_until(h, || is_set(&done)).await,
-            "the next second wakes the hello that waits for it, on a task of its own: it reads \
-             B there, and is answered"
-        );
-    })
-    .await;
-    drop(quoted.expect("a hello"));
-    drop(s1);
-    h.restore_outage(false);
-    h.release_swaps().await; // the given-up requests find their inputs spent
 }
 
 /// Flaws `FloorIgnoredPastTwo`, `WaitedCountsAfterFloor`, `PastTwoReadsAgain`,

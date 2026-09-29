@@ -2552,6 +2552,26 @@ pub enum SeederFlaw {
     /// back or is abandoned, and not as the clock moves: a read that stalls keeps it waiting
     /// past its second.
     ReadWaitUnwokenByClock,
+    /// A payment that finds its second's two reads spent waits for the next second without
+    /// asking to be woken then: nothing polls it again when the clock moves. A `hello` is
+    /// woken.
+    PayNextSecondUnwoken,
+    /// A payment waiting for a read under way that would serve it is woken when a read comes
+    /// back or is abandoned, and not as the clock moves: a read that stalls keeps it waiting
+    /// past its second, and past its deadline. A `hello` is woken.
+    PayReadWaitUnwokenByClock,
+    /// A payment waits for its account's turn without registering with the clock: a turn
+    /// held past its deadline is taken over only once something else wakes the payment. A
+    /// `hello` registers.
+    PayTurnNoClockWatch,
+    /// A payment waiting for a read under way that would serve it is woken as the clock
+    /// moves or a read is abandoned, and not when one comes back: it waits out the second,
+    /// and then reads again instead of taking that read's result. A `hello` is woken.
+    PayReadWaitUnwokenByReturn,
+    /// An entry waiting for a read under way that would serve it is woken as the clock
+    /// moves or a read comes back, and not when one is abandoned: once its reader is
+    /// dropped, it waits out the second instead of reading at once.
+    ReadWaitUnwokenByAbandon,
 }
 
 /// A defect planted in a mock viewer, to prove the adversary suite catches it.
@@ -3447,9 +3467,13 @@ struct State {
     /// Hellos waiting for their account's turn, per account
     /// ([`SeederFlaw::WaitingCountedPerVideo`] only).
     hellos_waiting_per_account: HashMap<Key, usize>,
-    /// Entries waiting for a read to come back ([`SeederFlaw::ReadWaitUnwokenByClock`]
-    /// only).
+    /// Entries waiting for a read to come back ([`SeederFlaw::ReadWaitUnwokenByClock`] and
+    /// [`SeederFlaw::PayReadWaitUnwokenByClock`] only).
     read_waiters: Vec<Waker>,
+    /// Entries waiting for a read to become the state each names
+    /// ([`SeederFlaw::ReadWaitUnwokenByAbandon`] and
+    /// [`SeederFlaw::PayReadWaitUnwokenByReturn`] only).
+    read_waiters_on: Vec<(ReadState, Waker)>,
 }
 
 /// An account's own reads in one second: the second, each read sent in it, and how many had
@@ -3646,7 +3670,7 @@ async fn next_poll() {
 }
 
 /// Ready on the next poll, with nothing asked to wake it: only a poll it did not ask for
-/// comes ([`SeederFlaw::NextSecondUnwoken`]).
+/// comes ([`SeederFlaw::NextSecondUnwoken`], [`SeederFlaw::PayNextSecondUnwoken`]).
 async fn unwoken_poll() {
     let mut polled = false;
     poll_fn(|_| {
@@ -4188,8 +4212,14 @@ impl Inner {
                 Plan::Done => return,
                 Plan::WaitRead => {
                     waited_in.get_or_insert(now);
-                    if self.has(SeederFlaw::ReadWaitUnwokenByClock) {
+                    if self.has(SeederFlaw::ReadWaitUnwokenByClock)
+                        || (proofs.is_some() && self.has(SeederFlaw::PayReadWaitUnwokenByClock))
+                    {
                         self.read_change().await;
+                    } else if self.has(SeederFlaw::ReadWaitUnwokenByAbandon) {
+                        self.read_becomes(ReadState::Back).await;
+                    } else if proofs.is_some() && self.has(SeederFlaw::PayReadWaitUnwokenByReturn) {
+                        self.read_becomes(ReadState::Abandoned).await;
                     } else {
                         next_poll().await;
                     }
@@ -4200,7 +4230,9 @@ impl Inner {
                 }
                 Plan::NextSecond => {
                     waited_in.get_or_insert(now);
-                    if self.has(SeederFlaw::NextSecondUnwoken) {
+                    if self.has(SeederFlaw::NextSecondUnwoken)
+                        || (proofs.is_some() && self.has(SeederFlaw::PayNextSecondUnwoken))
+                    {
                         unwoken_poll().await;
                     } else {
                         next_poll().await;
@@ -4264,7 +4296,8 @@ impl Inner {
     }
 
     /// Ready once a read comes back or is abandoned, and only then: the wait of
-    /// [`SeederFlaw::ReadWaitUnwokenByClock`], which no clock move wakes.
+    /// [`SeederFlaw::ReadWaitUnwokenByClock`] and [`SeederFlaw::PayReadWaitUnwokenByClock`],
+    /// which no clock move wakes.
     async fn read_change(&self) {
         let mut asked = false;
         poll_fn(|cx| {
@@ -4273,6 +4306,25 @@ impl Inner {
             }
             asked = true;
             self.state().read_waiters.push(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
+    }
+
+    /// Ready once the clock moves or a read becomes `state`, and only then: the wait of
+    /// [`SeederFlaw::ReadWaitUnwokenByAbandon`] (`Back`) and
+    /// [`SeederFlaw::PayReadWaitUnwokenByReturn`] (`Abandoned`).
+    async fn read_becomes(&self, state: ReadState) {
+        let mut asked = false;
+        poll_fn(|cx| {
+            if asked {
+                return Poll::Ready(());
+            }
+            asked = true;
+            self.state()
+                .read_waiters_on
+                .push((state, cx.waker().clone()));
+            self.clock.watch(cx.waker());
             Poll::Pending
         })
         .await;
@@ -5304,7 +5356,9 @@ impl Inner {
                     }
                     waited = true;
                     st.waiting.entry(key).or_default().push(cx.waker().clone());
-                    if !self.has(SeederFlaw::TurnNoClockWatch) {
+                    if !self.has(SeederFlaw::TurnNoClockWatch)
+                        && !(claim.is_some() && self.has(SeederFlaw::PayTurnNoClockWatch))
+                    {
                         self.clock.watch(cx.waker());
                     }
                     drop(st);
@@ -5586,9 +5640,24 @@ impl<'a> Reading<'a> {
 
     fn set(&self, state: ReadState) {
         self.with(|r| r.state = state);
-        if self.e.has(SeederFlaw::ReadWaitUnwokenByClock) {
+        if self.e.has(SeederFlaw::ReadWaitUnwokenByClock)
+            || self.e.has(SeederFlaw::PayReadWaitUnwokenByClock)
+        {
             let waiting = std::mem::take(&mut self.e.state().read_waiters);
             wake_all(waiting);
+        }
+        if self.e.has(SeederFlaw::ReadWaitUnwokenByAbandon)
+            || self.e.has(SeederFlaw::PayReadWaitUnwokenByReturn)
+        {
+            let woken: Vec<_> = {
+                let mut st = self.e.state();
+                let (woken, kept) = std::mem::take(&mut st.read_waiters_on)
+                    .into_iter()
+                    .partition(|(on, _)| *on == state);
+                st.read_waiters_on = kept;
+                woken
+            };
+            wake_all(woken.into_iter().map(|(_, w)| w).collect());
         }
     }
 
