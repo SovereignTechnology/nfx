@@ -469,6 +469,26 @@ impl MockNetwork {
         })
     }
 
+    /// A fresh token worth `amount` sat from `mint` in one-sat proofs, as a wallet holding
+    /// only small proofs selects it ([`ViewerFlaw::PaysInUnitProofs`] and the like only).
+    fn unit_token(&self, mint: &str, amount: u64) -> String {
+        let n = usize::try_from(amount).map_or(usize::MAX, |n| n.max(1));
+        let proofs = self.fresh_proofs(n.min(4 * MAX_PROOFS));
+        self.mint_token(TokenInfo {
+            proofs,
+            mints: vec![mint.to_owned()],
+            amount,
+            unit: "sat",
+            locked: false,
+            dleq: Dleq::Valid,
+        })
+    }
+
+    /// How many proofs `token` holds.
+    fn proof_count(&self, token: &str) -> usize {
+        self.read(token).map_or(0, |info| info.proofs.len())
+    }
+
     /// A token worth `amount` sat from `mint`, as a wallet selects it: `old` proofs it
     /// holds, then what the wallets hold of the older keyset ([`Harness::fund_older_keyset`]),
     /// spent first, up to the amount, topped up with fresh proofs (CDK selects an inactive
@@ -2572,6 +2592,29 @@ pub enum SeederFlaw {
     /// moves or a read comes back, and not when one is abandoned: once its reader is
     /// dropped, it waits out the second instead of reading at once.
     ReadWaitUnwokenByAbandon,
+    /// Refuses `unknown-video` to a peer with an account on a video it no longer serves: a
+    /// payment there that credited late, awaiting the quote that shows it, is never
+    /// settled, and the watcher pays the seeder nothing on any video.
+    DroppedVideoRefusesAccounts,
+    /// Answers a `hello` for a video it no longer serves from any peer, one with no account
+    /// there included, where it refuses it `unknown-video`.
+    DroppedVideoQuotesAnyone,
+    /// Still admits requests for a video it no longer serves, counting chunks it does not
+    /// serve.
+    DroppedVideoAdmits,
+    /// Refuses `unknown-video` to a peer whose only record on a video it no longer serves is
+    /// a swap whose outcome is unknown: a pre-payment there that credited late is never
+    /// shown to its watcher.
+    DroppedVideoIgnoresUnknownSwap,
+    /// Refuses a banned peer's `hello` for a video it no longer serves `unknown-video`, where
+    /// it refuses it `banned`.
+    DroppedVideoBanUnchecked,
+    /// Refuses the `hello` of a peer whose ban has expired, for a video it no longer serves,
+    /// as banned: it does not age the bans first.
+    DroppedVideoBanNotAged,
+    /// Refuses a `pay` on the session of a video it no longer serves `unknown-video`, which
+    /// stops the watcher, where it verifies it as any other.
+    DroppedVideoRefusesPay,
 }
 
 /// A defect planted in a mock viewer, to prove the adversary suite catches it.
@@ -3347,6 +3390,69 @@ pub enum ViewerFlaw {
     /// Once stopped, counts this ledger's closed session's payment's 180 s from that
     /// session's quote, not from sending.
     StoppedCatchUpFromQuote,
+    /// Pays with a token of one-sat proofs, as a wallet holding only small proofs sends an
+    /// exact selection whatever its count (CDK's `max_proofs` unset): more than 64 proofs
+    /// once a payment passes 64 sat, which the seeder refuses `bad-token`.
+    PaysInUnitProofs,
+    /// Pays its last payment of a session with one-sat proofs, whatever their count.
+    LastPayInUnitProofs,
+    /// Pays ahead after a refusal with one-sat proofs, whatever their count.
+    PayAheadInUnitProofs,
+    /// Pays with one-sat proofs up to 65 of them, and swaps to fewer only past that: a
+    /// payment of 65 sat holds 65 proofs.
+    SixtyFiveProofs,
+    /// Pays with a selection of an older keyset's proofs topped up with fresh ones as it
+    /// is, whatever its count: it never swaps to fewer first.
+    MixedSelectionUnswapped,
+    /// Swaps such a selection to fewer proofs only past 65 of them: one of 65 is paid as it
+    /// is.
+    MixedSelectionPastSixtyFive,
+    /// Counts a payment's 180 s from the last request it sent before it, not from sending:
+    /// a payment that waited behind the answer to the one before is reclaimed early.
+    WaitFromLastRequest,
+    /// Counts a payment's 180 s from the request that brought its unpaid count to half the
+    /// window, not from sending.
+    WaitFromDueRequest,
+    /// Counts the 180 s of a payment made after a `rej` from that `rej`, not from sending.
+    WaitFromLastRej,
+    /// Counts the 180 s of a payment ahead after a refusal from that refusal, not from
+    /// sending.
+    WaitFromRefusal,
+    /// Counts a closed session's payment's 180 s from the last request sent on that
+    /// session, not from sending.
+    EndWaitFromLastRequest,
+    /// Once stopped, counts a live session's 180 s from the last request sent on it, not
+    /// from sending.
+    StoppedLiveWaitFromLastRequest,
+    /// Once stopped, counts this ledger's closed session's payment's 180 s from the last
+    /// request sent on that session, not from sending.
+    StoppedCatchUpFromLastRequest,
+    /// Takes a live payment unanswered at 180 s whose reclaim finds a proof spent as
+    /// awaiting a quote, as a closed session's is, and does not stop: a quote showing it
+    /// makes it pay again.
+    TimeoutSpentAwaitsQuote,
+    /// Takes a payment refused with a code other than `mint-unavailable` whose reclaim
+    /// finds a proof spent as awaiting a quote, and does not stop: a quote showing it makes
+    /// it pay again.
+    RejSpentAwaitsQuote,
+    /// Takes a quote that settles a payment found spent as leave to pay again: it clears
+    /// the standing's stop.
+    SettlingQuoteClearsStop,
+    /// Takes a quote whose `served` is at most the chunks requested or the chunks paid for,
+    /// whichever is more: a seeder books the watcher's credit as served.
+    ServedUpToAcked,
+    /// Takes a quote whose `served` counts its refused requests too: a seeder books a chunk
+    /// it refused as served.
+    ServedCountsRefused,
+    /// Takes a quote that settles a payment if its `served` is at most that payment's
+    /// `upto_chunk`: a seeder books a pay-ahead it settles as served.
+    ServedWithinSettled,
+    /// Pays once the unpaid count reaches half the window, rounded down: on an odd window,
+    /// one chunk early, and so more often.
+    DueRoundsDown,
+    /// Pays once the unpaid count reaches the whole window when the window is odd: the
+    /// seeder refuses its next request each time.
+    DueFullOnOdd,
 }
 
 /// Why a viewer refuses a quote without stopping, for the flaws that act on the refusal.
@@ -3474,6 +3580,8 @@ struct State {
     /// ([`SeederFlaw::ReadWaitUnwokenByAbandon`] and
     /// [`SeederFlaw::PayReadWaitUnwokenByReturn`] only).
     read_waiters_on: Vec<(ReadState, Waker)>,
+    /// The videos it no longer serves ([`Harness::drop_video`]): it keeps their accounts.
+    dropped: HashSet<usize>,
 }
 
 /// An account's own reads in one second: the second, each read sent in it, and how many had
@@ -5928,6 +6036,11 @@ impl MockEngine {
     pub fn identities_held(&self) -> usize {
         self.0.identities_held()
     }
+
+    /// Stop serving video `video`, keeping its accounts, as a seeder that drops a video does.
+    pub fn drop_video(&self, video: usize) {
+        self.0.state().dropped.insert(video);
+    }
 }
 
 fn rej(code: RejCode, detail: &str) -> Rej {
@@ -5968,6 +6081,27 @@ impl SeederEngine for MockEngine {
             }
         };
         let key = (*peer, video);
+        // A video it no longer serves: a peer it holds an account for there, or a swap of
+        // one whose outcome is unknown, is answered as before, and admitted nothing; any
+        // other is refused `unknown-video`, and a banned one `banned`.
+        {
+            let mut st = e.state();
+            if st.dropped.contains(&video) && !e.has(SeederFlaw::DroppedVideoQuotesAnyone) {
+                if !e.has(SeederFlaw::DroppedVideoBanNotAged) {
+                    e.age(&mut st);
+                }
+                let holds = st.accounts.contains_key(&key)
+                    || (st.unknown.iter().any(|u| u.pay.key == key)
+                        && !e.has(SeederFlaw::DroppedVideoIgnoresUnknownSwap));
+                if !holds || e.has(SeederFlaw::DroppedVideoRefusesAccounts) {
+                    if st.banned.contains_key(peer) && !e.has(SeederFlaw::DroppedVideoBanUnchecked)
+                    {
+                        return Err(rej(RejCode::Banned, "this peer is banned"));
+                    }
+                    return Err(rej(RejCode::UnknownVideo, "no longer served here"));
+                }
+            }
+        }
         let count_key = (
             *peer,
             e.has(SeederFlaw::SessionCapPerVideo).then_some(video),
@@ -6746,7 +6880,9 @@ impl SeederSession for MockSession {
             }
             return false;
         }
-        let member = e.videos[self.key.1].members.contains(sha256);
+        // A video it no longer serves has no file it serves.
+        let member = e.videos[self.key.1].members.contains(sha256)
+            && (!st.dropped.contains(&self.key.1) || e.has(SeederFlaw::DroppedVideoAdmits));
         if !member && !e.has(SeederFlaw::AdmitsForeignChunks) {
             if e.has(SeederFlaw::ForeignCreatesAccount) {
                 e.account(&mut st, self.key);
@@ -6822,6 +6958,11 @@ impl SeederSession for MockSession {
     async fn pay(&mut self, pay: &Pay) -> Result<Ack, Rej> {
         if self.e.has(SeederFlaw::BanCheckedBeforeTurn) && self.banned() {
             return Err(rej(RejCode::Banned, "this peer is banned"));
+        }
+        if self.e.has(SeederFlaw::DroppedVideoRefusesPay)
+            && self.e.state().dropped.contains(&self.key.1)
+        {
+            return Err(rej(RejCode::UnknownVideo, "no longer served here"));
         }
         // The deadline counts from here, the payment's arrival.
         let id = self.e.arrive(self.key);
@@ -7034,6 +7175,15 @@ pub struct MockViewer {
     /// the 180 s run from sending).
     quoted_at: u64,
     answered_at: u64,
+    /// When the last request was sent, and when each request still owed was, oldest first;
+    /// every request sent, refused or not; when the last refusal came, and the last `rej`
+    /// since the last payment ([`ViewerFlaw::WaitFromLastRequest`] and the like only: the
+    /// 180 s run from sending, and `served` is bounded by the requests not refused).
+    last_request_at: u64,
+    request_times: Vec<u64>,
+    sent_requests: u64,
+    refused_at: u64,
+    rej_at: Option<u64>,
 }
 
 impl MockViewer {
@@ -7083,6 +7233,11 @@ impl MockViewer {
             unavailable_here: 0,
             quoted_at: 0,
             answered_at: 0,
+            last_request_at: 0,
+            request_times: Vec::new(),
+            sent_requests: 0,
+            refused_at: 0,
+            rej_at: None,
         }
     }
 
@@ -7752,7 +7907,10 @@ impl MockViewer {
         let early_own = (self.has(ViewerFlaw::StoppedIgnoresOwnWait) && self.halted())
             || (self.has(ViewerFlaw::StoppedCatchUpFromQuote)
                 && self.halted()
-                && self.clock.now() >= self.quoted_at + ANSWER_WAIT.as_secs());
+                && self.clock.now() >= self.quoted_at + ANSWER_WAIT.as_secs())
+            || (self.has(ViewerFlaw::StoppedCatchUpFromLastRequest)
+                && self.halted()
+                && self.clock.now() >= self.last_request_at + ANSWER_WAIT.as_secs());
         let early_others = self.has(ViewerFlaw::NoSessionIgnoresOthersWait) && self.quote.is_none();
         let old: Vec<(u64, Pending)> = {
             let mut st = self.standing();
@@ -7918,11 +8076,28 @@ impl MockViewer {
                 return Ok(None);
             }
         }
+        // At most 64 proofs (NFX-07 §3 step 1): a selection holding more is swapped to fewer
+        // first, here to fresh proofs, one per set bit. The flaws pay one-sat proofs, as a
+        // wallet holding only small ones selects them.
+        let units = self.has(ViewerFlaw::PaysInUnitProofs)
+            || (last && self.has(ViewerFlaw::LastPayInUnitProofs))
+            || (ahead > 0 && self.has(ViewerFlaw::PayAheadInUnitProofs))
+            || (amount <= 65 && self.has(ViewerFlaw::SixtyFiveProofs));
+        if units && older == 0 && kept.is_empty() {
+            token = self.net.unit_token(&self.mint, amount);
+        } else if self.net.proof_count(&token)
+            > MAX_PROOFS + usize::from(self.has(ViewerFlaw::MixedSelectionPastSixtyFive))
+            && !self.has(ViewerFlaw::MixedSelectionUnswapped)
+        {
+            self.net.put_back(older);
+            token = self.net.issue(&self.mint, amount);
+        }
+        let sent_at = self.stamp(threshold, ahead > 0);
         self.set_pending(Pending {
             upto,
             amount,
             token: token.clone(),
-            sent_at: self.clock.now(),
+            sent_at,
             spent: self.spent,
         });
         if !self.has(ViewerFlaw::PayAheadSticky) {
@@ -7932,6 +8107,29 @@ impl MockViewer {
             upto_chunk: upto,
             token,
         }))
+    }
+
+    /// When a payment made now is sent: now. The flaws stamp it with an earlier input: the
+    /// last request, the one that brought the unpaid count to `threshold`, the `rej` of the
+    /// payment before, or the refusal it pays ahead after.
+    fn stamp(&mut self, threshold: u64, ahead: bool) -> u64 {
+        let now = self.clock.now();
+        let rej_at = self.rej_at.take();
+        if self.has(ViewerFlaw::WaitFromLastRequest) {
+            self.last_request_at
+        } else if self.has(ViewerFlaw::WaitFromDueRequest) {
+            usize::try_from(self.acked + threshold)
+                .ok()
+                .and_then(|n| self.request_times.get(n.saturating_sub(1)))
+                .copied()
+                .unwrap_or(now)
+        } else if let Some(t) = rej_at.filter(|_| self.has(ViewerFlaw::WaitFromLastRej)) {
+            t
+        } else if ahead && self.has(ViewerFlaw::WaitFromRefusal) {
+            self.refused_at
+        } else {
+            now
+        }
     }
 
     /// Settle this ledger's entry in `list` (of the standing) if `quote` shows it exactly.
@@ -8087,19 +8285,20 @@ impl Viewer for MockViewer {
             return Err("no mint this viewer holds tokens from".into());
         }
         // A quote showing an unsettled payment accepted, both fields, settles it.
-        if self.settle_by_quote(
+        let unsettled = self.settle_by_quote(
             quote,
             |st| &mut st.unsettled,
             self.has(ViewerFlaw::SettleOnUptoOnly),
             self.has(ViewerFlaw::SettleOnSpentOnly),
             self.has(ViewerFlaw::SettleUnsettledAnyLedger),
             self.has(ViewerFlaw::SettleOnUptoAbove),
-        ) {
+        );
+        if unsettled {
             self.free_slot(self.id);
         }
         // So does one showing a payment that awaits a quote; one equal to the ledger
         // leaves it waiting.
-        self.settle_by_quote(
+        let lost = self.settle_by_quote(
             quote,
             |st| &mut st.lost,
             self.has(ViewerFlaw::SettleLostOnUpto),
@@ -8107,12 +8306,13 @@ impl Viewer for MockViewer {
             self.has(ViewerFlaw::SettleLostAnyLedger),
             self.has(ViewerFlaw::SettleLostOnUptoAbove),
         );
+        let mut settled = unsettled || lost;
         // And one showing a payment whose reclaim is incomplete: the seeder has it, and
         // the reclaim is cancelled.
         if !self.has(ViewerFlaw::QuoteIgnoresReclaiming) {
             let keep = self.has(ViewerFlaw::ReclaimSettleKeepsEntry);
             let before = keep.then(|| self.standing().reclaiming.clone());
-            self.settle_by_quote(
+            settled |= self.settle_by_quote(
                 quote,
                 |st| &mut st.reclaiming,
                 self.has(ViewerFlaw::SettleReclaimingOnUpto),
@@ -8130,8 +8330,18 @@ impl Viewer for MockViewer {
                 self.standing().reclaiming.retain(|(l, _)| *l != id);
             }
         }
-        let mut honest = quote.served
-            <= self.requested + u64::from(self.has(ViewerFlaw::ServedOffByOne))
+        // At most the chunks requested and not refused, whatever was paid for (flaws take
+        // more).
+        let served = if self.has(ViewerFlaw::ServedUpToAcked) {
+            self.requested.max(self.acked)
+        } else if self.has(ViewerFlaw::ServedCountsRefused) {
+            self.sent_requests
+        } else if settled && self.has(ViewerFlaw::ServedWithinSettled) {
+            self.requested.max(quote.accepted_upto)
+        } else {
+            self.requested
+        };
+        let mut honest = quote.served <= served + u64::from(self.has(ViewerFlaw::ServedOffByOne))
             && quote.accepted_upto == self.acked
             && quote.spent_total == self.spent;
         if !honest
@@ -8197,7 +8407,9 @@ impl Viewer for MockViewer {
             let id = self.id;
             self.standing().lost.retain(|(l, _)| *l != id);
         }
-        if self.has(ViewerFlaw::QuoteClearsStop) {
+        if self.has(ViewerFlaw::QuoteClearsStop)
+            || (lost && self.has(ViewerFlaw::SettlingQuoteClearsStop))
+        {
             self.standing().stopped = false;
             self.halted = false;
         }
@@ -8277,6 +8489,10 @@ impl Viewer for MockViewer {
         }
         self.frees_live_slot(ViewerFlaw::RequestedFreesLiveSlot);
         self.requested += 1;
+        let now = self.clock.now();
+        self.last_request_at = now;
+        self.request_times.push(now);
+        self.sent_requests += 1;
     }
 
     fn refused(&mut self) {
@@ -8295,6 +8511,8 @@ impl Viewer for MockViewer {
         } else {
             self.requested = self.requested.saturating_sub(1);
         }
+        self.request_times.pop();
+        self.refused_at = self.clock.now();
         self.pay_ahead = true;
         if self.has(ViewerFlaw::RefusalRestartsWait) {
             self.restart_wait(false);
@@ -8318,12 +8536,16 @@ impl Viewer for MockViewer {
     }
 
     async fn due(&mut self) -> Result<Option<Pay>, String> {
-        // Pay at half the window, so the seeder never has to stall.
+        // Pay at half the window, rounded up, so the seeder never has to stall.
         let window = self.quote.as_ref().map_or(2, |q| q.window);
         let when = if self.has(ViewerFlaw::PaysAtTheWindow) {
             window + 1
-        } else if self.has(ViewerFlaw::PaysAtFullWindow) {
+        } else if self.has(ViewerFlaw::PaysAtFullWindow)
+            || (window % 2 == 1 && self.has(ViewerFlaw::DueFullOnOdd))
+        {
             window
+        } else if self.has(ViewerFlaw::DueRoundsDown) {
+            window / 2
         } else {
             window.div_ceil(2)
         };
@@ -8470,9 +8692,12 @@ impl Viewer for MockViewer {
             }
             return;
         };
-        if !(was_halted && self.has(ViewerFlaw::RejNoReclaimWhenStopped)) {
-            self.reclaim(self.id, p, false);
-        }
+        self.rej_at = Some(self.clock.now());
+        let outcome = if was_halted && self.has(ViewerFlaw::RejNoReclaimWhenStopped) {
+            None
+        } else {
+            Some(self.reclaim(self.id, p, false))
+        };
         if self.has(ViewerFlaw::UnavailableClearsStop)
             && rej.code == RejCode::MintUnavailable
             && !self.reclaim_incomplete()
@@ -8492,6 +8717,12 @@ impl Viewer for MockViewer {
             _ => false,
         };
         if pays_on {
+            return;
+        }
+        if rej.code != RejCode::MintUnavailable
+            && outcome == Some(Reclaim::SomeSpent)
+            && self.has(ViewerFlaw::RejSpentAwaitsQuote)
+        {
             return;
         }
         if rej.code != RejCode::MintUnavailable || self.has(ViewerFlaw::StopsOnOutage) {
@@ -8548,6 +8779,8 @@ impl Viewer for MockViewer {
             || (was_halted && self.has(ViewerFlaw::StoppedLiveWaitFromLastAnswer))
         {
             Some(self.answered_at)
+        } else if was_halted && self.has(ViewerFlaw::StoppedLiveWaitFromLastRequest) {
+            Some(self.last_request_at)
         } else {
             None
         };
@@ -8575,6 +8808,9 @@ impl Viewer for MockViewer {
                 && self.has(ViewerFlaw::TimeoutDropsBlockedReclaim)
             {
                 self.standing().reclaiming.retain(|(_, q)| q.token != token);
+            }
+            if outcome == Reclaim::SomeSpent && self.has(ViewerFlaw::TimeoutSpentAwaitsQuote) {
+                return;
             }
         }
         if !self.has(ViewerFlaw::KeepsPayingAfterTimeout) {
@@ -8607,6 +8843,9 @@ impl Viewer for MockViewer {
             }
             if self.has(ViewerFlaw::EndRestartsWait) {
                 p.sent_at = self.clock.now();
+            }
+            if self.has(ViewerFlaw::EndWaitFromLastRequest) {
+                p.sent_at = self.last_request_at;
             }
             if self.has(ViewerFlaw::EndReclaimsNow) {
                 self.free_slot(self.id);
@@ -8834,6 +9073,10 @@ impl Harness for MockHarness {
 
     fn foreign_chunk(&self) -> String {
         "f".repeat(64)
+    }
+
+    fn drop_video(&self, engine: &MockEngine, v: u8) {
+        engine.drop_video(usize::from(v));
     }
 
     fn window_ceiling(&self) -> u64 {
