@@ -9,8 +9,8 @@ cd "$repo"
 py=${PYTHON:-python3}
 step() { printf '\n== %s\n' "$*"; }
 # The lock's steps run as the lock job runs them: under `env -i`, with only the variables
-# the lock's allow-list names. The job's own (GitLab's CI_*, the tool pins, a coloured
-# cargo) are none of its business, and in CI mode it refuses any it does not know.
+# the lock's allow-list names. The job's own (the CI host's GITHUB_* or CI_*, the tool pins,
+# a coloured cargo) are none of its business, and in CI mode it refuses any it does not know.
 locked() {
   local keep=() v
   for v in PATH HOME CI CARGO_HOME RUSTUP_HOME LOCKED_DIRS_UNLOCKED; do

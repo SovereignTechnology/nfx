@@ -3,8 +3,11 @@
 # never on a developer's machine. Dispatched by collaborators only:
 #   gh workflow run probe.yml --ref <branch> -f cmd='cargo test -p nfx-pay --test adversary' -f tag=<label>
 # The output is the job log and an artifact `probe-<tag>` holding output.txt and rc.txt.
-# It restores a build cache for speed; the verdict on the money crates is the `lock` job in
-# ci.yml, which never restores one.
+# A probe builds from scratch and caches nothing: a cache is read only on the branch that
+# saved it or the default branch, so one a probe saved on its own probe/<tag> branch was
+# never read by another probe, and saving it only made each probe slower. A probe/** branch
+# runs no ci.yml (its push trigger leaves those out), so a probe commit has no lock verdict;
+# the verdict on the money crates is the `lock` job in ci.yml.
 name: probe
 
 on:
@@ -42,13 +45,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            /opt/cargo-home/registry
-            crates/target
-          key: probe-${{ hashFiles('crates/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: probe-${{ hashFiles('crates/Cargo.lock') }}-
       - name: run
         shell: bash
         env:
