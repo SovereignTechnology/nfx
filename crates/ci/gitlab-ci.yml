@@ -1,3 +1,7 @@
+# DORMANT. This repository's CI runs on GitHub Actions (.github/workflows/ci.yml, the same
+# two jobs); this file runs nothing, and the fetch below names no real host. The lock still
+# pins it (crates/ci/check-locked.sh), so reviving it is a change to the pins.
+#
 # NFX master-plan CI (ADR 0008). It runs only master-plan checks, never the demo's
 # `npm run ci`. The project's CI config path is set to this file; the root
 # .gitlab-ci.yml path is left to the demo mirror, so `git merge demo/<tag>` stays

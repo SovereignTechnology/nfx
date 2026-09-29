@@ -1,9 +1,10 @@
 #!/bin/bash -p
-# The lock's verdict as its own CI job (gitlab-ci.yml `lock`). It runs no unpinned
-# repository code: only this script, check-locked.sh and locked.py (all pinned), cargo,
-# and the money crates' own build and tests, whose every input is pinned. gitlab-ci.yml
-# runs it under `env -i` with literal paths, so no pipeline or project variable reaches it.
-# The `check` job runs everything else.
+# The lock's verdict as its own CI job (.github/workflows/ci.yml `lock`). It runs no
+# unpinned repository code: only this script, check-locked.sh and locked.py (all pinned),
+# cargo, and the money crates' own build and tests, whose every input is pinned. ci.yml
+# (pinned too) runs it under `env -i` with literal paths, as the dormant gitlab-ci.yml
+# does, so no variable of the runner or the project reaches it. The `check` job runs
+# everything else.
 #
 # Order: the tree is the commit and holds nothing untracked; the pinned files and the
 # environment; the cached archives; then what the money crates are built from, read from
@@ -18,11 +19,11 @@ fail() { printf 'lock job: %s\n' "$*" >&2; exit 1; }
 [ "$(git rev-parse HEAD)" = "$CI_COMMIT_SHA" ] || fail "HEAD is not $CI_COMMIT_SHA"
 git diff --quiet HEAD -- || fail "tracked files differ from $CI_COMMIT_SHA"
 # And it holds nothing git does not track: a build directory or anything else a CI cache
-# can carry into a fresh clone under a shared key (gitlab-ci.yml) is refused, so the
-# verdict rests only on tracked files. The one exception is the registry cache and index
-# a job restores; cargo has not run yet, so registry/src and the rest are not there to
-# allow. Renames and staged paths (any status but ?? and !!) cannot appear after the diff
-# check above; if one does, it fails here.
+# could carry into a fresh clone is refused, so the verdict rests only on tracked files.
+# ci.yml's lock job restores no cache. The one exception is the registry cache and index a
+# job restores (gitlab-ci.yml's does, under a shared key); cargo has not run yet, so
+# registry/src and the rest are not there to allow. Renames and staged paths (any status
+# but ?? and !!) cannot appear after the diff check above; if one does, it fails here.
 while IFS= read -r -d '' entry; do
   status=${entry:0:2} path=${entry:3}
   case $status in

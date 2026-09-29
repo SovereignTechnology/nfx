@@ -42,7 +42,9 @@ fi
 #     the modules it rests on, its vector test); the pay/1 vectors and their reference
 #     reader; the workspace manifest's profile, patch, replace, lints, resolver, members
 #     and package;
-#   - this check, its helpers, the CI that runs them, and locked-compiled.txt.
+#   - this check, its helpers, the CI that runs them (.github/workflows whole: ci.yml runs
+#     them, and a workflow added beside it is a change too; and crates/ci/gitlab-ci.yml, the
+#     same jobs for GitLab, dormant), and locked-compiled.txt.
 # crates/ci/locked-compiled.txt pins the money crates' resolved dependency closure with
 # its features (nfx-pay's and nfx-pay-wire's, test dependencies included), the workspace
 # crates that may depend on nfx-pay, the workspace's build scripts and proc-macros, and
@@ -66,8 +68,9 @@ fi
 #   - a path package that is not a workspace member;
 #   - the money tests not all running.
 #
-# CI is recognised by CI, GITLAB_CI or CI_JOB_ID, and the pinned gitlab-ci.yml runs this
-# with CI=true and LOCKED_DIRS_UNLOCKED emptied, so a pipeline variable cannot unset CI.
+# CI is recognised by CI, GITLAB_CI or CI_JOB_ID. The pinned .github/workflows/ci.yml runs
+# this with CI=true: its lock job under env -i, its check job with LOCKED_DIRS_UNLOCKED
+# emptied (as the dormant gitlab-ci.yml does, so a pipeline variable cannot unset CI).
 #
 # What it guarantees: the money code (every pinned file) and what it is built and tested
 # with cannot change without a re-pin, and its tests ran in full. What it does not:
@@ -87,12 +90,16 @@ fi
 #     tests;
 #   - whoever can push can also re-pin, and the CI configuration lives in the branch it
 #     checks. This makes money-code changes loud and reviewable; the control is sovtech's
-#     review of every change to the pins;
+#     review of every change to the pins. An edit to the CI configuration fails its pin
+#     wherever the lock still runs (the lock job, and the check job's lock steps). One that
+#     stops the lock job running this check, or heeding it, the lock job cannot catch:
+#     only the check job's lock steps, if the edit leaves them running, and that review;
 #   - the verdict is the CI lock job's (env -i, bash -p, no unpinned code before it). A
 #     local run, or the check job's lock steps after unpinned code has run, is a second
 #     look;
-#   - pipeline variables and `[skip ci]` are the project's settings to close
-#     (gitlab-ci.yml).
+#   - a push whose message says `[skip ci]`, or to a probe/** branch (ci.yml leaves those
+#     out), runs no lock job: its commit counts as locked only once a lock job passed on
+#     it. GitLab's pipeline variables are that project's settings to close (gitlab-ci.yml).
 set -euo pipefail
 shopt -s inherit_errexit   # a failure inside $(...) fails the script, not just the subshell
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
@@ -116,6 +123,7 @@ guarded=(
   crates/ci/check.sh
   crates/ci/gitlab-ci.yml
   crates/ci/locked-compiled.txt
+  .github/workflows
 )
 must_be_absent=(crates/nfx-pay/build.rs crates/nfx-pay-wire/build.rs)
 paths=("${locked[@]}" "${guarded[@]}")
@@ -160,7 +168,7 @@ for p in "${must_be_absent[@]}"; do
 done
 
 # The build environment: nothing may redirect what cargo runs or compiles. In CI the lock
-# job runs under `env -i` (gitlab-ci.yml), and every variable must be on the list below.
+# job runs under `env -i` (ci.yml), and every variable must be on the list below.
 allowed='CARGO_HOME CARGO_TERM_COLOR CARGO_BUILD_JOBS CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG CARGO_INCREMENTAL CARGO_DENY_VERSION CARGO_DENY_SHA256 RUSTUP_HOME RUST_VERSION'
 ci_allowed="$allowed PATH HOME CI CI_COMMIT_SHA PYTHON PWD OLDPWD SHLVL _ LOCKED_DIRS_UNLOCKED"
 # Names from `env -0`, so no value can forge a line. A name that is not a plain
@@ -224,7 +232,7 @@ case $mode in
       src=$(realpath -m -- "$home/registry/src")
       case $src in
         "$(pwd -P)"/?*) ;;
-        *) fail "in CI, the extracted sources must be the job's own, inside the checkout (gitlab-ci.yml), not $src" ;;
+        *) fail "in CI, the extracted sources must be the job's own, inside the checkout (ci.yml), not $src" ;;
       esac
       rm -rf -- "${src:?}"
       echo "locked paths: extracted sources removed; cargo re-extracts from verified archives"

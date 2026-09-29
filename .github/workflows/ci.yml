@@ -1,20 +1,24 @@
-# NFX CI on GitHub Actions: the same two jobs as crates/ci/gitlab-ci.yml, in the same pinned
-# image. `lock` gives the money crates' verdict (crates/ci/check-locked.sh) under a clean
-# environment, installing nothing and restoring no cache, so nothing a branch or another job
-# leaves behind can stand in for the build. `check` runs everything else (crates/ci/check.sh).
+# NFX CI on GitHub Actions, in a pinned image. `lock` gives the money crates' verdict
+# (crates/ci/check-locked.sh) under a clean environment, installing nothing and restoring no
+# cache, so nothing a branch or another job leaves behind can stand in for the build. `check`
+# runs everything else (crates/ci/check.sh). The lock pins this file with the rest of
+# .github/workflows, so an edit to it fails the lock wherever the lock still runs.
+# crates/ci/gitlab-ci.yml holds the same two jobs for GitLab, and is dormant.
 name: ci
 
 on:
   push:
-    branches: ['**']   # branches only: a tag push (demo-base) runs nothing
+    # Branches only: a tag push (demo-base) runs nothing. A probe branch (probe/<tag>,
+    # probe.yml) runs nothing either: its commit is thrown away, and has no lock verdict.
+    branches: ['**', '!probe/**']
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Every pushed commit runs in a group of its own, so each gets its lock verdict; only a
-# pull request's superseded runs are cancelled.
+# Every pushed commit (but a probe's) runs in a group of its own, so each gets its lock
+# verdict; only a pull request's superseded runs are cancelled.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -45,13 +49,27 @@ jobs:
       - name: lock
         shell: bash
         run: |
-          # A branch without the money-code lock (older ones) has nothing to verify here;
-          # where the lock exists, it runs and fails closed.
-          if [ ! -e crates/ci/locked.sha256 ] && [ ! -e crates/ci/lock-job.sh ]; then
-            echo "no money-code lock on this branch"; exit 0
-          fi
-          # System-wide, so it survives env -i (HOME=/root below).
+          # System-wide, so it survives env -i (HOME=/root below); first, since the guard
+          # below reads the tree through git.
           git config --system --add safe.directory "$(pwd -P)"
+          # The lock is skipped only on a branch holding no money code and no part of the
+          # lock (main, and branches older than the lock). Money code is a money crate or a
+          # locked path, or any Rust file, Cargo manifest or Cargo.lock that names a money
+          # crate, so a crate moved elsewhere under its name still counts (one renamed too
+          # is money logic written afresh, which no lock can tell: check-locked.sh).
+          # Anywhere else the lock runs, and money code with any part of the lock missing
+          # fails here.
+          money=$(git ls-files -- crates/nfx-pay crates/nfx-pay-wire crates/nfx-node/src/pay crates/nfx-node/src/origin_pay.rs)
+          rc=0; named=$(git grep -l -E 'nfx[-_]pay' -- '*.rs' '*Cargo.toml' '*Cargo.lock') || rc=$?
+          [ "$rc" -le 1 ] || { echo "lock: git grep failed ($rc)"; exit 1; }
+          lock=$(git ls-files -- crates/ci/locked.sha256 crates/ci/lock-job.sh)
+          if [ -z "$money$named$lock" ]; then
+            echo "no money code and no money-code lock on this branch"; exit 0
+          fi
+          if [ ! -f crates/ci/locked.sha256 ] || [ ! -f crates/ci/lock-job.sh ]; then
+            echo "money code or part of the lock is here, but not the whole lock (crates/ci/locked.sha256, crates/ci/lock-job.sh)"
+            exit 1
+          fi
           /usr/bin/env -i PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             HOME=/root RUSTUP_HOME=/usr/local/rustup CARGO_HOME="$(pwd -P)/.cargo-home" CI=true \
             CI_COMMIT_SHA="$GITHUB_SHA" PYTHON=/usr/bin/python3 /bin/bash -p crates/ci/lock-job.sh
