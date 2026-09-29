@@ -344,22 +344,22 @@ pub struct EngineParams {
 /// What the adversary suite needs from an engine under test: the mock now, and the real
 /// engine with an in-process mint in the M2 security stage.
 ///
-/// **How the suite waits.** It never judges an engine's progress by a count of polls. It
-/// drives the engine's futures on the runtime its test runs it in, polled with their task's
-/// waker, and yields to that runtime between polls, so that tasks the engine spawns or
-/// wakes run too. An engine moves only on its calls' answers, on the harness's clock and on
-/// the suite's own calls: no timer of its own in real time moves it.
-/// [`Harness::answers_under_way`] says whether an answer of the mint's is still on its way,
-/// and the suite waits, in real time, while one is. So:
+/// **How the suite waits.** It judges an engine's progress by the answers its calls await,
+/// never by how many polls an answer takes. It drives the engine's futures on the runtime
+/// its test runs it in, polled with their task's waker, and yields to that runtime between
+/// polls, so that tasks the engine spawns or wakes run too. An engine moves only on its
+/// calls' answers, on the harness's clock and on the suite's own calls: no timer of its own
+/// in real time moves it. [`Harness::answers_under_way`] says whether an answer the engine
+/// awaits is still on its way, and the suite waits, in real time, while one is. So:
 /// - it lets a future take a step by polling it once the answers under way have come in, a
-///   turn of the runtime after them. An entry (a `hello` or a `pay`) awaits its own calls
-///   to the mint, so an answer that has woken it is taken in its next poll; and what it
-///   decides with no call under way (a refusal as it arrives, say) it answers in the poll
-///   that decides it;
+///   turn of the runtime after them. An entry (a `hello` or a `pay`) awaits its own calls,
+///   so an answer that has woken it is taken in its next poll; and what it decides with no
+///   call under way (a refusal as it arrives, say) it answers in the poll that decides it;
 /// - it waits for an answer, or checks that a future still waits, by polling it until it is
 ///   ready, or until it has stayed pending for 100 turns of the runtime with no answer under
-///   way. The engine has then taken every answer and its own tasks have run: it waits on the
-///   suite (a clock move, a release, another entry).
+///   way. It then takes the future to wait on the suite (a clock move, a release, another
+///   entry): by then the engine has taken every answer, since what it does between answers,
+///   on its own tasks and in the polls its answers wake, takes fewer turns than that.
 ///
 /// It waits 5 s in real time at most for an engine to settle, far above any honest answer,
 /// and a scenario that hangs is timed out by its runner. Scenarios whose entries run on
@@ -536,11 +536,14 @@ pub trait Harness {
     /// Key requests the seeder has sent the mint (NUT-01 and NUT-02), one per request,
     /// answered or held ([`Harness::hold_key_fetches`]).
     fn key_requests(&self) -> u64;
-    /// Whether an answer of the mint's to a seeder or a watcher is under way: its call has
-    /// left the engine or the watcher, and the mint has not yet answered it and woken its
-    /// caller. A call the suite holds ([`Harness::hold_swaps`] and the like) is not under
-    /// way, nor is an answer its caller has been woken for, or one ready for its caller's
-    /// next poll. The suite waits while one is (the trait's doc says how).
+    /// Whether an answer a seeder or a watcher awaits is under way: its call has left the
+    /// engine or the watcher, to the mint or to anything else that answers from off the
+    /// suite's runtime (a store's worker thread, say), and it has not yet been answered and
+    /// its caller woken. A call the suite holds ([`Harness::hold_swaps`] and the like) is not
+    /// under way, nor is an answer its caller has been woken for, or one ready for its
+    /// caller's next poll. The suite waits while one is (the trait's doc says how). The
+    /// mock's only such calls are the mint's; a harness for an engine that awaits others
+    /// counts them too.
     fn answers_under_way(&self) -> bool;
     /// The mint refuses, at once, a NUT-07 check or a NUT-09 restore that covers more than
     /// `max` proofs or outputs (CDK's `max_inputs` and `max_outputs`: 11014 for a check,

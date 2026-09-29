@@ -5,11 +5,12 @@
 //! scenario panics on failure. Concurrency uses [`both`], a deterministic two-future join,
 //! so the suite needs no runtime of its own: it runs in the one its test gives it.
 //!
-//! It judges an engine's progress by the mint's answers, never by a count of polls: it
-//! waits in real time while an answer of the mint's is under way, polls with the task's
-//! waker, and yields to the runtime between polls, so tasks an engine spawns or wakes run
-//! ([`Harness`] says how). So it holds whether a mint answers a read at once, on its
-//! reader's next poll (`tests/round_trip.rs`), or from another thread that wakes its
+//! It judges an engine's progress by the answers its calls await, never by how many polls
+//! an answer takes: it waits in real time while one is under way, polls with the task's
+//! waker, and yields to the runtime between polls, so tasks an engine spawns or wakes run.
+//! A future still pending after 100 turns of the runtime with no answer under way waits on
+//! the suite ([`Harness`] says how). So it holds whether a mint answers a read at once, on
+//! its reader's next poll (`tests/round_trip.rs`), or from another thread that wakes its
 //! reader, as a real mint's answer comes back (`tests/woken_reads.rs`).
 //!
 //! **Run it with [`adversary_suite!`](crate::adversary_suite)**, which emits one test per
@@ -531,17 +532,17 @@ async fn poll_once<F: Future>(f: F) {
     .await;
 }
 
-/// How many turns of the runtime an engine with no answer of the mint's under way is given,
-/// the future waited on polled at each, before it is taken to wait on the suite: it has
-/// taken every answer, and its own tasks have run ([`Harness`]: how the suite waits).
+/// How many turns of the runtime an engine with no answer under way is given, the future
+/// waited on polled at each, before it is taken to wait on the suite: it has taken every
+/// answer, and its own tasks have run ([`Harness`]: how the suite waits).
 const TURNS: usize = 100;
 
 /// The longest the suite waits, in real time, for an engine to settle: far above any honest
 /// answer, a mint's round trips taking milliseconds, and below the runner's timeout.
 const SETTLE_LIMIT: Duration = Duration::from_secs(5);
 
-/// Turns of the runtime while the mint has an answer under way
-/// ([`Harness::answers_under_way`]), [`SETTLE_LIMIT`] at most.
+/// Turns of the runtime while an answer is under way ([`Harness::answers_under_way`]),
+/// [`SETTLE_LIMIT`] at most.
 async fn answers_in<H: Harness>(h: &H) {
     let start = std::time::Instant::now();
     while h.answers_under_way() && start.elapsed() < SETTLE_LIMIT {
@@ -587,7 +588,7 @@ enum Settled<T> {
 
 /// Poll `f` on this task, a turn of the runtime between polls, until it is ready, or until
 /// it has stayed pending for [`TURNS`] turns with no answer under way: it then waits on the
-/// suite, whatever count of polls its engine's round trips took.
+/// suite, however many polls its engine's answers took.
 async fn settled<H: Harness, F: Future>(h: &H, mut f: Pin<&mut F>) -> Settled<F::Output> {
     let (start, mut quiet) = (std::time::Instant::now(), 0);
     loop {
