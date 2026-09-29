@@ -2545,6 +2545,13 @@ pub enum SeederFlaw {
     /// A payment refused `banned` frees the turn without noting the reads of that second
     /// sent by then: one sent before the refusal serves a `hello` that waited.
     BannedRefusalNoFloor,
+    /// An entry that finds its second's two reads spent waits for the next second without
+    /// asking to be woken then: nothing polls it again when the clock moves.
+    NextSecondUnwoken,
+    /// An entry waiting for a read under way that would serve it is woken when a read comes
+    /// back or is abandoned, and not as the clock moves: a read that stalls keeps it waiting
+    /// past its second.
+    ReadWaitUnwokenByClock,
 }
 
 /// A defect planted in a mock viewer, to prove the adversary suite catches it.
@@ -3440,6 +3447,9 @@ struct State {
     /// Hellos waiting for their account's turn, per account
     /// ([`SeederFlaw::WaitingCountedPerVideo`] only).
     hellos_waiting_per_account: HashMap<Key, usize>,
+    /// Entries waiting for a read to come back ([`SeederFlaw::ReadWaitUnwokenByClock`]
+    /// only).
+    read_waiters: Vec<Waker>,
 }
 
 /// An account's own reads in one second: the second, each read sent in it, and how many had
@@ -3629,6 +3639,21 @@ async fn next_poll() {
         } else {
             yielded = true;
             cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
+/// Ready on the next poll, with nothing asked to wake it: only a poll it did not ask for
+/// comes ([`SeederFlaw::NextSecondUnwoken`]).
+async fn unwoken_poll() {
+    let mut polled = false;
+    poll_fn(|_| {
+        if polled {
+            Poll::Ready(())
+        } else {
+            polled = true;
             Poll::Pending
         }
     })
@@ -4163,7 +4188,11 @@ impl Inner {
                 Plan::Done => return,
                 Plan::WaitRead => {
                     waited_in.get_or_insert(now);
-                    next_poll().await;
+                    if self.has(SeederFlaw::ReadWaitUnwokenByClock) {
+                        self.read_change().await;
+                    } else {
+                        next_poll().await;
+                    }
                     if self.has(SeederFlaw::ReuseWaitsOnePoll) {
                         return;
                     }
@@ -4171,7 +4200,11 @@ impl Inner {
                 }
                 Plan::NextSecond => {
                     waited_in.get_or_insert(now);
-                    next_poll().await;
+                    if self.has(SeederFlaw::NextSecondUnwoken) {
+                        unwoken_poll().await;
+                    } else {
+                        next_poll().await;
+                    }
                     continue;
                 }
                 Plan::Read(None) => {
@@ -4228,6 +4261,21 @@ impl Inner {
                 }
             }
         }
+    }
+
+    /// Ready once a read comes back or is abandoned, and only then: the wait of
+    /// [`SeederFlaw::ReadWaitUnwokenByClock`], which no clock move wakes.
+    async fn read_change(&self) {
+        let mut asked = false;
+        poll_fn(|cx| {
+            if asked {
+                return Poll::Ready(());
+            }
+            asked = true;
+            self.state().read_waiters.push(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
     }
 
     /// Take a place for a read of `slot`'s swaps in second `now`, covering `covers` (the
@@ -5538,6 +5586,10 @@ impl<'a> Reading<'a> {
 
     fn set(&self, state: ReadState) {
         self.with(|r| r.state = state);
+        if self.e.has(SeederFlaw::ReadWaitUnwokenByClock) {
+            let waiting = std::mem::take(&mut self.e.state().read_waiters);
+            wake_all(waiting);
+        }
     }
 
     /// The swaps it covers, by their outputs.

@@ -1034,4 +1034,7 @@ catches!(
     viewer_end_wait_from_last_answer: v(V::EndWaitFromLastAnswer) => a_viewer_settles_a_lost_payment_after_180_s,
     viewer_end_wait_from_quote: v(V::EndWaitFromQuote) => a_viewer_settles_a_lost_payment_after_180_s,
     viewer_stopped_catch_up_from_quote: v(V::StoppedCatchUpFromQuote) => a_stopped_viewer_pays_nothing,
+    next_second_unwoken: s(S::NextSecondUnwoken) => a_late_outcome_is_credited_never_banned,
+    next_second_unwoken_round_trip: r(S::NextSecondUnwoken) => a_late_outcome_is_credited_never_banned,
+    read_wait_unwoken_by_clock: r(S::ReadWaitUnwokenByClock) => a_late_outcome_is_credited_never_banned,
 );

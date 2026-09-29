@@ -4516,6 +4516,8 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
     a_payment_waiting_to_read_is_answered_at_its_deadline(h).await;
     a_turn_held_past_its_deadline_was_freed_there_for_a_read_waiting(h).await;
     a_turn_held_past_its_deadline_by_a_swap_was_freed_there_for_a_read_waiting(h).await;
+    an_entry_waiting_for_the_next_second_is_woken_by_it(h).await;
+    an_entry_waiting_for_a_read_is_woken_as_its_second_ends(h).await;
 }
 
 /// Outputs unsigned with an input spent are nothing, whatever the other inputs are: the
@@ -18823,6 +18825,79 @@ async fn b_unknown_after_the_seconds_two<H: Harness>(h: &H, s: &mut Session<H>) 
     h.mint_outage(false);
     assert!(h.steal(&b.token).await, "B's payer takes the proofs back");
     h.restore_outage(true);
+}
+
+/// Flaw `ReadWaitUnwokenByClock`, on the round-trip harness. An entry waiting for a read
+/// under way that would serve it waits no longer than the second (NFX-07 §3), and the
+/// second's end wakes it, whether that read has come back or not. A is a lost claim. A
+/// `hello` reads it and is never polled again; a second `hello`, on a task of its own,
+/// polled only when it is woken, waits for that read. The clock moves a second: the second
+/// `hello` reads A itself and quotes its claim, with nothing else polling it.
+async fn an_entry_waiting_for_a_read_is_woken_as_its_second_ends<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    lost_claim(h, &mut s, 4, 4).await;
+    h.advance(SECOND);
+    let (peer, one, two) = (h.peer(1), h.hello(), h.hello());
+    let mut stalled = Box::pin(e.hello(&peer, &one));
+    if poll_next(h, stalled.as_mut()).await.is_some() {
+        return; // synchronous reads: nothing is ever under way
+    }
+    let done = AtomicBool::new(false);
+    let (quoted, ()) = both(own_task(marked(e.hello(&peer, &two), &done)), async {
+        settle(h).await;
+        assert!(
+            !is_set(&done),
+            "the second hello waits for the first's read"
+        );
+        h.advance(SECOND); // the first's read outlives its second
+        assert!(
+            settle_until(h, || is_set(&done)).await,
+            "the second's end wakes the hello waiting for a read sent in it, on a task of its \
+             own: it reads A itself, and is answered"
+        );
+    })
+    .await;
+    let q = quoted.expect("a hello").quote().clone();
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (4, 4),
+        "the woken hello quotes A's claim"
+    );
+    drop(stalled);
+}
+
+/// Flaw `NextSecondUnwoken`, on either harness. An entry that finds its second's two reads
+/// spent waits for the next second (NFX-07 §3), and the next second wakes it. A and B as in
+/// [`b_unknown_after_the_seconds_two`]: a `hello` on a task of its own, polled only when it
+/// is woken, waits for the next second to read B. The clock moves a second: the `hello`
+/// reads there and is answered, with nothing else polling it.
+async fn an_entry_waiting_for_the_next_second_is_woken_by_it<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    a_first_read_learns_nothing(h, &e).await;
+    let mut s1 = open(h, &e, 1).await;
+    b_unknown_after_the_seconds_two(h, &mut s1).await;
+    let (peer, hello) = (h.peer(1), h.hello());
+    let done = AtomicBool::new(false);
+    let (quoted, ()) = both(own_task(marked(e.hello(&peer, &hello), &done)), async {
+        settle(h).await;
+        assert!(
+            !is_set(&done),
+            "the second's two reads spent: the hello waits for the next second to read B"
+        );
+        h.advance(SECOND);
+        assert!(
+            settle_until(h, || is_set(&done)).await,
+            "the next second wakes the hello that waits for it, on a task of its own: it reads \
+             B there, and is answered"
+        );
+    })
+    .await;
+    drop(quoted.expect("a hello"));
+    drop(s1);
+    h.restore_outage(false);
+    h.release_swaps().await; // the given-up requests find their inputs spent
 }
 
 /// Flaws `FloorIgnoredPastTwo`, `WaitedCountsAfterFloor`, `PastTwoReadsAgain`,
