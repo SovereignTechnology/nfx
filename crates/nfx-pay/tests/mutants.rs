@@ -1582,4 +1582,13 @@ catches!(
     viewer_unsolicited_rej_out_of_tries_no_stop: v(V::UnsolicitedRejOutOfTriesNoStop) => a_stopped_viewer_pays_nothing,
     viewer_due_rounds_down_on_resume: v(V::DueRoundsDownOnResume) => a_viewer_pays_for_every_request_and_no_more,
     viewer_due_rounds_down_on_sibling: v(V::DueRoundsDownOnSibling) => a_viewer_pays_for_every_request_and_no_more,
+    viewer_own_session_catch_up_from_last_request: v(V::OwnSessionCatchUpFromLastRequest) => a_viewer_settles_a_lost_payment_after_180_s,
+    viewer_own_session_catch_up_from_refusal: v(V::OwnSessionCatchUpFromRefusal) => a_viewer_settles_a_lost_payment_after_180_s,
+    viewer_repay_after_unavailable_in_unit_proofs: v(V::RepayAfterUnavailableInUnitProofs) => an_honest_pair_streams_a_whole_video,
+    viewer_served_unchecked_when_settling: v(V::ServedUncheckedWhenSettling) => a_viewer_refuses_quotes_it_cannot_honour,
+    viewer_pay_ahead_window_of_first_quote: v(V::PayAheadWindowOfFirstQuote) => a_viewer_pays_for_every_request_and_no_more,
+    viewer_lost_forgotten_on_stop: v(V::LostForgottenOnStop) => a_stopped_viewer_pays_nothing,
+    viewer_stopped_quote_settles_nothing: v(V::StoppedQuoteSettlesNothing) => a_stopped_viewer_pays_nothing,
+    dropped_video_skips_id_check: s(S::DroppedVideoSkipsIdCheck) => only_the_sessions_video_is_admitted,
+    dropped_video_skips_id_check_round_trip: r(S::DroppedVideoSkipsIdCheck) => only_the_sessions_video_is_admitted,
 );
