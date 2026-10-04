@@ -48,8 +48,9 @@ pub trait SeederEngine {
     ///   again as it answers, after its wait and its reads;
     /// - `unknown-video` for a video this seeder does not serve. A video it no longer serves
     ///   is answered as before for a peer it keeps an account for there, or a swap of one
-    ///   whose outcome is unknown: its bans and reads as ever, its session's payments
-    ///   verified as any others, and nothing of the video admitted. So a payment there
+    ///   whose outcome is unknown: its wait for a payment in progress, its reads, its bans,
+    ///   session ids and cap as ever, its session's payments verified as any others, and
+    ///   nothing of the video admitted, pre-paid chunks included. So a payment there
     ///   awaiting a quote is still settled. Any other peer is refused `unknown-video`;
     /// - `bad-session` for a session id that is open, on any video, or beyond the per-peer
     ///   cap on open and waiting sessions, counted across all videos.
@@ -79,7 +80,8 @@ pub trait SeederSession {
     /// aborted alike. `false` means answer it with `refuse` and serve not one byte.
     /// That happens when:
     /// - the peer is banned;
-    /// - the file is not this video's, or the seeder no longer serves this video;
+    /// - the file is not this video's, or the seeder no longer serves this video, pre-paid
+    ///   or not;
     /// - the chunk is not pre-paid and the account's window or the global cap is full.
     ///
     /// A refused request counts nowhere and creates no account.
@@ -174,7 +176,10 @@ pub trait Viewer {
     /// stay as they were.
     ///
     /// A quote does not undo a stop: taken or not, it leaves a viewer that has stopped
-    /// paying the seeder paying it nothing, on this session and every later one.
+    /// paying the seeder paying it nothing, on this session and every later one. One that
+    /// settles a payment, left unsettled, awaiting a quote or being reclaimed, settles it
+    /// into the ledger only, whenever the stop came: before its proofs were found spent, as
+    /// they were, or after.
     fn quote(&mut self, quote: &Quote) -> Result<(), String>;
 
     /// The seeder refused this ledger's `hello`, so no session opened. `banned` stops the
@@ -194,13 +199,14 @@ pub trait Viewer {
     fn refused(&mut self);
 
     /// The payment due now, if any. It covers requested chunks at the quoted price, made
-    /// once the unpaid count reaches half the window, rounded up, so a payment in flight
-    /// never stalls the seeder, or pays ahead after a refusal. Its token, as
-    /// [`Viewer::last_pay`]'s, meets the seeder's structure check (NFX-07 §3 step 1): of
+    /// once the unpaid count reaches half the session's quoted window, rounded up, so a
+    /// payment in flight never stalls the seeder, or pays ahead after a refusal. Its token,
+    /// as [`Viewer::last_pay`]'s, meets the seeder's structure check (NFX-07 §3 step 1): of
     /// one mint, a quoted one by its exact URL, in `sat`, of at most 64 proofs, none locked,
-    /// each with its DLEQ proof. A selection that would hold more than 64 proofs is swapped
-    /// to fewer first. One is in flight toward the seeder at a time, across its videos, and
-    /// none is made:
+    /// each with its DLEQ proof, whatever it pays from (due, ahead, again after a reclaim,
+    /// after a quote that settled a payment, or on another video). A selection that would
+    /// hold more than 64 proofs is swapped to fewer first. One is in flight toward the seeder
+    /// at a time, across its videos, and none is made:
     /// - once the viewer has stopped, ahead after a refusal included;
     /// - while a reclaim is incomplete or a payment awaits a quote;
     /// - after three `mint-unavailable` answers to its payments in a row, until a new
@@ -219,7 +225,8 @@ pub trait Viewer {
     /// quote on its own ledger, a mint that cannot serve it yet or a proof pending leaves it
     /// incomplete, and with every proof back or lost to the expiry the viewer pays again at
     /// its next session. A closed session's payment is reclaimed 180 s after it was sent,
-    /// whatever came since, and not before, whatever stopped the viewer.
+    /// whatever came since, and not before, whichever ledger catches it up, with a session
+    /// or not, and whatever stopped the viewer.
     async fn due(&mut self) -> Result<Option<Pay>, String>;
 
     /// The payment for every chunk still owed, when the session ends.
@@ -278,8 +285,9 @@ pub trait Viewer {
     /// session for this video), or the standing has used its three `mint-unavailable`
     /// tries (any new session's accepted quote restores them). A quote equal to the ledger leaves a
     /// payment waiting, and the watcher paying nothing. A viewer whose standing has stopped
-    /// paying the seeder (not merely awaiting a quote) awaits no quote, whatever it holds:
-    /// no new session makes it pay.
+    /// paying the seeder (not merely awaiting a quote) awaits no quote, whatever it holds: no
+    /// new session makes it pay. A stop holds whatever the viewer waits on when it comes, a
+    /// payment awaiting a quote included.
     fn awaiting_quote(&self) -> bool;
 }
 
