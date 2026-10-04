@@ -170,11 +170,15 @@ payment-enforced after release, so no mechanism pretends otherwise.
   (§3a), which would then stop paying.
 - A seeder that stops serving a video keeps its accounts there, by the rules above. It
   answers a `hello` for that video from a peer it keeps an account for there, or a swap of
-  one whose outcome is unknown, as it would before (its wait, reads and ban checks
-  included), verifies that session's payments as any others, and admits nothing of the
-  video; any other peer's `hello` for it is refused `unknown-video`, or `banned` (§2). So a
-  payment there awaiting a quote (§3a) is still settled, and its watcher pays on the
-  seeder's other videos.
+  one whose outcome is unknown, as it would before (its wait for a payment in progress,
+  its reads, its ban and session-id checks and the per-peer cap included), verifies that
+  session's payments as any others, and admits nothing of the video, pre-paid chunks
+  included; any other peer's `hello` for it is refused `unknown-video`, or `banned` (§2).
+  So a payment there awaiting a quote (§3a) is still settled, and its watcher pays on the
+  seeder's other videos. A stated concession: a watcher that asks for the video's files
+  there is refused, and may pay ahead after that refusal (§3a). The seeder credits it as
+  any pre-payment, and serves none of it while it does not serve the video: a cost to the
+  watcher within the half window that §3a bounds a video's credit to.
 - A ban expires after `ban_ttl`, and is recorded only for a peer with an account. A
   peer with none has been served nothing and owes nothing, so a ban would protect
   nothing: its refused `pay` is answered, and nothing is kept for it.
@@ -470,7 +474,8 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   Every rule below that says "pays that seeder nothing" holds for all its videos, and any
   of its videos' ledgers does the standing's catching up (the 180 s reclaim below).
   Identities are free, a seeder's as a watcher's (§3): a lying seeder takes one payment per
-  seeder identity the watcher pays, as a lying origin takes one per name (§4).
+  seeder identity the watcher pays, as a lying origin takes one per standing the client
+  keeps (§4).
 - **Take a quote only if it is honest about the account:**
   - its `served` is at most the chunks requested and not refused, whatever the watcher has
     paid for: credit it holds, or a payment the quote settles;
@@ -495,11 +500,15 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   `sat`, of at most 64 proofs, none locked to a spending condition, each carrying its DLEQ
   proof (NUT-12). A wallet whose selection would hold more than 64 proofs swaps to fewer
   first. CDK 0.18.1 sends an exact selection as it is, whatever its count, unless
-  `SendOptions::max_proofs` is set, so a watcher built on it sets it to 64. A token the
+  `SendOptions::max_proofs` is set, so a watcher built on it sets it to 64. Every payment
+  meets it, whatever the watcher pays from: due, ahead after a refusal, at a session's end,
+  again after a reclaim (its proofs back in a session or not, late, or less those lost to
+  the expiry), after a quote that settles a payment, or on another video. A token the
   seeder refuses `bad-token` stops the watcher (below).
   - Pay once the account's unpaid count reaches half of `window`, rounded up (3 of a
     `window` of 5), for each payment, so the seeder need not stall while a payment is in
-    flight.
+    flight. The `window` is the session's quote's: a seeder may quote another on a later
+    session.
   - Never pay ahead of need, except right after a refusal. Then pay ahead up to half of
     `window`, rounded down, less any credit the video's ledger already holds, which the seeder serves
     whatever its cap. Credit on a video never grows beyond half its window, so a seeder
@@ -642,7 +651,9 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   wait counts from the payment's own sending, never from an input before it: the
   session's quote, the answer to the payment before (a payment that became due while that
   one was in flight is sent only after its answer), the request that made it due, or the
-  refusal it pays ahead after.
+  refusal it pays ahead after. So it does wherever it is counted: on the payment's live
+  session, or by whichever of the seeder's ledgers catches a closed session's payment up,
+  with a session open or not, stopped or not.
   - On a live connection, for the payment sent on it, the seeder was unresponsive: 180 s
     after sending it, whatever came since (a second quote, a request refused or new, a
     timeout before then, or anything on another video), the watcher reclaims and stops. A
@@ -657,18 +668,22 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     then it is the standing's payment in flight.
   - A reclaim that finds proofs spent leaves the payment to a quote that shows it, as
     above. After a dropped connection the watcher awaits that quote, and pays again once one
-    shows the payment. On a live connection it has stopped: a quote that shows the payment
-    settles it into the ledger and nothing more, and the watcher awaits no quote and pays
-    nothing (below). A `pay` still buffered on a dropped connection can reach the seeder
-    after the watcher's next `hello`, and be credited after that session's quote.
+    shows the payment, unless it has stopped (below). On a live connection it has stopped:
+    a quote that shows the payment settles it into the ledger and nothing more, and the
+    watcher awaits no quote and pays nothing (below). A `pay` still buffered on a dropped
+    connection can reach the seeder after the watcher's next `hello`, and be credited after
+    that session's quote.
 - **Pay nothing after stopping,** at the end of a session included, nor ahead after a
   refusal. Nothing undoes a stop: not a later `ack` that matches its payment, a refused
   request or `hello`, a `mint-unavailable` answer with every proof taken back, the
   session's end, a second quote on an open session, a new session's quote on any of the
   seeder's videos (a new video's first included), taken or refused (for its price, its
-  `window` or its mints), nor a ledger made for another video.
-  A watcher that has stopped awaits no quote: a quote that shows a payment whose proofs
-  were found spent, as it stopped or since, settles that payment into the ledger and
+  `window` or its mints), one that settles a payment included, nor a ledger made for
+  another video. A stop holds whatever the watcher waits on when it comes: a payment
+  awaiting a quote, an incomplete reclaim, a closed session's payment, or its tries used.
+  A watcher that has stopped awaits no quote: a quote that shows a payment, whose proofs
+  were found spent before it stopped, as it stopped or since, or which a closed session
+  left unsettled, or whose reclaim is incomplete, settles that payment into the ledger and
   nothing more. Reclaiming is not paying: whatever stopped it, a stopped watcher still
   reclaims a live session's payment that is refused, or unanswered after the wait,
   finishes its incomplete reclaims, from whichever of the seeder's videos it is watching,
@@ -1276,11 +1291,15 @@ paths on one host are two origins.
     for after a payment arrived judges its keysets, in the payment's own second too.
   - §3: a seeder that stops serving a video keeps its accounts there. It answers the
     `hello` of a peer it keeps an account for there, or a swap of one whose outcome is
-    unknown, as before, with a quote, verifies that session's payments as any others, and
-    admits nothing of the video; any other peer's is refused `unknown-video` (a banned
-    one's `banned`), as §2's `hello` now says. So a payment there awaiting a quote is still
-    settled (was: every `hello` for it was refused `unknown-video`, and a payment there
-    credited late left the watcher paying that seeder nothing, on any video, for good).
+    unknown, as before (its wait, reads, ban and session-id checks and per-peer cap
+    included), with a quote, verifies that session's payments as any others, and admits
+    nothing of the video, pre-paid chunks included; any other peer's is refused
+    `unknown-video` (a banned one's `banned`), as §2's `hello` now says. So a payment there
+    awaiting a quote is still settled (was: every `hello` for it was refused
+    `unknown-video`, and a payment there credited late left the watcher paying that seeder
+    nothing, on any video, for good). A stated concession: a watcher asking for the video
+    there may pay ahead after the refusal, which the seeder credits and does not serve,
+    within the half window §3a bounds a video's credit to.
   - §3: a seeder is its long-term identity: the key its beacons are signed with, to which
     they bind its iroh endpoints, or on the mesh the identity its transport gives it. Every
     endpoint it announces serves from its one set of state; a seeder that runs separate
@@ -1288,23 +1307,29 @@ paths on one host are two origins.
   - §3a: the watcher keys its ledgers and its standing by the seeder's long-term identity,
     never by an endpoint. A ledger lasts as long as the watcher's own identity toward the
     seeder, and the standing as long as the wallet it pays from, whatever identity it
-    takes. A lying seeder takes one payment per seeder identity the watcher pays (was:
-    nothing said of what identifies a seeder or how long the standing lasts, and "gets
-    nothing more" unqualified).
+    takes. A lying seeder takes one payment per seeder identity the watcher pays, as a lying
+    origin takes one per standing the client keeps (§4) (was: nothing said of what
+    identifies a seeder or how long the standing lasts, and "gets nothing more"
+    unqualified).
   - §3a: the watcher pays with a token that passes the seeder's structure check: of one
     quoted mint by its exact URL, in `sat`, of at most 64 proofs, none locked, each with its
     DLEQ proof, as §2's `pay` now says. A selection that would hold more than 64 proofs is
-    swapped to fewer first (with CDK 0.18.1, `SendOptions::max_proofs` set to 64). What
-    step 1 implied, now said.
+    swapped to fewer first (with CDK 0.18.1, `SendOptions::max_proofs` set to 64). Every
+    payment meets it, whatever the watcher pays from: due, ahead, last, again after a
+    reclaim, after a settling quote, or on another video. What step 1 implied, now said.
   - §3a: a quote's `served` is at most the chunks requested and not refused, whatever the
     watcher has paid for: credit it holds, or a payment the quote settles.
   - §3a: the 180 s count from the payment's own sending, never from an input before it: the
     session's quote, the answer to the payment before, the request that made it due, or the
-    refusal it pays ahead after. What "from sending" said, now spelled out.
+    refusal it pays ahead after; and so wherever the wait is counted, on the live session or
+    by whichever ledger catches a closed session's payment up, with a session open or not,
+    stopped or not. What "from sending" said, now spelled out.
   - §3a: a live payment unanswered at 180 s whose reclaim finds a proof spent leaves the
     watcher stopped: a quote that shows it settles it into the ledger and nothing more, as
-    for any payment found spent as the watcher stops or since (was: "Either way, a reclaim
-    that finds proofs spent leaves the payment awaiting a quote", which read as leave to pay
-    again).
-  - §3a: half of `window`, rounded up, is the due point of each payment (3 of 5). What
-    "rounded up" said, now shown.
+    for any payment found spent before the watcher stops, as it stops or since, or left
+    unsettled or being reclaimed, whenever it stops; a stop holds whatever the watcher waits
+    on when it comes (was: "Either way, a reclaim that finds proofs spent leaves the payment
+    awaiting a quote", which read as leave to pay again, and "as it stopped or since" left
+    a payment found spent before the stop out).
+  - §3a: half of `window`, rounded up, is the due point of each payment (3 of 5), the
+    `window` being the session's quote's. What "rounded up" said, now shown.
