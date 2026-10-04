@@ -472,6 +472,20 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     payment after the wait: reclaiming is not paying. A watcher SHOULD back off before
     reopening sessions with a seeder whose sessions keep ending so, since each new
     session's accepted quote restores the three tries.
+- **Pay only with proofs of its own.** Other clients may pay from the watcher's wallet at
+  the same time: the user's other devices, or browser partitions (NFX-10 §3). Proofs
+  that two clients spend at once are refused to one of them as spent, and that one would
+  take it for the seeder's claim (below) and stop paying an honest seeder. So the
+  watcher pays only with outputs of a request of its own at the mint (a swap, NUT-03,
+  or a mint, NUT-04), kept where no other client takes them until it pays with them or
+  puts them back in the wallet. A proof another client may spend (one in a shared
+  NIP-60 wallet's token events, or one received from someone else) is swapped first.
+  Every output it derives, for such a request or a reclaim (below), comes from a seed
+  and counters no other client derives outputs from (NUT-13): no other client can
+  spend those outputs, or have them signed first so that the mint refuses them to the
+  watcher. It writes down the seed, and the keyset and counters each request uses,
+  before that request is sent, and keeps them until its outcome is learnt, so its
+  restores (NUT-09) find its own requests' outputs, after a restart too.
 - **Answers belong to their session.** A `rej` answers the payment sent on its session.
   One that answers no payment is unsolicited, and stops the watcher paying that seeder,
   as an unsolicited `ack` does. A refused `hello` opens no session and answers no
@@ -622,7 +636,9 @@ paths on one host are two origins.
   host only where a deployment permits it, as for a mint, §2).
 - The client pays only at a price within its own price cap, and only with a token of a
   mint the origin names, by its exact URL (§2), as it takes a quote (§3a): it pays no
-  price above the cap, whether a beacon's `price_hint` or a `402` names it.
+  price above the cap, whether a beacon's `price_hint` or a `402` names it. Its token
+  holds only proofs of its own, and it derives and keeps its outputs as a watcher does
+  (§3a).
 - The origin runs the checks of §3 (structure, mint, DLEQ, exact amount), swaps, and
   only then responds. It SHOULD hold the file's verified bytes before it swaps (from its
   store, or pulled and verified, NFX-05 §6.2), and answer a miss with nothing swapped (a
@@ -712,8 +728,9 @@ paths on one host are two origins.
   costs it no more than a new host. Two spellings of one base URL (a host's letter case,
   an explicit default port) may be kept as one standing or two: a second name gains a
   lying origin nothing a new path would not. Clients that pay from one wallet keep a
-  standing each, as two devices do, or two browser partitions (NFX-10 §3): a lying
-  origin takes one payment per base URL from each.
+  standing each, as two devices do, or two browser partitions (NFX-10 §3), and each pays
+  with proofs of its own (§3a): a lying origin takes one payment per base URL from
+  each.
 - NFX-05 §6's `Access-Control-Allow-Origin: *` is on every answer to a hash-addressed
   `GET`, paid or not, whatever its status, a `402` and a `503` included. An origin
   serving browsers (NFX-10 §3.1) SHOULD also:
@@ -1173,3 +1190,11 @@ paths on one host are two origins.
     taking no payment, and expose `X-NFX-Price` and `X-NFX-Mints` on every `402`.
     NFX-10 §3.1 says how a browser pays (was: nothing, so no browser could make a paid
     request or read a `402`).
+  - §3a: a watcher whose wallet other clients may share pays only with outputs of a
+    request of its own at the mint (a swap or a mint), kept where no other client takes
+    them, and derives every output from a seed and counters no other client derives
+    from, written down before each request is sent and kept until its outcome is learnt;
+    §4's client likewise (was: nothing, so a client paying straight from a shared wallet
+    could spend a proof another client of it was paying with, and the one refused took
+    it for the payee's claim and stopped paying an honest payee for good; and clients
+    deriving outputs from one seed could spend or block each other's).

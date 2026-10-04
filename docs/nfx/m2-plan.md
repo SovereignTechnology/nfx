@@ -358,6 +358,8 @@ against the suite:
 - the real engine on CDK, with exact amounts, a mint allowlist, DLEQ, and async NUT-03
   swap with bans on a spent or invalid proof;
 - the viewer wallet: proof selection and storage, the key file, no plaintext proofs;
+  it pays only with proofs of its own, and writes down each swap's NUT-13 seed and
+  counters before sending it (NFX-07 §3a);
 - pay/1 over iroh, and the **per-account window gate on blob serving** (the
   "per-member window gate" carried from A2; the window is per account, NFX-07 §2);
 - the HTTPS 402 surface on the origin.
@@ -370,7 +372,8 @@ Its outputs:
 
 **M2.2: the paid browser mesh** (NFX-10 §3.2).
 - A maintained p2p-media-loader v4 fork: a per-upload gate plus pay/1 framing.
-- A web wallet with NIP-60 write-through: proofs never in browser storage.
+- A web wallet with NIP-60 write-through: proofs never in browser storage; a record per
+  payment, written before its swaps, and a Web Lock per record (NFX-10 §3).
 - The bridge charges browsers like any seeder.
 - Its own locked paths and review.
 
