@@ -80,39 +80,102 @@ normal seeder upstream and a normal p2p-media-loader peer downstream.
 
 ## 3. Payments in the browser
 
+A page pays from the user's NIP-60 wallet, encrypted to the user's key on the user's
+relays, since proofs are never kept in browser storage (§3.2). Other clients may pay
+from that wallet at the same time: the user's other pages, sites and devices. A page's
+**partition** is the browser storage, with its Web Locks, that it shares with other
+pages: that of one web origin (scheme, host and port) in one browser profile, or, for a
+player embedded in another site's page, that of its web origin under that site; a
+private browsing session has its own. Whether a page pays an origin (§3.1) or a peer
+(§3.2):
+
+- **Its proofs are its own.** A page pays only with proofs fresh from a swap it made for
+  that payment (NUT-03), so no other client can be spending them. Proofs two clients
+  spent at once would be refused to one of them as spent, and that one would read it as
+  the payee's claim (NFX-07 §3a, §4) and stop paying an honest payee for good. The
+  swap's input fees (NUT-02) are the page's, one swap per payment.
+- **They stay in the wallet until the payment ends.** Before it sends them, the page
+  writes them into the wallet in a record encrypted to the user's key, as the wallet's
+  token events are, and sends nothing until one of the wallet's relays has accepted it.
+  The record is no NIP-60 token event, so no client pays from it; it sets the proofs
+  aside under the page's partition (a random id kept in its storage), and names the
+  payee and the payment's **sending time**, by which the page sends them, if at all.
+  NFX-07's 180 s wait for an unanswered payment is counted from that time. The proofs
+  stay there until the payment is served or acked, a quote settles it, or its reclaim
+  ends. Only a page of that partition acts on the record, reclaiming as NFX-07 §3a and
+  §4 say, so a page closed with a payment in flight leaves its reclaim to another page
+  of its partition, open then or later. Beyond this, the record's form is the page's
+  own.
+- **A partition never opened again loses its payments in flight.** Proofs set aside
+  under a partition that no page opens again (its storage cleared by the user or the
+  browser, or the site never visited again), and a payment's fresh proofs whose page
+  closed before writing them, are no page's: the value of each such payment is lost, as
+  a closed tab loses the earnings not yet written through (§3.2). NFX-07 keeps one
+  payment in flight to a payee at a time, so that is at most one per payee for each
+  page or partition that was paying it. A stated concession.
+- **Its standings are its partition's.** NFX-07's client, §3a's watcher and §4's client
+  alike, is the page's partition. Its pages keep its standings (§3a's per seeder, §4's
+  per origin) in its storage, since they hold no proofs, and change them only under a
+  Web Lock, so a stop, a try used or a back-off holds for them all, and one payment is
+  in flight to a payee among them all. Two partitions are two clients, though they pay
+  from one wallet, as two devices are: each keeps standings of its own, and storage
+  cleared makes a new partition. So a lying payee takes one payment per name (a
+  seeder's identity, an origin's base URL) from each partition that pays it (each web
+  origin, browser profile, device and private session, and again after storage is
+  cleared), each with its own payment in flight to it: a new partition gains it what a
+  new name does (NFX-07 §3a, §4). A stated concession.
+
 ### 3.1 HTTPS
 
 When fetching from a paying origin or HTTPS seeder, the player pays as NFX-07 §4 says,
-every client rule of it included. In a browser that means:
+every client rule of it included, as the page's partition (§3). Each rule's form in a
+browser is below: the request, the origin's answers, the load and its wait, and what
+the page cannot see.
 
-- **The request.** A paid request is a `fetch` of `<base>/<sha256>` (NFX-07 §4), whichever
-  of NFX-05 §6's paths the player asked for, with `X-NFX-Pay`, `redirect: "manual"`,
-  `credentials: "omit"` and `cache: "no-store"`. So no redirect is followed, and one
-  shows as such (an `opaqueredirect` answer: a refusal, NFX-07 §4); no cookie goes, so
-  `Access-Control-Allow-Origin: *` admits it; and no copy in the HTTP cache answers it or
-  adds a conditional header. A service worker of the page's passes a request carrying
-  `X-NFX-Pay` to the network untouched, so no copy it holds answers one either. It is
-  never an `XMLHttpRequest`, which follows a redirect with the request's headers, the
-  token included: whatever loads the file (hls.js, p2p-media-loader), a paid load goes
-  through a loader that makes such a `fetch`.
+- **The request.** A paid request is a `fetch` of `<base>/<sha256>` over HTTPS (NFX-07
+  §4), whichever of NFX-05 §6's paths the player asked for, with `X-NFX-Pay`,
+  `mode: "cors"`, `redirect: "manual"`, `credentials: "omit"` and `cache: "no-store"`,
+  and no other header a preflight would have to allow (a CORS-safelisted one, such as
+  `Accept`, may go). So the token goes (under `no-cors` the browser drops the header
+  unsent), and the preflight asks only for what NFX-07 §4's origin allows; no redirect
+  is followed, and one shows as such (an `opaqueredirect` answer: a refusal, NFX-07 §4);
+  no cookie goes, so `Access-Control-Allow-Origin: *` admits it; and no copy in the HTTP
+  cache answers it or adds a conditional header. A service worker of the page's passes a
+  request carrying `X-NFX-Pay` to the network untouched, so no copy it holds answers one
+  either. It is never an `XMLHttpRequest`, which follows a redirect with the request's
+  headers, the token included: whatever loads the file (hls.js, p2p-media-loader), a
+  paid load goes through a loader that makes such a `fetch`.
 - **What the origin sends.** A cross-origin paid request is preceded by a CORS
-  preflight, and a `402`'s `X-NFX-Price` and `X-NFX-Mints` are readable only if exposed.
-  A browser can pay only an origin that sends what NFX-07 §4 says an origin serving
-  browsers SHOULD.
-- **What the page cannot see.** A `fetch` that fails (a network error, which is also how
-  a failed preflight, a redirect under `redirect: "error"` and an answer without
-  `Access-Control-Allow-Origin` look) is a paid request with no final status: the page
-  reclaims 180 s after sending, as NFX-07 §4 says, never sooner. A `402` whose price or
-  mints the page cannot read names none (NFX-07 §4).
-- **Standings.** NFX-07 §4's standings belong to the wallet the page pays from, and last
-  as long as it: every page paying from one wallet shares them, with one paid request in
-  flight to an origin among them all. They hold no proofs, so browser storage MAY keep
-  them. A paid request's proofs stay in the wallet, not in the page alone, set aside so
-  that no page spends them, until the request is served or its reclaim ends; so a page
-  closed with one in flight leaves the reclaim to the next page that opens the wallet,
-  180 s after sending or later. Browser storage cleared while the wallet lives
-  loses the standings: a lying origin the page had stopped paying then takes one payment
-  more, as a new name would (NFX-07 §4). A stated concession.
+  preflight, which the browser passes only on a `2xx`, and a `402`'s `X-NFX-Price` and
+  `X-NFX-Mints` are readable only if exposed. A browser can pay only an origin that
+  sends what NFX-07 §4 says an origin serving browsers SHOULD.
+- **The load and its wait.** NFX-07 §4's client waits 180 s from sending for a final
+  status and for a `200`'s whole body, so nothing but the page's own end stops a paid
+  `fetch` before it ends or 180 s after its sending time (§3). No loader timeout applies
+  to it (hls.js's load policies, p2p-media-loader's `httpNotReceivingBytesTimeoutMs`). A
+  load the player drops (a seek, a level or ABR switch, its `destroy`) leaves it
+  running, detached: the page still reads and verifies its body, which decides whether
+  it was served, then keeps the file or drops it. It fetches the whole file, never the
+  rest of one loaded in part (as p2p-media-loader does, with `Range`). While it runs,
+  and while its reclaim does, no load from that origin is a paid request: a loader's
+  retry, or a second load at once (p2p-media-loader's `simultaneousHttpDownloads`,
+  hls.js's main and audio streams), waits, fails, or goes to another source. A page
+  that closes or navigates away stops waiting: a payment the origin had swapped is then
+  lost, and the partition pays that origin nothing more (NFX-07 §4's stated
+  concession); the reclaim falls to another page of the partition (§3).
+- **What the page cannot see.** It cannot see when the browser sends the `GET`, which
+  may be later than its `fetch`: after the preflight, or once a connection to the
+  origin is free. The page calls `fetch` by the sending time its record names (§3) and
+  counts NFX-07 §4's 180 s from that time; a `GET` the browser sends later is a request
+  that comes late (NFX-07 §4's stated concession). A `fetch` that fails before a status
+  (a network error, which is also how a failed preflight, a redirect under
+  `redirect: "error"` and an answer without `Access-Control-Allow-Origin` look) is a
+  paid request with no final status: the page reclaims 180 s after its sending time, as
+  NFX-07 §4 says, never sooner. A `200` whose body stream fails is a `200` cut short
+  (NFX-07 §4). A browser may send a `GET` again by itself when its connection failed
+  early; the copy carries the same token, so it takes no second payment, and its answer
+  is the request's. A `402` whose price or mints the page cannot read names none
+  (NFX-07 §4).
 
 ### 3.2 Paid browser mesh (M2)
 
@@ -210,16 +273,32 @@ NFX-05 byte formats.
 - Draft 2026-09-24 (M2.0 sixth audit): §3.2 lists `refuse`, allows several pay sessions
   on one account as NFX-07 does, and holds the data channel to NFX-07 §2's delivery rule.
 - Draft 2026-09-29 (M2.0 twenty-ninth audit,
-  `docs/nfx/reviews/2026-09-24-m2.0-twenty-ninth-audit.md`): §3.1 says how a browser
-  pays an origin under NFX-07 §4. A paid request is a `fetch` of `<base>/<sha256>` that
-  follows no redirect (a redirect is a refusal), sends no credentials and is answered
-  from no cache, the page's service worker's included; never an `XMLHttpRequest`. The
-  page pays only an origin that sends what NFX-07 §4 now says an origin serving browsers
-  SHOULD (the preflight allowing `X-NFX-Pay`, `Access-Control-Allow-Origin` on every
-  answer, `X-NFX-Price` and `X-NFX-Mints` exposed). A failed `fetch` is a paid request
-  with no final status, reclaimed 180 s after sending; a `402` it cannot read names no
-  price. The standings belong to the wallet, shared by its pages and kept as long as it,
-  and a paid request's proofs stay set aside in the wallet until it ends. Browser storage
-  cleared while the wallet lives costs one payment more per lying origin: a stated
-  concession. (Was: the request hooks attach the headers, which a browser could not send
-  or read across origins, and hls.js's default loader follows a redirect with the token.)
+  `docs/nfx/reviews/2026-09-24-m2.0-twenty-ninth-audit.md`).
+  - §3: a page pays from the user's NIP-60 wallet, which other clients share. Each
+    payment's proofs come fresh from a swap of the page's own, so no other client spends
+    them. Before it sends them, the page writes them into the wallet, encrypted as its
+    token events are and accepted by one of its relays, set aside under the page's
+    storage partition with the payee and the payment's sending time, from which NFX-07's
+    180 s wait counts; they stay there until the payment ends, and only that partition
+    reclaims them. A partition never opened again loses its payments in flight: a stated
+    concession. NFX-07's client, a watcher (§3a) or an origin's client (§4), is the
+    partition: its pages keep its standings in its storage and change them under a Web
+    Lock, so a lying payee takes one payment per name per partition: a stated
+    concession.
+  - §3.1 says how a browser pays an origin under NFX-07 §4, rule by rule. A paid request
+    is a `fetch` of `<base>/<sha256>` in `cors` mode, with no other header a preflight
+    must allow, that follows no redirect (a redirect is a refusal), sends no credentials
+    and is answered from no cache, the page's service worker's included; never an
+    `XMLHttpRequest`. The page pays only an origin that sends what NFX-07 §4 now says (a
+    preflight answered `204` allowing `X-NFX-Pay`, `Access-Control-Allow-Origin: *` on
+    every answer, `X-NFX-Price` and `X-NFX-Mints` exposed). No loader timeout or dropped
+    load stops a paid `fetch` before 180 s from its sending time; it fetches the whole
+    file, never a `Range` resume; and no retry or second load from that origin is paid
+    while it or its reclaim runs. A `GET` the browser sends after the sending time (a
+    slow preflight, a busy connection) comes late, as NFX-07 §4 concedes. A failed
+    `fetch` is a paid request with no final status, reclaimed 180 s after its sending
+    time, and a `402` the page cannot read names no price. (Was: the request hooks
+    attach the headers, which a browser could not send or read across origins; hls.js's
+    default loader follows a redirect with the token; the loaders' timeouts, aborts,
+    retries and `Range` resumes each broke a rule of NFX-07 §4; and nothing said where a
+    page keeps its standings or its proofs in flight, or which pages share them.)
