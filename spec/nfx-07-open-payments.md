@@ -613,7 +613,10 @@ query, a fragment or credentials names no origin, and the client pays it nothing
 paths on one host are two origins.
 
 - `GET <base>/<sha256>` with header `X-NFX-Pay: cashuB…`, a token worth exactly one chunk
-  at the origin's price. A paid request is a `GET` for the whole file, with no `Range` or
+  at the origin's price that passes the origin's structure check (§3 step 1): of one
+  mint, in unit `sat`, of at most 64 proofs (a wallet whose selection would hold more
+  swaps to fewer first), none locked to a spending condition, each carrying its DLEQ
+  proof (NUT-12). A paid request is a `GET` for the whole file, with no `Range` or
   conditional (`If-…`) header, and the client follows no redirect with it. It is sent
   over HTTPS only, since anyone who reads a token can spend it (plain HTTP to a loopback
   host only where a deployment permits it, as for a mint, §2).
@@ -640,19 +643,22 @@ paths on one host are two origins.
 
   The headers' values, each read as the whole field value (several field lines of one
   name are joined by commas, RFC 9110 §5.3):
-  - `X-NFX-Pay`: one token, as `pay.token` (§2).
+  - `X-NFX-Pay`: one token, as `pay.token` (§2), of at most 32 KiB, as a `pay` line is.
+    An origin SHOULD accept a field that long, whatever limit its server or a proxy in
+    front of it sets on other header fields, so that it refuses no token for its size.
   - `X-NFX-Price`: the price of one chunk in sat, as `price_per_chunk` (§2): a decimal
     integer from 1 to 2^53−1, digits only, the first not `0`.
   - `X-NFX-Mints`: 1 to 16 mint URLs (§2), each written with every `%` in it as `%25`
     and every `,` as `%2C`, then joined with commas (the list syntax of RFC 9110
     §5.6.1: spaces or tabs around a comma are allowed, and empty items are ignored).
     The client reads each item back in one pass, left to right, each `%2C` giving `,`
-    and each `%25` giving `%`, and compares the URL it gets byte for byte (§2). The header does not parse if an item
-    holds any other `%` or reads back as no mint URL (§2), or if it has no item or more
-    than 16. So a list is read only as it was written: `https://m.example/?k=a,b` and
-    `https://n.example` are sent as `https://m.example/?k=a%2Cb, https://n.example`; the
-    value `https://m.example/?k=a,https://n.example` is two items, and the one URL with
-    that comma is sent as `https://m.example/?k=a%2Chttps://n.example`.
+    and each `%25` giving `%`, and compares the URL it gets byte for byte (§2). The
+    header does not parse if an item holds any other `%` or reads back as no mint URL
+    (§2), or if it has no item or more than 16. So a list is read only as it was
+    written: `https://m.example/?k=a,b` and `https://n.example` are sent as
+    `https://m.example/?k=a%2Cb, https://n.example`; the value
+    `https://m.example/?k=a,https://n.example` is two items, and the one URL with that
+    comma is sent as `https://m.example/?k=a%2Chttps://n.example`.
 
   An origin sends these headers only in this form. A `402` whose `X-NFX-Price` or
   `X-NFX-Mints` is missing or does not parse names no price and no mint, as a `503`
@@ -705,15 +711,22 @@ paths on one host are two origins.
   (§3): a lying origin takes one payment per base URL the client pays, and a new path
   costs it no more than a new host. Two spellings of one base URL (a host's letter case,
   an explicit default port) may be kept as one standing or two: a second name gains a
-  lying origin nothing a new path would not.
-- An origin serving browsers (NFX-10 §3.1) SHOULD answer a paid request's CORS
-  preflight (an `OPTIONS` for `GET` with `X-NFX-Pay`) with
-  `Access-Control-Allow-Origin: *` (or the paying page's origin),
-  `Access-Control-Allow-Methods: GET` and `Access-Control-Allow-Headers: X-NFX-Pay`,
-  taking no payment; send that `Access-Control-Allow-Origin` on every answer to a
-  hash-addressed `GET`, paid or not, whatever its status (NFX-05 §6); and send
-  `Access-Control-Expose-Headers: X-NFX-Price, X-NFX-Mints` on every `402`. Without
-  them a page cannot send the token, see the answer, or read a `402`'s price and mints.
+  lying origin nothing a new path would not. Clients that pay from one wallet keep a
+  standing each, as two devices do, or two browser partitions (NFX-10 §3): a lying
+  origin takes one payment per base URL from each.
+- NFX-05 §6's `Access-Control-Allow-Origin: *` is on every answer to a hash-addressed
+  `GET`, paid or not, whatever its status, a `402` and a `503` included. An origin
+  serving browsers (NFX-10 §3.1) SHOULD also:
+  - answer a paid request's CORS preflight (an `OPTIONS` asking for a `GET` with
+    `X-NFX-Pay`) with a `204` carrying `Access-Control-Allow-Origin: *`,
+    `Access-Control-Allow-Methods: GET` and `Access-Control-Allow-Headers: X-NFX-Pay`.
+    A preflight carries no token and is no paid request: it takes no payment and is
+    never answered `402`, since a browser sends nothing after a preflight answered with
+    anything but a `2xx`;
+  - send `Access-Control-Expose-Headers: X-NFX-Price, X-NFX-Mints` on every `402`.
+
+  Without these a page cannot send the token, see the answer, or read a `402`'s price
+  and mints.
 - Bans do not apply: the payer is anonymous, and spent proofs simply earn a `402`.
 - Origins MAY serve gratis (`price_hint` 0 or `free` beacons). The website's ad/default
   mode is exactly this (origin at price 0).
@@ -1135,18 +1148,28 @@ paths on one host are two origins.
 - Draft 2026-09-29 (M2.0 twenty-ninth audit, `docs/nfx/reviews/2026-09-24-m2.0-twenty-ninth-audit.md`).
   - §4: an origin is its base URL (scheme, host, port and path), as a beacon's `https`
     endpoint names one or the client is given one otherwise; a URL with a query, a
-    fragment or credentials names none. A paid request is `GET <base>/<sha256>`. The client keeps a standing per base URL, so
-    one origin's answers change nothing of another's on the same host, and a lying
-    origin takes one payment per base URL (was: a standing per host and port, and
-    `GET /<sha256>`, so one lying tenant stopped payments to every origin on its host,
-    used their tries and held their one place in flight).
-  - §4: the headers have a grammar: `X-NFX-Pay` one token, as `pay.token`; `X-NFX-Price`
-    a decimal integer from 1 to 2^53−1; `X-NFX-Mints` 1 to 16 mint URLs in RFC 9110's
-    list syntax, each URL's `%` written `%25` and its `,` written `%2C` (was: `<sat>` and
-    `<comma list>`, which a mint URL holding a comma made ambiguous). A `402` whose
-    headers are missing or do not parse names no price and no mint, and is a refusal like
-    any other.
-  - §4: an origin serving browsers SHOULD allow `X-NFX-Pay` on a paid request's CORS
-    preflight, send `Access-Control-Allow-Origin` on every answer, and expose
-    `X-NFX-Price` and `X-NFX-Mints` on every `402`; NFX-10 §3.1 says how a browser pays
-    (was: nothing, so no browser could make a paid request or read a `402`).
+    fragment or credentials names none. A paid request is `GET <base>/<sha256>`. The
+    client keeps a standing per base URL, so one origin's answers change nothing of
+    another's on the same host, and a lying origin takes one payment per base URL (was:
+    a standing per host and port, and `GET /<sha256>`, so one lying tenant stopped
+    payments to every origin on its host, used their tries and held their one place in
+    flight). Clients that pay from one wallet (devices, NFX-10 §3's browser partitions)
+    keep a standing each, and a lying origin takes one payment per base URL from each.
+  - §4: the client's token passes the origin's structure check (§3 step 1): one mint,
+    `sat`, at most 64 proofs, none locked, each with its DLEQ proof (was: only "worth
+    exactly one chunk", so a client could send a token every origin refuses, one whose
+    DLEQ proofs its wallet left out, say, and send it again on every try).
+  - §4: the headers have a grammar: `X-NFX-Pay` one token, as `pay.token`, of at most
+    32 KiB, which an origin SHOULD accept whatever its other header limits;
+    `X-NFX-Price` a decimal integer from 1 to 2^53−1; `X-NFX-Mints` 1 to 16 mint URLs in
+    RFC 9110's list syntax, each URL's `%` written `%25` and its `,` written `%2C` (was:
+    `<sat>` and `<comma list>`, which a mint URL holding a comma made ambiguous, and no
+    size, so a server's usual 8 KiB header limit refused a token of many proofs). A
+    `402` whose headers are missing or do not parse names no price and no mint, and is a
+    refusal like any other.
+  - §4: NFX-05 §6's `Access-Control-Allow-Origin: *` is on every answer to a
+    hash-addressed `GET`, whatever its status. An origin serving browsers SHOULD answer
+    a paid request's CORS preflight with a `204` allowing `X-NFX-Pay`, never a `402`,
+    taking no payment, and expose `X-NFX-Price` and `X-NFX-Mints` on every `402`.
+    NFX-10 §3.1 says how a browser pays (was: nothing, so no browser could make a paid
+    request or read a `402`).
