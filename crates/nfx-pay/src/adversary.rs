@@ -109,12 +109,24 @@ macro_rules! adversary_suite {
             every_payment_due_on_another_videos_ledger_waits_from_its_sending,
             every_payment_ahead_on_another_videos_ledger_waits_from_its_sending,
             every_last_payment_on_another_videos_ledger_waits_from_its_sending,
+            every_payment_due_on_its_first_ledger_beside_the_others_history_waits_from_its_sending,
+            every_payment_ahead_on_its_first_ledger_beside_the_others_history_waits_from_its_sending,
+            every_last_payment_on_its_first_ledger_beside_the_others_history_waits_from_its_sending,
+            every_payment_due_on_another_videos_ledger_beside_the_others_history_waits_from_its_sending,
+            every_payment_ahead_on_another_videos_ledger_beside_the_others_history_waits_from_its_sending,
+            every_last_payment_on_another_videos_ledger_beside_the_others_history_waits_from_its_sending,
             every_payment_due_on_its_first_ledger_waits_at_a_sessions_end,
             every_payment_ahead_on_its_first_ledger_waits_at_a_sessions_end,
             every_last_payment_on_its_first_ledger_waits_at_a_sessions_end,
             every_payment_due_on_another_videos_ledger_waits_at_a_sessions_end,
             every_payment_ahead_on_another_videos_ledger_waits_at_a_sessions_end,
             every_last_payment_on_another_videos_ledger_waits_at_a_sessions_end,
+            every_payment_due_on_its_first_ledger_beside_the_others_history_waits_at_a_sessions_end,
+            every_payment_ahead_on_its_first_ledger_beside_the_others_history_waits_at_a_sessions_end,
+            every_last_payment_on_its_first_ledger_beside_the_others_history_waits_at_a_sessions_end,
+            every_payment_due_on_another_videos_ledger_beside_the_others_history_waits_at_a_sessions_end,
+            every_payment_ahead_on_another_videos_ledger_beside_the_others_history_waits_at_a_sessions_end,
+            every_last_payment_on_another_videos_ledger_beside_the_others_history_waits_at_a_sessions_end,
             every_payment_on_its_first_ledger_holds_at_most_64_proofs,
             every_payment_on_another_videos_ledger_holds_at_most_64_proofs,
             every_mixed_selection_on_its_first_ledger_is_swapped_to_fewer,
@@ -11941,6 +11953,8 @@ async fn a_ledger_beside<H: Harness>(h: &H, held: &str) -> (H::Viewer, Quote, u6
                 .expect("due answers at half the window")
                 .expect("due at half the window");
         }
+        drop(s);
+        lands(h).await;
         (e, v, 2)
     } else {
         let (e, v, _, claimed) = a_ledger_holding(h, held).await;
@@ -17807,17 +17821,19 @@ async fn every_payment_holds_at_most_64_proofs<H: Harness>(h: &H, on: &str, mixe
 }
 
 /// The scenarios of the table of waits ([`every_payment_waits_from_its_sending`]), one for
-/// each ledger the watcher pays on ([`LEDGERS`]), each way it pays ([`MADE`]) and each call
-/// that catches a closed session's payment up ([`CATCH_UPS`]): a scenario each, for the
-/// table's length.
+/// each ledger the watcher pays on ([`LEDGERS`]), each way it pays ([`MADE`]), each call
+/// that catches a closed session's payment up ([`CATCH_UPS`]), and the histories of the
+/// paying ledger or those of the standing's other ledger ([`histories`]): a scenario each,
+/// for the table's length.
 macro_rules! waits_from_its_sending {
-    ($($name:ident: $on:expr, $how:expr, $by:expr;)*) => {
+    ($($name:ident: $on:expr, $how:expr, $by:expr, $beside:expr;)*) => {
         $(
             /// A payment's 180 s count from its own sending (NFX-07 §3a): a part of the table
             /// of waits ([`every_payment_waits_from_its_sending`]), by the ledger that pays,
-            /// how the payment is made and the call that catches it up.
+            /// how the payment is made, the call that catches it up and whose history came
+            /// before it.
             pub async fn $name<H: Harness>(h: &H) {
-                every_payment_waits_from_its_sending(h, $on, $how, $by).await;
+                every_payment_waits_from_its_sending(h, $on, $how, $by, $beside).await;
             }
         )*
     };
@@ -17825,29 +17841,53 @@ macro_rules! waits_from_its_sending {
 
 waits_from_its_sending!(
     every_payment_due_on_its_first_ledger_waits_from_its_sending:
-        LEDGERS[0], MADE[0], CATCH_UPS[0];
+        LEDGERS[0], MADE[0], CATCH_UPS[0], false;
     every_payment_ahead_on_its_first_ledger_waits_from_its_sending:
-        LEDGERS[0], MADE[1], CATCH_UPS[0];
+        LEDGERS[0], MADE[1], CATCH_UPS[0], false;
     every_last_payment_on_its_first_ledger_waits_from_its_sending:
-        LEDGERS[0], MADE[2], CATCH_UPS[0];
+        LEDGERS[0], MADE[2], CATCH_UPS[0], false;
     every_payment_due_on_another_videos_ledger_waits_from_its_sending:
-        LEDGERS[1], MADE[0], CATCH_UPS[0];
+        LEDGERS[1], MADE[0], CATCH_UPS[0], false;
     every_payment_ahead_on_another_videos_ledger_waits_from_its_sending:
-        LEDGERS[1], MADE[1], CATCH_UPS[0];
+        LEDGERS[1], MADE[1], CATCH_UPS[0], false;
     every_last_payment_on_another_videos_ledger_waits_from_its_sending:
-        LEDGERS[1], MADE[2], CATCH_UPS[0];
+        LEDGERS[1], MADE[2], CATCH_UPS[0], false;
+    every_payment_due_on_its_first_ledger_beside_the_others_history_waits_from_its_sending:
+        LEDGERS[0], MADE[0], CATCH_UPS[0], true;
+    every_payment_ahead_on_its_first_ledger_beside_the_others_history_waits_from_its_sending:
+        LEDGERS[0], MADE[1], CATCH_UPS[0], true;
+    every_last_payment_on_its_first_ledger_beside_the_others_history_waits_from_its_sending:
+        LEDGERS[0], MADE[2], CATCH_UPS[0], true;
+    every_payment_due_on_another_videos_ledger_beside_the_others_history_waits_from_its_sending:
+        LEDGERS[1], MADE[0], CATCH_UPS[0], true;
+    every_payment_ahead_on_another_videos_ledger_beside_the_others_history_waits_from_its_sending:
+        LEDGERS[1], MADE[1], CATCH_UPS[0], true;
+    every_last_payment_on_another_videos_ledger_beside_the_others_history_waits_from_its_sending:
+        LEDGERS[1], MADE[2], CATCH_UPS[0], true;
     every_payment_due_on_its_first_ledger_waits_at_a_sessions_end:
-        LEDGERS[0], MADE[0], CATCH_UPS[1];
+        LEDGERS[0], MADE[0], CATCH_UPS[1], false;
     every_payment_ahead_on_its_first_ledger_waits_at_a_sessions_end:
-        LEDGERS[0], MADE[1], CATCH_UPS[1];
+        LEDGERS[0], MADE[1], CATCH_UPS[1], false;
     every_last_payment_on_its_first_ledger_waits_at_a_sessions_end:
-        LEDGERS[0], MADE[2], CATCH_UPS[1];
+        LEDGERS[0], MADE[2], CATCH_UPS[1], false;
     every_payment_due_on_another_videos_ledger_waits_at_a_sessions_end:
-        LEDGERS[1], MADE[0], CATCH_UPS[1];
+        LEDGERS[1], MADE[0], CATCH_UPS[1], false;
     every_payment_ahead_on_another_videos_ledger_waits_at_a_sessions_end:
-        LEDGERS[1], MADE[1], CATCH_UPS[1];
+        LEDGERS[1], MADE[1], CATCH_UPS[1], false;
     every_last_payment_on_another_videos_ledger_waits_at_a_sessions_end:
-        LEDGERS[1], MADE[2], CATCH_UPS[1];
+        LEDGERS[1], MADE[2], CATCH_UPS[1], false;
+    every_payment_due_on_its_first_ledger_beside_the_others_history_waits_at_a_sessions_end:
+        LEDGERS[0], MADE[0], CATCH_UPS[1], true;
+    every_payment_ahead_on_its_first_ledger_beside_the_others_history_waits_at_a_sessions_end:
+        LEDGERS[0], MADE[1], CATCH_UPS[1], true;
+    every_last_payment_on_its_first_ledger_beside_the_others_history_waits_at_a_sessions_end:
+        LEDGERS[0], MADE[2], CATCH_UPS[1], true;
+    every_payment_due_on_another_videos_ledger_beside_the_others_history_waits_at_a_sessions_end:
+        LEDGERS[1], MADE[0], CATCH_UPS[1], true;
+    every_payment_ahead_on_another_videos_ledger_beside_the_others_history_waits_at_a_sessions_end:
+        LEDGERS[1], MADE[1], CATCH_UPS[1], true;
+    every_last_payment_on_another_videos_ledger_beside_the_others_history_waits_at_a_sessions_end:
+        LEDGERS[1], MADE[2], CATCH_UPS[1], true;
 );
 
 /// Where a payment's 180 s are counted, for [`every_payment_waits_from_its_sending`]: on
@@ -17883,14 +17923,24 @@ const CATCH_UPS: [&str; 2] = ["due", "last_pay"];
 
 /// A payment's 180 s are counted from its own sending, never from an input before it,
 /// however it is made (`how`, of [`MADE`]), `on` whichever ledger ([`LEDGERS`]), whatever
-/// came before it ([`histories`]), wherever they are counted ([`COUNTED`]), and whichever
+/// came before it ([`histories`]: the paying ledger's own, or, `others`, the standing's
+/// other ledger's), wherever they are counted ([`COUNTED`]), and whichever
 /// call catches a closed session's payment up (`call`, of [`CATCH_UPS`]; a live session's
 /// payment is `timeout`'s, tried with the first). Each payment is sent 20 s after every
 /// input before it: the session's quote, the answer to the one before, the requests, the
 /// refusal, a reclaim completing or a quote that settled a payment, on its own ledger or the
 /// other video's. Unanswered, it is not reclaimed at 179 s from sending, and is at 180 s.
-async fn every_payment_waits_from_its_sending<H: Harness>(h: &H, on: &str, how: &str, call: &str) {
+async fn every_payment_waits_from_its_sending<H: Harness>(
+    h: &H,
+    on: &str,
+    how: &str,
+    call: &str,
+    others: bool,
+) {
     for (from, row, beside) in histories() {
+        if beside != others {
+            continue;
+        }
         for at in COUNTED {
             if at.starts_with("on its live session") && call != CATCH_UPS[0] {
                 continue;
