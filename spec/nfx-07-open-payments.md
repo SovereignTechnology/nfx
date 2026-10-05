@@ -298,6 +298,10 @@ whatever it offers. The checks run in this order:
    swapped.
    - **The swap is not tied to the `pay`'s connection.** If the connection drops, a
      swap that completes is still credited, and the watcher learns of it from a quote.
+     Nor is its outcome tied to the task that serves the connection: the seeder settles
+     an outcome as it comes back from the mint, whether or not that task is waiting for it
+     or running, and a `pay` whose outcome was settled in time is answered with it,
+     however late that task looks (the deadline, below).
    - **Outcomes:**
      - on success, `ack`: `accepted_upto` becomes `upto_chunk`, and `spent_total`
        grows by the face value;
@@ -1373,3 +1377,7 @@ paths on one host are two origins.
     `window` being the session's quote's, and a pay-ahead is half of it, rounded down, less
     the credit held, on whichever ledger and whatever came before the payment. What
     "rounded up" said, now shown.
+  - §3 step 5: the seeder settles a swap's outcome as it comes back from the mint, whether
+    or not the task serving the `pay`'s connection is waiting for it or running: a `pay`
+    whose outcome was settled in time is answered with it, however late that task looks.
+    What the adversary suite has assumed, now said.

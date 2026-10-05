@@ -27,7 +27,8 @@ pub type PeerId = [u8; 32];
 /// security stage) and [`crate::mock::MockEngine`].
 #[allow(async_fn_in_trait)]
 pub trait SeederEngine {
-    type Session: SeederSession + Send;
+    /// A session owns what it needs: the suite may move one to a thread of its own.
+    type Session: SeederSession + Send + 'static;
 
     /// A `hello` from `peer`. The session continues the peer's account for the video, and
     /// its quote carries the account's position. A `hello` creates no account. It waits
@@ -130,7 +131,10 @@ pub trait SeederSession {
     /// **Cancel-safe:** once the swap is sent it completes, and is credited or banned on,
     /// even if this future is dropped (the connection closed). The account's turn is held
     /// until then, or until the deadline. Dropped before its swap is sent, the payment is
-    /// abandoned unswapped: its turn is freed then, and it creates no account.
+    /// abandoned unswapped: its turn is freed then, and it creates no account. Nor is the
+    /// outcome tied to this future's polls: the engine settles it as it comes back, whether
+    /// or not this future is polled then, and one settled in time is the answer, however
+    /// late this future is polled again.
     async fn pay(&mut self, pay: &Pay) -> Result<Ack, Rej>;
 
     /// Whether this session's peer is banned.
@@ -387,31 +391,46 @@ pub struct EngineParams {
 /// What the adversary suite needs from an engine under test: the mock now, and the real
 /// engine with an in-process mint in the M2 security stage.
 ///
-/// **How the suite waits.** It judges an engine's progress by the answers its calls await,
-/// never by how many polls an answer takes. It drives the engine's futures on the runtime
-/// its test runs it in, polled with their task's waker, and yields to that runtime between
-/// polls, so that tasks the engine spawns or wakes run too. An engine moves only on its
-/// calls' answers, on the harness's clock and on the suite's own calls: no timer of its own
-/// in real time moves it. [`Harness::answers_under_way`] says whether an answer the engine
-/// awaits is still on its way, and the suite waits, in real time, while one is. So:
-/// - it lets a future take a step by polling it once the answers under way have come in, a
-///   turn of the runtime after them. An entry (a `hello` or a `pay`) awaits its own calls,
-///   so an answer that has woken it is taken in its next poll; and what it decides with no
-///   call under way (a refusal as it arrives, say) it answers in the poll that decides it;
+/// **How the suite waits.** It judges an engine's progress by the answers its calls await
+/// and by the engine settling, never by a single poll, or a single turn of the runtime. It
+/// drives the engine's futures on the runtime its test runs it in, polled with their task's
+/// waker, and yields to that runtime between polls, so that tasks the engine spawns or wakes
+/// run too; it never blocks that runtime's thread while it waits for the engine. An engine
+/// moves only on its calls' answers, on the harness's clock and on the suite's own calls: no
+/// timer of its own in real time moves it. [`Harness::answers_under_way`] says whether an
+/// answer the engine awaits is still on its way, and the suite waits, in real time, while
+/// one is. The engine settles once no answer is under way and its futures and tasks have
+/// had 100 turns of the runtime: what an engine does between an answer and its next wait,
+/// on its own tasks and in the polls its answers wake, takes fewer turns than that. So:
 /// - it waits for an answer, or checks that a future still waits, by polling it until it is
-///   ready, or until it has stayed pending for 100 turns of the runtime with no answer under
-///   way. It then takes the future to wait on the suite (a clock move, a release, another
-///   entry): by then the engine has taken every answer, since what it does between answers,
-///   on its own tasks and in the polls its answers wake, takes fewer turns than that.
+///   ready, or until the engine has settled with the future pending, which then waits on
+///   the suite (a clock move, a release, another entry). It lets a future it drives beside
+///   its own steps reach its wait the same way;
+/// - it leaves an entry with a read under way by polling it until a read reaches the mint,
+///   however many polls that takes, and it closes an entry's connection once the entry
+///   waits on the suite (its swap held, say);
+/// - after a release ([`Harness::release_swaps`], [`Harness::release_oldest_swap`],
+///   [`Harness::roll_back_reserved`]) it lets the engine settle before it acts again or reads
+///   the engine's state, its own entries not polled meanwhile. An engine settles a swap's
+///   outcome as it comes, on whatever task or thread takes it (a task of its own, say),
+///   whether or not the entry that sent the swap is polled: the swap is not tied to the
+///   `pay`'s connection (NFX-07 §3 step 5). An entry (a `hello` or a `pay`) awaits its own
+///   reads, key requests and keyset listings, and takes an answer that has woken it in its
+///   next poll; what it decides with no call under way (a refusal as it arrives, say) it
+///   answers in the poll that decides it.
 ///
 /// It waits 5 s in real time at most for an engine to settle, far above any honest answer,
 /// and a scenario that hangs is timed out by its runner. Scenarios whose entries run on
-/// threads of their own drive them with an executor of the suite's while the suite's thread
-/// blocks: there an entry needs no runtime to make progress, and the mint answers from
-/// threads of the harness's own, never from tasks on the suite's runtime.
+/// threads of their own, to meet at the mint, drive each there with an executor of the
+/// suite's, polled when it is woken, while the suite's thread goes on with its runtime
+/// running, the engine's own tasks included. The one exception is a race: an entry polled
+/// on the suite's thread while two others release the swaps and move the clock, for only as
+/// long as those two take, after which its answer is awaited on the suite's task. The mint
+/// answers from threads of the harness's own, never from tasks on the suite's runtime.
 #[allow(async_fn_in_trait)]
 pub trait Harness {
-    type Engine: SeederEngine + Send + Sync;
+    /// An engine owns what it needs: the suite may share one with a thread of its own.
+    type Engine: SeederEngine + Send + Sync + 'static;
     type Viewer: Viewer;
 
     /// A seeder serving two videos (0 and 1) at `price`, quoting `window` (≥ 2) and this
@@ -539,10 +558,12 @@ pub trait Harness {
     /// passing them untested.
     fn forget_keys(&self, engine: &Self::Engine);
     /// Run the oldest held swap, or deliver the oldest held response, and keep holding
-    /// the rest.
+    /// the rest. Its answer may come back after this returns, as from a real mint: it is
+    /// under way until then ([`Harness::answers_under_way`]).
     async fn release_oldest_swap(&self);
     /// Run the held swaps, deliver the held responses and answer held key requests, in
-    /// order, and hold no more.
+    /// order, and hold no more. Their answers may come back after this returns, as from a
+    /// real mint: each is under way until then ([`Harness::answers_under_way`]).
     async fn release_swaps(&self);
     /// Make the mint unreachable (`true`) or reachable again.
     fn mint_outage(&self, down: bool);
@@ -581,7 +602,8 @@ pub trait Harness {
     fn hold_next_swap_reserving(&self);
     /// The mint abandons every request that reserved inputs (CDK's recovery at startup):
     /// the inputs are unspent again, those requests are never processed, and a client
-    /// still waiting for one gets no answer.
+    /// still waiting for one gets no answer. It may learn so after this returns, as from a
+    /// real mint: under way until then ([`Harness::answers_under_way`]).
     fn roll_back_reserved(&self);
     /// Reads of swap state that have reached the mint (NUT-07 checks and NUT-09 restores),
     /// one per request, however many swaps it covers: counted as each arrives, so one the
