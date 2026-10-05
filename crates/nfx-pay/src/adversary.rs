@@ -1023,64 +1023,6 @@ fn is_set(flag: &AtomicBool) -> bool {
     flag.load(Ordering::SeqCst)
 }
 
-/// A waker that records its wake and passes it on to the task it runs in.
-struct OwnWaker {
-    woken: AtomicBool,
-    outer: Mutex<Option<Waker>>,
-}
-
-impl Wake for OwnWaker {
-    fn wake(self: Arc<Self>) {
-        self.wake_by_ref();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.woken.store(true, Ordering::SeqCst);
-        let outer = self
-            .outer
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some(w) = outer {
-            w.wake();
-        }
-    }
-}
-
-/// A future polled only when its own waker fires, as on a task of its own: whatever it
-/// waits for must wake it.
-struct OwnTask<F> {
-    f: Pin<Box<F>>,
-    waker: Arc<OwnWaker>,
-}
-
-fn own_task<F: Future>(f: F) -> OwnTask<F> {
-    OwnTask {
-        f: Box::pin(f),
-        waker: Arc::new(OwnWaker {
-            woken: AtomicBool::new(true),
-            outer: Mutex::new(None),
-        }),
-    }
-}
-
-impl<F: Future> Future for OwnTask<F> {
-    type Output = F::Output;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
-        *self
-            .waker
-            .outer
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(cx.waker().clone());
-        if !self.waker.woken.swap(false, Ordering::SeqCst) {
-            return Poll::Pending;
-        }
-        let waker = Waker::from(self.waker.clone());
-        self.f.as_mut().poll(&mut Context::from_waker(&waker))
-    }
-}
-
 /// An entry on a task of its own: a task of the runtime the scenario runs in, which that
 /// runtime polls when it is woken, in turn with the engine's own tasks, whatever the suite's
 /// task is doing ([`on_a_task`]). So whatever the entry waits for must wake it; and a wake

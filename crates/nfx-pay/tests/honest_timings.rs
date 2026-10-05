@@ -3,7 +3,7 @@
 //! listings asked after them, callers woken before their answer can be seen or woken for
 //! nothing, and the seeder settling swaps or sweeping on tasks of its own, or taking more
 //! polls at each step; its entries reaching it through tasks of its runtime, and their
-//! answers and wakes coming back through them; the clock taken on
+//! answers and wakes coming back through them; a closed connection or the clock taken on
 //! such a task; and its keys and keyset listings held from its start. The suite judges
 //! progress by answers and settling, so every scenario must pass against each as against
 //! the synchronous mock (`adversary.rs`).
@@ -232,6 +232,27 @@ mod wakes_through_a_task {
         hop: Some(spawner()),
         wakes_through_a_task: true,
         ..woken()
+    }));
+}
+
+/// The seeder takes a closed connection on a task of its own: a session's close, and the
+/// drop of a `hello` or a `pay` not yet answered.
+mod closes_on_a_task {
+    use super::*;
+    nfx_pay::adversary_suite!(MockHarness::with_timing(Timing {
+        spawn: Some(spawner()),
+        closes_on_a_task: true,
+        ..woken()
+    }));
+}
+
+/// The same, the mint answering at once.
+mod closes_on_a_task_at_once {
+    use super::*;
+    nfx_pay::adversary_suite!(MockHarness::with_timing(Timing {
+        spawn: Some(spawner()),
+        closes_on_a_task: true,
+        ..Timing::default()
     }));
 }
 

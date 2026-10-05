@@ -453,6 +453,29 @@ fn the_suite_makes_no_bare_unwrap() {
     }
 }
 
+#[test]
+fn the_suite_closes_connections_through_its_helper() {
+    // From its scenarios' helpers on, the suite drops a session or an entry only through
+    // `close`, which lets the close land before it goes on. A bare `drop` there is a `Drop`
+    // impl's, or the guard's that lets the mint's held reads go on, which is no connection.
+    let from = suite_line(|l| l.starts_with("const SECOND: Duration")) as usize;
+    let bare: Vec<usize> = (1..)
+        .zip(code_lines(SUITE))
+        .skip(from)
+        .filter(|(_, code)| {
+            code.contains("drop(")
+                && !code.contains("fn drop(")
+                && !code.contains("drop(go_on)")
+                && !code.contains("drop(_go_on)")
+        })
+        .map(|(at, _)| at)
+        .collect();
+    assert!(
+        bare.is_empty(),
+        "a session or an entry dropped without `close`, at lines {bare:?}"
+    );
+}
+
 /// The lines (from 1) of `source` whose code names `unwrap` or `unwrap_err` as a word.
 fn bare_unwraps(source: &str) -> Vec<usize> {
     let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
