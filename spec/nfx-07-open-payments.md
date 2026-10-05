@@ -245,12 +245,17 @@ whatever it offers. The checks run in this order:
    for another mint or another keyset serve no proof they are not for.
    - **Keysets it does not hold.** The seeder asks the mint for a keyset's keys only if
      the mint's keyset listing (NUT-02) names it: one the mint started since, say, or an
-     older one a wallet still spends. It caches the listing per mint and asks for it at
-     most once a second. A payment naming a keyset that the listing does not name, the
-     listing asked for before the payment arrived, makes it ask again; if it last asked
-     in the same second, the payment waits for the next second's listing.
+     older one a wallet still spends. It caches the listing per mint, and asks a mint
+     for it only at its own start or where a check needs one, here or the outputs'
+     keyset of step 5, and at most once a second: a payment refused by an earlier check
+     asks for none. Each mint's listing is its own: it names no keyset of another
+     mint's, and asking one mint for it delays asking no other. A payment naming a
+     keyset that the listing does not name, the listing asked for before the payment
+     arrived, makes it ask again; if it last asked in the same second, the payment waits
+     for the next second's listing.
    - A keyset that a listing asked for after the payment arrived does not name is
-     `bad-token`, without a ban. So is one whose keys the mint answers 12001 (a keyset it
+     `bad-token`, without a ban, whichever entry asked for it and in whichever second,
+     the payment's own included. So is one whose keys the mint answers 12001 (a keyset it
      does not know). A token naming keysets the mint never had so costs the mint at most
      a listing a second, whoever sends it.
 4. **The face value** exactly covers the new chunks. Short is `underpaid`, over is
@@ -292,7 +297,13 @@ whatever it offers. The checks run in this order:
      keyset whose `final_expiry` (NUT-02), as the mint lists it, is absent or at least
      twice `account_ttl` away by the seeder's own clock. With none, it does not swap:
      `mint-unavailable`, its own keyset error (below), and it reads nothing for it. So a
-     swap outlives its outputs only if it stays undecided that long (below).
+     swap outlives its outputs only if it stays undecided that long (below). It judges by
+     the mint's keyset listing of step 3, one asked for in the second the payment's turn
+     came or later, by whichever entry, before the payment arrived or after. If it holds
+     none, or one asked for before that second, it asks for the listing then; one asked
+     for and not yet answered it waits for, and a listing that comes at the deadline or
+     later is not used (the deadline, below). A mint's listing names what the mint lists
+     as it answers: a `final_expiry` listed since is judged at the next listing.
 
    - **Pending.** A mint may reserve a request's inputs before it signs (NUT-07
      `PENDING`; CDK does). A swap of reserved inputs is refused as pending (CDK 11002).
@@ -317,21 +328,22 @@ whatever it offers. The checks run in this order:
      seconds, and a deadline is as its second began: what comes in the deadline's second
      came after it. So a payment whose turn comes then or later runs none of its checks,
      the ban's included; keys or a keyset listing that come then or later are not used,
-     and nothing that needs them (DLEQ, amount) is judged; a swap's outcome the seeder
-     settles then is late (below); and a payment whose swap is not sent by then is not
-     rechecked against the watermark (step 5). Each is answered `mint-unavailable`. The
-     turn is freed at the deadline, however late that answer goes out, the swap's outcome
-     comes, or an entry takes the turn over: a read sent in the deadline's second or
-     later was sent after the freeing. A payment dropped before its swap is sent (its
-     connection closed) is abandoned unswapped, and frees the turn then; one dropped
-     after is settled as its swap completes (step 5). The payment that takes the turn,
-     once its checks pass, reads the abandoned swap (below), whether it waited for the
-     turn or came after the deadline; while that outcome is still unknown, it is answered
-     `mint-unavailable` without a swap (bounded state, above). A payment's own reads and
-     completions (below) count too, and so do the reads and requests that settle a retry
-     or a completion: all end at its deadline, however late they start (after a wait for
-     the account's turn, or a slow key fetch). One still unanswered then is abandoned,
-     proves nothing, and the payment is answered `mint-unavailable` at the deadline.
+     and nothing that needs them (DLEQ, amount, the outputs' keyset) is judged; a swap's
+     outcome the seeder settles then is late (below); and a payment whose swap is not
+     sent by then is not rechecked against the watermark (step 5). Each is answered
+     `mint-unavailable`. The turn is freed at the deadline, however late that answer goes
+     out, the swap's outcome comes, or an entry takes the turn over: a read sent in the
+     deadline's second or later was sent after the freeing. A payment dropped before its
+     swap is sent (its connection closed) is abandoned unswapped, and frees the turn
+     then; one dropped after is settled as its swap completes (step 5). The payment that
+     takes the turn, once its checks pass, reads the abandoned swap (below), whether it
+     waited for the turn or came after the deadline; while that outcome is still unknown,
+     it is answered `mint-unavailable` without a swap (bounded state, above). A payment's
+     own reads and completions (below) count too, and so do the reads and requests that
+     settle a retry or a completion: all end at its deadline, however late they start
+     (after a wait for the account's turn, or a slow key fetch). One still unanswered
+     then is abandoned, proves nothing, and the payment is answered `mint-unavailable` at
+     the deadline.
    - **Late outcomes.** A swap the seeder has answered `mint-unavailable` for, at the
      deadline or earlier, is still settled when its outcome becomes known. The seeder
      MUST learn it: from a late response, or, when none comes, by reading the swap's
@@ -1115,3 +1127,11 @@ therefore loses nothing:
     that the cache did not hold was fetched, with no bound, and one the mint did not know
     had no stated outcome). A listing that comes at the payment's deadline or later is not
     used, as keys that come then are not.
+  - §3: step 5's outputs' keyset is judged by the same per-mint listing, one asked for in
+    the second the payment's turn came or later; the seeder asks for it then if the one it
+    holds was asked for before that second, within the same once a second, and waits for
+    one not yet answered, to the deadline (was: `final_expiry` as the mint lists it, with
+    no word on when the listing is asked for). The seeder asks a mint for its listing only
+    at its own start or where step 3 or step 5 needs one. Each mint's listing names only
+    that mint's keysets and bounds only asks of that mint, and a listing any entry asked
+    for after a payment arrived judges its keysets, in the payment's own second too.
