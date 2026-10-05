@@ -408,10 +408,11 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
          cap is a rate (`debt_ttl`).
        - `quote` carries the account's position, so a watcher can resume.
        - HTTPS origins take one payment per request.
-     - The suite has 63 scenarios, run three times (the second with the mint's reads as
-       round trips, the third with them answered from another thread), each on its own
+     - The suite has 63 scenarios, run four times (the second with the mint's reads as
+       round trips, the third with them answered from another thread, the fourth with
+       every quoted mint's keyset listing asked for at the engine's start), each on its own
        thread under a real-time timeout, waiting on answers and never on a count of polls,
-       and each of 982
+       and each of 1,573
        planted defects fails an assertion of the suite (a hang, a panic raised
        elsewhere, or a runtime panic of Rust's own, is not a catch).
      - A swap with no answer is decided by reading its inputs (NUT-07), then its outputs
@@ -432,7 +433,15 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        restored cache cannot stand in for the build. Code in other crates is out of its
        scope, as the check itself states.
    - **Next:**
-     - a twenty-ninth independent audit, until one reports nothing;
+     - the twenty-ninth independent audit (2026-09-29) reported 26 findings. The
+       resolutions of 1 to 19 and 23 to 26 (the seeder, the watcher, origins, the browser
+       client, the lock and CI) are merged on `m2/contracts`, each pinned as a whole class
+       by a table of cases, not as the one instance found. Those of 20 to 22 (how the
+       suite waits: no progress judged by a count of polls, engine state read only once
+       settled, every mint answer of the third harness coming by a wake, and the planted
+       defects given the suite's own time limit) are in progress on `m2/r29-d`. The
+       audit's record follows them;
+     - then a thirtieth independent audit, until one reports nothing;
      - sovtech's OK to push M2.0 (given, once the audits are clean);
      - the testnet mint: sovtech approved its deployment once its runbook's checks
        are clean (a private record);
