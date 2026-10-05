@@ -222,6 +222,7 @@ def test_counts() -> dict[str, int]:
     if not listed:
         fail("cannot find the adversary_suite! list")
     mutants = (CRATES / "nfx-pay" / "tests" / "mutants.rs").read_text()
+    timings = (CRATES / "nfx-pay" / "tests" / "honest_timings.rs").read_text()
     runner = (CRATES / "nfx-pay" / "tests" / "runner.rs").read_text()
     pay1 = (CRATES / "nfx-pay-wire" / "tests" / "pay1.rs").read_text()
     scenarios = len(re.findall(r"^\s+[a-z_0-9]+,$", listed.group(1), re.M))
@@ -229,6 +230,9 @@ def test_counts() -> dict[str, int]:
         "adversary": scenarios,
         "round_trip": scenarios,  # the same suite, the mint answering reads on a later poll
         "woken_answers": scenarios,  # the same suite, every mint call answered from another thread
+        "listings_at_start": scenarios,  # the same suite, keyset listings asked at the start too
+        # the same suite against each honest engine and mint that take their time differently
+        "honest_timings": scenarios * len(re.findall(r"^\s+nfx_pay::adversary_suite!\(", timings, re.M)),
         "mutants": len(re.findall(r"^\s+[a-z_0-9]+: [svrw]\(", mutants, re.M)),
         "runner": len(re.findall(r"^#\[test\]$", runner, re.M)),
         "pay1": len(re.findall(r"^#\[test\]$", pay1, re.M)),
@@ -370,6 +374,7 @@ def compiled_in(pin: bool, found: list[str], members: list[dict], build_dir: pat
     out = subprocess.run(["cargo", "test", "--color", "never", "--locked", "--offline",
                           *target_dir, "-p", "nfx-pay", "-p", "nfx-pay-wire",
                           "--test", "adversary", "--test", "round_trip", "--test", "woken_answers",
+                          "--test", "listings_at_start", "--test", "honest_timings",
                           "--test", "mutants", "--test", "runner", "--test", "pay1"],
                          cwd=CRATES, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if out.returncode != 0:

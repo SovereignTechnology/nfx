@@ -1,7 +1,8 @@
 //! The NFX-07 adversary suite against the mock engine, its mint answering each read of swap
 //! state on the reader's next poll: a read then spans polls of its entry, and the scenarios
-//! act between them. `tests/woken_answers.rs` runs the suite with each of the seeder's calls
-//! answered from another thread instead, as a real mint's answer comes back.
+//! act between them. `tests/woken_answers.rs` runs the suite with each call the seeder's
+//! entries and sweeps await answered from another thread instead, as a real mint's answer
+//! comes back.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

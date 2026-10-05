@@ -8,9 +8,10 @@
 //!   released all at once or oldest first. Key requests can be held too.
 //! - The mint can be taken down.
 //! - The seeder's reads of swap state are answered in the poll that sends them, or on the
-//!   reader's next poll. Or every call the seeder makes to the mint (its reads, swaps, key
-//!   requests and keyset listings) is answered from another thread that wakes the caller a
-//!   few milliseconds later, as a real mint's answer comes back.
+//!   reader's next poll. Or every call the seeder's entries and sweeps send to the mint and
+//!   await (their reads, swaps, key requests and keyset listings) is answered from another
+//!   thread that wakes the caller a few milliseconds later, as a real mint's answer comes
+//!   back ([`Answers::Woken`] says which calls come back with another).
 //! - The seeder and the viewers keep time on the harness's clock, so debt ages, deadlines
 //!   pass and answers can be late. Moving the clock wakes whatever waits on it.
 //!
@@ -20,7 +21,8 @@
 //! or [`ViewerFlaw`]; `tests/mutants.rs` shows the adversary suite catches each one.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
@@ -126,6 +128,12 @@ impl Clock {
 
     fn advance(&self, by: Duration) {
         self.now.fetch_add(by.as_secs(), Ordering::Relaxed);
+        self.nudge();
+    }
+
+    /// Wake whatever waits on the clock, the time unchanged: a spurious wake
+    /// ([`Timing::wake_early`], [`Timing::spurious_wakes`]).
+    fn nudge(&self) {
         let wake = std::mem::take(&mut *lock(&self.waiting));
         for w in wake {
             w.wake();
@@ -384,6 +392,24 @@ struct Ledger {
     /// Calls answered from another thread whose caller has not been woken yet
     /// ([`Harness::answers_under_way`]).
     under_way: usize,
+    /// A panic raised on a thread of the harness's own that brings answers back or races a
+    /// release with the clock ([`Harness::race_release_with_clock`]), kept with where it was
+    /// raised, and raised again on the suite's thread as it next asks whether answers are
+    /// under way.
+    raised: Option<crate::adversary::Raised>,
+    /// How many such races the harness has run.
+    races: u64,
+    /// How the honest seeder and its mint take their time ([`Timing`]).
+    timing: Timing,
+    /// Swap outcomes the seeder has been handed and settles on tasks of its own
+    /// ([`Timing::spawn`]), not yet settled.
+    landing: usize,
+    /// Reads whose answers their readers have not taken yet ([`Harness::reads_out`]).
+    reads_out: usize,
+    /// How many answers have come back from another thread ([`Timing::jitter`]).
+    answered_later: u64,
+    /// The harness's clock, for the spurious wakes of [`Timing`].
+    clock: Option<Clock>,
     /// Key requests and keyset listings answered from another thread ([`Answers::Woken`]),
     /// by their handle: the answer once back, and who waits for it.
     calls: HashMap<u64, Call>,
@@ -495,15 +521,72 @@ enum Answers {
     /// A read on its reader's next poll, and every other call at once
     /// ([`MockHarness::with_round_trip_reads`]).
     NextPoll,
-    /// Every call from another thread, [`WOKEN_AFTER`] after it reaches the mint, waking
-    /// its caller ([`MockHarness::with_woken_answers`]). The mint answers a call as it
-    /// reaches it; its answer comes back by the wake.
+    /// Every call an entry or a sweep sends to the mint and awaits (a read of swap state,
+    /// a swap, a key request, a keyset listing) from another thread, [`WOKEN_AFTER`] after
+    /// it reaches the mint, waking its caller ([`MockHarness::with_woken_answers`]). The
+    /// mint answers a call as it reaches it; its answer comes back by the wake. Two calls
+    /// the seeder sends as it takes another answer come back with that answer: the retry of
+    /// a swap whose response was lost, sent as the seeder takes the loss, and the completion
+    /// of a swap whose inputs stayed unspent past `account_ttl`, sent within a read. And a
+    /// swap the seeder's client gives up on ([`Harness::time_out_next_swap`]) is lost to it
+    /// at once.
     Woken,
 }
 
 /// How long a call answered from another thread takes to come back: a few milliseconds,
 /// as a real mint's answer does.
 const WOKEN_AFTER: Duration = Duration::from_millis(2);
+
+/// Runs a future on a task of its own, on the runtime the engine was made in
+/// ([`Timing::spawn`]).
+pub type Spawner = Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>;
+
+/// How an honest seeder and its mint take their time, beyond the harnesses' own
+/// ([`MockHarness::with_timing`]). Each is a way an honest engine or a real mint may
+/// behave, which NFX-07 leaves free, so the suite must pass every one: it judges progress by
+/// answers and settling, never by when or in how many polls they come.
+#[derive(Clone, Default)]
+pub struct Timing {
+    /// The mint answers every call from another thread ([`MockHarness::with_woken_answers`]);
+    /// otherwise each in the poll that sends it.
+    pub woken: bool,
+    /// How long such an answer takes to come back; [`WOKEN_AFTER`] if `None`.
+    pub answer_after: Option<Duration>,
+    /// Each answer takes a different time, from none to twice that, so that answers
+    /// overtake one another.
+    pub jitter: bool,
+    /// Key requests come back this much later again: keys come after a listing asked after
+    /// them.
+    pub keys_later: Option<Duration>,
+    /// A caller is woken once before its answer can be seen, then again once it can.
+    pub wake_early: bool,
+    /// Every answer wakes everything waiting at the mint or on the clock, not only its
+    /// caller.
+    pub spurious_wakes: bool,
+    /// The seeder settles each swap's outcome on a task of its own, spawned with this, a
+    /// turn of the runtime after the answer comes, never on the thread that brings it.
+    pub spawn: Option<Spawner>,
+    /// With `spawn`: the seeder's sweep runs on a task of its own, which the sweep awaits.
+    pub sweep_on_a_task: bool,
+    /// The seeder's entries take this many polls more at each step, waking themselves.
+    pub yields: u32,
+}
+
+/// A read out ([`Harness::reads_out`]) while it lives.
+struct ReadOut(MockNetwork);
+
+impl ReadOut {
+    fn new(net: &MockNetwork) -> Self {
+        net.ledger().reads_out += 1;
+        Self(net.clone())
+    }
+}
+
+impl Drop for ReadOut {
+    fn drop(&mut self) {
+        self.0.ledger().reads_out -= 1;
+    }
+}
 
 /// A key request or keyset listing answered from another thread ([`Answers::Woken`]).
 #[derive(Default)]
@@ -512,8 +595,20 @@ struct Call {
     answer: Option<Called>,
     /// Whether the mint has it: sent, and not held ([`Harness::hold_key_fetches`]).
     sent: bool,
+    /// Held ([`Harness::hold_key_fetches`]): the mint answers it at the release, from
+    /// another thread, whether or not its caller is polled then.
+    held: Option<Held>,
     /// The wakers of those waiting for it.
     waiters: Vec<Waker>,
+}
+
+/// A held key request or keyset listing, as the mint will answer it.
+#[derive(Clone)]
+enum Held {
+    /// A key request to the mint at this URL, for these keysets.
+    Keys(String, HashSet<u64>),
+    /// A keyset listing of the mint at this URL.
+    Listing(String),
 }
 
 /// What came back for a [`Call`].
@@ -703,15 +798,87 @@ impl MockNetwork {
         self.ledger().answering == Answers::Woken
     }
 
+    /// How long an answer from another thread takes to come back, a key request's
+    /// (`keys`) or another's ([`Timing`]).
+    fn later(l: &mut Ledger, keys: bool) -> Duration {
+        let base = l.timing.answer_after.unwrap_or(WOKEN_AFTER);
+        let mut after = if l.timing.jitter {
+            l.answered_later += 1;
+            base * u32::try_from(l.answered_later * 7 % 5).unwrap_or(0) / 2
+        } else {
+            base
+        };
+        if keys {
+            after += l.timing.keys_later.unwrap_or_default();
+        }
+        after
+    }
+
+    /// Wake, the time unchanged, what waits on the clock and at the mint, its own waiters
+    /// as `waiters` (a spurious wake: [`Timing`]).
+    fn spurious(&self, waiters: &[Waker]) {
+        let (clock, waiting, calls) = {
+            let l = self.ledger();
+            let calls: Vec<Waker> = if l.timing.spurious_wakes {
+                l.calls
+                    .values()
+                    .flat_map(|c| c.waiters.iter().cloned())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let waiting = if l.timing.spurious_wakes {
+                l.waiting.clone()
+            } else {
+                Vec::new()
+            };
+            (l.clock.clone(), waiting, calls)
+        };
+        if let Some(c) = clock {
+            c.nudge();
+        }
+        for w in waiters.iter().chain(&waiting).chain(&calls) {
+            w.wake_by_ref();
+        }
+    }
+
+    /// Run `answer`, the engine's part of answers that come back on a thread of the
+    /// harness's own: a panic it raises is kept, with where it was raised, and raised again
+    /// on the suite's thread as it next asks whether answers are under way.
+    fn on_answer_thread(&self, answer: impl FnOnce()) {
+        if let Err(raised) = crate::adversary::keep_panic(answer) {
+            let mut l = self.ledger();
+            if l.raised.is_none() {
+                l.raised = Some(raised);
+            }
+        }
+    }
+
+    /// Whether a caller is woken before its answer can be seen ([`Timing::wake_early`]).
+    fn wakes_early(&self) -> bool {
+        self.ledger().timing.wake_early
+    }
+
+    /// Whether every answer wakes everything waiting ([`Timing::spurious_wakes`]).
+    fn wakes_all(&self) -> bool {
+        self.ledger().timing.spurious_wakes
+    }
+
     /// A key request or keyset listing the mint has answered with `answer`, as call `call`:
     /// its answer comes back from another thread [`WOKEN_AFTER`] from now, and wakes those
     /// waiting for it.
     fn call_back_later(&self, l: &mut Ledger, call: u64, answer: Called) {
         l.calls.entry(call).or_default().sent = true;
         l.under_way += 1;
+        let after = Self::later(l, matches!(answer, Called::Keys(_)));
         let net = self.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(WOKEN_AFTER);
+            std::thread::sleep(after);
+            if net.wakes_early() {
+                let waiters = net.ledger().calls.get(&call).map(|c| c.waiters.clone());
+                net.spurious(&waiters.unwrap_or_default());
+                std::thread::sleep(Duration::from_millis(1));
+            }
             let waiters = {
                 let mut l = net.ledger();
                 let c = l.calls.entry(call).or_default();
@@ -719,6 +886,9 @@ impl MockNetwork {
                 std::mem::take(&mut c.waiters)
             };
             wake_all(waiters);
+            if net.wakes_all() {
+                net.spurious(&[]);
+            }
             net.ledger().under_way -= 1;
         });
     }
@@ -749,15 +919,28 @@ impl MockNetwork {
         if later.is_empty() {
             return;
         }
-        self.ledger().under_way += 1;
+        let after = {
+            let mut l = self.ledger();
+            l.under_way += 1;
+            Self::later(&mut l, false)
+        };
         let net = self.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(WOKEN_AFTER);
-            for (id, outcome, done, deliver) in later {
-                done(outcome);
-                if deliver {
-                    net.deliver(id, outcome);
+            std::thread::sleep(after);
+            if net.wakes_early() {
+                net.spurious(&[]);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            net.on_answer_thread(|| {
+                for (id, outcome, done, deliver) in later {
+                    done(outcome);
+                    if deliver {
+                        net.deliver(id, outcome);
+                    }
                 }
+            });
+            if net.wakes_all() {
+                net.spurious(&[]);
             }
             net.ledger().under_way -= 1;
         });
@@ -766,6 +949,14 @@ impl MockNetwork {
     /// A read's round trip, from its sending: back on its reader's next poll, or once another
     /// thread has answered it and woken its reader ([`Answers::Woken`]).
     async fn round_trip(&self) {
+        self.round_trip_woken(true).await;
+    }
+
+    /// The same, its reader woken as it comes back if `wakes` ([`SeederFlaw::ReadUnwoken`]
+    /// otherwise).
+    async fn round_trip_woken(&self, wakes: bool) {
+        // Out from its sending until its reader takes it, or drops it.
+        let _out = ReadOut::new(self);
         if !self.woken() {
             return next_poll().await;
         }
@@ -777,13 +968,86 @@ impl MockNetwork {
             if b.0 {
                 return Poll::Ready(());
             }
+            b.1 = wakes.then(|| cx.waker().clone());
+            drop(b);
+            if !sent {
+                sent = true;
+                let after = {
+                    let mut l = self.ledger();
+                    l.under_way += 1;
+                    Self::later(&mut l, false)
+                };
+                let (net, back) = (self.clone(), back.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(after);
+                    if net.wakes_early() {
+                        let waker = lock(&back).1.clone();
+                        net.spurious(waker.as_slice());
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    let waker = {
+                        let mut b = lock(&back);
+                        b.0 = true;
+                        b.1.take()
+                    };
+                    if let Some(w) = waker {
+                        w.wake();
+                    }
+                    if net.wakes_all() {
+                        net.spurious(&[]);
+                    }
+                    net.ledger().under_way -= 1;
+                });
+            }
+            Poll::Pending
+        })
+        .await;
+    }
+
+    /// Deliver the responses held for the next read an entry makes
+    /// ([`Harness::deliver_responses_mid_read`]), if any, as that read reaches the mint: from
+    /// another thread a few milliseconds from now, and the read comes back a few
+    /// milliseconds after that, by a wake. So the seeder has taken them, on whatever task or
+    /// thread takes them, before its read goes on: and before the read's own time passes,
+    /// if the mint leaves it unanswered ([`Harness::unanswered_reads_take`]).
+    async fn deliver_as_read(&self) {
+        let held = {
+            let mut l = self.ledger();
+            if std::mem::take(&mut l.deliver_mid_read) {
+                std::mem::take(&mut l.responses)
+            } else {
+                return;
+            }
+        };
+        if held.is_empty() {
+            return;
+        }
+        let back = Arc::new(Mutex::new((false, None::<Waker>)));
+        let mut sent = false;
+        let mut held = Some(held);
+        poll_fn(|cx| {
+            let mut b = lock(&back);
+            if b.0 {
+                return Poll::Ready(());
+            }
             b.1 = Some(cx.waker().clone());
             drop(b);
             if !sent {
                 sent = true;
                 self.ledger().under_way += 1;
-                let (net, back) = (self.clone(), back.clone());
+                let (net, back, held) = (self.clone(), back.clone(), held.take());
                 std::thread::spawn(move || {
+                    std::thread::sleep(WOKEN_AFTER);
+                    net.on_answer_thread(|| {
+                        for (id, outcome, done) in held.into_iter().flatten() {
+                            done(outcome);
+                            net.deliver(id, outcome);
+                        }
+                    });
+                    // The read comes back once the seeder has settled them, on whatever task.
+                    while net.ledger().landing > 0 {
+                        std::thread::sleep(Duration::from_micros(200));
+                    }
                     std::thread::sleep(WOKEN_AFTER);
                     let waker = {
                         let mut b = lock(&back);
@@ -835,20 +1099,19 @@ impl MockNetwork {
         if ask {
             l.key_requests += 1;
         }
+        if l.hold_keys && l.answering == Answers::Woken {
+            // Held at the mint, which answers it at the release.
+            *call = Self::new_call(&mut l);
+            let c = l.calls.entry(*call).or_default();
+            c.held = Some(Held::Keys(url.to_owned(), keysets.clone()));
+            c.waiters.push(waker.clone());
+            return None;
+        }
         if l.hold_keys {
             l.waiting.push(waker.clone());
             return None;
         }
-        l.dialled.insert(url.to_owned());
-        let listing = l.listing_at(url);
-        let known = keysets.iter().all(|k| {
-            let owner = l.own_keysets.get(k).map(String::as_str);
-            listing.names(url, *k, owner)
-        });
-        let keys = known.then(|| MintKeys {
-            mint: url.to_owned(),
-            keysets: keysets.clone(),
-        });
+        let keys = Self::keys_of(&mut l, url, keysets);
         if l.answering == Answers::Woken {
             *call = Self::new_call(&mut l);
             l.calls
@@ -860,6 +1123,40 @@ impl MockNetwork {
             return None;
         }
         Some(keys)
+    }
+
+    /// The mint at `url`'s answer to a request for the keys of `keysets`, now: that mint's,
+    /// of those keysets; or `None`, a keyset it does not know (CDK 12001).
+    fn keys_of(l: &mut Ledger, url: &str, keysets: &HashSet<u64>) -> Option<MintKeys> {
+        l.dialled.insert(url.to_owned());
+        let listing = l.listing_at(url);
+        let known = keysets.iter().all(|k| {
+            let owner = l.own_keysets.get(k).map(String::as_str);
+            listing.names(url, *k, owner)
+        });
+        known.then(|| MintKeys {
+            mint: url.to_owned(),
+            keysets: keysets.clone(),
+        })
+    }
+
+    /// Answer, from another thread, the key requests and keyset listings held at the mint
+    /// ([`Answers::Woken`]), as they stand now: at their release.
+    fn answer_held_calls(&self, l: &mut Ledger) {
+        let held: Vec<(u64, Held)> = l
+            .calls
+            .iter_mut()
+            .filter_map(|(id, c)| c.held.take().map(|h| (*id, h)))
+            .collect();
+        let mut held = held;
+        held.sort_by_key(|(id, _)| *id);
+        for (id, h) in held {
+            let answer = match h {
+                Held::Keys(url, keysets) => Called::Keys(Self::keys_of(l, &url, &keysets)),
+                Held::Listing(url) => Called::Listing(l.listing_at(&url)),
+            };
+            self.call_back_later(l, id, answer);
+        }
     }
 
     /// Ask the mint at `url` for its keyset listing (NUT-02), now: the request's place
@@ -895,10 +1192,17 @@ impl MockNetwork {
             if let Some(Called::Listing(answer)) = &c.answer {
                 return Some(*answer);
             }
-            if c.sent {
+            if c.sent || c.held.is_some() {
                 c.waiters.push(waker.clone());
                 return None;
             }
+        }
+        if l.hold_keys && l.key_releases == released && call != 0 {
+            // Held at the mint, which answers it at the release.
+            let c = l.calls.entry(call).or_default();
+            c.held = Some(Held::Listing(url.to_owned()));
+            c.waiters.push(waker.clone());
+            return None;
         }
         if l.hold_keys && l.key_releases == released {
             l.waiting.push(waker.clone());
@@ -1382,17 +1686,17 @@ impl MockNetwork {
             // they have.
             let net = self.clone();
             let landed = std::thread::spawn(move || {
-                for (id, outcome, done, deliver) in later {
-                    done(outcome);
-                    if deliver {
-                        net.deliver(id, outcome);
+                crate::adversary::keep_panic(|| {
+                    for (id, outcome, done, deliver) in later {
+                        done(outcome);
+                        if deliver {
+                            net.deliver(id, outcome);
+                        }
                     }
-                }
+                })
             })
             .join();
-            if let Err(panic) = landed {
-                std::panic::resume_unwind(panic);
-            }
+            crate::adversary::rejoin(landed);
         }
         let now = {
             let mut l = self.ledger();
@@ -1766,6 +2070,7 @@ impl MockNetwork {
             l.hold_responses = false;
             l.hold_keys = false;
             l.key_releases += 1;
+            self.answer_held_calls(&mut l);
             (
                 std::mem::take(&mut l.queued),
                 std::mem::take(&mut l.responses),
@@ -3501,6 +3806,23 @@ pub enum SeederFlaw {
     /// Waits for the keyset rule's listing without watching the clock: a payment on a task
     /// of its own is not woken at its deadline.
     KeysetListingNoClockWatch,
+    /// Settles a swap's outcome without waking the payment that awaits it: a payment on a
+    /// task of its own is polled again only when something else wakes it.
+    OutcomeUnwoken,
+    /// Asks for keys without asking to be woken by their answer: where the mint answers
+    /// from another thread, a payment on a task of its own is woken only by the clock.
+    KeysUnwoken,
+    /// Asks for a keyset listing at step 3 without asking to be woken by its answer.
+    ListingUnwoken,
+    /// Sends a read of swap state without asking to be woken as it comes back: an entry on
+    /// a task of its own is polled again only when something else wakes it.
+    ReadUnwoken,
+    /// Settles a swap's outcome only as the payment that sent it is next polled, not as it
+    /// comes: one whose connection closed is never settled.
+    OutcomeLandsOnPoll,
+    /// Takes a payment's being polled again, its keys not come, as the mint not answering:
+    /// a spurious wake, or a clock move, and it gives up `mint-unavailable`.
+    KeysGiveUpOnWake,
     /// Trusts at step 3 only a listing it asked for itself, or one asked for in a later
     /// second than the payment arrived: one another entry asked for in that second, after
     /// it arrived, judges nothing, and it waits for the next second's or asks again.
@@ -5479,6 +5801,9 @@ struct PayRecord {
     /// The future has answered, or is gone.
     finished: bool,
     waker: Option<Waker>,
+    /// Its outcome, come, to settle as the future is next polled
+    /// ([`SeederFlaw::OutcomeLandsOnPoll`] only).
+    on_poll: Option<Box<dyn FnOnce() + Send>>,
     /// The swap once sent: what settles it, its token and its output set.
     swap: Option<(Settle, String, u64)>,
     /// In its read of its account's unknown swaps ([`SeederFlaw::DropInReadCreatesAccount`]
@@ -5775,6 +6100,23 @@ async fn next_poll() {
         }
     })
     .await;
+}
+
+impl Inner {
+    /// Polls more, waking itself, as an honest engine may take at a step
+    /// ([`Timing::yields`]).
+    async fn dawdle(&self) {
+        let mut left = self.net.ledger().timing.yields;
+        poll_fn(|cx| {
+            if left == 0 {
+                return Poll::Ready(());
+            }
+            left -= 1;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        })
+        .await;
+    }
 }
 
 /// Ready on the next poll, with nothing asked to wake it: only a poll it did not ask for
@@ -6407,6 +6749,7 @@ impl Inner {
                     continue;
                 }
                 Plan::Read(None) => {
+                    self.net.deliver_as_read().await;
                     // The flaw: its place taken only as it is sent, or once it is back.
                     if self.net.round_trips() {
                         let Some(learnt) = self.learn_read(Some(key), until) else {
@@ -6414,7 +6757,9 @@ impl Inner {
                         };
                         let reading =
                             Reading::start(self, slot, now, proofs.clone(), learnt.covers());
-                        self.net.round_trip().await;
+                        self.net
+                            .round_trip_woken(!self.has(SeederFlaw::ReadUnwoken))
+                            .await;
                         self.learn_apply(&learnt, by);
                         reading.back();
                     } else if let Some(learnt) = self.learn_read(Some(key), until) {
@@ -6432,6 +6777,7 @@ impl Inner {
                 Plan::Read(Some((index, lost, flight))) => {
                     let at = if at_first_look { first_look } else { now };
                     let reading = Reading::taken(self, slot, at, index);
+                    self.net.deliver_as_read().await;
                     // Sent now, exactly the swaps its place covers: its requests reach the
                     // mint.
                     let Some(learnt) = self.learn_read_of(lost, flight, until) else {
@@ -6442,7 +6788,9 @@ impl Inner {
                     }
                     if self.net.round_trips() {
                         // Its result is applied when it is back, on a later poll.
-                        self.net.round_trip().await;
+                        self.net
+                            .round_trip_woken(!self.has(SeederFlaw::ReadUnwoken))
+                            .await;
                     }
                     if self.has(SeederFlaw::CoverageFixedAtBack) {
                         // Back: on the next poll, or once the mint answers on this thread.
@@ -7305,6 +7653,7 @@ impl Inner {
                 landed: false,
                 finished: false,
                 waker: None,
+                on_poll: None,
                 swap: None,
                 reading: false,
                 rechecked: false,
@@ -7607,6 +7956,23 @@ impl Inner {
         // The mints that alone started the keysets named, if any: fixed as each starts.
         let owners: HashMap<u64, Option<String>> =
             named.iter().map(|k| (*k, self.net.owner_of(*k))).collect();
+        // What its key requests and listings ask to be woken by: the flaws, nothing.
+        let keys_waker = |cx: &Context<'_>| {
+            if self.has(SeederFlaw::KeysUnwoken) {
+                Waker::noop().clone()
+            } else {
+                cx.waker().clone()
+            }
+        };
+        let listing_waker = |cx: &Context<'_>| {
+            if self.has(SeederFlaw::ListingUnwoken) {
+                Waker::noop().clone()
+            } else {
+                cx.waker().clone()
+            }
+        };
+        // Polled once already, waiting ([`SeederFlaw::KeysGiveUpOnWake`] only).
+        let mut waited = false;
         poll_fn(|cx| {
             // Waiting for the next second to ask for the listing again.
             let mut next_second = false;
@@ -7664,7 +8030,7 @@ impl Inner {
                     drop(st);
                     break match self
                         .net
-                        .fetch_keys(mint, &missing, ask, &mut call, cx.waker())
+                        .fetch_keys(mint, &missing, ask, &mut call, &keys_waker(cx))
                     {
                         None => None,
                         Some(None) => Some(Err(rej(
@@ -7736,7 +8102,10 @@ impl Inner {
                 {
                     // Its answer is held: wait for it.
                     drop(st);
-                    let Some(answer) = self.net.listed(mint, l.released, l.call, cx.waker()) else {
+                    let Some(answer) =
+                        self.net
+                            .listed(mint, l.released, l.call, &listing_waker(cx))
+                    else {
                         break None;
                     };
                     held_waited = true;
@@ -7772,7 +8141,7 @@ impl Inner {
                 let seq = st.listings_asked;
                 own_ask = Some(seq);
                 drop(st);
-                let (released, call, answer) = self.net.list_keysets(mint, cx.waker());
+                let (released, call, answer) = self.net.list_keysets(mint, &listing_waker(cx));
                 self.state().listings.insert(
                     key.to_owned(),
                     Listing {
@@ -7813,6 +8182,10 @@ impl Inner {
             if let Some(found) = found {
                 return Poll::Ready(found);
             }
+            if asked && waited && self.has(SeederFlaw::KeysGiveUpOnWake) {
+                return Poll::Ready(Err(unavailable("no keys from the mint")));
+            }
+            waited = true;
             drop(st);
             if let Some(r) = self.state().pays.get_mut(&pay) {
                 r.listing_wait = next_second;
@@ -8052,6 +8425,9 @@ impl Inner {
             r.abandoned = late;
             let finished = r.finished;
             let mut wake: Vec<Waker> = r.waker.take().into_iter().collect();
+            if self.has(SeederFlaw::OutcomeUnwoken) {
+                wake.clear();
+            }
             if late {
                 self.settle_late(&mut st, pay, outcome);
             } else {
@@ -8075,6 +8451,14 @@ impl Inner {
     /// The answer to payment `id` once its swap is sent: its outcome if it settled in
     /// time, else `mint-unavailable` at the deadline.
     fn answer(&self, id: u64, cx: &Context<'_>) -> Poll<Result<Ack, Rej>> {
+        let on_poll = self
+            .state()
+            .pays
+            .get_mut(&id)
+            .and_then(|r| r.on_poll.take());
+        if let Some(land) = on_poll {
+            land();
+        }
         let (result, wake) = {
             let mut st = self.state();
             let now = self.clock.now();
@@ -8499,14 +8883,49 @@ impl SeederEngine for MockEngine {
     type Session = MockSession;
 
     async fn sweep(&self) {
-        if self.0.net.round_trips() {
-            self.0.net.round_trip().await;
-        }
-        self.0.learn(None, None, Learner::Sweep);
+        let spawn = {
+            let l = self.0.net.ledger();
+            l.timing.spawn.clone().filter(|_| l.timing.sweep_on_a_task)
+        };
+        let Some(spawn) = spawn else {
+            if self.0.net.round_trips() {
+                self.0.net.round_trip().await;
+            }
+            self.0.learn(None, None, Learner::Sweep);
+            return;
+        };
+        // On a task of its own, which this awaits.
+        let done = Arc::new(Mutex::new((false, None::<Waker>)));
+        let (e, finished) = (self.0.clone(), done.clone());
+        spawn(Box::pin(async move {
+            next_poll().await;
+            if e.net.round_trips() {
+                e.net.round_trip().await;
+            }
+            e.learn(None, None, Learner::Sweep);
+            let waker = {
+                let mut d = lock(&finished);
+                d.0 = true;
+                d.1.take()
+            };
+            if let Some(w) = waker {
+                w.wake();
+            }
+        }));
+        poll_fn(|cx| {
+            let mut d = lock(&done);
+            if d.0 {
+                return Poll::Ready(());
+            }
+            d.1 = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
     }
 
     async fn hello(&self, peer: &PeerId, hello: &Hello) -> Result<MockSession, Rej> {
         let e = &self.0;
+        e.dawdle().await;
         let video = match e.videos.iter().position(|v| v.addr == hello.video) {
             Some(v) => v,
             None if e.has(SeederFlaw::HelloAnyVideo) => 0,
@@ -9480,10 +9899,37 @@ impl MockSession {
             &pay.token,
             outputs,
             Box::new(move |outcome| {
-                let outcome = e2.after_swap(id, &token, outputs, outcome);
-                e2.land(id, &settle, &token, outputs, outcome);
+                let spawn = e2.net.ledger().timing.spawn.clone();
+                let net = e2.net.clone();
+                let e3 = e2.clone();
+                let land = move || {
+                    let outcome = e2.after_swap(id, &token, outputs, outcome);
+                    e2.land(id, &settle, &token, outputs, outcome);
+                };
+                if e3.has(SeederFlaw::OutcomeLandsOnPoll) {
+                    let mut st = e3.state();
+                    if let Some(r) = st.pays.get_mut(&id).filter(|r| !r.finished) {
+                        r.on_poll = Some(Box::new(land));
+                        let w = r.waker.take();
+                        drop(st);
+                        wake_all(w.into_iter().collect());
+                    }
+                    return;
+                }
+                match spawn {
+                    Some(spawn) => {
+                        net.ledger().landing += 1;
+                        spawn(Box::pin(async move {
+                            next_poll().await;
+                            land();
+                            net.ledger().landing -= 1;
+                        }));
+                    }
+                    None => land(),
+                }
             }),
         );
+        e.dawdle().await;
         poll_fn(|cx| e.answer(id, cx)).await
     }
 }
@@ -9605,6 +10051,7 @@ impl SeederSession for MockSession {
     }
 
     async fn pay(&mut self, pay: &Pay) -> Result<Ack, Rej> {
+        self.e.dawdle().await;
         if self.e.has(SeederFlaw::BanCheckedBeforeTurn) && self.banned() {
             return Err(rej(RejCode::Banned, "this peer is banned"));
         }
@@ -11841,12 +12288,12 @@ impl MockHarness {
         h
     }
 
-    /// An honest harness whose mint answers each of the seeder's calls (a read of swap
-    /// state, a swap, a key request or a keyset listing) from another thread, a few
-    /// milliseconds after it reaches the mint, and wakes its caller, as a real mint's answer
-    /// comes back: at no count of polls, and with the engine's own state changing off the
-    /// suite's thread (a swap's completion runs there). An engine whose calls are real round
-    /// trips passes the suite so.
+    /// An honest harness whose mint answers each call the seeder's entries and sweeps await
+    /// (a read of swap state, a swap, a key request or a keyset listing) from another
+    /// thread, a few milliseconds after it reaches the mint, and wakes its caller, as a real
+    /// mint's answer comes back ([`Answers::Woken`]): at no count of polls, and with the
+    /// engine's own state changing off the suite's thread (a swap's completion runs there).
+    /// An engine whose calls are real round trips passes the suite so.
     #[must_use]
     pub fn with_woken_answers() -> Self {
         let h = Self::default();
@@ -11877,6 +12324,22 @@ impl MockHarness {
     pub fn with_seeder_flaw_round_trip(flaw: SeederFlaw) -> Self {
         let h = Self::with_seeder_flaw(flaw);
         h.net.ledger().answering = Answers::NextPoll;
+        h
+    }
+
+    /// An honest harness whose seeder and mint take their time as `timing` says: the suite
+    /// must pass it as it passes the others.
+    #[must_use]
+    pub fn with_timing(timing: Timing) -> Self {
+        let h = Self::default();
+        {
+            let mut l = h.net.ledger();
+            if timing.woken {
+                l.answering = Answers::Woken;
+            }
+            l.timing = timing;
+            l.clock = Some(h.clock.clone());
+        }
         h
     }
 
@@ -12172,6 +12635,54 @@ impl Harness for MockHarness {
         self.net.release();
     }
 
+    fn race_release_with_clock(&self, by: Duration) {
+        // One of the two starts up to 5 ms after the other, the clock in two races and the
+        // release in the next two, by a lag that changes each race and comes round again: so
+        // an outcome comes back before the deadline in some races and after it in others,
+        // whether the mint answers swaps at once or from another thread a few milliseconds
+        // after they reach it.
+        let (release_lag, clock_lag) = {
+            let mut l = self.net.ledger();
+            l.under_way += 1;
+            l.races += 1;
+            let lag = Duration::from_micros(l.races * 1_237 % 5_000);
+            if (l.races / 2).is_multiple_of(2) {
+                (lag, Duration::ZERO)
+            } else {
+                (Duration::ZERO, lag)
+            }
+        };
+        let (net, clock) = (self.net.clone(), self.clock.clone());
+        std::thread::spawn(move || {
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let b = barrier.clone();
+            let n = net.clone();
+            let release = std::thread::spawn(move || {
+                crate::adversary::keep_panic(|| {
+                    b.wait();
+                    std::thread::sleep(release_lag);
+                    n.release();
+                })
+            });
+            let moved = std::thread::spawn(move || {
+                barrier.wait();
+                std::thread::sleep(clock_lag);
+                clock.advance(by);
+            });
+            let raised = match release.join() {
+                Ok(Ok(())) => None,
+                Ok(Err(raised)) => Some(raised),
+                Err(payload) => Some(crate::adversary::Raised::elsewhere(payload)),
+            };
+            let _ = moved.join();
+            let mut l = net.ledger();
+            if l.raised.is_none() {
+                l.raised = raised;
+            }
+            l.under_way -= 1;
+        });
+    }
+
     fn mint_outage(&self, down: bool) {
         self.net.ledger().down = down;
     }
@@ -12224,6 +12735,10 @@ impl Harness for MockHarness {
         self.net.ledger().reads
     }
 
+    fn reads_out(&self) -> usize {
+        self.net.ledger().reads_out
+    }
+
     fn key_requests(&self) -> u64 {
         self.net.ledger().key_requests
     }
@@ -12233,7 +12748,13 @@ impl Harness for MockHarness {
     }
 
     fn answers_under_way(&self) -> bool {
-        self.net.ledger().under_way > 0
+        let mut l = self.net.ledger();
+        if let Some(raised) = l.raised.take() {
+            drop(l);
+            crate::adversary::rejoin(Ok::<Result<(), _>, _>(Err(raised)));
+            return false;
+        }
+        l.under_way > 0
     }
 
     fn limit_state_reads(&self, max: Option<usize>) {

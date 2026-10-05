@@ -392,41 +392,46 @@ pub struct EngineParams {
 /// engine with an in-process mint in the M2 security stage.
 ///
 /// **How the suite waits.** It judges an engine's progress by the answers its calls await
-/// and by the engine settling, never by a single poll, or a single turn of the runtime. It
-/// drives the engine's futures on the runtime its test runs it in, polled with their task's
-/// waker, and yields to that runtime between polls, so that tasks the engine spawns or wakes
-/// run too; it never blocks that runtime's thread while it waits for the engine. An engine
+/// and by the engine settling, never by how many polls an answer or a step takes. It drives
+/// the engine's futures on the runtime its test runs it in, polled with their task's waker,
+/// and yields to that runtime between polls, so that tasks the engine spawns or wakes run
+/// too; it never blocks that runtime's thread while it waits for the engine. An engine
 /// moves only on its calls' answers, on the harness's clock and on the suite's own calls: no
 /// timer of its own in real time moves it. [`Harness::answers_under_way`] says whether an
 /// answer the engine awaits is still on its way, and the suite waits, in real time, while
-/// one is. The engine settles once no answer is under way and its futures and tasks have
-/// had 100 turns of the runtime: what an engine does between an answer and its next wait,
-/// on its own tasks and in the polls its answers wake, takes fewer turns than that. So:
+/// one is. The engine has settled once no answer is under way and its futures and tasks
+/// have had 100 turns of the runtime since: what an engine does between an answer and its
+/// next wait, on its own tasks and in the polls its answers wake, takes fewer turns than
+/// that. So:
 /// - it waits for an answer, or checks that a future still waits, by polling it until it is
 ///   ready, or until the engine has settled with the future pending, which then waits on
 ///   the suite (a clock move, a release, another entry). It lets a future it drives beside
 ///   its own steps reach its wait the same way;
-/// - it leaves an entry with a read under way by polling it until a read reaches the mint,
-///   however many polls that takes, and it closes an entry's connection once the entry
-///   waits on the suite (its swap held, say);
+/// - it leaves an entry with a read out by polling it until a read it sent has reached the
+///   mint and its answer is not yet taken ([`Harness::reads_out`]), however many polls that
+///   takes; where the mint answers a read in the poll that sends it, no read is ever out.
+///   It closes an entry's connection once the entry waits on the suite (its swap held, say);
 /// - after a release ([`Harness::release_swaps`], [`Harness::release_oldest_swap`],
-///   [`Harness::roll_back_reserved`]) it lets the engine settle before it acts again or reads
-///   the engine's state, its own entries not polled meanwhile. An engine settles a swap's
-///   outcome as it comes, on whatever task or thread takes it (a task of its own, say),
-///   whether or not the entry that sent the swap is polled: the swap is not tied to the
-///   `pay`'s connection (NFX-07 §3 step 5). An entry (a `hello` or a `pay`) awaits its own
-///   reads, key requests and keyset listings, and takes an answer that has woken it in its
-///   next poll; what it decides with no call under way (a refusal as it arrives, say) it
-///   answers in the poll that decides it.
+///   [`Harness::roll_back_reserved`]) or a clock move it lets the engine settle before it
+///   acts again, the entries it polls on its own task not polled meanwhile; and it reads what the engine holds
+///   ([`Harness::identities_held`]) and a session's ban only once the engine has settled
+///   since the suite last acted, a connection it closed included. An engine settles a swap's outcome as it comes, on whatever task
+///   or thread takes it (a task of its own, say), whether or not the entry that sent the
+///   swap is polled: the swap is not tied to the `pay`'s connection (NFX-07 §3 step 5). An
+///   entry (a `hello` or a `pay`) awaits its own reads, key requests and keyset listings,
+///   and takes an answer that has woken it in a later poll; what it decides with no call
+///   under way (a refusal as it arrives, say) it answers once it has decided it.
 ///
 /// It waits 5 s in real time at most for an engine to settle, far above any honest answer,
 /// and a scenario that hangs is timed out by its runner. Scenarios whose entries run on
 /// threads of their own, to meet at the mint, drive each there with an executor of the
-/// suite's, polled when it is woken, while the suite's thread goes on with its runtime
-/// running, the engine's own tasks included. The one exception is a race: an entry polled
-/// on the suite's thread while two others release the swaps and move the clock, for only as
-/// long as those two take, after which its answer is awaited on the suite's task. The mint
-/// answers from threads of the harness's own, never from tasks on the suite's runtime.
+/// suite's, on a thread the harness starts as the engine needs ([`Harness::spawn_thread`]),
+/// polled when it is woken, while the suite's thread goes on with its runtime running, the
+/// engine's own tasks included. A release that races the clock runs on threads of the
+/// harness's own ([`Harness::race_release_with_clock`]) while the suite polls the racing
+/// entry on its task. The mint answers from threads of the harness's own, never from tasks
+/// on the suite's runtime. An engine may spawn tasks on the runtime it was made in (the
+/// suite makes each engine on its own task), never on whatever thread polls its futures.
 #[allow(async_fn_in_trait)]
 pub trait Harness {
     /// An engine owns what it needs: the suite may share one with a thread of its own.
@@ -565,6 +570,22 @@ pub trait Harness {
     /// order, and hold no more. Their answers may come back after this returns, as from a
     /// real mint: each is under way until then ([`Harness::answers_under_way`]).
     async fn release_swaps(&self);
+    /// Release the held swaps, responses and key requests, as [`Harness::release_swaps`]
+    /// does, on a thread of the harness's own while another moves the clock by `by`, as
+    /// [`Harness::advance`] does, the two at once, and return without waiting for them: each
+    /// is under way ([`Harness::answers_under_way`]) until it is done and the answers it
+    /// released have come back. The suite meanwhile polls the entry whose outcome races its
+    /// deadline on its own task, its runtime running.
+    fn race_release_with_clock(&self, by: Duration);
+    /// Start a new thread running `side`, as the engine needs a thread to be to poll its
+    /// futures there: the suite runs some entries on threads of their own, each driven by an
+    /// executor of the suite's while the suite's runtime runs on its own thread. A harness
+    /// whose engine's futures need a runtime's context to be polled (a reactor or a timer
+    /// of a runtime the engine was made in) enters that context on the thread before it
+    /// runs `side`; the default starts a plain thread.
+    fn spawn_thread(&self, side: Box<dyn FnOnce() + Send>) {
+        std::thread::spawn(side);
+    }
     /// Make the mint unreachable (`true`) or reachable again.
     fn mint_outage(&self, down: bool);
     /// The mint processes the next swap that reaches it (held or not), and its response
@@ -589,8 +610,11 @@ pub trait Harness {
     /// next read of a swap's state (a NUT-07 check or a NUT-09 restore): between the
     /// seeder's two reads of that swap.
     fn process_timed_out_mid_read(&self);
-    /// The mint delivers the swap responses [`Harness::hold_swap_responses`] held right
-    /// after the next read of a swap's state: an answer that lands while the seeder reads.
+    /// The mint delivers the swap responses [`Harness::hold_swap_responses`] held as the
+    /// next read of a swap's state that an entry (a `hello` or a `pay`) makes reaches it,
+    /// and answers that read by a wake only once the engine has settled them, on whatever
+    /// task or thread settles them: an answer that lands while the seeder reads. The read
+    /// is under way until then ([`Harness::answers_under_way`]).
     fn deliver_responses_mid_read(&self);
     /// The mint answers swaps and restores but no NUT-07 state check (`true`), or checks
     /// again.
@@ -609,6 +633,10 @@ pub trait Harness {
     /// one per request, however many swaps it covers: counted as each arrives, so one the
     /// mint holds ([`Harness::gather_state_reads`]) counts while it waits there.
     fn state_reads(&self) -> u64;
+    /// Reads of swap state that have reached the mint and whose answers their readers have
+    /// not yet taken: on their way back ([`Harness::answers_under_way`]), or ready for the
+    /// reader's next poll. A read the mint answers in the poll that sends it is never out.
+    fn reads_out(&self) -> usize;
     /// Key requests the seeder has sent the mint (NUT-01 and NUT-02), one per request,
     /// answered or held ([`Harness::hold_key_fetches`]).
     fn key_requests(&self) -> u64;
