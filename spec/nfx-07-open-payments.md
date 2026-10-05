@@ -192,9 +192,11 @@ payment-enforced after release, so no mechanism pretends otherwise.
   there is refused, and may pay ahead after that refusal (§3a). The seeder credits it as
   any pre-payment, and serves none of it while it does not serve the video: a cost to the
   watcher within the half window that §3a bounds a video's credit to.
-- A ban expires after `ban_ttl`, and is recorded only for a peer with an account. A
-  peer with none has been served nothing and owes nothing, so a ban would protect
-  nothing: its refused `pay` is answered, and nothing is kept for it.
+- A ban expires `ban_ttl` after the refusal that earned it (a spent or invalid proof,
+  below), and is recorded only for a peer with an account. What the ban itself refuses, a
+  `hello`, a request or a `pay`, extends nothing. A peer with none has been served nothing
+  and owes nothing, so a ban would protect nothing: its refused `pay` is answered, and
+  nothing is kept for it.
 - Hellos waiting for a payment count toward the session cap.
 - A swap whose outcome is unknown is kept until it is learnt, at most one per account.
   Unknown means sent with no answer: abandoned at the deadline while still in flight
@@ -283,17 +285,20 @@ whatever it offers. The checks run in this order:
      the mint's keyset listing (NUT-02) names it: one the mint started since, say, or an
      older one a wallet still spends. It caches the listing per mint, and asks a mint
      for it only at its own start or where a check needs one, here or the outputs'
-     keyset of step 5, and at most once a second: a payment refused by an earlier check
-     asks for none. Each mint's listing is its own: it names no keyset of another
-     mint's, and asking one mint for it delays asking no other. A payment naming a
-     keyset that the listing does not name, the listing asked for before the payment
-     arrived, makes it ask again; if it last asked in the same second, the payment waits
-     for the next second's listing.
+     keyset of step 5, and at most once a second, an ask at its start included: a payment
+     refused by an earlier check asks for none, nor does a `hello`, nor a payment whose
+     turn has not come by its deadline (below). Each mint's listing is its own: it names
+     no keyset of another mint's, and asking one mint for it delays asking no other. A
+     payment naming a keyset that the listing does not name, the listing asked for
+     before the payment arrived, makes it ask again; if it last asked in the same second,
+     the payment waits for the next second's listing.
    - A keyset that a listing asked for after the payment arrived does not name is
      `bad-token`, without a ban, whichever entry asked for it and in whichever second,
      the payment's own included. So is one whose keys the mint answers 12001 (a keyset it
-     does not know). A token naming keysets the mint never had so costs the mint at most
-     a listing a second, whoever sends it.
+     does not know), though its listing names it: the seeder keeps nothing of that answer,
+     and asks for the keys again for the next payment that names the keyset. A token
+     naming keysets the mint never had so costs the mint at most a listing a second,
+     whoever sends it.
 4. **The face value** exactly covers the new chunks. Short is `underpaid`, over is
    `overpaid`. A product above 2^53−1 is `underpaid`. An exact payment that would take
    the account's `spent_total` above 2^53−1 is `overpaid`: no `ack` or quote could carry
@@ -366,8 +371,10 @@ whatever it offers. The checks run in this order:
      no further swap request for those proofs), and releases the account's turn to
      whichever payment takes it next. Deadlines and the seeder's clock count whole
      seconds, and a deadline is as its second began: what comes in the deadline's second
-     came after it. So a payment whose turn comes then or later runs none of its checks,
-     the ban's included; keys or a keyset listing that come then or later are not used,
+     came after it. So a payment whose turn comes then or later, or has not come by then,
+     another payment holding it, runs none of its checks, the ban's included: it asks the
+     mint for nothing, keys and keyset listing alike, and sends no read (below); keys or a
+     keyset listing that come then or later are not used,
      and nothing that needs them (DLEQ, amount, the outputs' keyset) is judged; a swap's
      outcome the seeder settles then is late (below); and a payment whose swap is not
      sent by then is not rechecked against the watermark (step 5). Each is answered
@@ -1458,6 +1465,22 @@ paths on one host are two origins.
     no account whose first payment there is still in progress is refused `unknown-video`
     until that payment lands; a session open when the video was dropped admits nothing and
     has its payments verified, as one opened since. What "as it would before" left open.
+  - §3 step 3, after the round's completeness review: a keyset whose keys the mint answers
+    12001 though its listing names it is `bad-token` without a ban as before, and the
+    seeder keeps nothing of that answer: it asks for the keys again for the next payment
+    that names the keyset (was: silent, so a seeder could keep refusing a keyset the mint
+    serves again, which stops an honest watcher). An ask for a mint's listing at the
+    seeder's start counts toward that second's one; a `hello` asks for none, nor does a
+    payment whose turn has not come by its deadline. What "only where a check needs one"
+    said, now spelled out.
+  - §3, the deadline: a payment whose turn has not come by its deadline, another payment
+    holding it, runs none of its checks either, as one whose turn comes then or later; and
+    such a payment asks the mint for nothing, keys and keyset listing alike, and sends no
+    read. What "the wait for the account's turn counts" and "no read is sent at or past
+    its entry's deadline" implied, now said.
+  - §3, bounded state: a ban expires `ban_ttl` after the refusal that earned it, and what
+    the ban itself refuses (a `hello`, a request, a `pay`) extends nothing (was: "expires
+    after `ban_ttl`", which did not say from when).
   - §3a: a payment answered by an `ack` that does not match is a refused payment: reclaimed
     as any other, without the 180 s wait, and, a proof found spent, settled into the ledger
     by a quote showing it and nothing more; an unsolicited `ack` reclaims nothing (was: no
