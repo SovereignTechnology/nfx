@@ -3390,21 +3390,23 @@ async fn a_listing_asked_for_again_wakes_its_payment<H: Harness>(h: &H) {
         upto_chunk: 8,
         token: h.token(4).await, // of the keyset the mint started
     };
-    let mut paying = own_task(s.pay(&p));
+    let done = flag();
+    let paying = pay_on_a_task(h, s, &p, &done);
+    settle(h).await;
     assert!(
-        waits(h, Pin::new(&mut paying)).await && h.listing_requests() > listed,
+        !is_set(&done) && h.listing_requests() > listed,
         "it waits for the keyset listing it asked for again, for a keyset the mint started \
          since the seeder last asked"
     );
     release(h).await; // the listing comes, then its keys
-    let r = answer_of(h, Pin::new(&mut paying)).await;
+    let answered = answer_of(h, pin!(&paying)).await;
+    let r = answered.as_ref().map(|(_, r)| r);
     assert!(
-        r.as_ref().is_some_and(Result::is_ok),
+        r.is_some_and(Result::is_ok),
         "a payment on a task of its own is woken by the keyset listing it asked for again at \
          step 3, held and released, then by its keys, and answered: {r:?}"
     );
-    close(h, paying).await;
-    close(h, s).await;
+    close(h, (answered, paying)).await;
 }
 
 /// Flaws `PayReadUnwoken` and `PayReadWokenEarly`. A payment's own read of its account's
@@ -21121,7 +21123,7 @@ async fn a_waiting_payment_is_answered_at_its_own_deadline<H: Harness>(h: &H) {
 async fn a_waiting_payment_is_woken_at_its_own_deadline<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut first = open(h, &e, 1).await;
-    let mut second = open(h, &e, 1).await;
+    let second = open(h, &e, 1).await;
     let mut third = open(h, &e, 1).await;
     let mut pays = Vec::new();
     for _ in 0..3 {
@@ -21139,13 +21141,15 @@ async fn a_waiting_payment_is_woken_at_its_own_deadline<H: Harness>(h: &H) {
     );
     advance(h, Duration::from_secs(30)).await;
     let mut three = Box::pin(third.pay(&pays[2]));
-    let done = AtomicBool::new(false);
-    let (r2, ()) = both(own_task(marked(second.pay(&pays[1]), &done)), async {
+    let done = flag();
+    let ((second, r2), ()) = both(&pay_on_a_task(h, second, &pays[1], &done), async {
         settle(h).await;
         assert!(!is_set(&done), "P2 waits for the turn");
         advance(h, Duration::from_secs(20)).await;
         assert!(waits(h, three.as_mut()).await, "P3 waits for the turn");
-        advance(h, Duration::from_secs(10)).await; // P1's deadline
+        // P1's deadline. The clock moves here, not through `advance`: P3 must be polled
+        // before the runtime polls P2's task, which the move wakes too.
+        h.advance(Duration::from_secs(10));
         assert!(
             waits(h, three.as_mut()).await,
             "P3, polled first, takes the turn over, its keys held"
@@ -25536,12 +25540,12 @@ async fn a_payment_dropped_waiting_on_a_read<H: Harness>(
                 token: h.bad_token(BadToken::Garbage, 4).await,
             },
         );
-        let (done, also) = (AtomicBool::new(false), AtomicBool::new(false));
+        let (done, also) = (flag(), flag());
         let mut paying = Some(paying);
-        let ((r1, r2), ()) = both(
+        let (((back3, r1), (back4, r2)), ()) = both(
             both(
-                own_task(marked(s3.pay(&first), &done)),
-                own_task(marked(s4.pay(&second), &also)),
+                &pay_on_a_task(h, s3, &first, &done),
+                &pay_on_a_task(h, s4, &second, &also),
             ),
             async {
                 settle(h).await;
@@ -25566,6 +25570,7 @@ async fn a_payment_dropped_waiting_on_a_read<H: Harness>(
             },
         )
         .await;
+        (s3, s4) = (back3, back4);
         assert!(
             is_rej(&r1, &RejCode::BadToken) && is_rej(&r2, &RejCode::BadToken),
             "the payments behind P2, their tokens unreadable, are refused bad-token: {r1:?}, \
