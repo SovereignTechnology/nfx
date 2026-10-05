@@ -4097,6 +4097,72 @@ pub enum SeederFlaw {
     /// Reads a `hello`'s account before its wait, not after, for a video it no longer
     /// serves: its quote misses a claim that reached the mint while it waited.
     DroppedVideoReadsBeforeTurn,
+    /// Still admits requests on a session that was open when it stopped serving the video.
+    DroppedVideoOpenSessionAdmits,
+    /// Does not ban the peer whose payment on a video it no longer serves is refused
+    /// `spent`.
+    DroppedVideoSpentNoBan,
+    /// Takes a payment short of the chunks it claims on a video it no longer serves.
+    DroppedVideoAcceptsUnderpaid,
+    /// Takes a payment of more than the chunks it claims on a video it no longer serves.
+    DroppedVideoAcceptsOverpaid,
+    /// Judges a `hello` for a video it no longer serves again as it answers: a peer whose
+    /// only record there, a swap of unknown outcome, its read learnt as nothing is refused
+    /// `unknown-video`.
+    DroppedVideoRechecksAccount,
+    /// Creates an account as it answers a `hello` for a video it no longer serves.
+    DroppedVideoHelloCreatesAccount,
+    /// Answers the `hello` of a peer with no account on a video it no longer serves whose
+    /// first payment there is still in progress, where it refuses it `unknown-video`.
+    DroppedVideoCountsPaymentInProgress,
+    /// Checks the peer's ban again as it answers a `hello` for a video it no longer serves
+    /// that waited for no payment without ageing the bans first: a ban that lapsed during
+    /// its read refuses it.
+    DroppedVideoUnwaitedRecheckBanNotAged,
+    /// As it answers a `hello` for a video it no longer serves that waited for no payment,
+    /// checks its session id before its peer's ban: a banned peer under an open id is
+    /// refused `bad-session`.
+    DroppedVideoUnwaitedRecheckIdBeforeBan,
+    /// As it answers a `hello` for a video it no longer serves that waited for a payment
+    /// and took the turn, checks its session id before its peer's ban: a banned peer under
+    /// an open id is refused `bad-session`.
+    DroppedVideoWaitedRecheckIdBeforeBan,
+    /// Does not read the account's unknown swaps for a `hello` for a video it no longer
+    /// serves that waited for a dead turn and took it over: its quote misses a claim that
+    /// reached the mint.
+    DroppedVideoWaitedTakeoverSkipsRead,
+    /// Checks the peer's ban again as it answers a `hello` for a video it no longer serves
+    /// that waited for a dead turn and took it over without ageing the bans first: a ban
+    /// that lapsed during its read refuses it.
+    DroppedVideoWaitedTakeoverRecheckBanNotAged,
+    /// Does not check the session id again as it answers a `hello` for a video it no longer
+    /// serves that waited for a dead turn and took it over: one opened by another peer
+    /// during its read is opened twice.
+    DroppedVideoWaitedTakeoverNoIdRecheck,
+    /// As it answers a `hello` for a video it no longer serves that waited for a dead turn
+    /// and took it over, checks its session id before its peer's ban: a banned peer under
+    /// an open id is refused `bad-session`.
+    DroppedVideoWaitedTakeoverRecheckIdBeforeBan,
+    /// Does not read the account's unknown swaps for a `hello` for a video it no longer
+    /// serves that took a dead turn over as it arrived: its quote misses a claim that
+    /// reached the mint.
+    DroppedVideoLateTakeoverSkipsRead,
+    /// Does not check the peer's ban again as it answers a `hello` for a video it no longer
+    /// serves that took a dead turn over as it arrived: a peer banned during its read is
+    /// quoted.
+    DroppedVideoLateTakeoverNoBanRecheck,
+    /// Checks the peer's ban again as it answers a `hello` for a video it no longer serves
+    /// that took a dead turn over as it arrived without ageing the bans first: a ban that
+    /// lapsed during its read refuses it.
+    DroppedVideoLateTakeoverRecheckBanNotAged,
+    /// Does not check the session id again as it answers a `hello` for a video it no longer
+    /// serves that took a dead turn over as it arrived: one opened by another peer during
+    /// its read is opened twice.
+    DroppedVideoLateTakeoverNoIdRecheck,
+    /// As it answers a `hello` for a video it no longer serves that took a dead turn over
+    /// as it arrived, checks its session id before its peer's ban: a banned peer under an
+    /// open id is refused `bad-session`.
+    DroppedVideoLateTakeoverRecheckIdBeforeBan,
 }
 
 /// How a payment came to its account's turn: the paths of the suite's matrix of payments,
@@ -4123,6 +4189,22 @@ impl Came {
             (true, false) => Self::LateTakeover,
         }
     }
+}
+
+/// What a defect planted on one path of a `hello` for a video the seeder no longer serves
+/// does wrong ([`Came`], the paths of a `hello` as of a payment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelloSlip {
+    /// It reads none of its account's unknown swaps.
+    SkipsRead,
+    /// It does not check its peer's ban again as it answers.
+    NoBanRecheck,
+    /// It checks the ban again without ageing the bans first.
+    BanNotAged,
+    /// It does not check its session id again as it answers.
+    NoIdRecheck,
+    /// It checks its session id again before its peer's ban.
+    IdBeforeBan,
 }
 
 /// The check that refused a payment before its swap was sent, by its answer.
@@ -4257,6 +4339,44 @@ enum Judged {
 }
 
 impl SeederFlaw {
+    /// The `hello`s for a video no longer served that a defect mishandles: on which path,
+    /// and how.
+    fn dropped_hello_slip(self) -> Option<(Came, HelloSlip)> {
+        Some(match self {
+            Self::DroppedVideoUnwaitedRecheckBanNotAged => (Came::Unwaited, HelloSlip::BanNotAged),
+            Self::DroppedVideoUnwaitedRecheckIdBeforeBan => {
+                (Came::Unwaited, HelloSlip::IdBeforeBan)
+            }
+            Self::DroppedVideoWaitedRecheckIdBeforeBan => (Came::Waited, HelloSlip::IdBeforeBan),
+            Self::DroppedVideoWaitedTakeoverSkipsRead => {
+                (Came::WaitedTakeover, HelloSlip::SkipsRead)
+            }
+            Self::DroppedVideoWaitedTakeoverRecheckBanNotAged => {
+                (Came::WaitedTakeover, HelloSlip::BanNotAged)
+            }
+            Self::DroppedVideoWaitedTakeoverNoIdRecheck => {
+                (Came::WaitedTakeover, HelloSlip::NoIdRecheck)
+            }
+            Self::DroppedVideoWaitedTakeoverRecheckIdBeforeBan => {
+                (Came::WaitedTakeover, HelloSlip::IdBeforeBan)
+            }
+            Self::DroppedVideoLateTakeoverSkipsRead => (Came::LateTakeover, HelloSlip::SkipsRead),
+            Self::DroppedVideoLateTakeoverNoBanRecheck => {
+                (Came::LateTakeover, HelloSlip::NoBanRecheck)
+            }
+            Self::DroppedVideoLateTakeoverRecheckBanNotAged => {
+                (Came::LateTakeover, HelloSlip::BanNotAged)
+            }
+            Self::DroppedVideoLateTakeoverNoIdRecheck => {
+                (Came::LateTakeover, HelloSlip::NoIdRecheck)
+            }
+            Self::DroppedVideoLateTakeoverRecheckIdBeforeBan => {
+                (Came::LateTakeover, HelloSlip::IdBeforeBan)
+            }
+            _ => return None,
+        })
+    }
+
     /// The refusals a defect of the matrix of payments mishandles: how, on which path, by
     /// which check.
     fn refusal_slip(self) -> Option<(Slip, Came, Check)> {
@@ -5741,6 +5861,618 @@ pub enum ViewerFlaw {
     /// On a session that resumed the account, counts a live session's payment's 180 s from
     /// the session's quote, not from sending.
     ResumedTimeoutFromQuote,
+    /// On a session that resumed its account with nothing to settle, counts its payment's
+    /// 180 s from the session's quote, not from sending.
+    PlainResumePayWaitFromQuote,
+    /// After a closed session's payment, reclaimed late in its ledger's next session, came
+    /// back, pays in one-sat proofs, whatever their count.
+    SessionLateReclaimPayInUnitProofs,
+    /// After a closed session's payment, reclaimed late in its ledger's next session, came
+    /// back, counts its payment's 180 s from the session's quote, not from sending.
+    SessionLateReclaimPayWaitFromQuote,
+    /// After a closed session's payment, reclaimed late in its ledger's next session, came
+    /// back, pays at half the window, rounded down.
+    SessionLateReclaimDueRoundsDown,
+    /// After a closed session's payment, reclaimed in its ledger's next session, lost a
+    /// proof to the expiry, pays in one-sat proofs, whatever their count.
+    SessionExpiredReclaimPayInUnitProofs,
+    /// After a closed session's payment, reclaimed in its ledger's next session, lost a
+    /// proof to the expiry, counts its payment's 180 s from the session's quote, not from
+    /// sending.
+    SessionExpiredReclaimPayWaitFromQuote,
+    /// After a closed session's payment, reclaimed in its ledger's next session, lost a
+    /// proof to the expiry, pays at half the window, rounded down.
+    SessionExpiredReclaimDueRoundsDown,
+    /// After a closed session's payment came back whole in a reclaim done with no session,
+    /// pays in one-sat proofs, whatever their count.
+    NoSessionReclaimPayInUnitProofs,
+    /// After a closed session's payment came back whole in a reclaim done with no session,
+    /// counts its payment's 180 s from the session's quote, not from sending.
+    NoSessionReclaimPayWaitFromQuote,
+    /// After a closed session's payment came back whole in a reclaim done with no session,
+    /// pays at half the window, rounded down.
+    NoSessionReclaimDueRoundsDown,
+    /// After a closed session's payment, reclaimed late with no session, came back, pays in
+    /// one-sat proofs, whatever their count.
+    NoSessionLateReclaimPayInUnitProofs,
+    /// After a closed session's payment, reclaimed late with no session, came back, counts
+    /// its payment's 180 s from the session's quote, not from sending.
+    NoSessionLateReclaimPayWaitFromQuote,
+    /// After a closed session's payment, reclaimed late with no session, came back, pays at
+    /// half the window, rounded down.
+    NoSessionLateReclaimDueRoundsDown,
+    /// After a closed session's payment, reclaimed with no session, lost a proof to the
+    /// expiry, pays in one-sat proofs, whatever their count.
+    NoSessionExpiredReclaimPayInUnitProofs,
+    /// After a closed session's payment, reclaimed with no session, lost a proof to the
+    /// expiry, counts its payment's 180 s from the session's quote, not from sending.
+    NoSessionExpiredReclaimPayWaitFromQuote,
+    /// After a closed session's payment, reclaimed with no session, lost a proof to the
+    /// expiry, pays at half the window, rounded down.
+    NoSessionExpiredReclaimDueRoundsDown,
+    /// After its closed session's payment came back whole in a reclaim another video's
+    /// ledger did in its session, pays in one-sat proofs, whatever their count.
+    OtherLedgerReclaimPayInUnitProofs,
+    /// After its closed session's payment came back whole in a reclaim another video's
+    /// ledger did in its session, counts its payment's 180 s from the session's quote, not
+    /// from sending.
+    OtherLedgerReclaimPayWaitFromQuote,
+    /// After its closed session's payment came back whole in a reclaim another video's
+    /// ledger did in its session, pays at half the window, rounded down.
+    OtherLedgerReclaimDueRoundsDown,
+    /// After its closed session's payment, reclaimed late by another video's ledger in its
+    /// session, came back, pays in one-sat proofs, whatever their count.
+    OtherLedgerLateReclaimPayInUnitProofs,
+    /// After its closed session's payment, reclaimed late by another video's ledger in its
+    /// session, came back, counts its payment's 180 s from the session's quote, not from
+    /// sending.
+    OtherLedgerLateReclaimPayWaitFromQuote,
+    /// After its closed session's payment, reclaimed late by another video's ledger in its
+    /// session, came back, pays at half the window, rounded down.
+    OtherLedgerLateReclaimDueRoundsDown,
+    /// After its closed session's payment, reclaimed by another video's ledger in its
+    /// session, lost a proof to the expiry, pays in one-sat proofs, whatever their count.
+    OtherLedgerExpiredReclaimPayInUnitProofs,
+    /// After its closed session's payment, reclaimed by another video's ledger in its
+    /// session, lost a proof to the expiry, counts its payment's 180 s from the session's
+    /// quote, not from sending.
+    OtherLedgerExpiredReclaimPayWaitFromQuote,
+    /// After its closed session's payment, reclaimed by another video's ledger in its
+    /// session, lost a proof to the expiry, pays at half the window, rounded down.
+    OtherLedgerExpiredReclaimDueRoundsDown,
+    /// After its closed session's payment came back whole in a reclaim another video's
+    /// ledger did with no session, pays in one-sat proofs, whatever their count.
+    OtherNoSessionReclaimPayInUnitProofs,
+    /// After its closed session's payment came back whole in a reclaim another video's
+    /// ledger did with no session, counts its payment's 180 s from the session's quote, not
+    /// from sending.
+    OtherNoSessionReclaimPayWaitFromQuote,
+    /// After its closed session's payment came back whole in a reclaim another video's
+    /// ledger did with no session, pays at half the window, rounded down.
+    OtherNoSessionReclaimDueRoundsDown,
+    /// After its closed session's payment, reclaimed late by another video's ledger with no
+    /// session, came back, pays in one-sat proofs, whatever their count.
+    OtherNoSessionLateReclaimPayInUnitProofs,
+    /// After its closed session's payment, reclaimed late by another video's ledger with no
+    /// session, came back, counts its payment's 180 s from the session's quote, not from
+    /// sending.
+    OtherNoSessionLateReclaimPayWaitFromQuote,
+    /// After its closed session's payment, reclaimed late by another video's ledger with no
+    /// session, came back, pays at half the window, rounded down.
+    OtherNoSessionLateReclaimDueRoundsDown,
+    /// After its closed session's payment, reclaimed by another video's ledger with no
+    /// session, lost a proof to the expiry, pays in one-sat proofs, whatever their count.
+    OtherNoSessionExpiredReclaimPayInUnitProofs,
+    /// After its closed session's payment, reclaimed by another video's ledger with no
+    /// session, lost a proof to the expiry, counts its payment's 180 s from the session's
+    /// quote, not from sending.
+    OtherNoSessionExpiredReclaimPayWaitFromQuote,
+    /// After its closed session's payment, reclaimed by another video's ledger with no
+    /// session, lost a proof to the expiry, pays at half the window, rounded down.
+    OtherNoSessionExpiredReclaimDueRoundsDown,
+    /// After a new session's quote restored the three tries it had used, pays in one-sat
+    /// proofs, whatever their count.
+    TriesRestoredPayInUnitProofs,
+    /// After a new session's quote restored the three tries it had used, counts its
+    /// payment's 180 s from the session's quote, not from sending.
+    TriesRestoredPayWaitFromQuote,
+    /// After a new session's quote restored the three tries it had used, pays at half the
+    /// window, rounded down.
+    TriesRestoredDueRoundsDown,
+    /// After a quote it refused without stopping, pays in one-sat proofs, whatever their
+    /// count.
+    RefusedQuotePayInUnitProofs,
+    /// After a quote it refused without stopping, counts its payment's 180 s from the
+    /// session's quote, not from sending.
+    RefusedQuotePayWaitFromQuote,
+    /// After a quote it refused without stopping, pays at half the window, rounded down.
+    RefusedQuoteDueRoundsDown,
+    /// After a refused hello that did not stop it, pays in one-sat proofs, whatever their
+    /// count.
+    RefusedHelloPayInUnitProofs,
+    /// After a refused hello that did not stop it, counts its payment's 180 s from the
+    /// session's quote, not from sending.
+    RefusedHelloPayWaitFromQuote,
+    /// After a refused hello that did not stop it, pays at half the window, rounded down.
+    RefusedHelloDueRoundsDown,
+    /// After a timeout with no payment on its session, pays in one-sat proofs, whatever
+    /// their count.
+    IdleTimeoutPayInUnitProofs,
+    /// After a timeout with no payment on its session, counts its payment's 180 s from the
+    /// session's quote, not from sending.
+    IdleTimeoutPayWaitFromQuote,
+    /// After a timeout with no payment on its session, pays at half the window, rounded
+    /// down.
+    IdleTimeoutDueRoundsDown,
+    /// Pays a payment that waited behind another video's payment in flight in one-sat
+    /// proofs, whatever their count.
+    BehindOtherVideoPayInUnitProofs,
+    /// Counts the 180 s of a payment that waited behind another video's payment in flight
+    /// from its last request, not from sending.
+    BehindOtherVideoWaitFromRequest,
+    /// After a refusal, pays ahead half the window less the credit every ledger of the
+    /// standing holds, another video's included.
+    PayAheadLessOtherLedgersCredit,
+    /// While another video's ledger holds credit, pays in one-sat proofs, whatever their
+    /// count.
+    BesideCreditPayInUnitProofs,
+    /// While another video's ledger owes chunks, counts its payment's 180 s from the
+    /// session's quote, not from sending.
+    BesideOwedPayWaitFromQuote,
+    /// Once another video's ledger has had a payment acked, pays in one-sat proofs,
+    /// whatever their count.
+    BesideAckPayInUnitProofs,
+    /// Once another video's ledger has had a payment acked, counts its payment's 180 s from
+    /// the session's quote, not from sending.
+    BesideAckPayWaitFromQuote,
+    /// Once another video's ledger has had a payment acked, pays at half the window,
+    /// rounded down.
+    BesideAckDueRoundsDown,
+    /// Once another video's ledger has had a payment refused mint-unavailable, pays ahead
+    /// half the window, rounded up, after a refusal.
+    BesideUnavailablePayAheadRoundsUp,
+    /// Once a quote has settled a payment of another video's ledger, pays in one-sat
+    /// proofs, whatever their count.
+    BesideSettledPayInUnitProofs,
+    /// Once a quote has settled a payment of another video's ledger, pays at half the
+    /// window, rounded down.
+    BesideSettledDueRoundsDown,
+    /// Once another video's ledger has had a closed session's payment back in a reclaim
+    /// done with no session, counts its payment's 180 s from the session's quote, not from
+    /// sending.
+    BesideNoSessionReclaimPayWaitFromQuote,
+    /// Once a new session's quote on another video's ledger has restored the tries the
+    /// standing had used, pays at half the window, rounded down.
+    BesideTriesRestoredDueRoundsDown,
+    /// Once another video's ledger has refused a quote without stopping, pays in one-sat
+    /// proofs, whatever their count.
+    BesideRefusedQuotePayInUnitProofs,
+    /// Once another video's ledger has resumed its account with nothing to settle, pays
+    /// ahead half the window, rounded up, after a refusal.
+    BesidePlainResumePayAheadRoundsUp,
+    /// Does not stop on a dishonest quote on a ledger while that ledger's own payment
+    /// awaits a quote.
+    OwnDishonestQuoteWhileAwaitingNoStop,
+    /// Does not stop on a dishonest quote on a ledger once that ledger's own payments have
+    /// used the standing's three tries.
+    OwnDishonestQuoteOutOfTriesNoStop,
+    /// Does not stop on a hello refused banned on a ledger while that ledger's own payment
+    /// awaits a quote.
+    OwnBannedHelloWhileAwaitingNoStop,
+    /// Does not stop on a hello refused banned on a ledger once that ledger's own payments
+    /// have used the standing's three tries.
+    OwnBannedHelloOutOfTriesNoStop,
+    /// Does not stop on an unsolicited rej on a ledger while that ledger's own payment
+    /// awaits a quote.
+    OwnUnsolicitedRejWhileAwaitingNoStop,
+    /// At a session's end, reclaims a closed session's payment at once, however young: the
+    /// catch-up of `last_pay` does not wait 180 s from sending.
+    LastPayCatchUpIgnoresWait,
+    /// A ledger made while a closed session's payment was unsettled reclaims it at once,
+    /// however young.
+    NewLedgerCatchUpIgnoresWait,
+    /// Drops a payment answered by an ack that does not match: its proofs are never
+    /// reclaimed.
+    WrongAckNoReclaim,
+    /// Reclaims a payment answered by an ack that does not match only 180 s after it was
+    /// sent.
+    WrongAckReclaimWaits,
+    /// Forgets a payment answered by an ack that does not match once its reclaim finds a
+    /// proof spent: a quote showing it is refused.
+    WrongAckSpentForgotten,
+    /// At a session's end, sends a selection of more than 64 proofs, drawn from two
+    /// keysets, as it is.
+    LastPayMixedUnswapped,
+    /// Paying ahead after a refusal, sends a selection of more than 64 proofs, drawn from
+    /// two keysets, as it is.
+    AheadMixedUnswapped,
+    /// On a ledger made for another video, sends a selection of more than 64 proofs, drawn
+    /// from two keysets, as it is.
+    SiblingMixedUnswapped,
+    /// Pays at half the window of the session its ledger first paid on, not the open
+    /// session's.
+    DueWindowOfFirstPayment,
+    /// After a refusal, pays ahead half the window of the session its ledger first paid on,
+    /// not the open session's.
+    PayAheadWindowOfFirstPayment,
+    /// Pays at half the window of the session its ledger first sent a request on, not the
+    /// open session's.
+    DueWindowOfFirstRequest,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because its
+    /// own payment was in flight.
+    LicenceOutlivesOwnPayment,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because
+    /// another video's payment was in flight.
+    LicenceOutlivesOtherPayment,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because a
+    /// closed session's payment was unsettled.
+    LicenceOutlivesUnsettled,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because the
+    /// ledger held half a window of credit.
+    LicenceOutlivesCredit,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because a
+    /// reclaim was incomplete.
+    LicenceOutlivesReclaim,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because a
+    /// payment awaited a quote.
+    LicenceOutlivesAwaiting,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because the
+    /// standing was out of tries.
+    LicenceOutlivesTries,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because it
+    /// held no proof the mint still takes.
+    LicenceOutlivesExpiredProofs,
+    /// Keeps a refusal's licence to pay ahead across the session's end: its next session
+    /// pays ahead.
+    LicenceOutlivesEnd,
+    /// Takes a quote whose `served` counts the requests the seeder refused after they were
+    /// paid for.
+    ServedCountsPaidRefused,
+    /// Takes a quote whose `served` is at most the `upto_chunk` of another video's payment
+    /// in flight on its live session.
+    ServedCountsOtherLive,
+}
+
+/// Whose history a defect planted on one history keys on: the paying ledger's own, or that
+/// of another of the standing's ledgers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Whose {
+    Own,
+    Other,
+}
+
+/// Where a closed session's payment was reclaimed: by its own ledger, in a session or with
+/// none, or by another video's ledger, in a session of its own or with none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Session,
+    NoSession,
+    Other,
+    OtherNoSession,
+}
+
+/// How that reclaim ended: every proof back at once, or once the mint could serve it, or a
+/// proof lost to its keyset's expiry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Whole,
+    Late,
+    Expired,
+}
+
+/// What a ledger has been through, or holds, for the defects planted on one history alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Past {
+    /// Its open session resumed the account, with nothing to settle and no credit.
+    PlainResume,
+    /// A closed session's payment of its own was reclaimed.
+    Caught(Place, Outcome),
+    /// A new session's quote restored the three tries the standing had used.
+    TriesRestored,
+    /// It refused a quote without stopping.
+    RefusedQuote,
+    /// Its `hello` was refused, with a code other than `banned`.
+    RefusedHello,
+    /// A timeout came with no payment on its session.
+    IdleTimeout,
+    /// A payment of its own was acked.
+    Acked,
+    /// A payment of its own was refused `mint-unavailable`.
+    Unavailable,
+    /// A quote settled a payment of its own.
+    Settled,
+    /// It holds credit.
+    Credit,
+    /// It owes chunks.
+    Owes,
+    /// Its payment now due waited behind another video's payment in flight.
+    BehindOther,
+}
+
+/// What such a defect does wrong with the payment that follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaySlip {
+    /// It pays in one-sat proofs.
+    Units,
+    /// It counts the payment's 180 s from the session's quote.
+    WaitFromQuote,
+    /// It counts them from the last request.
+    WaitFromRequest,
+    /// It pays at half the window, rounded down.
+    DueRoundsDown,
+    /// It pays ahead half the window, rounded up.
+    AheadRoundsUp,
+    /// It pays ahead less the credit the other ledgers hold too.
+    AheadLessOthersCredit,
+}
+
+/// What stops a watcher on a ledger with no payment in flight, for the defects that skip
+/// one stop on a ledger that waits on something of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cause {
+    DishonestQuote,
+    BannedHello,
+    UnsolicitedRej,
+}
+
+/// What that ledger waits on: its own payment awaiting a quote, or the three tries its own
+/// payments used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Waits {
+    Awaiting,
+    OutOfTries,
+}
+
+impl ViewerFlaw {
+    /// The history a defect is planted on, and what it does wrong with the next payment.
+    fn past_slip(self) -> Option<(Whose, Past, PaySlip)> {
+        Some(match self {
+            Self::PlainResumePayWaitFromQuote => {
+                (Whose::Own, Past::PlainResume, PaySlip::WaitFromQuote)
+            }
+            Self::SessionLateReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::Session, Outcome::Late),
+                PaySlip::Units,
+            ),
+            Self::SessionLateReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::Session, Outcome::Late),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::SessionLateReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::Session, Outcome::Late),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::SessionExpiredReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::Session, Outcome::Expired),
+                PaySlip::Units,
+            ),
+            Self::SessionExpiredReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::Session, Outcome::Expired),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::SessionExpiredReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::Session, Outcome::Expired),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::NoSessionReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Whole),
+                PaySlip::Units,
+            ),
+            Self::NoSessionReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Whole),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::NoSessionReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Whole),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::NoSessionLateReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Late),
+                PaySlip::Units,
+            ),
+            Self::NoSessionLateReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Late),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::NoSessionLateReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Late),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::NoSessionExpiredReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Expired),
+                PaySlip::Units,
+            ),
+            Self::NoSessionExpiredReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Expired),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::NoSessionExpiredReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Expired),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::OtherLedgerReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Whole),
+                PaySlip::Units,
+            ),
+            Self::OtherLedgerReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Whole),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::OtherLedgerReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Whole),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::OtherLedgerLateReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Late),
+                PaySlip::Units,
+            ),
+            Self::OtherLedgerLateReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Late),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::OtherLedgerLateReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Late),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::OtherLedgerExpiredReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Expired),
+                PaySlip::Units,
+            ),
+            Self::OtherLedgerExpiredReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Expired),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::OtherLedgerExpiredReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Expired),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::OtherNoSessionReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Whole),
+                PaySlip::Units,
+            ),
+            Self::OtherNoSessionReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Whole),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::OtherNoSessionReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Whole),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::OtherNoSessionLateReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Late),
+                PaySlip::Units,
+            ),
+            Self::OtherNoSessionLateReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Late),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::OtherNoSessionLateReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Late),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::OtherNoSessionExpiredReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Expired),
+                PaySlip::Units,
+            ),
+            Self::OtherNoSessionExpiredReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Expired),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::OtherNoSessionExpiredReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Expired),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::TriesRestoredPayInUnitProofs => (Whose::Own, Past::TriesRestored, PaySlip::Units),
+            Self::TriesRestoredPayWaitFromQuote => {
+                (Whose::Own, Past::TriesRestored, PaySlip::WaitFromQuote)
+            }
+            Self::TriesRestoredDueRoundsDown => {
+                (Whose::Own, Past::TriesRestored, PaySlip::DueRoundsDown)
+            }
+            Self::RefusedQuotePayInUnitProofs => (Whose::Own, Past::RefusedQuote, PaySlip::Units),
+            Self::RefusedQuotePayWaitFromQuote => {
+                (Whose::Own, Past::RefusedQuote, PaySlip::WaitFromQuote)
+            }
+            Self::RefusedQuoteDueRoundsDown => {
+                (Whose::Own, Past::RefusedQuote, PaySlip::DueRoundsDown)
+            }
+            Self::RefusedHelloPayInUnitProofs => (Whose::Own, Past::RefusedHello, PaySlip::Units),
+            Self::RefusedHelloPayWaitFromQuote => {
+                (Whose::Own, Past::RefusedHello, PaySlip::WaitFromQuote)
+            }
+            Self::RefusedHelloDueRoundsDown => {
+                (Whose::Own, Past::RefusedHello, PaySlip::DueRoundsDown)
+            }
+            Self::IdleTimeoutPayInUnitProofs => (Whose::Own, Past::IdleTimeout, PaySlip::Units),
+            Self::IdleTimeoutPayWaitFromQuote => {
+                (Whose::Own, Past::IdleTimeout, PaySlip::WaitFromQuote)
+            }
+            Self::IdleTimeoutDueRoundsDown => {
+                (Whose::Own, Past::IdleTimeout, PaySlip::DueRoundsDown)
+            }
+            Self::BehindOtherVideoPayInUnitProofs => {
+                (Whose::Own, Past::BehindOther, PaySlip::Units)
+            }
+            Self::BehindOtherVideoWaitFromRequest => {
+                (Whose::Own, Past::BehindOther, PaySlip::WaitFromRequest)
+            }
+            Self::PayAheadLessOtherLedgersCredit => {
+                (Whose::Other, Past::Credit, PaySlip::AheadLessOthersCredit)
+            }
+            Self::BesideCreditPayInUnitProofs => (Whose::Other, Past::Credit, PaySlip::Units),
+            Self::BesideOwedPayWaitFromQuote => (Whose::Other, Past::Owes, PaySlip::WaitFromQuote),
+            Self::BesideAckPayInUnitProofs => (Whose::Other, Past::Acked, PaySlip::Units),
+            Self::BesideAckPayWaitFromQuote => (Whose::Other, Past::Acked, PaySlip::WaitFromQuote),
+            Self::BesideAckDueRoundsDown => (Whose::Other, Past::Acked, PaySlip::DueRoundsDown),
+            Self::BesideUnavailablePayAheadRoundsUp => {
+                (Whose::Other, Past::Unavailable, PaySlip::AheadRoundsUp)
+            }
+            Self::BesideSettledPayInUnitProofs => (Whose::Other, Past::Settled, PaySlip::Units),
+            Self::BesideSettledDueRoundsDown => {
+                (Whose::Other, Past::Settled, PaySlip::DueRoundsDown)
+            }
+            Self::BesideNoSessionReclaimPayWaitFromQuote => (
+                Whose::Other,
+                Past::Caught(Place::NoSession, Outcome::Whole),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::BesideTriesRestoredDueRoundsDown => {
+                (Whose::Other, Past::TriesRestored, PaySlip::DueRoundsDown)
+            }
+            Self::BesideRefusedQuotePayInUnitProofs => {
+                (Whose::Other, Past::RefusedQuote, PaySlip::Units)
+            }
+            Self::BesidePlainResumePayAheadRoundsUp => {
+                (Whose::Other, Past::PlainResume, PaySlip::AheadRoundsUp)
+            }
+            _ => return None,
+        })
+    }
+
+    /// The stop a defect skips, and what the ledger it comes on waits on.
+    fn own_stop(self) -> Option<(Cause, Waits)> {
+        Some(match self {
+            Self::OwnDishonestQuoteWhileAwaitingNoStop => (Cause::DishonestQuote, Waits::Awaiting),
+            Self::OwnDishonestQuoteOutOfTriesNoStop => (Cause::DishonestQuote, Waits::OutOfTries),
+            Self::OwnBannedHelloWhileAwaitingNoStop => (Cause::BannedHello, Waits::Awaiting),
+            Self::OwnBannedHelloOutOfTriesNoStop => (Cause::BannedHello, Waits::OutOfTries),
+            Self::OwnUnsolicitedRejWhileAwaitingNoStop => (Cause::UnsolicitedRej, Waits::Awaiting),
+            _ => return None,
+        })
+    }
 }
 
 /// Why a viewer refuses a quote without stopping, for the flaws that act on the refusal.
@@ -7420,6 +8152,9 @@ impl Inner {
     }
 
     fn ban(&self, st: &mut State, key: Key) {
+        if self.has(SeederFlaw::DroppedVideoSpentNoBan) && st.dropped.contains(&key.1) {
+            return;
+        }
         // A peer with no account has been served nothing and owes nothing: nothing is kept.
         let has_account = if self.has(SeederFlaw::BanNeedsThisAccount) {
             st.accounts.contains_key(&key)
@@ -8958,7 +9693,9 @@ impl SeederEngine for MockEngine {
                     || (e.has(SeederFlaw::DroppedVideoAnyAccount)
                         && st.accounts.keys().any(|(p, _)| p == peer))
                     || (st.unknown.iter().any(|u| u.pay.key == key)
-                        && !e.has(SeederFlaw::DroppedVideoIgnoresUnknownSwap));
+                        && !e.has(SeederFlaw::DroppedVideoIgnoresUnknownSwap))
+                    || (st.paying.contains_key(&key)
+                        && e.has(SeederFlaw::DroppedVideoCountsPaymentInProgress));
                 if !holds || e.has(SeederFlaw::DroppedVideoRefusesAccounts) {
                     if st.banned.contains_key(peer) && !e.has(SeederFlaw::DroppedVideoBanUnchecked)
                     {
@@ -9064,7 +9801,17 @@ impl SeederEngine for MockEngine {
                 return Err(rej(RejCode::Banned, "this peer is banned"));
             }
         }
-        if read_first || (took_over && e.has(SeederFlaw::HelloTakeoverSkipsRead)) {
+        // The defect planted on this path alone, for a video it no longer serves.
+        let came = Came::of(took_over, floor.is_some());
+        let slip = e
+            .flaw
+            .and_then(SeederFlaw::dropped_hello_slip)
+            .filter(|(c, _)| *c == came && e.state().dropped.contains(&video))
+            .map(|(_, s)| s);
+        if read_first
+            || (took_over && e.has(SeederFlaw::HelloTakeoverSkipsRead))
+            || slip == Some(HelloSlip::SkipsRead)
+        {
         } else if e.has(SeederFlaw::HelloReadsAll) {
             e.learn(None, None, Learner::Hello);
         } else if e.has(SeederFlaw::HelloAwaitsRead) {
@@ -9098,6 +9845,7 @@ impl SeederEngine for MockEngine {
             || (!waited && e.has(SeederFlaw::UnwaitedRecheckBanNotAged))
             || (wait.waited && e.has(SeederFlaw::WaitedRecheckBanNotAged))
             || (late && e.has(SeederFlaw::LateTakeoverRecheckBanNotAged))
+            || slip == Some(HelloSlip::BanNotAged)
         {
             let bans = st.banned.clone(); // its debt ages, its bans do not
             e.age(&mut st);
@@ -9107,7 +9855,15 @@ impl SeederEngine for MockEngine {
         }
         // The ban again, as it answers: after its wait and its reads.
         let dropped = st.dropped.contains(&video);
-        let recheck = !(!waited && e.has(SeederFlaw::HelloRecheckOnlyAfterWait))
+        if dropped
+            && e.has(SeederFlaw::DroppedVideoRechecksAccount)
+            && !st.accounts.contains_key(&key)
+            && !st.unknown.iter().any(|u| u.pay.key == key)
+        {
+            return Err(rej(RejCode::UnknownVideo, "no longer served here"));
+        }
+        let recheck = slip != Some(HelloSlip::NoBanRecheck)
+            && !(!waited && e.has(SeederFlaw::HelloRecheckOnlyAfterWait))
             && !(dropped && e.has(SeederFlaw::DroppedVideoNoBanRecheck))
             && !(dropped && !waited && e.has(SeederFlaw::DroppedVideoUnwaitedNoBanRecheck))
             && !e.has(SeederFlaw::HelloNoBanRecheck)
@@ -9117,7 +9873,8 @@ impl SeederEngine for MockEngine {
         if (e.has(SeederFlaw::RecheckIdBeforeBan)
             || (!waited && e.has(SeederFlaw::UnwaitedRecheckIdBeforeBan))
             || (took_over && e.has(SeederFlaw::TakeoverRecheckIdBeforeBan))
-            || (late && e.has(SeederFlaw::LateTakeoverRecheckIdBeforeBan)))
+            || (late && e.has(SeederFlaw::LateTakeoverRecheckIdBeforeBan))
+            || slip == Some(HelloSlip::IdBeforeBan))
             && st.open.contains_key(&hello.session)
         {
             return Err(rej(RejCode::BadSession, "that session is open"));
@@ -9149,7 +9906,8 @@ impl SeederEngine for MockEngine {
             && !(dropped
                 && (e.has(SeederFlaw::DroppedVideoSkipsIdCheck)
                     || e.has(SeederFlaw::DroppedVideoNoIdRecheck)
-                    || (!waited && e.has(SeederFlaw::DroppedVideoUnwaitedNoIdRecheck))));
+                    || (!waited && e.has(SeederFlaw::DroppedVideoUnwaitedNoIdRecheck))))
+            && slip != Some(HelloSlip::NoIdRecheck);
         if id_open
             && !e.has(SeederFlaw::SessionIdAnyPeer)
             && !e.has(SeederFlaw::HelloNoSessionRecheck)
@@ -9185,7 +9943,9 @@ impl SeederEngine for MockEngine {
         if e.has(SeederFlaw::FreshWindowPerHello) {
             st.accounts.remove(&key);
         }
-        if e.has(SeederFlaw::HelloCreatesAccount) {
+        if e.has(SeederFlaw::HelloCreatesAccount)
+            || (dropped && e.has(SeederFlaw::DroppedVideoHelloCreatesAccount))
+        {
             e.account(&mut st, key);
         }
         // A hello creates no account: a new one quotes zeros.
@@ -9229,6 +9989,7 @@ impl SeederEngine for MockEngine {
             session: hello.session.clone(),
             quote,
             session_spent: Arc::new(AtomicU64::new(0)),
+            opened_served: !dropped,
         })
     }
 }
@@ -9241,6 +10002,9 @@ pub struct MockSession {
     session: String,
     quote: Quote,
     session_spent: Arc<AtomicU64>,
+    /// The video was served when this session opened
+    /// ([`SeederFlaw::DroppedVideoOpenSessionAdmits`] only).
+    opened_served: bool,
 }
 
 impl Drop for MockSession {
@@ -9643,11 +10407,16 @@ impl MockSession {
             self.on_refusal(&pay.token, pay.upto_chunk, info.amount, true);
             return Err(rej(bound_code, "spent_total would pass 2^53-1"));
         }
-        if due.is_none_or(|d| info.amount < d) {
+        // On a video it no longer serves (flaws take a wrong amount there).
+        let lax = |f| e.has(f) && e.state().dropped.contains(&self.key.1);
+        if due.is_none_or(|d| info.amount < d) && !lax(SeederFlaw::DroppedVideoAcceptsUnderpaid) {
             self.on_refusal(&pay.token, pay.upto_chunk, info.amount, true);
             return Err(rej(RejCode::Underpaid, "short of the chunks claimed"));
         }
-        if due.is_some_and(|d| info.amount > d) && !e.has(SeederFlaw::AcceptsOverpay) {
+        if due.is_some_and(|d| info.amount > d)
+            && !e.has(SeederFlaw::AcceptsOverpay)
+            && !lax(SeederFlaw::DroppedVideoAcceptsOverpaid)
+        {
             self.on_refusal(&pay.token, pay.upto_chunk, info.amount, true);
             return Err(rej(RejCode::Overpaid, "more than the chunks claimed"));
         }
@@ -9977,6 +10746,7 @@ impl SeederSession for MockSession {
         let member = e.videos[self.key.1].members.contains(sha256)
             && (!st.dropped.contains(&self.key.1)
                 || e.has(SeederFlaw::DroppedVideoAdmits)
+                || (self.opened_served && e.has(SeederFlaw::DroppedVideoOpenSessionAdmits))
                 || (prepaid && e.has(SeederFlaw::DroppedVideoAdmitsPrepaid)));
         if !member && !e.has(SeederFlaw::AdmitsForeignChunks) {
             if e.has(SeederFlaw::ForeignCreatesAccount) {
@@ -10227,6 +10997,11 @@ struct Pending {
     requested_at: u64,
     /// It was a session's last payment ([`ViewerFlaw::LastPayCatchUpFromRequest`] only).
     last: bool,
+    /// A closed session left it, and its reclaim at 180 s could not be served yet; it was
+    /// answered by an ack that does not match ([`ViewerFlaw::NoSessionLateReclaimPayInUnitProofs`],
+    /// [`ViewerFlaw::WrongAckSpentForgotten`] and the like only).
+    caught_up: bool,
+    by_ack: bool,
 }
 
 /// A watcher's standing with one seeder, shared by its ledgers for that seeder's videos
@@ -10268,6 +11043,13 @@ struct Standing {
     requested_all: u64,
     sent_by: Vec<(u64, u64)>,
     acked_by: Vec<(u64, u64)>,
+    /// What each ledger has been through, each ledger's requests not refused and
+    /// `accepted_upto`, and whether the reclaim under way found a proof listed expired
+    /// ([`ViewerFlaw::NoSessionReclaimPayInUnitProofs`],
+    /// [`ViewerFlaw::PayAheadLessOtherLedgersCredit`] and the like only).
+    pasts: Vec<(u64, Past)>,
+    positions: Vec<(u64, u64, u64)>,
+    lost_to_expiry: bool,
 }
 
 /// An honest viewer's ledger with one seeder for one video, holding tokens from one mint
@@ -10316,6 +11098,19 @@ pub struct MockViewer {
     held_credit: bool,
     /// The open session resumed the account ([`ViewerFlaw::DueRoundsDownOnResume`] only).
     resumed: bool,
+    /// The payment now due waited behind another video's payment in flight; requests refused
+    /// after they were paid for; the windows of the sessions it first paid and first sent a
+    /// request on; a closed session's payment was unsettled when this ledger was made; and
+    /// `mint-unavailable` answers in a row to this ledger's own payments
+    /// ([`ViewerFlaw::BehindOtherVideoPayInUnitProofs`], [`ViewerFlaw::ServedCountsPaidRefused`],
+    /// [`ViewerFlaw::DueWindowOfFirstPayment`], [`ViewerFlaw::NewLedgerCatchUpIgnoresWait`],
+    /// [`ViewerFlaw::OwnDishonestQuoteOutOfTriesNoStop`] and the like only).
+    behind_other: bool,
+    paid_refused: u64,
+    first_pay_window: Option<u64>,
+    first_request_window: Option<u64>,
+    made_with_unsettled: bool,
+    tries_here: u32,
 }
 
 impl MockViewer {
@@ -10373,6 +11168,12 @@ impl MockViewer {
             first_window: None,
             held_credit: false,
             resumed: false,
+            behind_other: false,
+            paid_refused: 0,
+            first_pay_window: None,
+            first_request_window: None,
+            made_with_unsettled: false,
+            tries_here: 0,
         }
     }
 
@@ -10382,6 +11183,80 @@ impl MockViewer {
 
     fn standing(&self) -> MutexGuard<'_, Standing> {
         lock(&self.standing)
+    }
+
+    /// Note that `ledger` has been through `past` (read by the defects planted on one
+    /// history only).
+    fn note(&self, ledger: u64, past: Past) {
+        let mut st = self.standing();
+        if !st.pasts.contains(&(ledger, past)) {
+            st.pasts.push((ledger, past));
+        }
+    }
+
+    /// Note this ledger's position in the standing (read by the same defects only).
+    fn note_position(&self) {
+        let (id, requested, acked) = (self.id, self.requested, self.acked);
+        let mut st = self.standing();
+        st.positions.retain(|(l, _, _)| *l != id);
+        st.positions.push((id, requested, acked));
+    }
+
+    /// The chunks the standing's other ledgers owe, and the credit they hold.
+    fn others(&self) -> (u64, u64) {
+        let id = self.id;
+        let st = self.standing();
+        let others = st.positions.iter().filter(|(l, _, _)| *l != id);
+        others.fold((0, 0), |(unpaid, credit), (_, requested, acked)| {
+            (
+                unpaid + requested.saturating_sub(*acked),
+                credit + acked.saturating_sub(*requested),
+            )
+        })
+    }
+
+    /// Whether the planted defect does `slip` to the payment this ledger makes now: its own
+    /// history, or another ledger's, is the one the defect is planted on.
+    fn slips(&self, slip: PaySlip) -> bool {
+        let Some((whose, past, does)) = self.flaw.and_then(ViewerFlaw::past_slip) else {
+            return false;
+        };
+        if does != slip {
+            return false;
+        }
+        let id = self.id;
+        match (whose, past) {
+            (_, Past::BehindOther) => self.behind_other,
+            (Whose::Other, Past::Credit) => self.others().1 > 0,
+            (Whose::Other, Past::Owes) => self.others().0 > 0,
+            (Whose::Own, _) => self.standing().pasts.contains(&(id, past)),
+            (Whose::Other, _) => {
+                let st = self.standing();
+                st.pasts.iter().any(|(l, p)| *l != id && *p == past)
+            }
+        }
+    }
+
+    /// Whether the planted defect skips the stop `cause` brings on this ledger.
+    fn own_stop_skipped(&self, cause: Cause) -> bool {
+        let Some((skipped, waits)) = self.flaw.and_then(ViewerFlaw::own_stop) else {
+            return false;
+        };
+        skipped == cause
+            && match waits {
+                Waits::Awaiting => self.awaiting(true),
+                Waits::OutOfTries => self.out_of_tries() && self.tries_here >= UNAVAILABLE_BUDGET,
+            }
+    }
+
+    /// Where this ledger reclaims a closed session's payment of `ledger`.
+    fn place_of(&self, ledger: u64) -> Place {
+        match (ledger == self.id, self.quote.is_some()) {
+            (true, true) => Place::Session,
+            (true, false) => Place::NoSession,
+            (false, true) => Place::Other,
+            (false, false) => Place::OtherNoSession,
+        }
     }
 
     /// Stop paying this seeder.
@@ -10572,6 +11447,7 @@ impl MockViewer {
     /// none of it.
     fn on_refused_quote(&mut self, why: Refusal, quote: &Quote) {
         use ViewerFlaw as F;
+        self.note(self.id, Past::RefusedQuote);
         // A second quote restoring the tries is `QuoteResetsFirst`, which acts on every quote.
         let (flaws, restores) = match why {
             Refusal::Price => (
@@ -10927,6 +11803,9 @@ impl MockViewer {
                 if expired > 0 && self.has(ViewerFlaw::RepayAfterExpiryInUnitProofs) {
                     self.standing().units_next = true;
                 }
+                if expired > 0 {
+                    self.standing().lost_to_expiry = true;
+                }
                 let outputs_first =
                     self.has(ViewerFlaw::OutputsExpiryFirst) && self.net.active_expired();
                 let decided = if outputs_first || expired == 0 {
@@ -11010,7 +11889,7 @@ impl MockViewer {
 
     /// Finish incomplete reclaims, and reclaim payments closed sessions left unsettled
     /// once they are 180 s old, whichever of the standing's ledgers they belong to.
-    fn catch_up(&mut self) {
+    fn catch_up(&mut self, last: bool) {
         let own = self.has(ViewerFlaw::ReclaimPerVideo)
             || (self.quote.is_none() && self.has(ViewerFlaw::NoSessionRetriesOwnOnly))
             || (self.halted() && self.has(ViewerFlaw::StoppedRetriesOwnOnly));
@@ -11040,9 +11919,21 @@ impl MockViewer {
                 }
                 continue;
             }
+            let (caught_up, by_ack, token) = (p.caught_up, p.by_ack, p.token.clone());
+            self.standing().lost_to_expiry = false;
             let outcome = self.reclaim(ledger, p, true);
             if outcome == Reclaim::All && self.has(ViewerFlaw::RepayAfterRetryInUnitProofs) {
                 self.standing().units_next = true;
+            }
+            if caught_up && outcome == Reclaim::All {
+                let place = self.place_of(ledger);
+                self.note(ledger, Past::Caught(place, Outcome::Late));
+            }
+            if by_ack
+                && outcome == Reclaim::SomeSpent
+                && self.has(ViewerFlaw::WrongAckSpentForgotten)
+            {
+                self.standing().lost.retain(|(_, q)| q.token != token);
             }
         }
         if self.has(ViewerFlaw::StoppedSkipsUnsettled) && self.halted() {
@@ -11057,6 +11948,8 @@ impl MockViewer {
         let own = self.has(ViewerFlaw::CatchUpOwnOnly)
             || (self.quote.is_none() && self.has(ViewerFlaw::NoSessionReclaimsOwnOnly));
         let early = self.has(ViewerFlaw::CatchUpIgnoresWait)
+            || (last && self.has(ViewerFlaw::LastPayCatchUpIgnoresWait))
+            || (self.made_with_unsettled && self.has(ViewerFlaw::NewLedgerCatchUpIgnoresWait))
             || (self.has(ViewerFlaw::StoppedIgnoresWait) && self.halted());
         // Early for this ledger's own payments, or for the other videos' (flaws).
         let early_own = (self.has(ViewerFlaw::StoppedIgnoresOwnWait) && self.halted())
@@ -11142,9 +12035,25 @@ impl MockViewer {
             }
             // An unanswered payment with every proof back, or lost to the expiry, uses no try,
             // and restores none (flaws do).
+            let (place, token) = (self.place_of(ledger), p.token.clone());
+            self.standing().lost_to_expiry = false;
             let outcome = self.reclaim(owner, p, false);
             if outcome == Reclaim::All && self.has(ViewerFlaw::RepayAfterReclaimInUnitProofs) {
                 self.standing().units_next = true;
+            }
+            // How it ended, and where (read by the defects planted on one history only).
+            let lost = std::mem::take(&mut self.standing().lost_to_expiry);
+            match outcome {
+                Reclaim::All | Reclaim::Expired if lost => {
+                    self.note(ledger, Past::Caught(place, Outcome::Expired));
+                }
+                Reclaim::All => self.note(ledger, Past::Caught(place, Outcome::Whole)),
+                Reclaim::Blocked | Reclaim::Pending => {
+                    for (_, q) in &mut self.standing().reclaiming {
+                        q.caught_up |= q.token == token;
+                    }
+                }
+                Reclaim::Expired | Reclaim::SomeSpent => {}
             }
             if matches!(outcome, Reclaim::All | Reclaim::Expired) {
                 if self.has(ViewerFlaw::UnansweredBackCountsATry)
@@ -11170,7 +12079,14 @@ impl MockViewer {
         used >= UNAVAILABLE_BUDGET && !self.has(ViewerFlaw::NoUnavailableBudget)
     }
 
-    fn pay_when(&mut self, threshold: u64, last: bool) -> Result<Option<Pay>, String> {
+    /// The payment to make now, if any: `licensed` to pay ahead by a refusal, or `last`, at
+    /// the session's end.
+    fn pay_when(
+        &mut self,
+        threshold: u64,
+        last: bool,
+        licensed: bool,
+    ) -> Result<Option<Pay>, String> {
         self.taken_by_another();
         let stop_holds = !(last && self.has(ViewerFlaw::LastPayIgnoresStop));
         if self.halted() && stop_holds && self.has(ViewerFlaw::StoppedSkipsReclaim) {
@@ -11182,12 +12098,12 @@ impl MockViewer {
         // Reclaiming is not paying: a stopped viewer still catches up, and so does one that
         // holds no session's quote (between sessions, or its `hello` or quote refused).
         if self.quote.is_some() || !self.has(ViewerFlaw::CatchUpOnlyInSession) {
-            self.catch_up();
+            self.catch_up(last);
         }
         let Some(q) = self.quote.clone() else {
             return Ok(None);
         };
-        let may_ahead = self.pay_ahead && !last && !self.has(ViewerFlaw::NoPayAhead);
+        let may_ahead = licensed && !last && !self.has(ViewerFlaw::NoPayAhead);
         let reclaim_blocks = self.reclaim_incomplete()
             && !(may_ahead && self.has(ViewerFlaw::PayAheadIgnoresReclaim))
             && !(last && self.has(ViewerFlaw::LastPayIgnoresReclaim));
@@ -11208,20 +12124,44 @@ impl MockViewer {
         let stop_blocks = self.halted()
             && stop_holds
             && !(may_ahead && self.has(ViewerFlaw::PayAheadIgnoresStop));
+        if other_blocks && (may_ahead || self.requested.saturating_sub(self.acked) >= threshold) {
+            self.behind_other = true;
+        }
         if stop_blocks || awaiting || reclaim_blocks || pending_blocks {
+            // The licence ended as this call began (flaws keep it, by what stopped it paying).
+            let closed =
+                slot.is_some_and(|l| self.standing().unsettled.iter().any(|(x, _)| *x == l));
+            let keeps = (self.pending.is_some() && self.has(ViewerFlaw::LicenceOutlivesOwnPayment))
+                || (other_blocks && !closed && self.has(ViewerFlaw::LicenceOutlivesOtherPayment))
+                || (closed && self.has(ViewerFlaw::LicenceOutlivesUnsettled))
+                || (reclaim_blocks && self.has(ViewerFlaw::LicenceOutlivesReclaim))
+                || (awaiting && self.has(ViewerFlaw::LicenceOutlivesAwaiting));
+            self.pay_ahead |= licensed && keeps;
             return Ok(None);
         }
         if out_of_tries {
+            self.pay_ahead |= licensed && self.has(ViewerFlaw::LicenceOutlivesTries);
             return Ok(None);
         }
         let unpaid = self.requested.saturating_sub(self.acked);
         let credit = self.acked.saturating_sub(self.requested);
+        let credit = if self.slips(PaySlip::AheadLessOthersCredit) {
+            credit + self.others().1
+        } else {
+            credit
+        };
         if credit > 0 && !last && self.has(ViewerFlaw::DueErrsOnCredit) {
             return Err("the ledger holds credit".into());
         }
         // Half the session's quote's window (the first session's, for a flaw).
         let q = match self.first_window {
             Some(window) if self.has(ViewerFlaw::PayAheadWindowOfFirstQuote) => {
+                Quote { window, ..q }
+            }
+            _ => q,
+        };
+        let q = match self.first_pay_window {
+            Some(window) if self.has(ViewerFlaw::PayAheadWindowOfFirstPayment) => {
                 Quote { window, ..q }
             }
             _ => q,
@@ -11237,12 +12177,14 @@ impl MockViewer {
         } else if self.has(ViewerFlaw::PayAheadRoundsUp)
             || (unavailable && self.has(ViewerFlaw::PayAheadRoundsUpAfterUnavailable))
             || (self.id != 0 && self.has(ViewerFlaw::PayAheadRoundsUpOnSibling))
+            || self.slips(PaySlip::AheadRoundsUp)
         {
             q.window.div_ceil(2).saturating_sub(credit)
         } else {
             (q.window / 2).saturating_sub(credit)
         };
         if ahead == 0 && (unpaid == 0 || unpaid < threshold) {
+            self.pay_ahead |= licensed && self.has(ViewerFlaw::LicenceOutlivesCredit);
             return Ok(None);
         }
         let extra = u64::from(self.has(ViewerFlaw::PaysAhead));
@@ -11283,6 +12225,7 @@ impl MockViewer {
             (token, older) = self.net.draw(&self.mint, amount, &[]);
             if self.net.proofs_listing(&token).0 > 0 {
                 self.net.put_back(older);
+                self.pay_ahead |= licensed && self.has(ViewerFlaw::LicenceOutlivesExpiredProofs);
                 return Ok(None);
             }
         }
@@ -11302,12 +12245,16 @@ impl MockViewer {
             || self.has(ViewerFlaw::PaysInUnitProofs)
             || (last && self.has(ViewerFlaw::LastPayInUnitProofs))
             || (ahead > 0 && self.has(ViewerFlaw::PayAheadInUnitProofs))
-            || (amount <= 65 && self.has(ViewerFlaw::SixtyFiveProofs));
+            || (amount <= 65 && self.has(ViewerFlaw::SixtyFiveProofs))
+            || self.slips(PaySlip::Units);
         if units && older == 0 && kept.is_empty() {
             token = self.net.unit_token(&self.mint, amount);
         } else if self.net.proof_count(&token)
             > MAX_PROOFS + usize::from(self.has(ViewerFlaw::MixedSelectionPastSixtyFive))
             && !self.has(ViewerFlaw::MixedSelectionUnswapped)
+            && !(last && self.has(ViewerFlaw::LastPayMixedUnswapped))
+            && !(ahead > 0 && self.has(ViewerFlaw::AheadMixedUnswapped))
+            && !(self.id != 0 && self.has(ViewerFlaw::SiblingMixedUnswapped))
         {
             self.net.put_back(older);
             token = self.net.issue(&self.mint, amount);
@@ -11319,6 +12266,18 @@ impl MockViewer {
             }
             None => self.stamp(threshold, ahead > 0),
         };
+        // From the session's quote, or the last request, for a defect planted on one history.
+        let sent_at = if self.slips(PaySlip::WaitFromQuote) {
+            self.quoted_at
+        } else if self.slips(PaySlip::WaitFromRequest) {
+            self.last_request_at
+        } else {
+            sent_at
+        };
+        self.behind_other = false;
+        if self.first_pay_window.is_none() {
+            self.first_pay_window = Some(q.window);
+        }
         self.set_pending(Pending {
             upto,
             amount,
@@ -11327,10 +12286,9 @@ impl MockViewer {
             spent: self.spent,
             requested_at: self.last_request_at,
             last,
+            caught_up: false,
+            by_ack: false,
         });
-        if !self.has(ViewerFlaw::PayAheadSticky) {
-            self.pay_ahead = false;
-        }
         Ok(Some(Pay {
             upto_chunk: upto,
             token,
@@ -11459,6 +12417,7 @@ impl Viewer for MockViewer {
             },
         );
         other.pay_ahead = self.has(ViewerFlaw::SiblingPaysAhead);
+        other.made_with_unsettled = !self.standing().unsettled.is_empty();
         other
     }
 
@@ -11625,6 +12584,18 @@ impl Viewer for MockViewer {
                 .map(|(_, n)| *n)
                 .sum();
             self.requested.max(others)
+        } else if self.has(ViewerFlaw::ServedCountsOtherLive) {
+            let id = self.id;
+            let others = self
+                .standing()
+                .live
+                .iter()
+                .filter(|(l, _)| *l != id)
+                .map(|(_, p)| p.upto)
+                .max();
+            self.requested.max(others.unwrap_or(0))
+        } else if self.has(ViewerFlaw::ServedCountsPaidRefused) {
+            self.requested + self.paid_refused
         } else if settled && self.has(ViewerFlaw::ServedWithinSettled) {
             self.requested.max(quote.accepted_upto)
         } else if settled && self.has(ViewerFlaw::ServedUncheckedWhenSettling) {
@@ -11669,6 +12640,7 @@ impl Viewer for MockViewer {
             }
             if !(self.has(ViewerFlaw::DishonestQuoteWhileAwaitingNoStop) && self.awaiting(false))
                 && !(self.has(ViewerFlaw::DishonestQuoteOutOfTriesNoStop) && self.out_of_tries())
+                && !self.own_stop_skipped(Cause::DishonestQuote)
             {
                 self.halt();
             }
@@ -11715,11 +12687,23 @@ impl Viewer for MockViewer {
         if self.first_window.is_none() {
             self.first_window = Some(quote.window);
         }
+        // What the ledger has been through (read by the defects planted on one history).
+        if resumed && !settled && self.acked <= self.requested {
+            self.note(self.id, Past::PlainResume);
+        }
+        if settled {
+            self.note(self.id, Past::Settled);
+        }
+        if self.standing().unavailable >= UNAVAILABLE_BUDGET {
+            self.note(self.id, Past::TriesRestored);
+        }
         // A new session: `mint-unavailable` answers are counted afresh.
         self.standing().unavailable = 0;
         self.unavailable_here = 0;
+        self.tries_here = 0;
         self.quote = Some(quote.clone());
         (self.quoted_at, self.answered_at) = (self.clock.now(), self.clock.now());
+        self.note_position();
         Ok(())
     }
 
@@ -11728,6 +12712,7 @@ impl Viewer for MockViewer {
             self.reclaims_other_live();
         }
         if rej.code != RejCode::Banned {
+            self.note(self.id, Past::RefusedHello);
             if self.has(ViewerFlaw::HelloRefusalRestartsWait) {
                 self.restart_wait(false);
             }
@@ -11777,7 +12762,8 @@ impl Viewer for MockViewer {
         };
         let stops = stops
             && !(self.has(ViewerFlaw::BannedHelloWhileAwaitingNoStop) && self.awaiting(false))
-            && !(self.has(ViewerFlaw::BannedHelloOutOfTriesNoStop) && self.out_of_tries());
+            && !(self.has(ViewerFlaw::BannedHelloOutOfTriesNoStop) && self.out_of_tries())
+            && !(rej.code == RejCode::Banned && self.own_stop_skipped(Cause::BannedHello));
         if stops && self.has(ViewerFlaw::BannedHelloStopsLedger) {
             self.halted = true;
         } else if stops {
@@ -11807,6 +12793,10 @@ impl Viewer for MockViewer {
         self.last_request_at = now;
         self.request_times.push(now);
         self.sent_requests += 1;
+        if self.first_request_window.is_none() {
+            self.first_request_window = self.quote.as_ref().map(|q| q.window);
+        }
+        self.note_position();
     }
 
     fn refused(&mut self) {
@@ -11815,6 +12805,9 @@ impl Viewer for MockViewer {
         }
         if self.has(ViewerFlaw::PaysForRefused) {
             return;
+        }
+        if self.requested > 0 && self.requested <= self.acked {
+            self.paid_refused += 1;
         }
         if self.has(ViewerFlaw::RefusedNoCredit) {
             if self.requested > self.acked {
@@ -11832,7 +12825,9 @@ impl Viewer for MockViewer {
         }
         self.refused_at = self.clock.now();
         self.held_credit |= self.acked > self.requested;
+        // The refusal licenses the `due` that follows it on this ledger, and no other.
         self.pay_ahead = true;
+        self.note_position();
         if self.has(ViewerFlaw::RefusalRestartsWait) {
             self.restart_wait(false);
         }
@@ -11860,6 +12855,20 @@ impl Viewer for MockViewer {
             (Some(_), Some(first)) if self.has(ViewerFlaw::DueWindowOfFirstQuote) => first,
             (q, _) => q.map_or(2, |q| q.window),
         };
+        // That of the session it first paid on, or first sent a request on (flaws).
+        let window = match (self.first_pay_window, self.first_request_window) {
+            (Some(first), _)
+                if self.quote.is_some() && self.has(ViewerFlaw::DueWindowOfFirstPayment) =>
+            {
+                first
+            }
+            (_, Some(first))
+                if self.quote.is_some() && self.has(ViewerFlaw::DueWindowOfFirstRequest) =>
+            {
+                first
+            }
+            _ => window,
+        };
         let when = if self.has(ViewerFlaw::PaysAtTheWindow) {
             window + 1
         } else if self.has(ViewerFlaw::PaysAtFullWindow)
@@ -11874,16 +12883,25 @@ impl Viewer for MockViewer {
             || (self.standing().unavailable > 0
                 && self.has(ViewerFlaw::DueRoundsDownAfterUnavailable))
             || (self.standing().lost_at > 0 && self.has(ViewerFlaw::DueRoundsDownAfterSpent))
+            || self.slips(PaySlip::DueRoundsDown)
         {
             window / 2
         } else {
             window.div_ceil(2)
         };
-        self.pay_when(when.max(1), false)
+        // A refusal licenses this call to pay ahead, and no other (NFX-07 §3a): the licence
+        // ends here, whether or not this call pays.
+        let licensed = if self.has(ViewerFlaw::PayAheadSticky) {
+            self.pay_ahead
+        } else {
+            std::mem::take(&mut self.pay_ahead)
+        };
+        self.pay_when(when.max(1), false, licensed)
     }
 
     async fn last_pay(&mut self) -> Result<Option<Pay>, String> {
-        self.pay_when(1, true)
+        // It pays nothing ahead, and leaves a refusal's licence to the `due` that follows.
+        self.pay_when(1, true, false)
     }
 
     fn ack(&mut self, ack: &Ack) -> Result<(), String> {
@@ -11991,11 +13009,26 @@ impl Viewer for MockViewer {
             if !self.has(ViewerFlaw::AckKeepsUnavailable) {
                 self.standing().unavailable = 0;
                 self.unavailable_here = 0;
+                self.tries_here = 0;
             }
             if ok {
                 self.answered_at = self.clock.now();
+                self.note(self.id, Past::Acked);
             }
+            self.note_position();
             return Ok(());
+        }
+        // An ack that does not match the payment it answers refuses that payment (NFX-07
+        // §3a): its proofs are reclaimed as any refused payment's, with no 180 s wait, by the
+        // calls that finish an incomplete reclaim. It is held as one until then. An
+        // unsolicited ack answers no payment, and reclaims nothing.
+        if let Some(mut p) = expected {
+            p.by_ack = true;
+            if self.has(ViewerFlaw::WrongAckReclaimWaits) {
+                self.standing().unsettled.push((self.id, p));
+            } else if !self.has(ViewerFlaw::WrongAckNoReclaim) {
+                self.standing().reclaiming.push((self.id, p));
+            }
         }
         self.halt();
         Err("an ack that does not match what was paid".into())
@@ -12028,6 +13061,7 @@ impl Viewer for MockViewer {
                 && !(self.has(ViewerFlaw::UnsolicitedRejWhileAwaitingNoStop)
                     && self.awaiting(false))
                 && !(self.has(ViewerFlaw::UnsolicitedRejOutOfTriesNoStop) && self.out_of_tries())
+                && !self.own_stop_skipped(Cause::UnsolicitedRej)
             {
                 self.halt();
             }
@@ -12078,6 +13112,8 @@ impl Viewer for MockViewer {
             self.unavailable_here += 1;
         } else {
             self.standing().unavailable += 1;
+            self.tries_here += 1;
+            self.note(self.id, Past::Unavailable);
         }
     }
 
@@ -12100,6 +13136,7 @@ impl Viewer for MockViewer {
         }
         let Some(p) = &self.pending else {
             // No payment on this session: nothing is this call's.
+            self.note(self.id, Past::IdleTimeout);
             self.lets_go(
                 self.has(ViewerFlaw::TimeoutForgivesLost),
                 self.has(ViewerFlaw::TimeoutDropsReclaim),
@@ -12172,6 +13209,15 @@ impl Viewer for MockViewer {
     fn end(&mut self) {
         self.taken_by_another();
         self.quote = None;
+        // The session's end ends a refusal's licence to pay ahead (the flaws that take a
+        // quote they refuse for a refused request keep theirs for the next session).
+        if !(self.has(ViewerFlaw::PriceRefusalPaysAhead)
+            || self.has(ViewerFlaw::WindowRefusalPaysAhead)
+            || self.has(ViewerFlaw::MintRefusalPaysAhead)
+            || self.has(ViewerFlaw::LicenceOutlivesEnd))
+        {
+            self.pay_ahead = false;
+        }
         if self.has(ViewerFlaw::EndCountsATry) {
             self.standing().unavailable += 1;
         }
@@ -12238,7 +13284,7 @@ impl Viewer for MockViewer {
 pub struct MockHarness {
     net: MockNetwork,
     mint: String,
-    videos: [VideoAddr; 2],
+    videos: [VideoAddr; 3],
     unknown: VideoAddr,
     sessions: AtomicU64,
     clock: Clock,
@@ -12258,6 +13304,7 @@ impl Default for MockHarness {
             videos: [
                 addr("nfx:testnet:1:adversary-suite"),
                 addr("nfx:testnet:1:adversary-suite-two"),
+                addr("nfx:testnet:1:adversary-suite-three"),
             ],
             unknown: addr("nfx:testnet:1:not-served-here"),
             sessions: AtomicU64::new(0),
@@ -12379,7 +13426,7 @@ impl MockHarness {
     }
 
     fn videos(&self) -> Vec<(VideoAddr, HashSet<String>)> {
-        (0..2u8)
+        (0..3u8)
             .map(|v| {
                 let members = (0..1024).map(|n| self.chunk_of(v, n)).collect();
                 (self.videos[usize::from(v)].clone(), members)

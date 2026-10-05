@@ -209,6 +209,9 @@ says of a page holds for a worker it pays or earns from. Whether a page pays an 
   the partition pays that seeder nothing more, as it pays an origin nothing more that
   kept a closed page's payment (§3.1). A stated concession, the cost of the one-payment
   bound.
+  Credit is the ledger's too: a seeder that refuses everything takes at most half a
+  page's window ceiling for each video (NFX-07 §3a) from each page, a new page's identity
+  holding none of an earlier one's.
 
 ### 3.1 HTTPS
 
@@ -422,3 +425,6 @@ NFX-05 byte formats.
     pays or earns that move value and are no swaps, the licence purchase and an earning
     page's `redeem`, have their records specified with licensed mode (NFX-08, NFX-09),
     not here (was: nothing, while the rule spoke only of swaps). §3.3 points here.
+  - §3: credit a page holds with a seeder is its ledger's, so its identity's: a seeder
+    that refuses everything takes at most half a page's window ceiling for each video from
+    each page (NFX-07 §3a, which now states that bound per identity).

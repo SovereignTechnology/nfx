@@ -70,8 +70,8 @@ payment-enforced after release, so no mechanism pretends otherwise.
   the video refuses it with `unknown-video`, unless the peer is banned: a banned peer's
   `hello` is refused `banned`, whatever video it names (§3). One that has stopped serving
   the video still answers the `hello` of a peer it keeps an account for there, or a swap
-  of one whose outcome is unknown, verifies that session's payments, and admits nothing of
-  the video (§3).
+  of one whose outcome is unknown, judged as the `hello` arrives, verifies that session's
+  payments, and admits nothing of the video (§3).
 - **`quote`** (seeder→watcher) replies with the *binding* price; the beacon's
   `price_hint` was advisory. It also carries the account's position, so a watcher can
   resume after a reconnect. A watcher takes one quote per session and refuses a second.
@@ -177,8 +177,16 @@ payment-enforced after release, so no mechanism pretends otherwise.
   taking a dead turn over included, its reads after that wait, its ban and session-id
   checks as it arrives and again as it answers, the ban as it then stands, and the per-peer
   cap, waiting `hello`s counted. It verifies that session's payments as any others, and
-  admits nothing of the video, pre-paid chunks included. Any other peer's `hello` for it is
-  refused `unknown-video`, or `banned` (§2).
+  admits nothing of the video, pre-paid chunks included; so too on a session that was open
+  when it stopped serving the video. Any other peer's `hello` for it is refused
+  `unknown-video`, or `banned` (§2).
+  The seeder judges this as the `hello` arrives, by what it keeps then. A `hello` it
+  answers stays answered whatever its reads then learn: a peer whose only record there was
+  an unknown swap, learnt as nothing, is quoted zeros, its `hello` having created no
+  account, and its next `hello` is refused `unknown-video`. One it refuses is refused as
+  it arrives, and creates nothing. A peer with no account there whose first payment there
+  is still in progress (sent on a session open when the video was dropped) has no account
+  yet: its `hello` is refused `unknown-video` until that payment lands and creates one.
   So a payment there awaiting a quote (§3a) is still settled, and its watcher pays on the
   seeder's other videos. A stated concession: a watcher that asks for the video's files
   there is refused, and may pay ahead after that refusal (§3a). The seeder credits it as
@@ -469,8 +477,9 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
 
 ## 3a. Watcher duties
 
-- **Know a seeder by its long-term identity** (§3), never by an endpoint or another
-  transport identity: the endpoints one seeder announces share its ledgers and its standing.
+- **Know a seeder by its long-term identity** (§3), never by an endpoint, nor by a
+  transport identity where the seeder announces a long-term one: the endpoints one seeder
+  announces share its ledgers and its standing.
 - **Keep a ledger per (seeder, video):** chunks requested, `accepted_upto`,
   `spent_total`, and any payment not yet settled. It lasts as long as the watcher's
   identity toward that seeder, by which the seeder keeps the account (§3). The watcher
@@ -532,21 +541,35 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   CDK 0.18.1 sends an exact selection as it is, whatever its count, unless
   `SendOptions::max_proofs` is set, so a watcher built on it sets it to 64. Every payment
   meets it, however it is made (due, ahead after a refusal, or at a session's end), on
-  whichever of the seeder's ledgers, and whatever came before it: an `ack`, a
-  `mint-unavailable` answer, a reclaim (its proofs back in a session or not, late, or less
-  those lost to the expiry), a quote that settled a payment, a resumed session, or credit
-  held. A token the
+  whichever of the seeder's ledgers, and whatever came before it, on that ledger or on
+  another of the seeder's: an `ack`, a `mint-unavailable` answer, a reclaim (of a refused
+  payment, or of one a closed session left, by its own ledger or another video's, in a
+  session or not; its proofs back at once, late, or less those lost to the expiry), a quote
+  that settled a payment, a resumed session, credit held or chunks owed, a quote or a
+  `hello` refused, its tries used and restored, or another video's payment in flight
+  ahead of it. A token the
   seeder refuses `bad-token` stops the watcher (below).
   - Pay once the account's unpaid count reaches half of `window`, rounded up (3 of a
     `window` of 5), for each payment, on whichever of the seeder's ledgers and whatever
     came before it (as for the token's shape, above), so the seeder need not stall while a
     payment is in flight. The `window` is the session's quote's: a seeder may quote
     another on a later session.
-  - Never pay ahead of need, except right after a refusal. Then pay ahead up to half of
-    `window`, rounded down, less any credit the video's ledger already holds, so too on
-    whichever ledger and whatever came before, which the seeder serves whatever its cap. Credit on a video never grows beyond half its window, so a seeder
-    that refuses everything takes at most half the watcher's ceiling, for each video the
-    watcher asks it for.
+  - Never pay ahead of need, except right after a refusal. A refusal licenses the next
+    time the watcher decides what to pay on that video's ledger, and no other: then, if
+    nothing else stops a payment, pay ahead up to half of `window`, rounded down, less any
+    credit that video's ledger already holds (what another video's ledger holds or owes
+    counts for nothing), so too on whichever ledger and whatever came before, which the
+    seeder serves whatever its cap. The licence ends there, whether or not that decision
+    paid: one that paid nothing because a payment was in flight toward the seeder or left
+    unsettled, a reclaim was incomplete, a payment awaited a quote, the tries were used,
+    the wallet held no proof the mint takes, the ledger already held half a window of
+    credit, or the watcher had stopped, licenses nothing later. Nor does a licence outlive
+    its session, or pass to another video's ledger. So a refusal that came while a payment
+    was in flight pays nothing ahead once that payment is answered: the watcher asks
+    again, and a new refusal licenses anew. Credit on a video never grows beyond half its
+    window, so a seeder that refuses everything takes at most half the watcher's ceiling
+    for each video the watcher asks it for, under each identity the watcher takes toward
+    it: the ledger, and its credit, are that identity's (above).
   - Keep one payment in flight toward a seeder at a time, across its videos. One sent on a
     live session holds that place until it is answered or its 180 s are up (below): a
     second quote, a request refused or new, a timeout before then, a ledger made for
@@ -595,8 +618,13 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   `spent_total` the ledger plus its face value. An inconsistent or unsolicited ack stops
   the watcher paying that seeder. An `ack` settles only the payment sent on its session:
   an unsolicited one settles nothing, even one showing another video's payment in both
-  fields.
-- **Reclaim the proofs of every refused payment,** whatever the code, known or not, by
+  fields. A payment answered by an `ack` that does not match is a refused payment: the
+  watcher stops, and reclaims its proofs as it reclaims any refused payment (below),
+  without the 180 s wait. If that reclaim finds a proof spent, the payment awaits a quote
+  like any other, and, the watcher having stopped, a quote showing it settles it into the
+  ledger and nothing more. An unsolicited `ack` answers no payment, and reclaims nothing.
+- **Reclaim the proofs of every refused payment,** whatever the code, known or not, or
+  refused by an `ack` that does not match (above), by
   swapping them back at the mint, to outputs the watcher derives deterministically
   (NUT-13). A reclaim left without an answer is retried, and a retry can find the proofs
   spent by that reclaim itself: before calling any proof spent, the watcher restores its
@@ -688,8 +716,9 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   So it does for every payment, however it is made, on whichever ledger and whatever came
   before it (as for the token's shape, above), and wherever it is counted: on the
   payment's live session, or by whichever of the seeder's ledgers catches a closed
-  session's payment up, with a session open or not (a new one, or one held since before
-  the payment was sent), stopped or not.
+  session's payment up, one made since the payment included, with a session open or not (a
+  new one, or one held since before the payment was sent), stopped or not, and whenever it
+  catches up: as it decides a payment, or at a session's end.
   - On a live connection, for the payment sent on it, the seeder was unresponsive: 180 s
     after sending it, whatever came since (a second quote, a request refused or new, a
     timeout before then, or anything on another video), the watcher reclaims and stops. A
@@ -721,7 +750,8 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   were found spent before it stopped, as it stopped or since, or which a closed session
   left unsettled, or whose reclaim is incomplete, settles that payment into the ledger and
   nothing more. Reclaiming is not paying: whatever stopped it, a stopped watcher still
-  reclaims a live session's payment that is refused, or unanswered after the wait,
+  reclaims a live session's payment that is refused, by a `rej` or by an `ack` that does
+  not match, or unanswered after the wait,
   finishes its incomplete reclaims, from whichever of the seeder's videos it is watching,
   and reclaims a closed session's unsettled payment after the wait, counted from sending.
   A stop shortens no wait: whatever stopped it, and whatever came after, it reclaims no
@@ -1422,3 +1452,26 @@ paths on one host are two origins.
     or not the task serving the `pay`'s connection is waiting for it or running: a `pay`
     whose outcome was settled in time is answered with it, however late that task looks.
     What the adversary suite has assumed, now said.
+  - §3 (M2.0 twenty-ninth audit, completeness review): a `hello` for a video the seeder no
+    longer serves is judged as it arrives, by what the seeder keeps then: one it answers
+    stays answered whatever its reads learn, and one it refuses creates nothing; a peer with
+    no account whose first payment there is still in progress is refused `unknown-video`
+    until that payment lands; a session open when the video was dropped admits nothing and
+    has its payments verified, as one opened since. What "as it would before" left open.
+  - §3a: a payment answered by an `ack` that does not match is a refused payment: reclaimed
+    as any other, without the 180 s wait, and, a proof found spent, settled into the ledger
+    by a quote showing it and nothing more; an unsolicited `ack` reclaims nothing (was: no
+    stated fate, and the mock dropped the payment).
+  - §3a: "right after a refusal" defined: a refusal licenses the next time the watcher
+    decides what to pay on that video's ledger, and no other; the licence ends there,
+    whether or not it paid, and at the session's end (was: undefined, and the mock kept the
+    licence until a payment was made).
+  - §3a: the half-window bound restated per identity: half the watcher's ceiling for each
+    video, under each identity the watcher takes toward the seeder (as the one-payment bound
+    was; NFX-10 §3 says so for a page).
+  - §3a: a seeder is known by its long-term identity, never by a transport identity where
+    it announces a long-term one (was: "never by ... another transport identity", against
+    §3, where a mesh seeder's identity is the one its transport gives it); the list of what
+    may come before a payment names both ledgers, each place and end of a reclaim, a refused
+    quote or `hello`, tries used and restored, and another video's payment ahead of it; the
+    180 s are counted alike by a ledger made since the payment, and at a session's end.

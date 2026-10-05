@@ -54,7 +54,12 @@ pub trait SeederEngine {
     ///   and again as it answers (the ban as it then stands), and the cap, waiting hellos
     ///   counted, as ever; its session's payments verified as any others, and nothing of the
     ///   video admitted, pre-paid chunks included. So a payment there awaiting a quote is
-    ///   still settled. Any other peer is refused `unknown-video`;
+    ///   still settled. Any other peer is refused `unknown-video`. This is judged as the
+    ///   `hello` arrives, by what the seeder keeps then: one it answers stays answered
+    ///   whatever its reads learn (a peer whose only record there was an unknown swap, learnt
+    ///   as nothing, is quoted zeros, and its next `hello` is refused), and one it refuses
+    ///   creates nothing. A peer with no account there whose first payment there is still in
+    ///   progress has no account yet, and is refused `unknown-video` until it lands;
     /// - `bad-session` for a session id that is open, on any video, or beyond the per-peer
     ///   cap on open and waiting sessions, counted across all videos.
     ///
@@ -84,7 +89,8 @@ pub trait SeederSession {
     /// That happens when:
     /// - the peer is banned;
     /// - the file is not this video's, or the seeder no longer serves this video, pre-paid
-    ///   or not;
+    ///   or not, on a session that was open when it stopped serving it as on one opened
+    ///   since (either still has its payments verified as any others);
     /// - the chunk is not pre-paid and the account's window or the global cap is full.
     ///
     /// A refused request counts nowhere and creates no account.
@@ -146,8 +152,9 @@ pub trait SeederSession {
 /// for the seeder's other videos: whether the watcher has stopped paying the seeder,
 /// reclaims not yet complete, payments awaiting a quote, the one payment in flight toward
 /// the seeder (a payment left unsettled by a closed session included), and the count of
-/// `mint-unavailable` answers in a row. A seeder is its long-term identity, whatever
-/// transport identity it takes (NFX-07 §3a): the ledger lasts as long as the watcher's own
+/// `mint-unavailable` answers in a row. A seeder is its long-term identity, never a
+/// transport identity where it announces a long-term one (NFX-07 §3, §3a): the ledger lasts
+/// as long as the watcher's own
 /// identity toward it, which the watcher keeps while a payment of the ledger is not yet
 /// settled, and the standing as long as the wallet the watcher pays from, so a lying seeder
 /// takes one payment per seeder identity the watcher pays. Implementations: the real wallet-backed
@@ -200,25 +207,34 @@ pub trait Viewer {
     fn requested(&mut self);
 
     /// The seeder answered a request with `refuse`. It is not owed, and if it was already
-    /// paid for, that payment becomes credit. The next [`Viewer::due`] may pay ahead, up
-    /// to half a window less the credit already held. It settles nothing: the payment in
-    /// flight, a payment awaiting a quote, an incomplete reclaim and a stop stay as they
-    /// were.
+    /// paid for, that payment becomes credit. It licenses the next [`Viewer::due`] on this
+    /// ledger, and no other call, to pay ahead, up to half a window less the credit already
+    /// held: that `due` uses the licence and ends it, whether or not it pays, and so does
+    /// [`Viewer::end`]; [`Viewer::last_pay`] neither uses nor ends it, and it licenses
+    /// nothing on a ledger for another video. It settles nothing: the payment in flight, a
+    /// payment awaiting a quote, an incomplete reclaim and a stop stay as they were.
     fn refused(&mut self);
 
     /// The payment due now, if any. It covers requested chunks at the quoted price, made
     /// once the unpaid count reaches half the session's quoted window, rounded up, so a
     /// payment in flight never stalls the seeder, or pays ahead after a refusal half the
-    /// window, rounded down, less the credit the ledger holds. Its token, as
+    /// window, rounded down, less the credit the ledger holds: what another video's ledger
+    /// owes or holds counts for nothing. It pays ahead only as the first `due` after a
+    /// refusal on this ledger's open session ([`Viewer::refused`]): if this call pays
+    /// nothing, for whichever reason below or because nothing is payable, the refusal
+    /// licenses nothing later. Its token, as
     /// [`Viewer::last_pay`]'s, meets the seeder's structure check (NFX-07 §3 step 1): of one
     /// mint, a quoted one by its exact URL, in `sat`, of at most 64 proofs, none locked (open
     /// mode), each with its DLEQ proof. A selection that would hold more than 64 proofs is
     /// swapped to fewer first. The due point, the pay-ahead and the token hold so for every
-    /// payment, on whichever of the seeder's ledgers, and whatever came before it: an ack, a
-    /// `mint-unavailable` answer, a reclaim (its proofs back, late or less those lost to the
-    /// expiry), a quote that settled a payment, a resumed session, or credit held. A
-    /// payment's 180 s count from its own sending (NFX-07 §3a), whatever it is and wherever
-    /// they are counted. One is in flight toward the seeder
+    /// payment, on whichever of the seeder's ledgers, and whatever came before it, on that
+    /// ledger or on another of the seeder's: an ack, a `mint-unavailable` answer, a reclaim
+    /// (of a refused payment, or of one a closed session left, by its own ledger or another
+    /// video's, in a session or not; its proofs back at once, late, or less those lost to
+    /// the expiry), a quote that settled a payment, a resumed session, credit held or chunks
+    /// owed, a quote or a `hello` refused, its tries used and restored, or another video's
+    /// payment in flight ahead of it. A payment's 180 s count from its own sending (NFX-07
+    /// §3a), whatever it is and wherever they are counted. One is in flight toward the seeder
     /// at a time, across its videos, and none is made:
     /// - once the viewer has stopped, ahead after a refusal included;
     /// - while a reclaim is incomplete or a payment awaits a quote;
@@ -238,11 +254,16 @@ pub trait Viewer {
     /// quote on its own ledger, a mint that cannot serve it yet or a proof pending leaves it
     /// incomplete, and with every proof back or lost to the expiry the viewer pays again at
     /// its next session. A closed session's payment is reclaimed 180 s after it was sent,
-    /// whatever came since, and not before, whichever ledger catches it up, with a session
-    /// or not, and whatever stopped the viewer.
+    /// whatever came since, and not before, whichever ledger catches it up, one made since
+    /// included, with a session or not, and whatever stopped the viewer. A payment an ack
+    /// that does not match refused ([`Viewer::ack`]) is reclaimed here as an incomplete
+    /// reclaim is finished, with no wait.
     async fn due(&mut self) -> Result<Option<Pay>, String>;
 
-    /// The payment for every chunk still owed, when the session ends.
+    /// The payment for every chunk still owed, when the session ends. It pays nothing ahead,
+    /// and leaves a refusal's licence to the [`Viewer::due`] that follows it. It first
+    /// catches up as `due` does: it finishes incomplete reclaims, and reclaims a closed
+    /// session's payment 180 s after it was sent, and not before.
     async fn last_pay(&mut self) -> Result<Option<Pay>, String>;
 
     /// The seeder's `ack`. `Err`: it is unsolicited, or does not match the payment
@@ -250,6 +271,15 @@ pub trait Viewer {
     /// stops paying this seeder. An ack settles only the payment sent on its session: an
     /// unsolicited one settles nothing, even one showing another video's payment in both
     /// fields. An ack that matches does not undo a stop.
+    ///
+    /// A payment answered by an ack that does not match is a refused payment (NFX-07 §3a):
+    /// the viewer reclaims its proofs as any refused payment's, with no 180 s wait. This
+    /// call does not reach the mint: it holds the payment as one whose reclaim is still to
+    /// run, and the calls that finish an incomplete reclaim run it ([`Viewer::due`],
+    /// [`Viewer::last_pay`], from whichever of the seeder's ledgers, with a session or not).
+    /// Proofs it finds spent leave the payment to a quote that shows it, which settles it
+    /// into the ledger only: the viewer has stopped. An unsolicited ack answers no payment,
+    /// and reclaims nothing.
     fn ack(&mut self, ack: &Ack) -> Result<(), String>;
 
     /// The seeder's `rej` answering this ledger's payment, sent on this session, whatever
@@ -283,10 +313,11 @@ pub trait Viewer {
     /// payment an earlier session left unsettled is not this call's.
     async fn timeout(&mut self);
 
-    /// The session ended (its connection closed). The ledger stays, and a payment in
-    /// flight stays unsettled, still the standing's one payment in flight. This ledger's
-    /// quote settles it if both its fields match. Failing that, any ledger of the standing
-    /// reclaims it once it is 180 s old, and proofs found spent leave it awaiting a quote.
+    /// The session ended (its connection closed). A refusal's licence to pay ahead ends
+    /// with it. The ledger stays, and a payment in flight stays unsettled, still the
+    /// standing's one payment in flight. This ledger's quote settles it if both its fields
+    /// match. Failing that, any ledger of the standing reclaims it once it is 180 s old, and
+    /// proofs found spent leave it awaiting a quote.
     fn end(&mut self);
 
     /// Whether the viewer pays this seeder nothing: it has stopped, or a payment awaits a
@@ -438,7 +469,7 @@ pub trait Harness {
     type Engine: SeederEngine + Send + Sync + 'static;
     type Viewer: Viewer;
 
-    /// A seeder serving two videos (0 and 1) at `price`, quoting `window` (≥ 2) and this
+    /// A seeder serving three videos (0, 1 and 2) at `price`, quoting `window` (≥ 2) and this
     /// harness's mint only, with a global cap of `global_cap` unpaid chunks per
     /// [`Harness::debt_ttl`].
     fn engine(&self, price: u64, window: u64, global_cap: u64) -> Self::Engine;
@@ -452,7 +483,7 @@ pub trait Harness {
     /// swaps, and any cache keyed by peer. A count that leaves a kind out hides exactly the
     /// growth the suite looks for.
     fn identities_held(&self, engine: &Self::Engine) -> usize;
-    /// A `hello` for video `v` (0 or 1), under a fresh session id.
+    /// A `hello` for video `v` (0, 1 or 2), under a fresh session id.
     fn hello_for(&self, v: u8) -> Hello;
     /// A `hello` for video 0.
     fn hello(&self) -> Hello {
@@ -472,7 +503,7 @@ pub trait Harness {
     }
     /// A file of no video the seeder serves.
     fn foreign_chunk(&self) -> String;
-    /// `engine` stops serving video `v` (0 or 1), as a seeder that drops a video does: it no
+    /// `engine` stops serving video `v` (0, 1 or 2), as a seeder that drops a video does: it no
     /// longer serves the video's files, and keeps its accounts there (NFX-07 §3). A real
     /// engine's harness restarts it without the video, its state kept.
     fn drop_video(&self, engine: &Self::Engine, v: u8);
