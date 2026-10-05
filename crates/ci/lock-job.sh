@@ -7,9 +7,9 @@
 # everything else.
 #
 # Order: the tree is the commit and holds nothing untracked; the pinned files and the
-# environment; the cached archives; then what the money crates are built from, read from
-# cargo metadata before anything is compiled; then the build and the money tests; then the
-# pinned files again.
+# environment; the cached archives; then what the money crates are built from and which
+# test targets they have, read from cargo metadata before anything is compiled; then the
+# build and every money test; then the pinned files again.
 set -euo pipefail
 shopt -s inherit_errexit
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"

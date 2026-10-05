@@ -17,8 +17,10 @@ on:
 permissions:
   contents: read
 
-# Every pushed commit (but a probe's) runs in a group of its own, so each gets its lock
-# verdict; only a pull request's superseded runs are cancelled.
+# The tip of every push (but a probe's) runs in a group of its own, named by its commit, so
+# no later push cancels its lock verdict; only a pull request's superseded runs are
+# cancelled. A commit pushed below a tip gets no run of its own: check-locked.sh lists every
+# push that gets no lock verdict.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -52,22 +54,68 @@ jobs:
           # System-wide, so it survives env -i (HOME=/root below); first, since the guard
           # below reads the tree through git.
           git config --system --add safe.directory "$(pwd -P)"
-          # The lock is skipped only on a branch holding no money code and no part of the
-          # lock (main, and branches older than the lock). Money code is a money crate or a
-          # locked path, or any Rust file, Cargo manifest or Cargo.lock that names a money
-          # crate, so a crate moved elsewhere under its name still counts (one renamed too
-          # is money logic written afresh, which no lock can tell: check-locked.sh).
-          # Anywhere else the lock runs, and money code with any part of the lock missing
-          # fails here.
-          money=$(git ls-files -- crates/nfx-pay crates/nfx-pay-wire crates/nfx-node/src/pay crates/nfx-node/src/origin_pay.rs)
+          # The lock is skipped only on a branch that holds no money code and never held
+          # any (main, and branches older than the lock). Either of two things makes it
+          # run, and then anything short of the whole lock fails here:
+          #  - history: a commit in HEAD's history changed a file of the lock or a path of
+          #    the money code, as the commit that introduced the lock did. So a branch that
+          #    ever held money code runs the lock whatever its tree calls that code now, and
+          #    a history squashed or rewritten counts by the paths its commits changed;
+          #  - content: a money crate, a locked path or a part of the lock; a Rust file,
+          #    Cargo manifest or Cargo.lock naming a money crate in its bytes; or a manifest
+          #    or Cargo.lock naming one as cargo reads it, in any key or string once decoded
+          #    (an escape, a multi-line string, a `package =` rename). One that Python's
+          #    TOML 1.0 reader cannot read, or that is not a regular file, counts as naming
+          #    one, and so does a submodule, whose files are not here to read.
+          # What that leaves: money logic written afresh under other names, on a history
+          # that never held any, which no lock can tell from other code (check-locked.sh).
+          lock_files=(crates/ci/check-locked.sh crates/ci/lock-job.sh crates/ci/locked.py crates/ci/locked.sha256 crates/ci/locked-compiled.txt)
+          money_paths=(crates/nfx-pay crates/nfx-pay-wire crates/nfx-node/src/pay crates/nfx-node/src/origin_pay.rs)
+          shallow=$(git rev-parse --is-shallow-repository) || { echo "lock: git rev-parse failed"; exit 1; }
+          [ "$shallow" = false ] || { echo "lock: the checkout is shallow, so the guard cannot read its history"; exit 1; }
+          history=$(git rev-list --full-history -1 HEAD -- "${lock_files[@]}" "${money_paths[@]}") || { echo "lock: git rev-list failed"; exit 1; }
+          money=$(git ls-files -- "${money_paths[@]}") || { echo "lock: git ls-files failed"; exit 1; }
           rc=0; named=$(git grep -l -E 'nfx[-_]pay' -- '*.rs' '*Cargo.toml' '*Cargo.lock') || rc=$?
           [ "$rc" -le 1 ] || { echo "lock: git grep failed ($rc)"; exit 1; }
-          lock=$(git ls-files -- crates/ci/locked.sha256 crates/ci/lock-job.sh)
-          if [ -z "$money$named$lock" ]; then
-            echo "no money code and no money-code lock on this branch"; exit 0
+          decoded=$(/usr/bin/python3 -I -S - <<'PY'
+          import re, subprocess, tomllib
+          money = re.compile("nfx[-_]pay")
+          def names(v):  # every key and every string of a decoded TOML document
+              if isinstance(v, dict):
+                  for k, x in v.items():
+                      yield k
+                      yield from names(x)
+              elif isinstance(v, list):
+                  for x in v:
+                      yield from names(x)
+              elif isinstance(v, str):
+                  yield v
+          tracked = subprocess.run(["git", "ls-files", "-s", "-z"], check=True, stdout=subprocess.PIPE).stdout
+          for entry in tracked.split(b"\0")[:-1]:
+              meta, _, path = entry.partition(b"\t")
+              mode, shown = meta.split(b" ")[0], ascii(path.decode("utf-8", "backslashreplace"))
+              if mode == b"160000":
+                  print(f"{shown}: a submodule")
+              elif path.endswith((b"Cargo.toml", b"Cargo.lock")):
+                  if mode not in (b"100644", b"100755"):
+                      print(f"{shown}: not a regular file")
+                      continue
+                  try:
+                      with open(path, "rb") as f:
+                          if any(money.search(s) for s in names(tomllib.load(f))):
+                              print(f"{shown}: names a money crate")
+                  except Exception as e:
+                      print(f"{shown}: not read as TOML ({type(e).__name__})")
+          PY
+          ) || { echo "lock: reading the Cargo manifests failed"; exit 1; }
+          lock=$(git ls-files -- "${lock_files[@]}") || { echo "lock: git ls-files failed"; exit 1; }
+          if [ -z "$history$money$named$decoded$lock" ]; then
+            echo "no money code and no money-code lock on this branch, or in its history"; exit 0
           fi
+          echo "lock: required here by:${history:+ history (${history:0:12})}${money:+ money paths}${named:+ names in bytes}${decoded:+ what cargo reads}${lock:+ lock files}"
+          [ -z "$decoded" ] || head -n 5 <<<"$decoded"
           if [ ! -f crates/ci/locked.sha256 ] || [ ! -f crates/ci/lock-job.sh ]; then
-            echo "money code or part of the lock is here, but not the whole lock (crates/ci/locked.sha256, crates/ci/lock-job.sh)"
+            echo "money code or part of the lock is here, or in this branch's history, but not the whole lock (crates/ci/locked.sha256, crates/ci/lock-job.sh)"
             exit 1
           fi
           /usr/bin/env -i PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \

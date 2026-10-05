@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """The parts of the locked-path check that need a parser (crates/ci/check-locked.sh).
 
-    locked.py manifest            the derived pin lines for crates/ci/locked.sha256
+    locked.py manifest            the derived pin lines for crates/ci/locked.sha256, once
+                                  the workspace's manifests and lock file are tracked files
     locked.py sources             every cached .crate matches its Cargo.lock checksum
-    locked.py facts               what the money crates are built from, from cargo
-                                  metadata alone (nothing is compiled), against
-                                  crates/ci/locked-compiled.txt
+    locked.py facts               what the money crates are built from and which test
+                                  targets they have, from cargo metadata alone (nothing is
+                                  compiled), against crates/ci/locked-compiled.txt
     locked.py compiled [--pin]    the facts, then a build of nfx-pay and nfx-pay-wire alone,
                                   into a target directory made for this run (a fresh
                                   temporary one, removed after): check what the compiler
-                                  read for every one of their targets, and that the money
-                                  tests really ran; --pin rewrites the facts file. Because
+                                  read for every one of their targets, and that every money
+                                  test really ran; --pin rewrites the facts file. Because
                                   the build and the run use that directory, no build
                                   directory git does not track can stand in for a compile or
                                   a test binary; in CI a compiler artifact reported reused
@@ -29,6 +30,14 @@ The facts, one per line:
 - `money-build <name> <version> <features>`: the features the lock job's own build of the
   money crates compiles each package with (a narrower set than the workspace unifies).
   Checked after that build.
+- `money-test <crate> <kind> <target> <tests>`: every test binary of the money crates, and
+  the number of tests it runs. There is one for each target cargo metadata lists for the
+  two crates, since `cargo test --all-targets` builds each as a test binary (a library's
+  unit tests, each file under tests/, any bin, example or bench), and one of kind `doc` for
+  each library's doctests. The set of targets, and the numbers the suite's own files
+  declare, are checked before any build; every number after the run. A test file added,
+  removed, renamed or emptied, or a number of tests that changed, fails until it is
+  re-pinned, and then shows in the pins' diff.
 
 Every path package must be a workspace member: a crate outside the workspace, wired in
 by path, would escape every check here. The money crates are locked whole
@@ -45,9 +54,12 @@ directory made for the run, so the checkout's own is never read or trusted):
   names `track_caller`: a panic in a function so marked is reported where it was called,
   so one in the mock, called from the suite, would be taken for a failed assertion of the
   suite;
-- the suite, the mutants, the runner they share and the pay/1 vector tests each ran, and
-  reported exactly the number of tests their pinned sources declare. A test runner that
-  runs nothing fails.
+- every test binary of the money crates ran, and no other: the binaries run are the ones
+  the build made and checked, one for each target cargo metadata lists, and each reported
+  exactly the number of tests pinned for it, all passed, none ignored or filtered out;
+- the suite, the mutants, the runner they share and the pay/1 vector tests each reported
+  exactly the number of tests their pinned sources declare. A test runner that runs
+  nothing fails.
 
 Out of scope, and why: code in other crates. It may compile a pinned file (by
 `#[path]`, say), but it cannot change one, and a copy of money logic written anywhere is
@@ -58,6 +70,7 @@ import hashlib
 import json
 import os
 import pathlib
+import posixpath
 import re
 import shutil
 import subprocess
@@ -75,6 +88,7 @@ MONEY_USERS = [":!crates/nfx-pay", ":!crates/nfx-node/src/pay", ":!crates/nfx-no
 # Where `track_caller` may not appear: every money crate file but the suite's own.
 NOT_TRACK_CALLER = ["crates/nfx-pay", "crates/nfx-pay-wire", ":!crates/nfx-pay/src/adversary.rs"]
 BUILD = "money-build "
+TESTS = "money-test "
 # CI, as check-locked.sh recognises it: there the money build must be from scratch.
 IN_CI = bool(os.environ.get("CI") or os.environ.get("GITLAB_CI") or os.environ.get("CI_JOB_ID"))
 
@@ -96,6 +110,15 @@ def manifest() -> None:
     with open(CRATES / "Cargo.toml", "rb") as f:
         ws = tomllib.load(f)
     w = ws.get("workspace", {})
+    # No pin covers the workspace's manifests and lock file whole (check-locked.sh), so
+    # each is a file git tracks at the path cargo reads it from, never one reached through
+    # a link in a directory above it. check-locked.sh checks that each is a regular file.
+    read = ["crates/Cargo.toml", "crates/Cargo.lock",
+            *(posixpath.normpath(f"crates/{m}/Cargo.toml") for m in w.get("members", []))]
+    tracked = set(run("git", "ls-files", "-z", "--", *read, cwd=REPO).split("\0"))
+    if not set(read) <= tracked:
+        fail("manifests or lock files cargo reads that git does not track at that path: "
+             f"{sorted(set(read) - tracked)}")
     sections = {k: ws.get(k) for k in ("profile", "patch", "replace")}
     sections.update({f"workspace.{k}": w.get(k) for k in ("lints", "resolver", "members", "package")})
     text = json.dumps(sections, sort_keys=True, separators=(",", ":"))
@@ -239,6 +262,57 @@ def test_counts() -> dict[str, int]:
     }
 
 
+def test_targets(members: list[dict]) -> list[str]:
+    """Every test binary the money crates have, as `<crate> <kind> <target>`, from cargo
+    metadata alone: one for each target, since `cargo test --all-targets` builds each as a
+    test binary (a library's or a bin's unit tests, a file under tests/, an example, a
+    bench), and one of kind `doc` for the doctests of each library rustdoc tests. A build
+    script is no test target: it is a fact of its own (`build-script`)."""
+    out = []
+    for p in members:
+        if p["name"] not in MONEY_CRATES:
+            continue
+        for t in p["targets"]:
+            kinds = t["kind"]
+            if "custom-build" in kinds:
+                continue
+            out.append(f"{p['name']} {'/'.join(kinds)} {t['name']}")
+            if {"lib", "rlib", "proc-macro"} & set(kinds):
+                out.append(f"{p['name']} doc {t['name']}")
+    if len(set(out)) != len(out) or any(len(x.split()) != 3 for x in out):
+        fail(f"the money crates' test targets cannot be told apart by crate, kind and name: {out}")
+    return sorted(out)
+
+
+def pinned_tests() -> dict[str, int]:
+    """The test binaries the pins count, each with its number of tests."""
+    out = {}
+    for line in PINS.read_text().splitlines() if PINS.exists() else []:
+        if not line.startswith(TESTS):
+            continue
+        label, _, n = line[len(TESTS):].rpartition(" ")
+        if not n.isdigit() or len(label.split()) != 3 or label in out:
+            fail(f"a pin that is malformed or repeated: {line}")
+        out[label] = int(n)
+    return out
+
+
+def check_test_targets(targets: list[str]) -> None:
+    """The money crates' test targets are exactly the ones the pins count, and each of the
+    suite's files declares the number of tests pinned for it: both known before any build."""
+    pinned = pinned_tests()
+    old, new = set(pinned), set(targets)
+    if old != new:
+        diff = [f"- {x}" for x in sorted(old - new)] + [f"+ {x}" for x in sorted(new - old)]
+        fail("the money crates' test targets differ from the ones their pins count:\n"
+             + "\n".join(diff))
+    for name, n in test_counts().items():
+        got = [pinned[x] for x in pinned if x.split()[1:] == ["test", name]]
+        if got != [n]:
+            got = got[0] if len(got) == 1 else got
+            fail(f"tests/{name}.rs declares {n} tests, and its pin counts {got}")
+
+
 def facts_now() -> tuple[list[str], dict, list[dict]]:
     """The facts, from cargo metadata and rustc alone: nothing is compiled."""
     meta = json.loads(run("cargo", "metadata", "--format-version", "1", "--locked", "--offline"))
@@ -269,20 +343,26 @@ def facts_now() -> tuple[list[str], dict, list[dict]]:
     return sorted(facts), meta, members
 
 
-def check_facts(facts: list[str], build: bool = False) -> None:
-    """The metadata facts (or, with `build`, the money build's) against their pins."""
+def check_facts(facts: list[str], kind: str = "") -> None:
+    """The metadata facts (or, with `kind`, the money build's or the money tests') against
+    their pins."""
     pinned = PINS.read_text().splitlines() if PINS.exists() else []
-    old = {x for x in pinned if x.startswith(BUILD) == build}
+    old = {x for x in pinned if (x.startswith(kind) if kind else not x.startswith((BUILD, TESTS)))}
     new = set(facts)
     if old != new:
         diff = [f"- {x}" for x in sorted(old - new)] + [f"+ {x}" for x in sorted(new - old)]
-        fail("what the money crates are built from differs from its pins:\n" + "\n".join(diff))
+        what = ("the money tests that ran differ from their pins" if kind == TESTS
+                else "what the money crates are built from differs from its pins")
+        fail(f"{what}:\n" + "\n".join(diff))
 
 
 def facts() -> None:
-    found, _, _ = facts_now()
+    found, _, members = facts_now()
     check_facts(found)
-    print(f"locked paths: {len(found)} facts match their pins, read before any build")
+    targets = test_targets(members)
+    check_test_targets(targets)
+    print(f"locked paths: {len(found)} facts match their pins, and the money crates' "
+          f"{len(targets)} test targets are the ones pinned, read before any build")
 
 
 def package_of(package_id: str) -> tuple[str, str]:
@@ -300,6 +380,7 @@ def compiled(pin: bool) -> None:
     found, meta, members = facts_now()
     if not pin:
         check_facts(found)
+        check_test_targets(test_targets(members))
     # The build and the test run go in a target directory made for this run alone, so no
     # build directory left in the checkout (by a CI cache, a stale local build, or anything
     # else git does not track) can stand in for a compile or a test binary. In CI a
@@ -317,6 +398,9 @@ def compiled_in(pin: bool, found: list[str], members: list[dict], build_dir: pat
     tracked = {(REPO / f).resolve() for f in run("git", "ls-files", "-z", cwd=REPO).split("\0") if f}
     money = {p["manifest_path"]: pathlib.Path(p["manifest_path"]).parent.resolve()
              for p in members if p["name"] in MONEY_CRATES}
+    money_names = {p["manifest_path"]: p["name"] for p in members if p["name"] in MONEY_CRATES}
+    targets = test_targets(members)
+    test_binaries: dict[str, str] = {}  # a test binary's file name -> its target
     wire_dir = (CRATES / "nfx-pay-wire").resolve()
     out = run("cargo", "test", "-p", "nfx-pay", "-p", "nfx-pay-wire", "--all-targets", "--no-run",
               "--locked", "--offline", "--message-format=json", *target_dir)
@@ -339,6 +423,13 @@ def compiled_in(pin: bool, found: list[str], members: list[dict], build_dir: pat
         if d is None:
             fail(f"no dep-info for {target}: every money target must show what it compiled")
         seen_targets += 1
+        if msg["profile"]["test"] and msg.get("executable"):
+            label = (f"{money_names[msg['manifest_path']]} {'/'.join(msg['target']['kind'])} "
+                     f"{msg['target']['name']}")
+            exe = pathlib.Path(msg["executable"]).name
+            if exe in test_binaries or label in test_binaries.values():
+                fail(f"{target} was built as a test binary twice")
+            test_binaries[exe] = label
         # Only nfx-pay-wire's integration tests may read outside their crate, and only the
         # pinned pay/1 vectors, symlinks resolved. An example or a bench is built in test
         # mode by --all-targets too: that is no exemption.
@@ -351,6 +442,11 @@ def compiled_in(pin: bool, found: list[str], members: list[dict], build_dir: pat
                 fail(f"{target} compiled {src}, from outside its crate ({d.name})")
     if seen_targets == 0:
         fail("found no dep-info for the money crates' build")
+    # Every target cargo metadata lists was built as a test binary, and nothing else was.
+    doc = {x for x in targets if x.split()[1] == "doc"}
+    if set(test_binaries.values()) != set(targets) - doc:
+        fail("the test binaries built are not the money crates' test targets:\n"
+             f"built: {sorted(test_binaries.values())}\ntargets: {sorted(set(targets) - doc)}")
 
     named = subprocess.run(["git", "grep", "-nw", "nfx_pay", "--", "*.rs", *MONEY_USERS],
                            cwd=REPO, capture_output=True, text=True)
@@ -369,43 +465,70 @@ def compiled_in(pin: bool, found: list[str], members: list[dict], build_dir: pat
     if marked.returncode != 1:
         fail(f"git grep for track_caller failed:\n{marked.stderr[-3000:]}")
 
-    # The money tests ran, all of them. `cargo test` exits 0 when a runner skips them.
+    # The money tests ran, all of them: every test binary the build made, which is every
+    # target cargo metadata lists, and then each library's doctests. `cargo test` exits 0
+    # when a runner skips them, so each binary is matched to what it reported.
     want = test_counts()
     out = subprocess.run(["cargo", "test", "--color", "never", "--locked", "--offline",
-                          *target_dir, "-p", "nfx-pay", "-p", "nfx-pay-wire",
-                          "--test", "adversary", "--test", "round_trip", "--test", "woken_answers",
-                          "--test", "listings_at_start", "--test", "honest_timings",
-                          "--test", "mutants", "--test", "runner", "--test", "pay1"],
+                          *target_dir, "-p", "nfx-pay", "-p", "nfx-pay-wire", "--all-targets"],
                          cwd=CRATES, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if out.returncode != 0:
         fail(f"the money tests failed:\n{out.stdout[-4000:]}")
-    ran = {}
+    docs = subprocess.run(["cargo", "test", "--color", "never", "--locked", "--offline",
+                           *target_dir, "-p", "nfx-pay", "-p", "nfx-pay-wire", "--doc"],
+                          cwd=CRATES, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if docs.returncode != 0:
+        fail(f"the money crates' doctests failed:\n{docs.stdout[-4000:]}")
+    doc_names = {x.split()[2].replace("-", "_"): x for x in doc}
+    ran: dict[str, int] = {}
     current = None
-    for line in out.stdout.splitlines():  # one stream, so each result follows its binary
-        m = re.search(r"Running tests/(\w+)\.rs \((.+?)\)$", line)
+    # One stream each, so each result follows its binary.
+    for line in out.stdout.splitlines() + docs.stdout.splitlines():
+        m = re.search(r"^\s*Running .*\((.+?)\)$", line)
         if m:
-            # Keyed by the binary cargo actually ran, not by the file name alone.
-            exe = pathlib.Path(m.group(2)).name
-            current = m.group(1) if exe.startswith(f"{m.group(1)}-") else None
-        m = re.match(r"test result: ok\. (\d+) passed; 0 failed", line)
-        if m and current:
-            ran[current] = int(m.group(1))
+            # Keyed by the binary cargo actually ran: one the build made and checked.
+            exe = pathlib.Path(m.group(1)).name
+            if exe not in test_binaries:
+                fail(f"a test binary ran that the money build did not make: {line.strip()}")
+            current = test_binaries[exe]
+        m = re.search(r"^\s*Doc-tests (\S+)$", line)
+        if m:
+            if m.group(1).replace("-", "_") not in doc_names:
+                fail(f"doctests ran that are no money crate's: {line.strip()}")
+            current = doc_names[m.group(1).replace("-", "_")]
+        m = re.match(r"test result: (.*)$", line)
+        if m:
+            done = re.fullmatch(r"ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;.*",
+                                m.group(1))
+            if not done:
+                fail(f"{current}: not every test ran and passed: {line.strip()}")
+            if current is None or current in ran:
+                fail(f"a test result that follows no test binary of its own: {line.strip()}")
+            ran[current] = int(done.group(1))
             current = None
+    if set(ran) != set(targets):
+        fail("the test binaries that ran are not the money crates' test targets:\n"
+             f"ran: {sorted(ran)}\ntargets: {targets}")
     for name, n in want.items():
-        if ran.get(name) != n:
-            fail(f"tests/{name}.rs: {n} tests declared, {ran.get(name)} ran and passed")
+        got = [ran[x] for x in ran if x.split()[1:] == ["test", name]]
+        if got != [n]:
+            got = got[0] if len(got) == 1 else got
+            fail(f"tests/{name}.rs: {n} tests declared, {got} ran and passed")
+    tests = sorted(f"{TESTS}{label} {n}" for label, n in ran.items())
 
     if pin:
-        found = sorted(found + list(built))
+        found = sorted(found + list(built) + tests)
     else:
-        check_facts(sorted(built), build=True)
+        check_facts(sorted(built), BUILD)
+        check_facts(tests, TESTS)
     if pin:
         PINS.write_text("".join(f + "\n" for f in found))
         print(f"pinned {len(found)} facts in {PINS.relative_to(REPO)}")
         return
-    counts = ", ".join(f"{k} {v}" for k, v in want.items())
-    print(f"locked paths: {len(found)} facts match their pins; every money target's compiled "
-          f"files are tracked and its own; the money tests ran ({counts})")
+    counts = ", ".join(x[len(TESTS):] for x in tests)
+    print(f"locked paths: {len(found)} facts and {len(tests)} test binaries match their pins; "
+          f"every money target's compiled files are tracked and its own; the money tests ran "
+          f"({counts})")
 
 
 def main() -> None:
