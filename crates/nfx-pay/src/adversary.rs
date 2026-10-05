@@ -3,7 +3,8 @@
 //! Every scenario is generic over [`Harness`]. It runs against the mock now, and the M2
 //! security stage runs it unchanged against the real engine with an in-process mint. A
 //! scenario panics on failure. Concurrency uses [`both`], a deterministic two-future join,
-//! so the suite needs no runtime of its own: it runs in the one its test gives it.
+//! and tasks of the runtime the scenario runs in, which its runner gives the suite the way
+//! to start ([`run_scenario!`](crate::run_scenario)): the suite names no runtime of its own.
 //!
 //! It judges an engine's progress by the answers its calls await and by the engine
 //! settling, never by a single poll or turn of the runtime: it waits in real time while an
@@ -17,8 +18,9 @@
 //! an entry or a sweep awaits (a read, a swap, a key request, a keyset listing) from another
 //! thread that wakes its caller, as a real mint's answer comes back
 //! (`tests/woken_answers.rs`); and whether an honest engine settles outcomes or sweeps on
-//! tasks of its own, takes more polls at a step, or is woken early or for nothing
-//! (`tests/honest_timings.rs`). Nor does it depend
+//! tasks of its own, takes its entries, their answers or their wakes through such tasks,
+//! takes a closed connection or the clock on one, takes more polls at a step, or is woken
+//! early or for nothing (`tests/honest_timings.rs`). Nor does it depend
 //! on when, beyond what NFX-07 §3 requires, an engine asks its mints for their keyset
 //! listings: one that asks at its start too passes as one that asks only where a check
 //! needs one (`tests/listings_at_start.rs`).
@@ -45,12 +47,12 @@ use std::time::Duration;
 use nfx_pay_wire::pay::{Ack, Hello, Pay, Quote, Rej, RejCode};
 
 use crate::session::{
-    BadToken, EngineParams, Harness, MintEvent, SeederEngine, SeederSession, Viewer,
+    BadToken, EngineParams, Harness, MintEvent, PeerId, SeederEngine, SeederSession, Viewer,
 };
 
-/// Every scenario, one `#[test]` each, against the harness `$h` builds: each runs on a
-/// thread of its own, in a current-thread runtime, and fails if it does not finish within
-/// [`SCENARIO_SECS`] ([`run_on_a_thread`]).
+/// Every scenario, one `#[test]` each, against the harness `$h` builds: each runs as
+/// [`run_scenario!`](crate::run_scenario) runs it, and fails if it does not finish within
+/// [`SCENARIO_SECS`].
 #[macro_export]
 macro_rules! adversary_suite {
     ($h:expr) => {
@@ -162,13 +164,7 @@ macro_rules! adversary_suite {
         $(
             #[test]
             fn $name() {
-                match $crate::adversary::run_on_a_thread($crate::adversary::SCENARIO_SECS, || {
-                    tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("a runtime")
-                        .block_on(async { $crate::adversary::$name(&$h).await })
-                }) {
+                match $crate::run_scenario!($crate::adversary::$name(&$h)) {
                     $crate::adversary::Ran::Finished => {}
                     $crate::adversary::Ran::Panicked { payload, .. } => {
                         std::panic::resume_unwind(payload)
@@ -180,11 +176,57 @@ macro_rules! adversary_suite {
     };
 }
 
+/// Run one scenario, `$scenario` (a call of one, which builds its harness), as the suite's
+/// tests and the planted defects' both run it, and say how it ended ([`Ran`]): on a thread
+/// of its own ([`run_on_a_thread`], at most [`SCENARIO_SECS`]), in a current-thread runtime
+/// whose tasks the suite may start ([`with_tasks`]), its future boxed, so that it is not
+/// moved about that thread's stack. That runtime takes up a task another thread woke or
+/// started before any of its own tasks' next polls (`global_queue_interval(1)`): by default
+/// it would take one only every 31st poll while tasks of its own keep it busy, and a wake
+/// a mint's thread made could then stand many turns behind an entry that polls itself.
+#[macro_export]
+macro_rules! run_scenario {
+    ($scenario:expr) => {
+        $crate::adversary::run_on_a_thread($crate::adversary::SCENARIO_SECS, move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .global_queue_interval(1)
+                .build()
+                .expect("a runtime");
+            let tasks = runtime.handle().clone();
+            $crate::adversary::with_tasks(
+                move |task| {
+                    tasks.spawn(task);
+                },
+                move || runtime.block_on(Box::pin(async move { $scenario.await })),
+            )
+        })
+    };
+}
+
 type Session<H> = <<H as Harness>::Engine as SeederEngine>::Session;
 
 /// How long a scenario may take, in real time, wherever it runs: against an honest engine
 /// ([`adversary_suite!`](crate::adversary_suite)) or a planted defect (`tests/mutants.rs`).
-pub const SCENARIO_SECS: u64 = 30;
+/// It is there to end a run that hangs, not to time one that is slow, so it is sized for a
+/// machine far busier than any the suite is expected to run on. Measured on four cores, in
+/// an unoptimised build: the slowest scenario against an honest engine (`a_hello_holds_no_state`
+/// where every answer takes the mint 5 ms) takes 14 to 16 s with a test binary's tests run
+/// four at once, and the slowest planted defect 6 to 8 s; with forty busy loops beside them
+/// and 32 tests at once (eighteen runnable threads to a core), 125 to 150 s and 80 to 100 s,
+/// half the limit at most. What the suite waits for in real time besides (5 s, for an
+/// engine to settle) ended there on the engine settling, never on that limit: the suite
+/// counts an engine's turns and its polls, not the time they take.
+pub const SCENARIO_SECS: u64 = 300;
+
+/// The stack a scenario's thread is given ([`run_on_a_thread`]). A scenario's frames hold
+/// room for the futures it awaits, the engine's among them, and the longest scenario awaits
+/// several hundred: against the mock, in an unoptimised build and with its own future
+/// boxed, it overflows 3 MiB and runs in 4, more than the 2 MiB a thread has by default. An
+/// engine whose futures are larger takes more in proportion, so the room is sixteen times
+/// the mock's need. It is address space, not memory: only what a scenario touches is ever
+/// paged in.
+pub const SCENARIO_STACK: usize = 64 << 20;
 
 /// How a scenario run by [`run_on_a_thread`] ended.
 pub enum Ran {
@@ -459,34 +501,103 @@ const RUNTIME_PANICS: [&str; 45] = [
     "Formatting argument out of range",
 ];
 
-std::thread_local! {
-    /// Where the last panic on this thread was raised.
-    static PANICKED_AT: std::cell::RefCell<Option<(String, u32)>> = const { std::cell::RefCell::new(None) };
+/// A panic as the hook saw it raised: where, and what it said, if it said anything.
+#[derive(Clone, PartialEq, Eq)]
+struct Kept {
+    file: String,
+    line: u32,
+    said: Option<String>,
 }
 
-/// Run `body` on a thread of its own and wait for it in real time, at most `secs`: an engine
-/// that blocks its thread (a deadlock) is timed out too, where a runtime's timer could not
-/// fire. A panic is reported with where it was raised.
+std::thread_local! {
+    /// The first panic raised on this thread, and whether it is the only one so far. The
+    /// first is the one judged: a later one may only follow from it (an engine's task
+    /// panics, a runtime catches it, and the entry that task was to answer then fails a
+    /// check of the suite).
+    static FIRST_PANIC: std::cell::RefCell<(Option<Kept>, bool)> =
+        const { std::cell::RefCell::new((None, true)) };
+
+    /// How the scenario running on this thread starts a task of its runtime
+    /// ([`with_tasks`]).
+    static TASKS: std::cell::RefCell<Option<std::rc::Rc<Starts>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Starts a future as a task of a runtime.
+type Starts = dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>);
+
+/// Note a panic raised on this thread at `at`: the first is kept, and a later one only
+/// marks that it was not the last.
+fn note_panic(at: Option<Kept>) {
+    FIRST_PANIC.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.0.is_none() {
+            *p = (at, true);
+        } else if p.0 != at {
+            p.1 = false;
+        }
+    });
+}
+
+/// How a body run on this thread ended (`run`, as `catch_unwind` gives it), judged by the
+/// first panic raised on the thread while it ran, which is taken: the panic the body ended
+/// with, where that is the only one; else the first, with what it said, though something
+/// caught it on the way (a runtime, in a task of the engine's own) and whether or not the
+/// body went on to return.
+fn ended<T>(run: std::thread::Result<T>) -> Result<T, Raised> {
+    let (first, only) = FIRST_PANIC.with(|p| std::mem::replace(&mut *p.borrow_mut(), (None, true)));
+    match (run, first) {
+        (Ok(v), None) => Ok(v),
+        (Err(payload), None) => Err(Raised { at: None, payload }),
+        (Err(payload), Some(at)) if only => Err(Raised {
+            at: Some(at),
+            payload,
+        }),
+        (_, Some(at)) => {
+            let payload: Box<dyn std::any::Any + Send> = match &at.said {
+                Some(said) => Box::new(said.clone()),
+                None => Box::new(()),
+            };
+            Err(Raised {
+                at: Some(at),
+                payload,
+            })
+        }
+    }
+}
+
+/// Run `body` on a thread of its own, with [`SCENARIO_STACK`] of stack, and wait for it in
+/// real time, at most `secs`: an engine that blocks its thread (a deadlock) is timed out
+/// too, where a runtime's timer could not fire. A panic is reported with where it was
+/// raised: the first raised on that thread, whatever caught it. So a panic an engine raises
+/// on a task of its own, which its runtime catches, is the one reported, whether the body
+/// then fails a check of the suite or returns: it is never taken for either.
 pub fn run_on_a_thread(secs: u64, body: impl FnOnce() + Send + 'static) -> Ran {
     static HOOK: std::sync::Once = std::sync::Once::new();
     HOOK.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let at = info.location().map(|l| (l.file().to_owned(), l.line()));
-            PANICKED_AT.with(|p| *p.borrow_mut() = at);
+            let said = info.payload_as_str().map(str::to_owned);
+            note_panic(info.location().map(|l| Kept {
+                file: l.file().to_owned(),
+                line: l.line(),
+                said,
+            }));
             previous(info);
         }));
     });
     let (done, answer) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
-        let at = PANICKED_AT.with(|p| p.borrow_mut().take());
-        let _ = done.send((run, at));
-    });
+    std::thread::Builder::new()
+        .stack_size(SCENARIO_STACK)
+        .spawn(move || {
+            let run = ended(std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)));
+            let _ = done.send(run);
+        })
+        .expect("a thread to run the scenario on");
     match answer.recv_timeout(Duration::from_secs(secs)) {
-        Ok((Ok(()), _)) => Ran::Finished,
-        Ok((Err(payload), at)) => {
-            let (file, line) = at.unwrap_or_default();
+        Ok(Ok(())) => Ran::Finished,
+        Ok(Err(Raised { at, payload })) => {
+            let (file, line) = at.map(|at| (at.file, at.line)).unwrap_or_default();
             Ran::Panicked {
                 file,
                 line,
@@ -497,9 +608,21 @@ pub fn run_on_a_thread(secs: u64, body: impl FnOnce() + Send + 'static) -> Ran {
     }
 }
 
-/// A panic on a thread a scenario spawned, kept with where it was raised.
+/// Run `body`, a scenario's whole run on this thread, with `start` to start a task on the
+/// runtime it runs in: the suite runs an entry on a task of its own there ([`on_a_task`]),
+/// which that runtime polls when it is woken, in turn with the engine's own tasks.
+pub fn with_tasks<T>(
+    start: impl Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + 'static,
+    body: impl FnOnce() -> T,
+) -> T {
+    TASKS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(start)));
+    body()
+}
+
+/// A panic on a thread a scenario spawned, or in a task of its own, kept with where it was
+/// raised.
 pub struct Raised {
-    at: Option<(String, u32)>,
+    at: Option<Kept>,
     payload: Box<dyn std::any::Any + Send>,
 }
 
@@ -515,25 +638,27 @@ impl Raised {
 /// raised, for [`rejoin`] to raise again on the scenario's thread, where [`run_on_a_thread`]
 /// judges it.
 pub fn keep_panic<T>(body: impl FnOnce() -> T) -> Result<T, Raised> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).map_err(|payload| Raised {
-        at: PANICKED_AT.with(|p| p.borrow_mut().take()),
-        payload,
-    })
+    ended(std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)))
 }
 
 /// A spawned thread's result, on the scenario's thread: its panic raised again as from where
-/// it was first raised (a resumed panic runs no hook, so the place stays as set here). So a
+/// it was first raised (a resumed panic runs no hook, so the place is noted here). So a
 /// panic in the engine on another thread is never taken for the scenario's own, nor a
 /// scenario's assertion there for a runtime's.
 pub fn rejoin<T>(joined: std::thread::Result<Result<T, Raised>>) -> T {
     match joined {
         Ok(Ok(v)) => v,
         Ok(Err(Raised { at, payload })) => {
-            PANICKED_AT.with(|p| *p.borrow_mut() = at);
+            note_panic(at);
             std::panic::resume_unwind(payload)
         }
         Err(payload) => {
-            PANICKED_AT.with(|p| *p.borrow_mut() = None);
+            // Its place is not known: it counts as a panic of no place.
+            note_panic(Some(Kept {
+                file: String::new(),
+                line: 0,
+                said: None,
+            }));
             std::panic::resume_unwind(payload)
         }
     }
@@ -619,12 +744,61 @@ async fn yield_once() {
     .await;
 }
 
-/// Drive `f` until it waits on the suite, or finishes, then drop it: a connection that
-/// closes while its request waits (its swap held on its way to the mint, say), however many
-/// polls its engine takes to get there.
+/// Drive `f` until it waits on the suite, or finishes, then drop it, and let that land
+/// ([`close`]): a connection that closes while its request waits (its swap held on its way
+/// to the mint, say), however many polls its engine takes to get there.
 async fn close_waiting<H: Harness, F: Future>(h: &H, f: F) {
-    let mut f = pin!(f);
-    let _ = settled(h, f.as_mut()).await;
+    {
+        let mut f = pin!(f);
+        let _ = settled(h, f.as_mut()).await;
+    }
+    lands(h).await;
+}
+
+/// A future the suite drove to its wait ([`at_its_wait`]): awaited, it goes on from there,
+/// or gives the output it finished with.
+struct AtItsWait<F: Future> {
+    f: Pin<Box<F>>,
+    out: Option<F::Output>,
+}
+
+impl<F: Future> Future for AtItsWait<F>
+where
+    F::Output: Unpin,
+{
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        match self.out.take() {
+            Some(v) => Poll::Ready(v),
+            None => self.f.as_mut().poll(cx),
+        }
+    }
+}
+
+/// Drive `f` until it waits on the suite, or finishes ([`settled`]), and give it back to
+/// be driven on. An entry started after this arrives behind it, however many polls `f`
+/// took to reach its wait: an entry on a task of its own is polled by the runtime as it
+/// will, so one started beside `f` could overtake it.
+async fn at_its_wait<H: Harness, F: Future>(h: &H, f: F) -> AtItsWait<F>
+where
+    F::Output: Unpin,
+{
+    let mut f = Box::pin(f);
+    let out = match settled(h, f.as_mut()).await {
+        Settled::Ready(v) => Some(v),
+        Settled::Waits | Settled::Busy => None,
+    };
+    AtItsWait { f, out }
+}
+
+/// Close what `closed` holds (drop it: a session, a pending `hello` or `pay` with its
+/// connection, a task that runs one, or several of these), and let the close land
+/// ([`lands`]) before the suite acts again or reads the engine's state: an engine may take
+/// a closed connection on a task of its own.
+async fn close<H: Harness, T>(h: &H, closed: T) {
+    drop(closed);
+    lands(h).await;
 }
 
 /// How many turns of the runtime an engine with no answer under way is given, the future
@@ -647,15 +821,15 @@ async fn poll_in_task<F: Future>(mut f: Pin<&mut F>) -> Option<F::Output> {
     .await
 }
 
-/// Once the engine has settled, poll `f` on this task, a turn of the runtime between polls,
-/// until a read of swap state it sent is out ([`Harness::reads_out`]: it has reached the
-/// mint, and its answer is not taken yet), or until `f` is ready or waits on the suite (as
-/// [`settled`] judges): its output, if it is ready. So an entry that reads is left with its
-/// read out, where the mint answers it on a later poll or from another thread, however many
-/// polls the entry takes to send it; where the mint answers a read in the poll that sends
-/// it, no read is ever out, and the entry has gone on with the answer.
+/// Poll `f` on this task, a turn of the runtime between polls, until a read of swap state
+/// sent since is out ([`Harness::reads_out`]: it has reached the mint, and its answer is
+/// not taken yet), or until `f` is ready or waits on the suite (as [`settled`] judges): its
+/// output, if it is ready. So an entry that reads is left with its read out, where the
+/// mint answers it on a later poll or from another thread, however many polls the entry
+/// takes to send it; where the mint answers a read in the poll that sends it, no read is
+/// ever out, and the entry has gone on with the answer. The suite calls this once the
+/// engine has settled, so that the read is `f`'s.
 async fn until_read<H: Harness, F: Future>(h: &H, mut f: Pin<&mut F>) -> Option<F::Output> {
-    settle(h).await;
     let before = h.state_reads();
     let (start, mut quiet) = (std::time::Instant::now(), 0);
     loop {
@@ -818,8 +992,9 @@ async fn roll_back<H: Harness>(h: &H) {
 }
 
 /// `read` of the engine's state, once what the suite did last has landed ([`lands`]): a
-/// connection closed, a clock move, a release. An engine may take any of these on a task of
-/// its own, so the suite reads its state only once it has settled.
+/// connection closed (one that closed as a session or an entry went out of scope too), a
+/// clock move, a release, an answer taken. An engine may take any of these on a task of its
+/// own, so the suite reads its state only once it has settled.
 async fn landed<H: Harness, T>(h: &H, read: impl FnOnce() -> T) -> T {
     lands(h).await;
     read()
@@ -906,6 +1081,169 @@ impl<F: Future> Future for OwnTask<F> {
     }
 }
 
+/// An entry on a task of its own: a task of the runtime the scenario runs in, which that
+/// runtime polls when it is woken, in turn with the engine's own tasks, whatever the suite's
+/// task is doing ([`on_a_task`]). So whatever the entry waits for must wake it; and a wake
+/// that comes before what it announces finds nothing, and leaves it waiting. Awaited (by
+/// reference), it gives the entry's output, a panic the entry raised being raised again
+/// where it is awaited. Dropped, it drops the entry at once: its connection closes.
+struct Task<T> {
+    now: Arc<Mutex<TaskNow<T>>>,
+}
+
+/// How a [`Task`] stands, shared with the runtime's task that polls its entry.
+struct TaskNow<T> {
+    /// The entry, until it finishes, panics or is dropped with its [`Task`].
+    entry: Option<Pin<Box<dyn Future<Output = T> + Send>>>,
+    /// Its output, or the panic it raised, until whoever awaits the task takes it.
+    out: Option<Result<T, Raised>>,
+    /// The runtime has polled it: it has arrived.
+    started: bool,
+    /// It finished, or panicked.
+    done: bool,
+    /// The waker of whoever awaits it.
+    waiter: Option<Waker>,
+}
+
+/// What [`on_a_task`] raises where no runner gave the suite a way to start tasks, or a
+/// [`Task`] awaited again once its output was taken: no check of the suite's, and nothing a
+/// planted defect is caught by.
+struct NoRunner;
+
+/// Start `entry` as a task of the runtime the scenario runs in ([`with_tasks`]): polled by
+/// that runtime when it is woken, never by the suite. Run a scenario with
+/// [`run_scenario!`](crate::run_scenario), which gives it the way.
+fn on_a_task<T: Send + 'static>(entry: impl Future<Output = T> + Send + 'static) -> Task<T> {
+    let now = Arc::new(Mutex::new(TaskNow {
+        entry: Some(Box::pin(entry)),
+        out: None,
+        started: false,
+        done: false,
+        waiter: None,
+    }));
+    let shared = now.clone();
+    let task = poll_fn(move |cx| {
+        let mut now = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        now.started = true;
+        let Some(entry) = now.entry.as_mut() else {
+            return Poll::Ready(()); // dropped with its `Task`
+        };
+        // A panic the entry raises is kept, the thread's first panic left as it stands
+        // ([`run_on_a_thread`] judges by it): it is raised again where the task is awaited.
+        let polled =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry.as_mut().poll(cx)));
+        let out = match polled {
+            Ok(Poll::Pending) => return Poll::Pending,
+            Ok(Poll::Ready(v)) => Ok(v),
+            Err(payload) => Err(Raised {
+                at: FIRST_PANIC.with(|p| p.borrow().0.clone()),
+                payload,
+            }),
+        };
+        now.entry = None;
+        now.out = Some(out);
+        now.done = true;
+        let waiter = now.waiter.take();
+        drop(now);
+        if let Some(w) = waiter {
+            w.wake();
+        }
+        Poll::Ready(())
+    });
+    let Some(start) = TASKS.with(|t| t.borrow().clone()) else {
+        std::panic::panic_any(NoRunner)
+    };
+    start(Box::pin(task));
+    Task { now }
+}
+
+impl<T> Task<T> {
+    fn now(&self) -> std::sync::MutexGuard<'_, TaskNow<T>> {
+        self.now.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether the runtime has polled it yet: its entry has arrived.
+    fn started(&self) -> bool {
+        self.now().started
+    }
+}
+
+impl<T> Future for &Task<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
+        let mut now = self.now();
+        match now.out.take() {
+            Some(Ok(v)) => Poll::Ready(v),
+            Some(Err(raised)) => {
+                drop(now);
+                Poll::Ready(rejoin(Ok(Err(raised))))
+            }
+            None if now.done => std::panic::panic_any(NoRunner),
+            None => {
+                now.waiter = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl<T> Drop for Task<T> {
+    fn drop(&mut self) {
+        let entry = self.now().entry.take();
+        drop(entry); // its connection closes, here and now
+    }
+}
+
+/// A `hello` of `peer` to `e` on a task of its own ([`on_a_task`]), marking `done` as it is
+/// answered: a clone of the engine, the same seeder, goes with it.
+fn hello_on_a_task<H: Harness>(
+    _h: &H,
+    e: &H::Engine,
+    peer: &PeerId,
+    hello: &Hello,
+    done: &Arc<AtomicBool>,
+) -> Task<Result<Session<H>, Rej>> {
+    let (e, peer, hello, done) = (e.clone(), *peer, hello.clone(), done.clone());
+    on_a_task(async move {
+        let quoted = e.hello(&peer, &hello).await;
+        done.store(true, Ordering::SeqCst);
+        quoted
+    })
+}
+
+/// `s`'s payment `pay` on a task of its own ([`on_a_task`]), marking `done` as it is
+/// answered. The task holds the session meanwhile, as a connection's handler does: its
+/// answer comes with the session, and a task dropped unanswered closes both.
+fn pay_on_a_task<H: Harness>(
+    _h: &H,
+    mut s: Session<H>,
+    pay: &Pay,
+    done: &Arc<AtomicBool>,
+) -> Task<(Session<H>, Result<Ack, Rej>)> {
+    let (pay, done) = (pay.clone(), done.clone());
+    on_a_task(async move {
+        let answer = s.pay(&pay).await;
+        done.store(true, Ordering::SeqCst);
+        (s, answer)
+    })
+}
+
+/// A sweep of `e` on a task of its own ([`on_a_task`]), marking `done` as it finishes.
+fn sweep_on_a_task<H: Harness>(_h: &H, e: &H::Engine, done: &Arc<AtomicBool>) -> Task<()> {
+    let (e, done) = (e.clone(), done.clone());
+    on_a_task(async move {
+        e.sweep().await;
+        done.store(true, Ordering::SeqCst);
+    })
+}
+
+/// A flag an entry on a task of its own marks as it is answered ([`hello_on_a_task`] and
+/// the like), for the suite to read with [`is_set`].
+fn flag() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
+
 /// A future run on a thread of its own by an executor of the suite's ([`on_a_thread`]),
 /// while the suite's task goes on, and the engine's runtime keeps running on its thread.
 struct Side<T> {
@@ -925,8 +1263,9 @@ struct SideNow {
     held: bool,
     /// Its thread has finished.
     done: bool,
-    /// How many times it has been polled.
+    /// How many polls of it have begun, and how many have ended.
     polls: usize,
+    ended: usize,
     /// The waker of the task waiting for it to finish ([`Side::joined`]).
     waiter: Option<Waker>,
     /// Its thread, once it has started.
@@ -989,6 +1328,7 @@ where
                     break v;
                 }
                 let mut now = state();
+                now.ended += 1;
                 now.idle = !now.woken;
                 while now.idle || now.held {
                     drop(now);
@@ -1035,18 +1375,34 @@ impl<T> Side<T> {
         }
     }
 
-    /// Whether it still waits once the engine has settled, as [`settled`] judges a future
-    /// on this task: pending, with no answer under way, for [`TURNS`] turns of this task's
-    /// runtime, its own tasks run meanwhile, and over them either not woken (it waits for a
-    /// wake) or polled [`TURNS`] times more (it wakes itself, and goes nowhere). Not if it
-    /// finished, or the engine kept an answer under way for [`SETTLE_LIMIT`].
+    /// Whether it waits on the suite, judged as [`settled`] judges a future on this task,
+    /// in terms that hold of an entry polled on another thread ([`Harness`] says why). With
+    /// no answer under way, it does once either holds:
+    /// - it has stood pending, not woken since its last poll began, and not polled, for
+    ///   [`TURNS`] turns of this task's runtime in a row: whatever it awaits of the engine's
+    ///   own tasks on this runtime (a task it reached the engine through, one that passes a
+    ///   wake on to it) has had those turns, counted from when it began to wait, not from
+    ///   when the suite began to look;
+    /// - it keeps looking, and nothing comes: it has been polled [`TURNS`] times more, each
+    ///   of those polls begun since the suite began to look or an answer was last under
+    ///   way, and is pending still. So an engine may wait by polling again (the mock waits
+    ///   so for the next second's read, and for a read under way).
+    ///
+    /// The turns that pass while its thread has yet to start, or to take up a wake, count
+    /// for nothing, and neither rule waits for the two threads to take turns [`TURNS`]
+    /// times over: on a busy machine each such turn takes the machine's whole round. Not if
+    /// it finished, or the engine did not settle within [`SETTLE_LIMIT`].
     async fn waits<H: Harness>(&self, h: &H) -> bool {
-        let (start, mut quiet, mut from) = (std::time::Instant::now(), 0, self.now().polls);
+        let start = std::time::Instant::now();
+        // Turns in a row it stood idle and unpolled; its polls begun as it was last looked
+        // at, and as the suite began to look or an answer was last under way.
+        let (mut quiet, mut seen) = (0, self.now().polls);
+        let mut from = seen;
         loop {
             yield_once().await;
-            let (idle, done, polls) = {
+            let (idle, done, polls, ended) = {
                 let now = self.now();
-                (now.idle, now.done, now.polls)
+                (now.idle, now.done, now.polls, now.ended)
             };
             if done {
                 return false;
@@ -1054,11 +1410,12 @@ impl<T> Side<T> {
             if h.answers_under_way() {
                 (quiet, from) = (0, polls);
             } else {
-                quiet += 1;
-                if quiet >= TURNS && (idle || polls - from >= TURNS) {
+                quiet = if idle && polls == seen { quiet + 1 } else { 0 };
+                if quiet >= TURNS || ended >= from + TURNS {
                     return true;
                 }
             }
+            seen = polls;
             if start.elapsed() >= SETTLE_LIMIT {
                 return false;
             }
@@ -2608,10 +2965,9 @@ pub async fn open_sessions_are_capped_and_released<H: Harness>(h: &H) {
     }
     drop(held);
     for play in 0..3 * cap {
-        assert!(
-            e.hello(&h.peer(3), &h.hello()).await.is_ok(),
-            "closed sessions do not count (play {play})"
-        );
+        let played = e.hello(&h.peer(3), &h.hello()).await;
+        assert!(played.is_ok(), "closed sessions do not count (play {play})");
+        drop(played);
     }
 }
 
@@ -2685,8 +3041,8 @@ pub async fn a_seeder_answers_within_its_deadline<H: Harness>(h: &H) {
         if keys {
             hold_refetch(h, &e);
         }
-        let (done, asked) = (AtomicBool::new(false), h.key_requests());
-        let (r, ()) = both(own_task(marked(s.pay(&slow), &done)), async {
+        let (done, asked) = (flag(), h.key_requests());
+        let ((s, r), ()) = both(&pay_on_a_task(h, s, &slow, &done), async {
             settle(h).await;
             assert!(
                 !keys || h.key_requests() > asked,
@@ -2865,16 +3221,30 @@ pub async fn a_seeder_answers_within_its_deadline<H: Harness>(h: &H) {
     the_keyset_rule_waits_for_its_listing(h, Quoted::Second).await;
 }
 
-/// Flaws `OutcomeUnwoken`, `KeysUnwoken`, `ListingUnwoken`, `ReadUnwoken` and, where the
-/// mint answers by a wake, `KeysetListingWaitUnwoken`. Every answer an entry awaits wakes
-/// it as it comes: NFX-07 §3 sets no poll, and an entry on a task of
-/// its own is polled only when it is woken. Each entry here is such a one, and is answered
-/// once its answers have come back and the engine has settled, no clock moving meanwhile:
-/// a payment awaiting the mint's keyset listing, keys and its swap's outcome, where the
-/// mint answers each by a wake; the same with the listing, then keys, held and released; a
-/// payment awaiting the listing its keyset rule judges by; and a `hello` awaiting its read
-/// of its account's unknown swap. Where the mint answers a
-/// call in the poll that sends it, nothing is awaited but what is held.
+/// Flaws `OutcomeUnwoken`, `KeysUnwoken`, `ListingUnwoken`, `ReadUnwoken`, `PayReadUnwoken`,
+/// `SweepReadUnwoken`, `NoClaimUnwoken` and, where the mint answers by a wake,
+/// `KeysetListingWaitUnwoken`; and, where the seeder settles on tasks of its own,
+/// `OutcomeWokenEarly`, `KeysWokenEarly`, `ListingWokenEarly`, `KeysetListingWokenEarly`,
+/// `ReadWokenEarly`, `PayReadWokenEarly`, `SweepReadWokenEarly` and one for each outcome
+/// that is no claim (`SpentWokenEarly` and the like). Every answer an entry or a sweep
+/// awaits wakes it as it comes, and not before the entry can see it: NFX-07 §3 sets no
+/// poll, and an entry on a task of its own is polled when it is woken, and only then. So
+/// does the turn of a payment whose connection closed, as its swap is settled
+/// (`DroppedLandWakesNone`, `TurnWokenEarly`). Each
+/// entry here is such a one, and is answered once its answers have come back and the
+/// engine has settled, no clock moving meanwhile. They are every call an entry or a sweep
+/// sends its mint and awaits, by each kind of answer that takes a wake of its own:
+/// - a payment's keyset listing, its keys and its swap's outcome, a claim, where the mint
+///   answers each by a wake; the same with the listing, then keys, held and released; and
+///   the listing its keyset rule judges by. The seeder asks to be woken by a key request
+///   or a listing before it knows the answer, so one wake serves every answer to it;
+/// - a read of an account's unknown swap, sent by a `hello`, by a payment, and by a sweep;
+/// - a swap's outcome that is no claim, each kind the seeder settles: spent, invalid, a
+///   mint not reached, no answer (the retry's included), pending, and its outputs' keyset
+///   rotated out or expired; and a request the mint abandons, which is sent again.
+///
+/// Where the mint answers a call in the poll that sends it, nothing is awaited but what is
+/// held.
 pub async fn every_answer_wakes_the_entry_awaiting_it<H: Harness>(h: &H) {
     // A payment's every answer, its swap held, on a fresh engine: the keyset listing, keys,
     // the outcome.
@@ -2886,10 +3256,10 @@ pub async fn every_answer_wakes_the_entry_awaiting_it<H: Harness>(h: &H) {
         upto_chunk: 4,
         token: h.token(4).await,
     };
-    let mut paying = own_task(s.pay(&p));
-    let _ = settled(h, Pin::new(&mut paying)).await;
+    let paying = pay_on_a_task(h, s, &p, &flag());
+    settle(h).await;
     release(h).await;
-    let r = answer_of(h, Pin::new(&mut paying)).await;
+    let r = answer_of(h, pin!(&paying)).await.map(|(_, r)| r);
     assert!(
         r.as_ref().is_some_and(Result::is_ok),
         "a payment on a task of its own is woken by each answer it awaits (the keyset \
@@ -2897,24 +3267,26 @@ pub async fn every_answer_wakes_the_entry_awaiting_it<H: Harness>(h: &H) {
     );
     drop(paying);
 
-    // The keyset listing held, on a fresh engine (or keys, if it asked for the listing at
-    // its start).
+    // The keyset listing held, on a fresh engine (or keys, if it held the listing from its
+    // start): it holds no keys, as an engine may from its start.
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     serve(h, &mut s, 0, 4);
-    h.hold_key_fetches();
+    hold_refetch(h, &e);
     let asked = h.key_requests();
     let p = Pay {
         upto_chunk: 4,
         token: h.token(4).await,
     };
-    let mut paying = own_task(s.pay(&p));
+    let done = flag();
+    let paying = pay_on_a_task(h, s, &p, &done);
+    settle(h).await;
     assert!(
-        waits(h, Pin::new(&mut paying)).await && h.key_requests() > asked,
+        !is_set(&done) && h.key_requests() > asked,
         "it waits for the keyset listing or the keys it asked for"
     );
     release(h).await; // they come
-    let r = answer_of(h, Pin::new(&mut paying)).await;
+    let r = answer_of(h, pin!(&paying)).await.map(|(_, r)| r);
     assert!(
         r.as_ref().is_some_and(Result::is_ok),
         "a payment on a task of its own is woken by the keyset listing and the keys it asked \
@@ -2929,18 +3301,20 @@ pub async fn every_answer_wakes_the_entry_awaiting_it<H: Harness>(h: &H) {
     settles(h, &mut s, 4, 4, 0).await;
     serve(h, &mut s, 4, 4);
     hold_refetch(h, &e);
-    let listed = h.listing_requests();
+    let (asked, listed) = (h.key_requests(), h.listing_requests());
     let p = Pay {
         upto_chunk: 8,
         token: h.token(4).await,
     };
-    let mut paying = own_task(s.pay(&p));
+    let done = flag();
+    let paying = pay_on_a_task(h, s, &p, &done);
+    settle(h).await;
     assert!(
-        waits_for_keys(h, Pin::new(&mut paying)).await && h.listing_requests() == listed,
+        !is_set(&done) && h.key_requests() > asked && h.listing_requests() == listed,
         "it waits for the keys it asked for, the keyset listing of its second held"
     );
     release(h).await; // its keys come
-    let r = answer_of(h, Pin::new(&mut paying)).await;
+    let r = answer_of(h, pin!(&paying)).await.map(|(_, r)| r);
     assert!(
         r.as_ref().is_some_and(Result::is_ok),
         "a payment on a task of its own is woken by the keys it asked for, held and \
@@ -2960,14 +3334,18 @@ pub async fn every_answer_wakes_the_entry_awaiting_it<H: Harness>(h: &H) {
         upto_chunk: 8,
         token: h.token(4).await,
     };
-    let mut paying = own_task(s.pay(&p));
-    let r = answer_of(h, Pin::new(&mut paying)).await;
+    let paying = pay_on_a_task(h, s, &p, &flag());
+    let r = answer_of(h, pin!(&paying)).await.map(|(_, r)| r);
     assert!(
         r.as_ref().is_some_and(Result::is_ok),
         "a payment on a task of its own is woken by the keyset listing its keyset rule judges \
          by, and answered: {r:?}"
     );
     drop(paying);
+
+    // A swap's outcome that is no claim, each kind of it. (A swap left unknown below comes
+    // back to a payment awaited here, not on a task of its own.)
+    every_outcome_that_is_no_claim_wakes_its_payment(h).await;
 
     // A hello's read of its account's unknown swap.
     let e = h.engine(1, 4, 1000);
@@ -2977,8 +3355,8 @@ pub async fn every_answer_wakes_the_entry_awaiting_it<H: Harness>(h: &H) {
     drop(s);
     advance(h, SECOND).await;
     let (peer, hello) = (h.peer(1), h.hello());
-    let mut quoting = own_task(e.hello(&peer, &hello));
-    let r = answer_of(h, Pin::new(&mut quoting)).await;
+    let quoting = hello_on_a_task(h, &e, &peer, &hello, &flag());
+    let r = answer_of(h, pin!(&quoting)).await;
     assert!(
         r.as_ref().is_some_and(Result::is_ok),
         "a hello on a task of its own is woken as its read comes back, and answered: {:?}",
@@ -2987,6 +3365,11 @@ pub async fn every_answer_wakes_the_entry_awaiting_it<H: Harness>(h: &H) {
     drop((r, quoting));
     release(h).await;
     a_listing_asked_for_again_wakes_its_payment(h).await;
+
+    a_payments_own_read_wakes_it(h).await;
+    a_sweeps_read_wakes_it(h).await;
+    a_swap_the_mint_abandons_wakes_its_payment(h).await;
+    a_closed_payments_outcome_wakes_what_waits_for_its_turn(h).await;
 }
 
 /// Flaw `ListingUnwoken`, against a seeder that asked for its mints' listings at its start
@@ -3025,6 +3408,208 @@ async fn a_listing_asked_for_again_wakes_its_payment<H: Harness>(h: &H) {
     drop(paying);
     drop(s);
     lands(h).await;
+}
+
+/// Flaws `PayReadUnwoken` and `PayReadWokenEarly`. A payment's own read of its account's
+/// unknown swap wakes it as it comes back (NFX-07 §3 sets no poll). A's request is held at
+/// the mint, its inputs reserved, and the seeder's client gave up on it: unknown. A second
+/// later the peer pays again, on a task of its own: its checks pass, it reads A, which no
+/// read can decide, and it is refused `mint-unavailable` once that read is back.
+async fn a_payments_own_read_wakes_it<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    parked(h, &mut s, 4).await;
+    advance(h, SECOND).await;
+    let p = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    let paying = pay_on_a_task(h, s, &p, &flag());
+    let r = answer_of(h, pin!(&paying)).await.map(|(_, r)| r);
+    assert!(
+        r.as_ref()
+            .is_some_and(|r| is_rej(r, &RejCode::MintUnavailable)),
+        "a payment on a task of its own is woken as its own read of its account's unknown \
+         swap comes back, and answered that the swap is unknown still: {r:?}"
+    );
+    drop(paying);
+    release(h).await;
+}
+
+/// Flaws `SweepReadUnwoken` and `SweepReadWokenEarly`. A sweep's read wakes it as it comes
+/// back. A is unknown, as in [`a_payments_own_read_wakes_it`]. A second later a sweep runs
+/// on a task of its own: it reads A, learns nothing, and finishes once that read is back.
+async fn a_sweeps_read_wakes_it<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    parked(h, &mut s, 4).await;
+    advance(h, SECOND).await;
+    let sweeping = sweep_on_a_task(h, &e, &flag());
+    let swept = answer_of(h, pin!(&sweeping)).await;
+    assert!(
+        swept.is_some(),
+        "a sweep on a task of its own is woken as its read comes back, and finishes"
+    );
+    drop((sweeping, s));
+    release(h).await;
+}
+
+/// A swap the mint abandons is an answer too: none will come, and the payment that awaits
+/// it is told so as the mint rolls it back, whenever that is (NFX-07 §3: a swap left with
+/// no answer is sent again in time). The mint holds the request of a payment on a task of
+/// its own, its inputs reserved, and abandons it a second before the payment's deadline:
+/// the payment sends its swap again in that second, and is acknowledged, though the clock
+/// reaches its deadline right after.
+async fn a_swap_the_mint_abandons_wakes_its_payment<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    h.hold_next_swap_reserving();
+    let p = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    let done = flag();
+    let paying = pay_on_a_task(h, s, &p, &done);
+    settle(h).await;
+    assert!(
+        !is_set(&done),
+        "the payment waits: the mint holds its request, its inputs reserved"
+    );
+    advance(h, Duration::from_secs(59)).await;
+    roll_back(h).await; // the mint abandons the request: no answer will come
+    advance(h, SECOND).await; // the payment's deadline
+    let r = answer_of(h, pin!(&paying)).await.map(|(_, r)| r);
+    assert!(
+        r.as_ref()
+            .is_some_and(|r| r.as_ref().is_ok_and(|ack| ack.accepted_upto == 4)),
+        "a payment on a task of its own is woken as the mint abandons its request, a second \
+         before its deadline: it sends its swap again in time, and is acknowledged: {r:?}"
+    );
+    drop(paying);
+}
+
+/// Flaws `DroppedLandWakesNone` and `TurnWokenEarly`. The outcome of a payment whose
+/// connection closed frees its account's turn as it is settled, and wakes what waits for
+/// that turn then (NFX-07 §3 step 5: the swap is not tied to the `pay`'s connection). P's
+/// swap is held on its way to the mint, and P's connection closes. A `hello` of its
+/// account arrives on a task of its own and waits for P's turn. The swap goes through: the
+/// `hello` is woken, and quotes the claim, with no time passing.
+async fn a_closed_payments_outcome_wakes_what_waits_for_its_turn<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    h.hold_swaps();
+    let p = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    close_waiting(h, s.pay(&p)).await; // its connection closes, its swap in flight
+    let (peer, hello, done) = (h.peer(1), h.hello(), flag());
+    let quoting = hello_on_a_task(h, &e, &peer, &hello, &done);
+    settle(h).await;
+    assert!(
+        !is_set(&done),
+        "the hello waits for P's turn, P's swap held"
+    );
+    release(h).await; // P's swap goes through
+    let quoted = answer_of(h, pin!(&quoting)).await;
+    let q = quoted
+        .and_then(Result::ok)
+        .map(|s| (s.quote().accepted_upto, s.quote().spent_total));
+    assert_eq!(
+        q,
+        Some((4, 4)),
+        "a hello waiting, on a task of its own, for the turn of a payment whose connection \
+         closed is woken as that payment's swap is settled, and quotes its claim"
+    );
+    drop((quoting, s));
+}
+
+/// The outcomes of a first swap that are no claim, in
+/// [`every_outcome_that_is_no_claim_wakes_its_payment`].
+const NO_CLAIMS: [&str; 7] = [
+    "spent",
+    "invalid",
+    "the mint not reached",
+    "no answer, its retry's included",
+    "pending",
+    "its outputs' keyset rotated out",
+    "a keyset expired",
+];
+
+/// Flaws `NoClaimUnwoken`, and `SpentWokenEarly` and the like, one for each row. A swap's
+/// outcome wakes the payment that awaits it whatever the outcome is (NFX-07 §3 step 5): a
+/// refusal is an answer as an ack is. For each row of [`NO_CLAIMS`], a payment on a task of
+/// its own has its swap at the mint, or on its way there, and its answer held; the answer
+/// comes, and the payment is answered what that outcome means, with no time passing:
+/// `spent`, `bad-token` for proofs the mint refuses as invalid, and `mint-unavailable` for
+/// the rest.
+async fn every_outcome_that_is_no_claim_wakes_its_payment<H: Harness>(h: &H) {
+    for kind in NO_CLAIMS {
+        advance(h, SECOND).await; // a keyset the mint started is listed the next second
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        let token = if kind == "invalid" {
+            h.bad_token(BadToken::Forged, 4).await
+        } else {
+            h.token(4).await
+        };
+        match kind {
+            "spent" => assert!(h.steal(&token).await, "someone else spent it"),
+            "no answer, its retry's included" => h.lose_next_swap_response(),
+            "pending" => assert!(
+                h.reserve_rest(&token).await,
+                "another request reserves its proofs"
+            ),
+            "its outputs' keyset rotated out" => h.before_next_swap(MintEvent::RotateKeyset),
+            "a keyset expired" => h.before_next_swap(MintEvent::ExpireKeyset),
+            _ => {}
+        }
+        // Its request is held on its way to a mint that is down as it gets there; else the
+        // mint has it, and its answer is held.
+        if kind == "the mint not reached" {
+            h.hold_swaps();
+        } else {
+            h.hold_swap_responses();
+        }
+        let p = Pay {
+            upto_chunk: 4,
+            token,
+        };
+        let done = flag();
+        let paying = pay_on_a_task(h, s, &p, &done);
+        settle(h).await;
+        assert!(
+            !is_set(&done),
+            "the payment waits for its swap's answer ({kind})"
+        );
+        // The mint is down as the held request reaches it, or as the retry of the swap
+        // whose answer was lost does.
+        let down = kind == "the mint not reached" || kind == "no answer, its retry's included";
+        h.mint_outage(down);
+        release(h).await;
+        h.mint_outage(false);
+        let want = match kind {
+            "spent" => RejCode::Spent,
+            "invalid" => RejCode::BadToken,
+            _ => RejCode::MintUnavailable,
+        };
+        let r = answer_of(h, pin!(&paying)).await.map(|(_, r)| r);
+        assert!(
+            r.as_ref().is_some_and(|r| is_rej(r, &want)),
+            "a payment on a task of its own is woken as its swap's outcome comes, no claim \
+             ({kind}), and answered {want:?}: {r:?}"
+        );
+        drop(paying);
+        if kind == "pending" {
+            roll_back(h).await; // the request that reserved its proofs is abandoned
+        }
+    }
+    advance(h, SECOND).await; // the keyset the mint issues from now is listed from this second
 }
 
 /// A swap abandoned at the deadline is settled when its outcome comes: a claim is
@@ -5210,7 +5795,7 @@ pub async fn the_deadline_frees_the_account<H: Harness>(h: &H) {
     let asked = h.key_requests();
     let ((paid, late), ()) = both(
         both(
-            marked(s.pay(&next), &next_done),
+            at_its_wait(h, marked(s.pay(&next), &next_done)).await,
             own_task(marked(e.hello(&peer, &hello), &hello_done)),
         ),
         async {
@@ -5436,24 +6021,30 @@ pub async fn the_deadline_frees_the_account<H: Harness>(h: &H) {
 /// Poll `pay` on this task while the harness, on threads of its own, releases the held
 /// swaps and moves the clock to the deadline, the two at once
 /// ([`Harness::race_release_with_clock`]). Its swap is held once it waits on the suite. It
-/// is polled, the runtime running, until it is answered or the engine has settled, which
-/// it has before the caller reads its state.
+/// is polled, the runtime running, until it is answered: the race may still be under way
+/// then, so the caller reads the engine's state only once it has settled ([`landed`]).
 async fn race<H: Harness>(h: &H, s: &mut Session<H>, pay: &Pay) -> Result<Ack, Rej> {
     let mut f = pin!(s.pay(pay));
     if let Settled::Ready(r) = settled(h, f.as_mut()).await {
         return r;
     }
     h.race_release_with_clock(Duration::from_secs(60));
-    let r = answer_of(h, f.as_mut())
+    answer_of(h, f.as_mut())
         .await
-        .expect("the payment is answered once its swap and its deadline have raced");
-    settle(h).await;
-    r
+        .expect("the payment is answered once its swap and its deadline have raced")
 }
 
 /// A swap's outcome racing the deadline on other threads is settled once, and
 /// consistently. In time it is the answer: an ack, or `spent` with a ban. Late the
 /// answer is `mint-unavailable`: a claim is still credited, once, and nobody is banned.
+///
+/// Either order of a race is right, so no round's order is required, and none is counted:
+/// only what each order must leave. Both orders do come about, for a claim and for a
+/// refusal alike, on every harness and under every honest timing, as the harness staggers
+/// the two ([`Harness::race_release_with_clock`]). Measured over the hundred rounds, twice:
+/// of each fifty, 21 in time and 29 late where the mint answers a swap at once; 13 and 37
+/// where its answer comes back by a wake a few milliseconds later (11 to 15 in time under
+/// the timings that vary how long that takes); 9 and 41 where it takes 5 ms.
 pub async fn racing_outcomes_settle_once<H: Harness + Sync>(h: &H) {
     for round in 0..100u32 {
         let spent = round % 2 == 1;
@@ -9739,7 +10330,7 @@ pub async fn one_accounts_payments_are_serialised<H: Harness>(h: &H) {
     let (d1, d2) = (AtomicBool::new(false), AtomicBool::new(false));
     let ((paid, (q1, q2)), ()) = both(
         both(
-            s.pay(&p),
+            at_its_wait(h, s.pay(&p)).await,
             both(
                 own_task(marked(e.hello(&peer, &one), &d1)),
                 own_task(marked(e.hello(&peer, &two), &d2)),
@@ -9782,7 +10373,7 @@ pub async fn one_accounts_payments_are_serialised<H: Harness>(h: &H) {
     );
     let ((refused, (q1, q2)), ()) = both(
         both(
-            s.pay(&short),
+            at_its_wait(h, s.pay(&short)).await,
             both(
                 own_task(marked(e.hello(&peer, &one), &d1)),
                 own_task(marked(e.hello(&peer, &two), &d2)),
@@ -10180,12 +10771,12 @@ pub async fn concurrent_entries_read_two_a_second<H: Harness + Sync>(h: &H) {
             let (barrier, e, peer, hello) = (barrier.clone(), e.clone(), h.peer(1), h.hello());
             on_a_thread(h, move || async move {
                 barrier.wait();
-                drop(e.hello(&peer, &hello).await.expect("a hello"));
+                e.hello(&peer, &hello).await.expect("a hello")
             })
         })
         .collect();
     for side in sides {
-        side.joined().await;
+        close(h, side.joined().await).await;
     }
     h.gather_state_reads(0, Duration::ZERO);
     let reads = h.state_reads() - before;
@@ -10214,12 +10805,12 @@ pub async fn concurrent_entries_read_two_a_second<H: Harness + Sync>(h: &H) {
             let (barrier, e, peer, hello) = (barrier.clone(), e.clone(), h.peer(1), h.hello());
             on_a_thread(h, move || async move {
                 barrier.wait();
-                drop(e.hello(&peer, &hello).await.expect("a hello"));
+                e.hello(&peer, &hello).await.expect("a hello")
             })
         })
         .collect();
     for side in sides {
-        side.joined().await;
+        close(h, side.joined().await).await;
     }
     h.gather_state_reads(0, Duration::ZERO);
     let reads = h.state_reads() - before;
@@ -10255,19 +10846,17 @@ async fn reads_under_way_on_threads<H: Harness + Sync>(h: &H) {
             let (barrier, e, peer, hello) = (barrier.clone(), e.clone(), h.peer(1), h.hello());
             on_a_thread(h, move || async move {
                 barrier.wait();
-                let q = e
-                    .hello(&peer, &hello)
-                    .await
-                    .expect("a hello")
-                    .quote()
-                    .clone();
-                (q.accepted_upto, q.spent_total)
+                let s = e.hello(&peer, &hello).await.expect("a hello");
+                let q = s.quote().clone();
+                ((q.accepted_upto, q.spent_total), s)
             })
         })
         .collect();
     let mut quotes = Vec::new();
     for side in sides {
-        quotes.push(side.joined().await);
+        let (quote, s) = side.joined().await;
+        quotes.push(quote);
+        close(h, s).await;
     }
     h.gather_state_reads(0, Duration::ZERO);
     quotes.sort_unstable();
@@ -10291,7 +10880,7 @@ async fn reads_under_way_on_threads<H: Harness + Sync>(h: &H) {
     let reader = {
         let (e, peer, hello) = (e.clone(), h.peer(1), h.hello());
         on_a_thread(h, move || async move {
-            drop(e.hello(&peer, &hello).await.expect("a hello"))
+            e.hello(&peer, &hello).await.expect("a hello")
         })
     };
     let go_on = ReadsGoOn(h);
@@ -10315,7 +10904,7 @@ async fn reads_under_way_on_threads<H: Harness + Sync>(h: &H) {
         );
         sent
     };
-    reader.joined().await;
+    close(h, reader.joined().await).await;
     assert!(
         sent >= 2,
         "a hello's read under way serves no payment: P, looking while it was, sent its own at \
@@ -10409,7 +10998,7 @@ async fn a_read_covers_what_was_unknown_as_it_was_sent<H: Harness + Sync>(h: &H)
     let reader = {
         let (e, peer, hello) = (e.clone(), h.peer(1), h.hello());
         on_a_thread(h, move || async move {
-            drop(e.hello(&peer, &hello).await.expect("a hello"))
+            e.hello(&peer, &hello).await.expect("a hello")
         })
     };
     let go_on = ReadsGoOn(h);
@@ -10421,7 +11010,7 @@ async fn a_read_covers_what_was_unknown_as_it_was_sent<H: Harness + Sync>(h: &H)
     assert_eq!(serve(h, &mut s, 4, 4), 4, "A credited");
     lost_claim(h, &mut s, 8, 4).await; // B
     drop(go_on); // the hello's read comes back
-    reader.joined().await;
+    close(h, reader.joined().await).await;
     let q = open(h, &e, 1).await.quote().clone();
     assert_eq!(
         (q.accepted_upto, q.spent_total),
@@ -10456,7 +11045,7 @@ async fn a_waited_hello_waits_for_no_read_under_way_sent_before<H: Harness + Syn
     let reader = {
         let e = e.clone();
         on_a_thread(h, move || async move {
-            drop(e.hello(&peer, &first).await.expect("the first hello"));
+            e.hello(&peer, &first).await.expect("the first hello")
         })
     };
     let go_on = ReadsGoOn(h);
@@ -10491,7 +11080,7 @@ async fn a_waited_hello_waits_for_no_read_under_way_sent_before<H: Harness + Syn
         drop(answered.expect("the second hello"));
         sent
     };
-    reader.joined().await;
+    close(h, reader.joined().await).await;
     assert!(
         sent >= 2,
         "the second hello's wait ended after the first's read was sent: that read, under way, \
@@ -10536,7 +11125,7 @@ async fn a_payment_served_waits_for_no_other_read_under_way<H: Harness + Sync>(h
         behind = {
             let e = e.clone();
             on_a_thread(h, move || async move {
-                drop(e.hello(&peer, &hello).await.expect("the hello behind P0"));
+                e.hello(&peer, &hello).await.expect("the hello behind P0")
             })
         };
         assert!(behind.waits(h).await, "the hello waits for P0");
@@ -10571,7 +11160,7 @@ async fn a_payment_served_waits_for_no_other_read_under_way<H: Harness + Sync>(h
         );
         answered.is_some()
     };
-    behind.joined().await;
+    close(h, behind.joined().await).await;
     assert!(
         answered,
         "P0's read, back, serves P, of the same proofs: P waits for no other read under way, \
@@ -10613,7 +11202,7 @@ async fn a_takeover_hello_dropped_waiting_for_a_read_keeps_nothing<H: Harness + 
         h1 = {
             let e = e.clone();
             on_a_thread(h, move || async move {
-                drop(e.hello(&peer, &one).await.expect("H1, once it read A"));
+                e.hello(&peer, &one).await.expect("H1, once it read A")
             })
         };
         assert!(h1.waits(h).await, "H1 waits for P1");
@@ -10654,7 +11243,7 @@ async fn a_takeover_hello_dropped_waiting_for_a_read_keeps_nothing<H: Harness + 
             // It takes the turn over, and waits for that read.
             let _ = waits(h, late.as_mut()).await;
         } // and its connection closes as it waits; H1's read goes on
-        h1.joined().await;
+        close(h, h1.joined().await).await;
     }
     drop((s1, s2));
     h.restore_outage(false);
@@ -22157,8 +22746,9 @@ async fn a_takeover_reads_the_abandoned_swap<H: Harness>(h: &H) {
         let answered = if waited {
             settle_on(h, behind.as_mut(), 3).await
         } else {
-            let done = AtomicBool::new(false);
-            let (r, ()) = both(own_task(marked(behind.as_mut(), &done)), async {
+            // It arrives now: `behind`, never polled, did not.
+            let done = flag();
+            let (r, ()) = both(&hello_on_a_task(h, &e, &peer, &hello, &done), async {
                 settle_until(h, || is_set(&done)).await;
                 assert!(
                     is_set(&done),
@@ -22254,7 +22844,7 @@ async fn a_takeover_reads_the_abandoned_swap<H: Harness>(h: &H) {
 async fn a_payment_waiting_for_a_dead_turn_is_woken_by_its_deadline<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
-    let mut s2 = open(h, &e, 1).await;
+    let s2 = open(h, &e, 1).await;
     serve(h, &mut s, 0, 4);
     h.hold_swap_responses();
     let p1 = Pay {
@@ -22268,9 +22858,9 @@ async fn a_payment_waiting_for_a_dead_turn_is_woken_by_its_deadline<H: Harness>(
         token: h.token(4).await,
     };
     advance(h, Duration::from_secs(30)).await;
-    let r = woken_on_its_own_task(
+    let (_s2, r) = woken_on_its_own_task(
         h,
-        s2.pay(&p2),
+        |done| pay_on_a_task(h, s2, &p2, done),
         async { h.advance(Duration::from_secs(30)) }, // P1's deadline
         "P2 waits for P1's turn",
         "P1's deadline wakes P2, waiting for its turn on a task of its own: it takes the turn \
@@ -22349,7 +22939,7 @@ async fn a_payment_dropped_before_its_swap_frees_the_turn<H: Harness>(h: &H) {
     // of their own. P is dropped before its keys come, and the keys come after.
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
-    let mut s2 = open(h, &e, 1).await;
+    let s2 = open(h, &e, 1).await;
     serve(h, &mut s, 0, 4);
     hold_refetch(h, &e);
     let p = Pay {
@@ -22369,11 +22959,11 @@ async fn a_payment_dropped_before_its_swap_frees_the_turn<H: Harness>(h: &H) {
         upto_chunk: 4,
         token: h.token(4).await,
     };
-    let (hello_done, next_done) = (AtomicBool::new(false), AtomicBool::new(false));
-    let ((quoted, paid), ()) = both(
+    let (hello_done, next_done) = (flag(), flag());
+    let ((quoted, (_s2, paid)), ()) = both(
         both(
-            own_task(marked(e.hello(&peer, &hello), &hello_done)),
-            own_task(marked(s2.pay(&next), &next_done)),
+            &hello_on_a_task(h, &e, &peer, &hello, &hello_done),
+            &pay_on_a_task(h, s2, &next, &next_done),
         ),
         async {
             settle(h).await;
@@ -22474,7 +23064,7 @@ async fn a_payment_dropped_before_its_swap_frees_the_turn<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
     let mut s2 = open(h, &e, 1).await;
-    let mut s3 = open(h, &e, 1).await;
+    let s3 = open(h, &e, 1).await;
     serve(h, &mut s, 0, 4);
     hold_refetch(h, &e);
     let (p1, p2, next) = (
@@ -22509,11 +23099,11 @@ async fn a_payment_dropped_before_its_swap_frees_the_turn<H: Harness>(h: &H) {
     };
     assert!(pending, "P2 takes the turn, and waits for keys");
     let hello = h.hello();
-    let (hello_done, next_done) = (AtomicBool::new(false), AtomicBool::new(false));
-    let ((quoted, paid), ()) = both(
+    let (hello_done, next_done) = (flag(), flag());
+    let ((quoted, (_s3, paid)), ()) = both(
         both(
-            own_task(marked(e.hello(&peer, &hello), &hello_done)),
-            own_task(marked(s3.pay(&next), &next_done)),
+            &hello_on_a_task(h, &e, &peer, &hello, &hello_done),
+            &pay_on_a_task(h, s3, &next, &next_done),
         ),
         async {
             settle(h).await;
@@ -23475,20 +24065,22 @@ async fn b_unknown_after_the_seconds_two<H: Harness>(h: &H, s: &mut Session<H>) 
     h.restore_outage(true);
 }
 
-/// `entry` on a task of its own, polled only when it is woken: once the engine has settled
-/// it still waits (`waiting` says why); `then` runs, and it is woken and answered, with
-/// nothing else polling it (`woken`). Its answer.
-async fn woken_on_its_own_task<H: Harness, F: Future>(
+/// The entry `entry` starts on a task of its own, marking the flag it is given
+/// ([`hello_on_a_task`], [`pay_on_a_task`]), polled only when it is woken: once the engine
+/// has settled it has arrived, and still waits (`waiting` says why); `then` runs, and it is
+/// woken and answered, with nothing else polling it (`woken`). Its answer.
+async fn woken_on_its_own_task<H: Harness, T>(
     h: &H,
-    entry: F,
+    entry: impl FnOnce(&Arc<AtomicBool>) -> Task<T>,
     then: impl Future<Output = ()>,
     waiting: &str,
     woken: &str,
-) -> F::Output {
-    let done = AtomicBool::new(false);
-    let (out, ()) = both(own_task(marked(entry, &done)), async {
+) -> T {
+    let done = flag();
+    let task = entry(&done);
+    let (out, ()) = both(&task, async {
         settle(h).await;
-        assert!(!is_set(&done), "{waiting}");
+        assert!(task.started() && !is_set(&done), "{waiting}");
         then.await;
         assert!(settle_until(h, || is_set(&done)).await, "{woken}");
     })
@@ -23535,9 +24127,9 @@ async fn an_entry_waiting_for_a_read_is_woken_as_its_second_ends<H: Harness>(h: 
                 upto_chunk: 4,
                 token: h.token(4).await,
             };
-            let paid = woken_on_its_own_task(
+            let (_s, paid) = woken_on_its_own_task(
                 h,
-                s.pay(&p),
+                |done| pay_on_a_task(h, s, &p, done),
                 async { h.advance(SECOND) }, // the first's read outlives its second
                 "the payment waits for the hello's read",
                 "the second's end wakes the payment waiting for a read sent in it, on a task of \
@@ -23552,7 +24144,7 @@ async fn an_entry_waiting_for_a_read_is_woken_as_its_second_ends<H: Harness>(h: 
             let two = h.hello();
             let quoted = woken_on_its_own_task(
                 h,
-                e.hello(&peer, &two),
+                |done| hello_on_a_task(h, &e, &peer, &two, done),
                 async { h.advance(SECOND) }, // the first's read outlives its second
                 "the second hello waits for the first's read",
                 "the second's end wakes the hello waiting for a read sent in it, on a task of \
@@ -23589,15 +24181,16 @@ async fn an_entry_waiting_for_the_next_second_is_woken_by_it<H: Harness>(h: &H) 
                 upto_chunk: 4,
                 token: h.token(4).await,
             };
-            let paid = woken_on_its_own_task(
+            let (back, paid) = woken_on_its_own_task(
                 h,
-                s1.pay(&p),
+                |done| pay_on_a_task(h, s1, &p, done),
                 async { h.advance(SECOND) },
                 "the second's two reads spent: the payment waits for the next second to read B",
                 "the next second wakes the payment that waits for it, on a task of its own: it \
                  reads B there, and is answered",
             )
             .await;
+            s1 = back;
             let ack = paid.expect("B read as nothing: the payment is swapped");
             assert_eq!(
                 (ack.accepted_upto, ack.spent_total),
@@ -23608,7 +24201,7 @@ async fn an_entry_waiting_for_the_next_second_is_woken_by_it<H: Harness>(h: &H) 
             let (peer, hello) = (h.peer(1), h.hello());
             let quoted = woken_on_its_own_task(
                 h,
-                e.hello(&peer, &hello),
+                |done| hello_on_a_task(h, &e, &peer, &hello, done),
                 async { h.advance(SECOND) },
                 "the second's two reads spent: the hello waits for the next second to read B",
                 "the next second wakes the hello that waits for it, on a task of its own: it \
@@ -23659,9 +24252,9 @@ async fn a_payment_waiting_for_a_read_is_woken_as_it_comes_back<H: Harness>(h: &
         token: h.token(4).await,
     };
     let before = h.state_reads();
-    let paid = woken_on_its_own_task(
+    let (_s, paid) = woken_on_its_own_task(
         h,
-        s.pay(&p),
+        |done| pay_on_a_task(h, s, &p, done),
         async {
             let quoted = answer_of(h, first.as_mut()).await;
             assert!(
@@ -23705,7 +24298,7 @@ async fn a_hello_waiting_for_a_read_is_woken_as_it_is_abandoned<H: Harness>(h: &
     }
     let quoted = woken_on_its_own_task(
         h,
-        e.hello(&peer, &two),
+        |done| hello_on_a_task(h, &e, &peer, &two, done),
         async move { drop(first) }, // its connection closes: abandoned
         "the second hello waits for the first's read",
         "the first's read abandoned wakes the hello waiting for it, on a task of its own: it \
@@ -26109,9 +26702,9 @@ async fn a_keyset_the_mint_started_is_listed_the_next_second<H: Harness>(h: &H, 
         upto_chunk: 8,
         token: h.token_at(&mint, 4).await, // of the keyset the mint started now
     };
-    let r = woken_on_its_own_task(
+    let (s, r) = woken_on_its_own_task(
         h,
-        s.pay(&p),
+        |done| pay_on_a_task(h, s, &p, done),
         async { h.advance(SECOND) },
         "a payment of a keyset the mint started in the second the seeder last asked for its \
          listing waits for the next second's listing: it is not refused by one asked for before \
@@ -26738,9 +27331,9 @@ async fn the_keyset_rule_waits_for_its_listing<H: Harness>(h: &H, quoted: Quoted
                  and answered then, the listing not come"
             }
         };
-        let r = woken_on_its_own_task(
+        let (s, r) = woken_on_its_own_task(
             h,
-            s.pay(&p),
+            |done| pay_on_a_task(h, s, &p, done),
             async {
                 assert!(
                     waits(h, other.as_mut()).await,
@@ -27515,14 +28108,22 @@ async fn hellos_behind_then<H: Harness, F: Future<Output = Result<Ack, Rej>>>(
     what: &str,
 ) -> Result<Ack, Rej> {
     let (peer, one, two) = (h.peer(1), h.hello(), h.hello());
-    let (d1, d2) = (AtomicBool::new(false), AtomicBool::new(false));
-    let mut first = own_task(marked(e.hello(&peer, &one), &d1));
-    let mut second = own_task(marked(e.hello(&peer, &two), &d2));
-    let mut hellos = pin!(both(&mut first, &mut second));
+    let (d1, d2) = (flag(), flag());
+    let held = landed(h, || h.identities_held(e)).await;
+    let first = hello_on_a_task(h, e, &peer, &one, &d1);
+    let second = hello_on_a_task(h, e, &peer, &two, &d2);
+    let mut hellos = pin!(both(&first, &second));
     let _ = settled(h, hellos.as_mut()).await;
     assert!(
         !is_set(&d1) && !is_set(&d2),
         "both hellos wait for the payment"
+    );
+    // Read as it stands, with no more settling: the engine has settled, both waiting.
+    let waiting = h.identities_held(e);
+    assert!(
+        waiting > held,
+        "both hellos have reached the seeder, and wait there for the payment's turn: it holds \
+         what waits ({waiting} records, {held} before them)"
     );
     let (((q1, q2), ()), answer) = both(
         both(hellos, async {
@@ -28855,22 +29456,23 @@ async fn hellos_on_every_path_recheck_as_they_answer<H: Harness>(h: &H) {
     }
 }
 
-/// `entry` on a task of its own, polled only when it is woken: once the engine has settled
-/// it still waits (`waiting` says why). The clock moves `first`, which wakes it, and it
-/// waits on; the clock moves `then`, and it is woken and answered, with nothing else
-/// polling it (`woken`). Its answer.
-async fn woken_again_on_its_own_task<H: Harness, F: Future>(
+/// The entry `entry` starts on a task of its own, marking the flag it is given, polled only
+/// when it is woken: once the engine has settled it still waits (`waiting` says why). The
+/// clock moves `first`, which wakes it, and it waits on; the clock moves `then`, and it is
+/// woken and answered, with nothing else polling it (`woken`). Its answer.
+async fn woken_again_on_its_own_task<H: Harness, T>(
     h: &H,
-    entry: F,
+    entry: impl FnOnce(&Arc<AtomicBool>) -> Task<T>,
     first: Duration,
     then: Duration,
     waiting: &str,
     woken: &str,
-) -> F::Output {
-    let done = AtomicBool::new(false);
-    let (out, ()) = both(own_task(marked(entry, &done)), async {
+) -> T {
+    let done = flag();
+    let task = entry(&done);
+    let (out, ()) = both(&task, async {
         settle(h).await;
-        assert!(!is_set(&done), "{waiting}");
+        assert!(task.started() && !is_set(&done), "{waiting}");
         advance(h, first).await;
         settle(h).await;
         assert!(
@@ -28895,7 +29497,7 @@ async fn entries_waiting_for_a_dead_turn_are_woken_after_a_move<H: Harness>(h: &
     let ten = Duration::from_secs(10);
     for pays in [false, true] {
         let e = h.engine(1, 4, 1000);
-        let (mut s1, mut s2) = (open(h, &e, 1).await, open(h, &e, 1).await);
+        let (mut s1, s2) = (open(h, &e, 1).await, open(h, &e, 1).await);
         serve(h, &mut s1, 0, 4);
         h.hold_swap_responses();
         let p1 = Pay {
@@ -28910,9 +29512,9 @@ async fn entries_waiting_for_a_dead_turn_are_woken_after_a_move<H: Harness>(h: &
                 upto_chunk: 4,
                 token: h.token(4).await,
             };
-            let r = woken_again_on_its_own_task(
+            let (_s2, r) = woken_again_on_its_own_task(
                 h,
-                s2.pay(&p2),
+                |done| pay_on_a_task(h, s2, &p2, done),
                 2 * ten,
                 3 * ten,
                 "the payment waits for P1's dead turn",
@@ -28928,7 +29530,7 @@ async fn entries_waiting_for_a_dead_turn_are_woken_after_a_move<H: Harness>(h: &
             let (peer, hello) = (h.peer(1), h.hello());
             let r = woken_again_on_its_own_task(
                 h,
-                e.hello(&peer, &hello),
+                |done| hello_on_a_task(h, &e, &peer, &hello, done),
                 2 * ten,
                 3 * ten,
                 "the hello waits for P1's dead turn",

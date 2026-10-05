@@ -256,7 +256,7 @@ def test_counts() -> dict[str, int]:
         "listings_at_start": scenarios,  # the same suite, keyset listings asked at the start too
         # the same suite against each honest engine and mint that take their time differently
         "honest_timings": scenarios * len(re.findall(r"^\s+nfx_pay::adversary_suite!\(", timings, re.M)),
-        "mutants": len(re.findall(r"^\s+[a-z_0-9]+: [svrwl]\(", mutants, re.M)),
+        "mutants": len(re.findall(r"^\s+[a-z_0-9]+: [svrwlt]\(", mutants, re.M)),
         "runner": len(re.findall(r"^#\[test\]$", runner, re.M)),
         "pay1": len(re.findall(r"^#\[test\]$", pay1, re.M)),
     }

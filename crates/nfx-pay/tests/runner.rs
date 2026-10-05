@@ -75,6 +75,55 @@ fn a_panic_on_a_spawned_thread_is_judged_where_it_was_raised() {
 }
 
 #[test]
+fn a_panic_caught_on_the_way_is_the_one_reported() {
+    // An engine panics on a task of its own, and its runtime catches that. The scenario
+    // then fails a check of the suite, the entry that task was to answer never answered;
+    // or it returns. Either way the first panic raised on its thread is the one reported,
+    // where it was raised and with what it said: never the check, and never a pass.
+    static RAISED: AtomicU32 = AtomicU32::new(0);
+    for then_fails in [true, false] {
+        let ran = run_on_a_thread(5, move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let task = tokio::spawn(async {
+                    RAISED.store(line!(), Ordering::SeqCst);
+                    panic!("raised on a task of the engine's own");
+                });
+                assert!(task.await.is_err(), "the runtime caught it");
+                assert!(!bb(then_fails), "a behaviour");
+            });
+        });
+        let Ran::Panicked { file, line, .. } = &ran else {
+            panic!("a panic is reported (the scenario then fails a check: {then_fails})");
+        };
+        assert!(file.ends_with("nfx-pay/tests/runner.rs"), "{file}");
+        assert_eq!(
+            *line,
+            RAISED.load(Ordering::SeqCst) + 1,
+            "where the first was raised (the scenario then fails a check: {then_fails})"
+        );
+        assert_eq!(message(&ran), "raised on a task of the engine's own");
+    }
+    // The same in a file of the engine's: at no line is it a check of the suite's.
+    let at = suite_line(|l| l.starts_with("assert_eq!("));
+    let Ran::Panicked { payload, .. } = run_on_a_thread(5, || {
+        let _ = std::panic::catch_unwind(|| panic!("raised in the engine"));
+        a_behaviour();
+    }) else {
+        panic!("it panicked");
+    };
+    let ran = Ran::Panicked {
+        file: "nfx-pay/src/mock.rs".into(),
+        line: at,
+        payload,
+    };
+    assert_eq!(message(&ran), "raised in the engine");
+    assert!(!ran.failed_the_suite(), "counted in the mock");
+}
+
+#[test]
 fn the_suites_checks_are_the_suite_failing() {
     // Each kind of check the suite makes, raised for real, at a line of the suite that
     // makes a check.
@@ -237,8 +286,13 @@ fn a_runtime_panic_at_a_check_of_the_suite_is_not_the_suite_failing() {
         },
         || bb(String::from("a")).insert(bb(3), 'x'),
         || {
+            // Poisoned on another thread: the first panic on this one is the one reported.
             let once = std::sync::Once::new();
-            let _ = std::panic::catch_unwind(|| once.call_once(|| panic!("poisons it")));
+            std::thread::scope(|scope| {
+                let _ = scope
+                    .spawn(|| once.call_once(|| panic!("poisons it")))
+                    .join();
+            });
             once.call_once(|| {});
         },
         || {

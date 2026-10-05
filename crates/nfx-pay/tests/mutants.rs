@@ -4,6 +4,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::sync::Arc;
+
 use nfx_pay::adversary;
 use nfx_pay::mock::{MockHarness, SeederFlaw as S, ViewerFlaw as V};
 
@@ -15,14 +17,9 @@ macro_rules! catches {
                 // The defect must fail a check of the suite: a hang, a panic raised in the
                 // engine, the harness or a runtime, or one at a line of the suite that makes
                 // no check (a bare unwrap), names no behaviour, so none is a catch. The time
-                // allowed is the suite's own: a late catch under load is not taken for a hang.
-                let run = adversary::run_on_a_thread(adversary::SCENARIO_SECS, || {
-                    tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("a runtime")
-                        .block_on(async { adversary::$scenario(&$harness).await })
-                });
+                // allowed is the suite's own, and so is the way it is run: a late catch under
+                // load is not taken for a hang.
+                let run = nfx_pay::run_scenario!(adversary::$scenario(&$harness));
                 match &run {
                     adversary::Ran::Finished => panic!(
                         "{} did not catch the planted defect",
@@ -64,10 +61,24 @@ fn r(flaw: S) -> MockHarness {
 
 /// A flawed seeder whose mint answers every call its entries and sweeps await (a read, a
 /// swap, a key request, a keyset listing) from another thread a few milliseconds later,
-/// waking its caller, as a real mint's answer comes back: each defect registered here fails
-/// the check it fails on round trips, against an engine whose mint answers come by wakes.
+/// waking its caller, as a real mint's answer comes back. Most defects registered here fail
+/// the check they fail on round trips; a few fail another, in the scenario each is
+/// registered with.
 fn w(flaw: S) -> MockHarness {
     MockHarness::with_seeder_flaw_woken(flaw)
+}
+
+/// The same, the seeder settling each swap's outcome on a task of its own, on the runtime
+/// the scenario runs in: for defects that can arise only where the seeder has such tasks,
+/// one of which wakes an entry before it settles what the wake announces.
+fn t(flaw: S) -> MockHarness {
+    let rt = tokio::runtime::Handle::current();
+    MockHarness::with_seeder_flaw_on_tasks(
+        flaw,
+        Arc::new(move |task| {
+            rt.spawn(task);
+        }),
+    )
 }
 
 /// A flawed seeder that asks every quoted mint for its keyset listing at its start too, as
@@ -2936,4 +2947,38 @@ catches!(
     freed_at_deadline_second_ban_stale_outcome: s(S::FreedAtDeadlineSecondBanStale) => a_turn_freed_by_an_outcome_at_the_deadline_runs_no_check,
     freed_at_deadline_second_ban_stale_outcome_round_trip: r(S::FreedAtDeadlineSecondBanStale) => a_turn_freed_by_an_outcome_at_the_deadline_runs_no_check,
     freed_at_deadline_second_ban_stale_outcome_woken: w(S::FreedAtDeadlineSecondBanStale) => a_turn_freed_by_an_outcome_at_the_deadline_runs_no_check,
+    // Every answer an entry or a sweep awaits wakes it, whatever the answer: a payment's own
+    // read and a sweep's come back by a wake only where the mint answers from another
+    // thread.
+    pay_read_unwoken_woken: w(S::PayReadUnwoken) => every_answer_wakes_the_entry_awaiting_it,
+    pay_read_unwoken_on_tasks: t(S::PayReadUnwoken) => every_answer_wakes_the_entry_awaiting_it,
+    sweep_read_unwoken_woken: w(S::SweepReadUnwoken) => every_answer_wakes_the_entry_awaiting_it,
+    sweep_read_unwoken_on_tasks: t(S::SweepReadUnwoken) => every_answer_wakes_the_entry_awaiting_it,
+    no_claim_unwoken: s(S::NoClaimUnwoken) => every_answer_wakes_the_entry_awaiting_it,
+    no_claim_unwoken_round_trip: r(S::NoClaimUnwoken) => every_answer_wakes_the_entry_awaiting_it,
+    no_claim_unwoken_woken: w(S::NoClaimUnwoken) => every_answer_wakes_the_entry_awaiting_it,
+    no_claim_unwoken_on_tasks: t(S::NoClaimUnwoken) => every_answer_wakes_the_entry_awaiting_it,
+    // And it wakes the entry once the entry can see it, not before: these arise only where
+    // the seeder has a task of its own to wake from and then settle on.
+    outcome_woken_early_on_tasks: t(S::OutcomeWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
+    spent_woken_early_on_tasks: t(S::SpentWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
+    invalid_woken_early_on_tasks: t(S::InvalidWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
+    unreachable_woken_early_on_tasks: t(S::UnreachableWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
+    lost_woken_early_on_tasks: t(S::LostWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
+    pending_woken_early_on_tasks: t(S::PendingWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
+    outputs_refused_woken_early_on_tasks: t(S::OutputsRefusedWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
+    expired_woken_early_on_tasks: t(S::ExpiredWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
+    keys_woken_early_on_tasks: t(S::KeysWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
+    listing_woken_early_on_tasks: t(S::ListingWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
+    keyset_listing_woken_early_on_tasks: t(S::KeysetListingWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
+    read_woken_early_on_tasks: t(S::ReadWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
+    pay_read_woken_early_on_tasks: t(S::PayReadWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
+    sweep_read_woken_early_on_tasks: t(S::SweepReadWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
+    // So does an account's turn, as the swap of a payment whose connection closed is
+    // settled.
+    dropped_land_wakes_none: s(S::DroppedLandWakesNone) => every_answer_wakes_the_entry_awaiting_it,
+    dropped_land_wakes_none_round_trip: r(S::DroppedLandWakesNone) => every_answer_wakes_the_entry_awaiting_it,
+    dropped_land_wakes_none_woken: w(S::DroppedLandWakesNone) => every_answer_wakes_the_entry_awaiting_it,
+    dropped_land_wakes_none_on_tasks: t(S::DroppedLandWakesNone) => every_answer_wakes_the_entry_awaiting_it,
+    turn_woken_early_on_tasks: t(S::TurnWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
 );

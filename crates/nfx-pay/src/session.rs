@@ -25,9 +25,16 @@ pub type PeerId = [u8; 32];
 
 /// A seeder's payment engine. Implementations: the real engine (locked until the M2
 /// security stage) and [`crate::mock::MockEngine`].
-#[allow(async_fn_in_trait)]
+///
+/// The futures of [`SeederEngine::hello`], [`SeederEngine::sweep`] and
+/// [`SeederSession::pay`] are `Send`: a connection's handler runs each on a task of a
+/// runtime that may move it between threads, and the suite runs entries on tasks of their
+/// own ([`Harness`]: how the suite waits). So such a future holds nothing bound to one
+/// thread across a wait: no `Rc`, no borrow of a `RefCell`, no guard of a lock.
 pub trait SeederEngine {
-    /// A session owns what it needs: the suite may move one to a thread of its own.
+    /// A session owns what it needs: the suite may move one to a thread or a task of its
+    /// own. So it borrows nothing from its engine, nor from anything else outside itself:
+    /// what it shares with the engine it holds a handle to (an `Arc`, a channel).
     type Session: SeederSession + Send + 'static;
 
     /// A `hello` from `peer`. The session continues the peer's account for the video, and
@@ -65,7 +72,11 @@ pub trait SeederEngine {
     ///
     /// A refused `hello` leaves nothing: no account, no place under the cap, and its
     /// session id not open.
-    async fn hello(&self, peer: &PeerId, hello: &Hello) -> Result<Self::Session, Rej>;
+    fn hello(
+        &self,
+        peer: &PeerId,
+        hello: &Hello,
+    ) -> impl Future<Output = Result<Self::Session, Rej>> + Send;
 
     /// Learn the outcome of every swap left unknown, every account's, as a seeder's
     /// background task does periodically (NFX-07 §3). An account's own `hello` and `pay`
@@ -75,11 +86,10 @@ pub trait SeederEngine {
     /// - the engine under test sweeps only when called, never on a timer of its own;
     /// - a sweep that finds another one running returns, or runs alongside it: it never
     ///   waits for it ([`Harness::sweep_during_next_read`] runs one inside another's read).
-    async fn sweep(&self);
+    fn sweep(&self) -> impl Future<Output = ()> + Send;
 }
 
 /// One open session: one peer, one video. **Dropping it closes it.**
-#[allow(async_fn_in_trait)]
 pub trait SeederSession {
     /// The binding quote, with the account's position as of the `hello`.
     fn quote(&self) -> &Quote;
@@ -142,7 +152,7 @@ pub trait SeederSession {
     /// outcome tied to this future's polls: the engine settles it as it comes back, whether
     /// or not this future is polled then, and one settled in time is the answer, however
     /// late this future is polled again.
-    async fn pay(&mut self, pay: &Pay) -> Result<Ack, Rej>;
+    fn pay(&mut self, pay: &Pay) -> impl Future<Output = Result<Ack, Rej>> + Send;
 
     /// Whether this session's peer is banned.
     fn banned(&self) -> bool;
@@ -444,30 +454,67 @@ pub struct EngineParams {
 ///   takes; where the mint answers a read in the poll that sends it, no read is ever out.
 ///   It closes an entry's connection once the entry waits on the suite (its swap held, say);
 /// - after a release ([`Harness::release_swaps`], [`Harness::release_oldest_swap`],
-///   [`Harness::roll_back_reserved`]) or a clock move it lets the engine settle before it
-///   acts again, the entries it polls on its own task not polled meanwhile; and it reads what the engine holds
-///   ([`Harness::identities_held`]) and a session's ban only once the engine has settled
-///   since the suite last acted, a connection it closed included. An engine settles a swap's outcome as it comes, on whatever task
-///   or thread takes it (a task of its own, say), whether or not the entry that sent the
-///   swap is polled: the swap is not tied to the `pay`'s connection (NFX-07 §3 step 5). An
-///   entry (a `hello` or a `pay`) awaits its own reads, key requests and keyset listings,
-///   and takes an answer that has woken it in a later poll; what it decides with no call
-///   under way (a refusal as it arrives, say) it answers once it has decided it.
+///   [`Harness::roll_back_reserved`]), after a clock move, and after it closes a connection
+///   (it drops a session, or a `hello` or a `pay` not yet answered) it lets the engine
+///   settle before it acts again, the entries it polls on its own task not polled
+///   meanwhile: an engine may take any of these on a task of its own, and stamp a close
+///   with the time it takes it;
+/// - it reads what the engine holds ([`Harness::identities_held`]) and a session's ban only
+///   once the engine has settled since the suite last acted, an answer it took and a
+///   connection that closed as a session went out of scope included.
+///
+/// An engine settles a swap's outcome as it comes, on whatever task or thread takes it (a
+/// task of its own, say), whether or not the entry that sent the swap is polled: the swap
+/// is not tied to the `pay`'s connection (NFX-07 §3 step 5). An entry (a `hello` or a
+/// `pay`) awaits its own reads, key requests and keyset listings, and takes an answer that
+/// has woken it in a later poll: between its polls it sends its mint nothing more, so the
+/// suite sets the order of two entries' steps by the order it polls them in. It may reach
+/// the engine through tasks of the engine's own first, and its answer and its wakes may
+/// come back through them. What an entry decides with no call under way (a refusal as it
+/// arrives, say) it answers once it has decided it.
+///
+/// **An entry on a task of its own** is a task of the runtime the suite runs in, which that
+/// runtime polls when it is woken, in turn with the engine's own tasks; the suite never
+/// polls it. So whatever an entry awaits wakes it once the entry can see it: a wake that
+/// comes before, with none after, leaves the entry waiting, and the suite fails it. This is
+/// what the `Send` futures of [`SeederEngine`] and the `Clone` of [`Harness::Engine`] are
+/// for: the task owns the session or a clone of the engine, and gives the session back.
+///
+/// **An entry on a thread of its own.** Scenarios whose entries meet at the mint drive each
+/// on a thread the harness starts as the engine needs ([`Harness::spawn_thread`]), with an
+/// executor of the suite's that polls it when it is woken, while the suite's thread goes on
+/// with its runtime running, the engine's own tasks included. Turns of that runtime say
+/// nothing of how far a thread has got: a thread starts, and takes up a wake, when the
+/// operating system runs it. So the suite takes such an entry to wait on it only once, with
+/// no answer under way, the entry has stood pending, not woken since its last poll began
+/// and not polled, through 100 turns of the suite's runtime in a row: what such an entry
+/// still awaits of the engine's own tasks on that runtime (a task it reaches the engine
+/// through, one that passes a wake on to it) wakes it within fewer turns than that of its
+/// beginning to wait, each such task running in a turn after it is spawned or woken. An
+/// entry that waits by polling again (it wakes itself, and looks) waits on the suite too,
+/// once it has been polled 100 times more with no answer under way, and is pending still.
+/// The suite does not wait for its own runtime to take a turn between each two of those
+/// polls: what an entry on a thread awaits of a task of the engine's own on the suite's
+/// runtime, it awaits by that task's wake, not by polling for it.
 ///
 /// It waits 5 s in real time at most for an engine to settle, far above any honest answer,
-/// and a scenario that hangs is timed out by its runner. Scenarios whose entries run on
-/// threads of their own, to meet at the mint, drive each there with an executor of the
-/// suite's, on a thread the harness starts as the engine needs ([`Harness::spawn_thread`]),
-/// polled when it is woken, while the suite's thread goes on with its runtime running, the
-/// engine's own tasks included. A release that races the clock runs on threads of the
-/// harness's own ([`Harness::race_release_with_clock`]) while the suite polls the racing
-/// entry on its task. The mint answers from threads of the harness's own, never from tasks
-/// on the suite's runtime. An engine may spawn tasks on the runtime it was made in (the
-/// suite makes each engine on its own task), never on whatever thread polls its futures.
+/// and a scenario that hangs is timed out by its runner. A release that races the clock runs
+/// on threads of the harness's own ([`Harness::race_release_with_clock`]) while the suite
+/// polls the racing entry on its task. The mint answers from threads of the harness's own,
+/// never from tasks on the suite's runtime. A panic raised on such a thread (in the
+/// engine's code that takes an answer there, say) is the harness's to keep, and to raise
+/// again on the suite's thread ([`crate::adversary::keep_panic`],
+/// [`crate::adversary::rejoin`]): the suite's runner judges a panic by where it was first
+/// raised, and one lost there would leave a check of the suite's to fail in its stead. An
+/// engine may spawn tasks on the runtime it was made in (the suite makes each engine on its
+/// own task), never on whatever thread polls its futures.
 #[allow(async_fn_in_trait)]
 pub trait Harness {
-    /// An engine owns what it needs: the suite may share one with a thread of its own.
-    type Engine: SeederEngine + Send + Sync + 'static;
+    /// An engine owns what it needs, and is a handle to its seeder: the suite shares one
+    /// with a thread of its own, and gives a clone of it, the same seeder, to a task of its
+    /// own. So it borrows nothing from the harness that made it, nor from anything else
+    /// outside itself; an engine that is no such handle is wrapped in one (an `Arc`).
+    type Engine: SeederEngine + Clone + Send + Sync + 'static;
     type Viewer: Viewer;
 
     /// A seeder serving three videos (0, 1 and 2) at `price`, quoting `window` (≥ 2) and this
@@ -622,6 +669,15 @@ pub trait Harness {
     /// is under way ([`Harness::answers_under_way`]) until it is done and the answers it
     /// released have come back. The suite meanwhile polls the entry whose outcome races its
     /// deadline on its own task, its runtime running.
+    ///
+    /// The suite races a hundred payments so, and each race may come out either way: the
+    /// outcome settled before the clock reaches the deadline, or after. Both are right, so
+    /// the suite requires neither of any race, and counts none. For both to come about, a
+    /// harness varies from call to call which of the two starts first and by how much, the
+    /// lags reaching from none to well past the time its mint's answer to a released swap
+    /// takes to come back, for the calls of either parity alike (the suite races a claim
+    /// and a refusal in turn). One that starts them the same way each time still passes,
+    /// and tests one order only.
     fn race_release_with_clock(&self, by: Duration);
     /// Start a new thread running `side`, as the engine needs a thread to be to poll its
     /// futures there: the suite runs some entries on threads of their own, each driven by an
@@ -660,7 +716,12 @@ pub trait Harness {
     /// next read of a swap's state that an entry (a `hello` or a `pay`) makes reaches it,
     /// and answers that read by a wake only once the engine has settled them, on whatever
     /// task or thread settles them: an answer that lands while the seeder reads. The read
-    /// is under way until then ([`Harness::answers_under_way`]).
+    /// is under way until then ([`Harness::answers_under_way`]). A real engine's harness
+    /// needs a seam in its settlement to know that it has settled them (the mock's engine
+    /// counts the outcomes it has been handed and not yet settled). One that answers the
+    /// read without it races an engine that settles outcomes on a task of its own: the
+    /// scenarios that ask then pass or fail by which of the two comes first, and where the
+    /// read takes a mint's round trip to come back, the engine's task all but always does.
     fn deliver_responses_mid_read(&self);
     /// The mint answers swaps and restores but no NUT-07 state check (`true`), or checks
     /// again.

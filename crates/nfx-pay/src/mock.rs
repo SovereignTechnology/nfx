@@ -23,9 +23,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use nfx_pay_wire::namespace::VideoAddr;
@@ -544,6 +544,10 @@ const WOKEN_AFTER: Duration = Duration::from_millis(2);
 /// ([`Timing::spawn`]).
 pub type Spawner = Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>;
 
+/// Runs a thread's work with the context of the runtime the engine was made in entered
+/// ([`Timing::enter`]).
+pub type Enter = Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
+
 /// How an honest seeder and its mint take their time, beyond the harnesses' own
 /// ([`MockHarness::with_timing`]). Each is a way an honest engine or a real mint may
 /// behave, which NFX-07 leaves free, so the suite must pass every one: it judges progress by
@@ -573,6 +577,34 @@ pub struct Timing {
     pub sweep_on_a_task: bool,
     /// The seeder's entries take this many polls more at each step, waking themselves.
     pub yields: u32,
+    /// Starts the tasks the seeder's entries go through (`tasks_in` and the three after
+    /// it), on the runtime the seeder was made in. One that spawns on the runtime whose
+    /// context the calling thread has entered needs `enter` too.
+    pub hop: Option<Spawner>,
+    /// With `hop`: each entry (a `hello`, a `pay`, a sweep) reaches the seeder through this
+    /// many such tasks, one after another.
+    pub tasks_in: u32,
+    /// With `hop`: each entry's answer comes back through this many such tasks.
+    pub tasks_out: u32,
+    /// With `hop`: the answer of a `pay` that waited comes back through one such task more.
+    pub task_after_a_wait: bool,
+    /// With `hop`: every wake of an entry is passed on to it by such a task.
+    pub wakes_through_a_task: bool,
+    /// The harness runs the threads it starts with this, the context of the seeder's
+    /// runtime entered there ([`Harness::spawn_thread`]): an entry polled on such a thread
+    /// can then spawn on that runtime as on its own thread.
+    pub enter: Option<Enter>,
+    /// With `spawn`: the seeder takes a closed connection on a task of its own, a turn of
+    /// the runtime after the drop, and stamps it with the time it takes it: a session's
+    /// close, and the drop of a `hello` or a `pay` not yet answered.
+    pub closes_on_a_task: bool,
+    /// With `spawn`: the seeder ages its state (bans, debt, accounts never paid) on a task
+    /// of its own that the clock wakes, a turn of the runtime after each move, not as each
+    /// entry arrives.
+    pub ages_on_a_task: bool,
+    /// The seeder holds every quoted mint's keys from its start (kept from an earlier run,
+    /// say), and asks each mint for its keyset listing then.
+    pub held_from_start: bool,
 }
 
 /// A read out ([`Harness::reads_out`]) while it lives.
@@ -952,12 +984,14 @@ impl MockNetwork {
     /// A read's round trip, from its sending: back on its reader's next poll, or once another
     /// thread has answered it and woken its reader ([`Answers::Woken`]).
     async fn round_trip(&self) {
-        self.round_trip_woken(true).await;
+        self.round_trip_as(true, None).await;
     }
 
     /// The same, its reader woken as it comes back if `wakes` ([`SeederFlaw::ReadUnwoken`]
-    /// otherwise).
-    async fn round_trip_woken(&self, wakes: bool) {
+    /// and the like otherwise); or, with `early`, by a task of the seeder's own started
+    /// with it, which wakes the reader before it lets it see the answer
+    /// ([`SeederFlaw::ReadWokenEarly`] and the like).
+    async fn round_trip_as(&self, wakes: bool, early: Option<Spawner>) {
         // Out from its sending until its reader takes it, or drops it.
         let _out = ReadOut::new(self);
         if !self.woken() {
@@ -965,13 +999,24 @@ impl MockNetwork {
         }
         // Whether it is back, and the waker of its reader's last poll.
         let back = Arc::new(Mutex::new((false, None::<Waker>)));
+        let seen = Arc::new(AtomicBool::new(true));
         let mut sent = false;
         poll_fn(|cx| {
             let mut b = lock(&back);
-            if b.0 {
+            if b.0 && seen.load(Ordering::SeqCst) {
                 return Poll::Ready(());
             }
-            b.1 = wakes.then(|| cx.waker().clone());
+            b.1 = match &early {
+                Some(spawn) if wakes && !b.0 => {
+                    seen.store(false, Ordering::SeqCst);
+                    Some(Waker::from(Arc::new(EarlyWake {
+                        spawn: spawn.clone(),
+                        entry: cx.waker().clone(),
+                        seen: seen.clone(),
+                    })))
+                }
+                _ => wakes.then(|| cx.waker().clone()),
+            };
             drop(b);
             if !sent {
                 sent = true;
@@ -4556,6 +4601,56 @@ pub enum SeederFlaw {
     /// next second to read, frees its account's turn without noting the floor: a read sent
     /// before then serves a `hello` that waited.
     WaitedDropAwaitingNextSecondNoFloor,
+    /// Sends a payment's own read of swap state without asking to be woken as it comes
+    /// back: a payment on a task of its own is polled again only when something else wakes
+    /// it.
+    PayReadUnwoken,
+    /// Sends a sweep's read of swap state without asking to be woken as it comes back: a
+    /// sweep on a task of its own never finishes.
+    SweepReadUnwoken,
+    /// Settles a swap's outcome that is no claim (spent, invalid, or no answer the seeder
+    /// can use) without waking the payment that awaits it.
+    NoClaimUnwoken,
+    /// Settles a swap's outcome on a task of its own that wakes the payment first, yields,
+    /// and then settles it without a wake: a payment on a task of its own, polled between
+    /// the two, finds no answer and is never woken again.
+    OutcomeWokenEarly,
+    /// The same for an outcome `spent` alone.
+    SpentWokenEarly,
+    /// The same for proofs the mint refuses as invalid alone.
+    InvalidWokenEarly,
+    /// The same for a swap that never reached the mint alone.
+    UnreachableWokenEarly,
+    /// The same for a swap left with no answer, its retry included, alone.
+    LostWokenEarly,
+    /// The same for a swap the mint refuses as pending alone.
+    PendingWokenEarly,
+    /// The same for a swap whose outputs the mint refuses alone.
+    OutputsRefusedWokenEarly,
+    /// The same for a swap the mint refuses for an expired keyset alone.
+    ExpiredWokenEarly,
+    /// Takes a key request's answer on a task of its own that wakes the payment first,
+    /// yields, and only then lets it see the keys, without a wake.
+    KeysWokenEarly,
+    /// The same for the answer to a keyset listing asked for at step 3.
+    ListingWokenEarly,
+    /// The same for the answer to the keyset listing the keyset rule judges by.
+    KeysetListingWokenEarly,
+    /// The same for a read of swap state an entry sends, a `hello`'s or a payment's.
+    ReadWokenEarly,
+    /// The same for a payment's own read of swap state alone.
+    PayReadWokenEarly,
+    /// The same for a sweep's read of swap state.
+    SweepReadWokenEarly,
+    /// Settles the swap of a payment whose connection closed without waking what waits for
+    /// its account's turn: a `hello` waiting there on a task of its own is never polled
+    /// again.
+    DroppedLandWakesNone,
+    /// Settles a swap's outcome on a task of its own that wakes what waits for the
+    /// account's turn first, yields, and then frees the turn without a wake: an entry on a
+    /// task of its own, polled between the two, finds the turn held and is never woken
+    /// again.
+    TurnWokenEarly,
 }
 
 /// How a payment came to its account's turn: the paths of the suite's matrix of payments,
@@ -4780,6 +4875,24 @@ impl SeederFlaw {
             }
             _ => return None,
         })
+    }
+
+    /// Whether it is one of the flaws that, on a task of the seeder's own, wake a payment,
+    /// or what waits for its turn, before they settle its swap's outcome
+    /// ([`Inner::wakes_early`] says for which outcomes).
+    fn settles_after_a_wake(self) -> bool {
+        matches!(
+            self,
+            Self::OutcomeWokenEarly
+                | Self::TurnWokenEarly
+                | Self::SpentWokenEarly
+                | Self::InvalidWokenEarly
+                | Self::UnreachableWokenEarly
+                | Self::LostWokenEarly
+                | Self::PendingWokenEarly
+                | Self::OutputsRefusedWokenEarly
+                | Self::ExpiredWokenEarly
+        )
     }
 
     /// The refusals a defect of the matrix of payments mishandles: how, on which path, by
@@ -7256,6 +7369,12 @@ struct State {
     /// Keysets whose keys a mint answered 12001, by mint ([`SeederFlaw::KeysRefusalCached`]
     /// only).
     keys_refused: HashSet<(String, u64)>,
+    /// Payments woken before their swap's outcome was settled ([`SeederFlaw::OutcomeWokenEarly`]
+    /// and the like only): its settlement wakes them no more.
+    woken_early: HashSet<u64>,
+    /// Payments whose turn's waiters were woken before their swap's outcome was settled
+    /// ([`SeederFlaw::TurnWokenEarly`] only): its settlement wakes them no more.
+    turn_woken_early: HashSet<u64>,
 }
 
 /// An account's own reads in one second: the second, each read sent in it, and how many had
@@ -7434,6 +7553,10 @@ struct Inner {
     net: MockNetwork,
     flaw: Option<SeederFlaw>,
     state: Mutex<State>,
+    /// The time it ages its state to, where it does so on a task of its own
+    /// ([`Timing::ages_on_a_task`]): the clock's as that task last saw it, or as the
+    /// seeder itself last moved it.
+    aged: AtomicU64,
 }
 
 /// Ready on the next poll: the shape of a mint round trip, with no time passing.
@@ -7466,6 +7589,173 @@ impl Inner {
         })
         .await;
     }
+
+    /// `entry` (a `hello`, a `pay` or a sweep) as a seeder runs it that takes its entries
+    /// through tasks of the runtime it was made in ([`Timing::hop`]): through
+    /// [`Timing::tasks_in`] tasks first, its wakes passed on by one if
+    /// [`Timing::wakes_through_a_task`], its answer through [`Timing::tasks_out`] more, and
+    /// through another after a `pay` that waited if [`Timing::task_after_a_wait`].
+    async fn through_tasks<T>(&self, pay: bool, entry: impl Future<Output = T>) -> T {
+        let (hop, tasks_in, tasks_out, after_a_wait, relays) = {
+            let l = self.net.ledger();
+            let t = &l.timing;
+            (
+                t.hop.clone(),
+                t.tasks_in,
+                t.tasks_out,
+                t.task_after_a_wait,
+                t.wakes_through_a_task,
+            )
+        };
+        let Some(hop) = hop else {
+            return entry.await;
+        };
+        for _ in 0..tasks_in {
+            a_task(&hop).await;
+        }
+        let mut entry = std::pin::pin!(entry);
+        let mut waited = false;
+        let answer = poll_fn(|cx| {
+            let polled = if relays {
+                let relay = Waker::from(Arc::new(Relay {
+                    hop: hop.clone(),
+                    entry: cx.waker().clone(),
+                }));
+                entry.as_mut().poll(&mut Context::from_waker(&relay))
+            } else {
+                entry.as_mut().poll(cx)
+            };
+            waited |= polled.is_pending();
+            polled
+        })
+        .await;
+        for _ in 0..tasks_out {
+            a_task(&hop).await;
+        }
+        if pay && waited && after_a_wait {
+            a_task(&hop).await;
+        }
+        answer
+    }
+
+    /// The waker a call of an entry's asks the mint to wake as its answer comes: the
+    /// entry's own. With `flaw`, on a seeder that has tasks of its own, one that wakes the
+    /// entry before it lets it see the answer ([`EarlyWake`]): `seen` is then false until
+    /// it does.
+    fn early_waker(&self, flaw: SeederFlaw, cx: &Context<'_>, seen: &Arc<AtomicBool>) -> Waker {
+        let spawn = if self.has(flaw) {
+            self.net.ledger().timing.spawn.clone()
+        } else {
+            None
+        };
+        let Some(spawn) = spawn else {
+            return cx.waker().clone();
+        };
+        seen.store(false, Ordering::SeqCst);
+        Waker::from(Arc::new(EarlyWake {
+            spawn,
+            entry: cx.waker().clone(),
+            seen: seen.clone(),
+        }))
+    }
+
+    /// A read's round trip, sent by `by`: back once the mint has answered it, its sender
+    /// woken as it comes back. The flaws: not woken, or woken before the answer can be
+    /// seen.
+    async fn read_back(&self, by: Learner) {
+        let unwoken = match by {
+            Learner::Hello => self.has(SeederFlaw::ReadUnwoken),
+            Learner::Pay => {
+                self.has(SeederFlaw::ReadUnwoken) || self.has(SeederFlaw::PayReadUnwoken)
+            }
+            Learner::Sweep => self.has(SeederFlaw::SweepReadUnwoken),
+        };
+        let early = match by {
+            Learner::Hello => self.has(SeederFlaw::ReadWokenEarly),
+            Learner::Pay => {
+                self.has(SeederFlaw::ReadWokenEarly) || self.has(SeederFlaw::PayReadWokenEarly)
+            }
+            Learner::Sweep => self.has(SeederFlaw::SweepReadWokenEarly),
+        };
+        let early = if early {
+            self.net.ledger().timing.spawn.clone()
+        } else {
+            None
+        };
+        self.net.round_trip_as(!unwoken, early).await;
+    }
+
+    /// Whether, with tasks of its own, it wakes a payment before it settles its swap's
+    /// outcome `outcome` (the flaws).
+    fn wakes_early(&self, outcome: Swap) -> bool {
+        match self.flaw {
+            Some(SeederFlaw::OutcomeWokenEarly) => true,
+            Some(SeederFlaw::SpentWokenEarly) => outcome == Swap::Spent,
+            Some(SeederFlaw::InvalidWokenEarly) => outcome == Swap::Invalid,
+            Some(SeederFlaw::UnreachableWokenEarly) => outcome == Swap::Unreachable,
+            Some(SeederFlaw::LostWokenEarly) => outcome == Swap::Lost,
+            Some(SeederFlaw::PendingWokenEarly) => outcome == Swap::Pending,
+            Some(SeederFlaw::OutputsRefusedWokenEarly) => outcome == Swap::OutputsRefused,
+            Some(SeederFlaw::ExpiredWokenEarly) => outcome == Swap::Expired,
+            _ => false,
+        }
+    }
+
+    /// The flaws ([`SeederFlaw::OutcomeWokenEarly`] and the like), on a task of the seeder's
+    /// own: the outcome's payment is woken first, and the outcome settled a turn of the
+    /// runtime later, with no wake.
+    async fn land_woken_early(
+        &self,
+        id: u64,
+        pay: &Settle,
+        token: &str,
+        outputs: u64,
+        outcome: Swap,
+    ) {
+        let outcome = self.after_swap(id, token, outputs, outcome);
+        if self.wakes_early(outcome) {
+            let waker = {
+                let mut st = self.state();
+                st.woken_early.insert(id);
+                st.pays.get_mut(&id).and_then(|r| r.waker.take())
+            };
+            wake_all(waker.into_iter().collect());
+            next_poll().await;
+        } else if self.has(SeederFlaw::TurnWokenEarly) {
+            let waiters = {
+                let mut st = self.state();
+                st.turn_woken_early.insert(id);
+                st.waiting.remove(&pay.key)
+            };
+            wake_all(waiters.unwrap_or_default());
+            next_poll().await;
+        }
+        self.land(id, pay, token, outputs, outcome);
+    }
+
+    /// With what it starts the task that takes a closed connection, if it takes one on a
+    /// task of its own ([`Timing::closes_on_a_task`]).
+    fn closes_on_a_task(&self) -> Option<Spawner> {
+        let l = self.net.ledger();
+        l.timing.spawn.clone().filter(|_| l.timing.closes_on_a_task)
+    }
+
+    /// The time it ages its state to ([`Inner::age`]): the clock's; or, where it ages on a
+    /// task of its own ([`Timing::ages_on_a_task`]), the time that task last saw.
+    fn aged_now(&self) -> u64 {
+        if self.net.ledger().timing.ages_on_a_task {
+            self.aged.load(Ordering::SeqCst)
+        } else {
+            self.clock.now()
+        }
+    }
+
+    /// The seeder's own wait moves the clock by `by` (a read left unanswered, the seam of
+    /// [`Harness::advance_during_next_land`]): it has seen that time pass itself.
+    fn pass(&self, by: Duration) {
+        self.clock.advance(by);
+        self.aged.store(self.clock.now(), Ordering::SeqCst);
+    }
 }
 
 /// Ready on the next poll, with nothing asked to wake it: only a poll it did not ask for
@@ -7486,6 +7776,68 @@ async fn unwoken_poll() {
 fn wake_all(wake: Vec<Waker>) {
     for w in wake {
         w.wake();
+    }
+}
+
+/// A turn through a task of the runtime the seeder was made in, started with `spawn`: this
+/// waits until that task has run ([`Timing::tasks_in`] and the like).
+async fn a_task(spawn: &Spawner) {
+    let done = Arc::new(Mutex::new((false, None::<Waker>)));
+    let ran = done.clone();
+    spawn(Box::pin(async move {
+        let waker = {
+            let mut d = lock(&ran);
+            d.0 = true;
+            d.1.take()
+        };
+        if let Some(w) = waker {
+            w.wake();
+        }
+    }));
+    poll_fn(|cx| {
+        let mut d = lock(&done);
+        if d.0 {
+            return Poll::Ready(());
+        }
+        d.1 = Some(cx.waker().clone());
+        Poll::Pending
+    })
+    .await;
+}
+
+/// Passes a wake of an entry on to it through a task of the seeder's runtime
+/// ([`Timing::wakes_through_a_task`]): a task for each wake, so as many as the wakers the
+/// entry handed out while it waited.
+struct Relay {
+    hop: Spawner,
+    entry: Waker,
+}
+
+impl Wake for Relay {
+    fn wake(self: Arc<Self>) {
+        let entry = self.entry.clone();
+        (self.hop)(Box::pin(async move { entry.wake() }));
+    }
+}
+
+/// What a flawed seeder asks to be woken in an entry's stead as an answer comes
+/// ([`SeederFlaw::KeysWokenEarly`] and the like): it starts a task of the seeder's own,
+/// which wakes the entry, yields, and only then lets the entry see the answer (`seen`),
+/// waking it no more. An entry polled between the two finds nothing, and waits for good.
+struct EarlyWake {
+    spawn: Spawner,
+    entry: Waker,
+    seen: Arc<AtomicBool>,
+}
+
+impl Wake for EarlyWake {
+    fn wake(self: Arc<Self>) {
+        let (entry, seen) = (self.entry.clone(), self.seen.clone());
+        (self.spawn)(Box::pin(async move {
+            entry.wake();
+            next_poll().await;
+            seen.store(true, Ordering::SeqCst);
+        }));
     }
 }
 
@@ -8169,9 +8521,7 @@ impl Inner {
                         };
                         let reading =
                             Reading::start(self, slot, now, proofs.clone(), learnt.covers());
-                        self.net
-                            .round_trip_woken(!self.has(SeederFlaw::ReadUnwoken))
-                            .await;
+                        self.read_back(by).await;
                         self.learn_apply(&learnt, by);
                         reading.back();
                     } else if let Some(learnt) = self.learn_read(Some(key), until) {
@@ -8200,9 +8550,7 @@ impl Inner {
                     }
                     if self.net.round_trips() {
                         // Its result is applied when it is back, on a later poll.
-                        self.net
-                            .round_trip_woken(!self.has(SeederFlaw::ReadUnwoken))
-                            .await;
+                        self.read_back(by).await;
                     }
                     if self.has(SeederFlaw::CoverageFixedAtBack) {
                         // Back: on the next poll, or once the mint answers on this thread.
@@ -8455,7 +8803,7 @@ impl Inner {
             wait = wait.min(u.saturating_sub(self.clock.now()));
         }
         if wait > 0 {
-            self.clock.advance(Duration::from_secs(wait));
+            self.pass(Duration::from_secs(wait));
         }
     }
 
@@ -8717,6 +9065,7 @@ impl Inner {
         if !self.has(SeederFlaw::OwnReadsNeverPruned) {
             st.own_reads.retain(|_, (at, ..)| *at == now);
         }
+        let now = self.aged_now();
         let secs = |d: Duration| d.as_secs();
         if !self.has(SeederFlaw::DebtNeverAges) {
             let ttl = if self.has(SeederFlaw::AgeTtlOneSecond) {
@@ -9386,19 +9735,23 @@ impl Inner {
         // The mints that alone started the keysets named, if any: fixed as each starts.
         let owners: HashMap<u64, Option<String>> =
             named.iter().map(|k| (*k, self.net.owner_of(*k))).collect();
-        // What its key requests and listings ask to be woken by: the flaws, nothing.
+        // What its key requests and listings ask to be woken by: the flaws, nothing; or a
+        // task of the seeder's own that wakes it before the answer can be seen (`keys_seen`
+        // and `listing_seen` false meanwhile).
+        let keys_seen = Arc::new(AtomicBool::new(true));
+        let listing_seen = Arc::new(AtomicBool::new(true));
         let keys_waker = |cx: &Context<'_>| {
             if self.has(SeederFlaw::KeysUnwoken) {
                 Waker::noop().clone()
             } else {
-                cx.waker().clone()
+                self.early_waker(SeederFlaw::KeysWokenEarly, cx, &keys_seen)
             }
         };
         let listing_waker = |cx: &Context<'_>| {
             if self.has(SeederFlaw::ListingUnwoken) {
                 Waker::noop().clone()
             } else {
-                cx.waker().clone()
+                self.early_waker(SeederFlaw::ListingWokenEarly, cx, &listing_seen)
             }
         };
         // Polled once already, waiting ([`SeederFlaw::KeysGiveUpOnWake`] only), and the clock
@@ -9476,6 +9829,9 @@ impl Inner {
                 });
                 if unlisted == Some(false) || self.has(SeederFlaw::UnlistedKeysFetched) {
                     // Every keyset missing is the mint's: ask for their keys.
+                    if !keys_seen.load(Ordering::SeqCst) {
+                        break None; // the flaw: asked for, and not to be seen yet
+                    }
                     let ask = !std::mem::replace(&mut asked, true);
                     drop(st);
                     break match self
@@ -9498,6 +9854,7 @@ impl Inner {
                             )))
                         }
                         Some(Some(served)) => {
+                            keys_seen.store(true, Ordering::SeqCst);
                             let mut st = self.state();
                             let held = st.keys.entry(mint.to_owned()).or_insert_with(|| MintKeys {
                                 mint: served.mint.clone(),
@@ -9561,6 +9918,9 @@ impl Inner {
                     && l.answer.is_none()
                 {
                     // Its answer is held: wait for it.
+                    if !listing_seen.load(Ordering::SeqCst) {
+                        break None; // the flaw: not to be seen yet
+                    }
                     drop(st);
                     let Some(answer) =
                         self.net
@@ -9568,6 +9928,7 @@ impl Inner {
                     else {
                         break None;
                     };
+                    listing_seen.store(true, Ordering::SeqCst);
                     held_waited = true;
                     if let Some(l) = self.state().listings.get_mut(key) {
                         l.answer = Some(answer);
@@ -9687,12 +10048,16 @@ impl Inner {
         let key = self.listing_key(mint);
         let own = self.has(SeederFlaw::KeysetListingOwnCache);
         let other_mint = self.other_mint(mint);
+        let seen = Arc::new(AtomicBool::new(true));
         poll_fn(|cx| {
-            // The flaw: woken by the clock alone.
-            let waker = if self.has(SeederFlaw::KeysetListingWaitUnwoken) {
-                Waker::noop()
-            } else {
-                cx.waker()
+            // The flaws: woken by the clock alone; or by a task of the seeder's own, before
+            // the listing can be seen (`seen` false meanwhile).
+            let waker = || {
+                if self.has(SeederFlaw::KeysetListingWaitUnwoken) {
+                    Waker::noop().clone()
+                } else {
+                    self.early_waker(SeederFlaw::KeysetListingWokenEarly, cx, &seen)
+                }
             };
             let found = loop {
                 let mut st = self.state();
@@ -9741,10 +10106,15 @@ impl Inner {
                         break Some(answer.final_expiry);
                     }
                     // Its answer is held: wait for it.
+                    if !seen.load(Ordering::SeqCst) {
+                        break None; // the flaw: not to be seen yet
+                    }
                     drop(st);
-                    let Some(mut answer) = self.net.listed(mint, l.released, l.call, waker) else {
+                    let Some(mut answer) = self.net.listed(mint, l.released, l.call, &waker())
+                    else {
                         break None;
                     };
+                    seen.store(true, Ordering::SeqCst);
                     if self.has(SeederFlaw::HeldListingExpiryDropped) {
                         answer.final_expiry = None;
                     }
@@ -9771,7 +10141,7 @@ impl Inner {
                 }
                 let seq = st.listings_asked;
                 drop(st);
-                let (released, call, answer) = self.net.list_keysets(mint, waker);
+                let (released, call, answer) = self.net.list_keysets(mint, &waker());
                 let listed = Listing {
                     at: now,
                     seq,
@@ -9844,7 +10214,7 @@ impl Inner {
         let arrived = self.clock.now();
         let during = std::mem::take(&mut self.net.ledger().advance_during_land);
         if during > 0 {
-            self.clock.advance(Duration::from_secs(during));
+            self.pass(Duration::from_secs(during));
         }
         let wake = {
             let mut st = self.state();
@@ -9871,6 +10241,8 @@ impl Inner {
                 });
             }
             let now = self.clock.now();
+            let early = st.woken_early.remove(&id);
+            let turn_early = st.turn_woken_early.remove(&id);
             let Some(r) = st.pays.get_mut(&id) else {
                 return;
             };
@@ -9896,6 +10268,11 @@ impl Inner {
             if self.has(SeederFlaw::OutcomeUnwoken) {
                 wake.clear();
             }
+            // The flaws: an outcome that is no claim wakes no one; one whose payment was
+            // woken before it was settled wakes it no more.
+            if early || (outcome != Swap::Claimed && self.has(SeederFlaw::NoClaimUnwoken)) {
+                wake.clear();
+            }
             if late {
                 self.settle_late(&mut st, pay, outcome);
             } else {
@@ -9905,9 +10282,14 @@ impl Inner {
                 }
             }
             let flaw = SeederFlaw::LandFreedAfterDeadline;
-            wake.extend(self.freeing(&mut st, pay.key, id, flaw, |st| {
+            let waiters = self.freeing(&mut st, pay.key, id, flaw, |st| {
                 self.release_turn(st, pay.key, id)
-            }));
+            });
+            // The flaws: what waits for the turn was woken before it was freed, and is not
+            // now; or is not, the payment's connection closed.
+            if !turn_early && !(finished && self.has(SeederFlaw::DroppedLandWakesNone)) {
+                wake.extend(waiters);
+            }
             if finished && !self.has(SeederFlaw::LandKeepsFinished) {
                 st.pays.remove(&id);
             }
@@ -10095,6 +10477,7 @@ struct Settle {
 /// Owned by a `pay` future: when it answers or is dropped, the payment's record is
 /// finished, and a turn it holds without a swap in flight is released. Dropped before its
 /// swap is sent (its connection closed), it is abandoned unswapped.
+#[derive(Clone)]
 struct PayGuard {
     e: Arc<Inner>,
     id: u64,
@@ -10114,10 +10497,25 @@ struct PayGuard {
     unfloored: bool,
     /// How it came to its turn.
     came: Came,
+    /// Its drop is being taken, on a task of the seeder's own ([`Timing::closes_on_a_task`]).
+    taken: bool,
 }
 
 impl Drop for PayGuard {
     fn drop(&mut self) {
+        // An honest seeder may take a payment dropped unanswered on a task of its own.
+        if !self.answered
+            && !self.taken
+            && let Some(spawn) = self.e.closes_on_a_task()
+        {
+            let mut later = self.clone();
+            later.taken = true;
+            spawn(Box::pin(async move {
+                next_poll().await;
+                drop(later);
+            }));
+            return;
+        }
         let wake = {
             let mut st = self.e.state();
             let Some(r) = st.pays.get_mut(&self.id) else {
@@ -10244,6 +10642,7 @@ impl Drop for PayGuard {
 }
 
 /// A `hello` waiting for its account's turn, counted toward its peer's session cap.
+#[derive(Clone)]
 struct HelloWait {
     e: Arc<Inner>,
     key: Key,
@@ -10254,6 +10653,8 @@ struct HelloWait {
     took: bool,
     /// It waited for a payment it did not take the turn over from.
     waited: bool,
+    /// Its drop is being taken, on a task of the seeder's own ([`Timing::closes_on_a_task`]).
+    taken: bool,
 }
 
 impl HelloWait {
@@ -10280,6 +10681,18 @@ impl HelloWait {
 impl Drop for HelloWait {
     fn drop(&mut self) {
         if !self.counted {
+            return;
+        }
+        // An honest seeder may take a `hello` dropped unanswered on a task of its own.
+        if !self.taken
+            && let Some(spawn) = self.e.closes_on_a_task()
+        {
+            let mut later = self.clone();
+            later.taken = true;
+            spawn(Box::pin(async move {
+                next_poll().await;
+                drop(later);
+            }));
             return;
         }
         let e = self.e.clone();
@@ -10327,15 +10740,55 @@ impl MockEngine {
                 .into_iter()
                 .map(|(addr, members)| Video { addr, members })
                 .collect(),
+            aged: AtomicU64::new(clock.now()),
             clock,
             net,
             flaw,
             state: Mutex::new(State::default()),
         };
-        if e.listings() != Listings::OnDemand {
+        let (held_from_start, ageing) = {
+            let l = e.net.ledger();
+            let t = &l.timing;
+            (
+                t.held_from_start,
+                t.spawn.clone().filter(|_| t.ages_on_a_task),
+            )
+        };
+        if e.listings() != Listings::OnDemand || held_from_start {
             e.list_at_start();
         }
-        Ok(Self(Arc::new(e)))
+        if held_from_start {
+            // The keys of the keyset each quoted mint issues from, kept from an earlier run.
+            for mint in &e.config.mints {
+                let keyset = {
+                    let l = e.net.ledger();
+                    l.own_active.get(mint).copied().unwrap_or(l.active_keyset)
+                };
+                e.state().keys.insert(
+                    mint.clone(),
+                    MintKeys {
+                        mint: mint.clone(),
+                        keysets: HashSet::from([keyset]),
+                    },
+                );
+            }
+        }
+        let e = Arc::new(e);
+        if let Some(spawn) = ageing {
+            // The task that ages its state: woken by each move of the clock, and gone with
+            // the seeder.
+            let (seeder, clock) = (Arc::downgrade(&e), e.clock.clone());
+            spawn(Box::pin(poll_fn(move |cx| {
+                let Some(e) = seeder.upgrade() else {
+                    return Poll::Ready(());
+                };
+                clock.watch(cx.waker());
+                e.aged.store(clock.now(), Ordering::SeqCst);
+                e.age(&mut e.state());
+                Poll::Pending
+            })));
+        }
+        Ok(Self(e))
     }
 
     /// Per-identity records held.
@@ -10361,13 +10814,26 @@ impl SeederEngine for MockEngine {
     type Session = MockSession;
 
     async fn sweep(&self) {
+        self.0.through_tasks(false, self.sweep_now()).await;
+    }
+
+    async fn hello(&self, peer: &PeerId, hello: &Hello) -> Result<MockSession, Rej> {
+        self.0
+            .through_tasks(false, self.hello_now(peer, hello))
+            .await
+    }
+}
+
+impl MockEngine {
+    /// A sweep, at the seeder ([`SeederEngine::sweep`]).
+    async fn sweep_now(&self) {
         let spawn = {
             let l = self.0.net.ledger();
             l.timing.spawn.clone().filter(|_| l.timing.sweep_on_a_task)
         };
         let Some(spawn) = spawn else {
             if self.0.net.round_trips() {
-                self.0.net.round_trip().await;
+                self.0.read_back(Learner::Sweep).await;
             }
             self.0.learn(None, None, Learner::Sweep);
             return;
@@ -10378,7 +10844,7 @@ impl SeederEngine for MockEngine {
         spawn(Box::pin(async move {
             next_poll().await;
             if e.net.round_trips() {
-                e.net.round_trip().await;
+                e.read_back(Learner::Sweep).await;
             }
             e.learn(None, None, Learner::Sweep);
             let waker = {
@@ -10401,7 +10867,8 @@ impl SeederEngine for MockEngine {
         .await;
     }
 
-    async fn hello(&self, peer: &PeerId, hello: &Hello) -> Result<MockSession, Rej> {
+    /// A `hello`, at the seeder ([`SeederEngine::hello`]).
+    async fn hello_now(&self, peer: &PeerId, hello: &Hello) -> Result<MockSession, Rej> {
         let e = &self.0;
         e.dawdle().await;
         let video = match e.videos.iter().position(|v| v.addr == hello.video) {
@@ -10528,6 +10995,7 @@ impl SeederEngine for MockEngine {
             reading: false,
             took: false,
             waited: false,
+            taken: false,
         };
         if e.has(SeederFlaw::HelloAsksListing)
             && let Some(mint) = e.config.mints.first()
@@ -10776,28 +11244,44 @@ pub struct MockSession {
 
 impl Drop for MockSession {
     fn drop(&mut self) {
-        let now = self.e.clock.now();
-        let from_close = !self.e.has(SeederFlaw::ForgetsFromLastAdmission);
-        let mut st = self.e.state();
-        if st.open.get(&self.session) == Some(&self.key) && !self.e.has(SeederFlaw::SessionIdLeaks)
-        {
-            st.open.remove(&self.session);
-        }
-        if let Some(n) = st.open_count.get_mut(&self.count_key) {
-            *n = n.saturating_sub(1);
-            if *n == 0 {
-                st.open_count.remove(&self.count_key);
+        let (e, key, count_key, session) = (
+            self.e.clone(),
+            self.key,
+            self.count_key,
+            self.session.clone(),
+        );
+        let spawn = e.closes_on_a_task();
+        let close = move || {
+            let now = e.clock.now();
+            let from_close = !e.has(SeederFlaw::ForgetsFromLastAdmission);
+            let mut st = e.state();
+            if st.open.get(&session) == Some(&key) && !e.has(SeederFlaw::SessionIdLeaks) {
+                st.open.remove(&session);
             }
-        }
-        if let Some(n) = st.open_accounts.get_mut(&self.key) {
-            *n = n.saturating_sub(1);
-            if *n == 0 || self.e.has(SeederFlaw::ForgetsOnFirstClose) {
-                st.open_accounts.remove(&self.key);
+            if let Some(n) = st.open_count.get_mut(&count_key) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    st.open_count.remove(&count_key);
+                }
             }
-        }
-        // An account is idle from its last session's close.
-        if from_close && let Some(a) = st.accounts.get_mut(&self.key) {
-            a.last_active = now;
+            if let Some(n) = st.open_accounts.get_mut(&key) {
+                *n = n.saturating_sub(1);
+                if *n == 0 || e.has(SeederFlaw::ForgetsOnFirstClose) {
+                    st.open_accounts.remove(&key);
+                }
+            }
+            // An account is idle from its last session's close.
+            if from_close && let Some(a) = st.accounts.get_mut(&key) {
+                a.last_active = now;
+            }
+        };
+        match spawn {
+            // On a task of the seeder's own, a turn of the runtime later, as of then.
+            Some(spawn) => spawn(Box::pin(async move {
+                next_poll().await;
+                close();
+            })),
+            None => close(),
         }
     }
 }
@@ -11552,6 +12036,20 @@ impl MockSession {
                 let spawn = e2.net.ledger().timing.spawn.clone();
                 let net = e2.net.clone();
                 let e3 = e2.clone();
+                // The flaws: on a task of its own, it wakes the payment before it settles.
+                if let Some(spawn) = spawn
+                    .clone()
+                    .filter(|_| e3.flaw.is_some_and(SeederFlaw::settles_after_a_wake))
+                {
+                    net.ledger().landing += 1;
+                    spawn(Box::pin(async move {
+                        next_poll().await;
+                        e3.land_woken_early(id, &settle, &token, outputs, outcome)
+                            .await;
+                        net.ledger().landing -= 1;
+                    }));
+                    return;
+                }
                 let land = move || {
                     let outcome = e2.after_swap(id, &token, outputs, outcome);
                     e2.land(id, &settle, &token, outputs, outcome);
@@ -11705,6 +12203,22 @@ impl SeederSession for MockSession {
     }
 
     async fn pay(&mut self, pay: &Pay) -> Result<Ack, Rej> {
+        let e = self.e.clone();
+        e.through_tasks(true, self.pay_now(pay)).await
+    }
+
+    fn banned(&self) -> bool {
+        let mut st = self.e.state();
+        if !self.e.has(SeederFlaw::BannedNotAged) {
+            self.e.age(&mut st);
+        }
+        self.e.peer_banned(&st, self.key)
+    }
+}
+
+impl MockSession {
+    /// A `pay`, at the seeder ([`SeederSession::pay`]).
+    async fn pay_now(&mut self, pay: &Pay) -> Result<Ack, Rej> {
         self.e.dawdle().await;
         if self.e.has(SeederFlaw::BanCheckedBeforeTurn) && self.banned() {
             return Err(rej(RejCode::Banned, "this peer is banned"));
@@ -11726,6 +12240,7 @@ impl SeederSession for MockSession {
             waited: false,
             unfloored: false,
             came: Came::Unwaited,
+            taken: false,
         };
         let mut took_over = false;
         if !self.e.has(SeederFlaw::ConcurrentPays) {
@@ -11871,14 +12386,6 @@ impl SeederSession for MockSession {
                     || (r.code == RejCode::Banned && e.has(SeederFlaw::BannedRefusalNoFloor))
             });
         answer
-    }
-
-    fn banned(&self) -> bool {
-        let mut st = self.e.state();
-        if !self.e.has(SeederFlaw::BannedNotAged) {
-            self.e.age(&mut st);
-        }
-        self.e.peer_banned(&st, self.key)
     }
 }
 
@@ -14304,11 +14811,29 @@ impl MockHarness {
 
     /// A harness whose mint answers every call from another thread
     /// ([`MockHarness::with_woken_answers`]) and whose seeders carry `flaw`: the suite must
-    /// fail against it at the same check as where the mint answers on a later poll.
+    /// fail against it too. Most defects fail there at the check they fail where the mint
+    /// answers on a later poll; a few fail at another, where an answer that comes by a wake
+    /// leaves a different check first (`tests/mutants.rs` registers each with the scenario
+    /// that catches it).
     #[must_use]
     pub fn with_seeder_flaw_woken(flaw: SeederFlaw) -> Self {
         let h = Self::with_seeder_flaw(flaw);
         h.net.ledger().answering = Answers::Woken;
+        h
+    }
+
+    /// The same, the seeders settling each swap's outcome on a task of their own, started
+    /// with `spawn` ([`Timing::spawn`]): for defects that can arise only where the seeder
+    /// has such tasks (it wakes an entry from one before it settles what the wake
+    /// announces).
+    #[must_use]
+    pub fn with_seeder_flaw_on_tasks(flaw: SeederFlaw, spawn: Spawner) -> Self {
+        let h = Self::with_seeder_flaw_woken(flaw);
+        h.net.ledger().timing = Timing {
+            woken: true,
+            spawn: Some(spawn),
+            ..Timing::default()
+        };
         h
     }
 
@@ -14620,17 +15145,20 @@ impl Harness for MockHarness {
     }
 
     fn race_release_with_clock(&self, by: Duration) {
-        // One of the two starts up to 5 ms after the other, the clock in two races and the
-        // release in the next two, by a lag that changes each race and comes round again: so
-        // an outcome comes back before the deadline in some races and after it in others,
-        // whether the mint answers swaps at once or from another thread a few milliseconds
-        // after they reach it.
+        // One of the two starts after the other: the release in one pair of races and the
+        // clock in the next (a pair is a claim's race and a refusal's, which the suite runs
+        // in turn), by a lag that grows from none to 32 ms and comes round again. A mint's
+        // answer to a released swap comes back at once or within some 10 ms under every
+        // honest timing, so an outcome is settled before the deadline in some races and
+        // after it in others, for a claim and a refusal alike.
+        const LAGS_MS: [u64; 7] = [0, 1, 2, 4, 8, 16, 32];
         let (release_lag, clock_lag) = {
             let mut l = self.net.ledger();
             l.under_way += 1;
+            let pair = usize::try_from(l.races / 2).unwrap_or(0);
             l.races += 1;
-            let lag = Duration::from_micros(l.races * 1_237 % 5_000);
-            if (l.races / 2).is_multiple_of(2) {
+            let lag = Duration::from_millis(LAGS_MS[pair / 2 % LAGS_MS.len()]);
+            if pair.is_multiple_of(2) {
                 (lag, Duration::ZERO)
             } else {
                 (Duration::ZERO, lag)
@@ -14664,6 +15192,14 @@ impl Harness for MockHarness {
                 l.raised = raised;
             }
             l.under_way -= 1;
+        });
+    }
+
+    fn spawn_thread(&self, side: Box<dyn FnOnce() + Send>) {
+        let enter = self.net.ledger().timing.enter.clone();
+        std::thread::spawn(move || match enter {
+            Some(enter) => enter(side),
+            None => side(),
         });
     }
 
