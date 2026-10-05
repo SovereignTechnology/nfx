@@ -67,12 +67,37 @@ pub const MAX_PROOFS: usize = 64;
 const OLDER_KEYSETS: u64 = 1 << 32;
 /// Ids of keysets no mint ever had start past this ([`BadToken::UnknownKeyset`]).
 const UNKNOWN_KEYSETS: u64 = 1 << 48;
+/// Ids of keysets one mint alone started start past this ([`Harness::start_keyset_at`]).
+const OWN_KEYSETS: u64 = 1 << 56;
 
 /// Whether a mint whose active keyset is `active` lists keyset `k` (NUT-02): the active
 /// one, every one before it, and the older keysets the wallets hold, which predate it. A
 /// keyset it never had it does not list.
 fn lists(active: u64, k: u64) -> bool {
     k <= active || (k > OLDER_KEYSETS && k < UNKNOWN_KEYSETS)
+}
+
+/// A mint's keyset listing (NUT-02), as it answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Listed {
+    /// Its active keyset ([`lists`] says which others it lists).
+    active: u64,
+    /// The keysets mints alone had started by then, its own among them, run to this id
+    /// ([`Harness::start_keyset_at`]).
+    own_upto: u64,
+    /// The `final_expiry` it lists for its active keyset, if any.
+    final_expiry: Option<u64>,
+}
+
+impl Listed {
+    /// Whether it names keyset `k`, which mint `owner` alone started (`None`: one every
+    /// mint shares), as the listing of the mint at `url`.
+    fn names(&self, url: &str, k: u64, owner: Option<&str>) -> bool {
+        match owner {
+            Some(m) => m == url && k <= self.own_upto,
+            None => lists(self.active, k),
+        }
+    }
 }
 
 /// Payment state is not trusted after a panic: a poisoned lock aborts the caller.
@@ -255,6 +280,12 @@ struct Ledger {
     /// how many there have been.
     older_keyset: Option<u64>,
     older_keysets: u64,
+    /// Keysets one mint alone started, and that mint ([`Harness::start_keyset_at`]).
+    own_keysets: HashMap<u64, String>,
+    /// The keyset each such mint issues from, the one it started last, and the
+    /// `final_expiry` it lists for it.
+    own_active: HashMap<String, u64>,
+    own_expiry: HashMap<String, Option<u64>>,
     /// The keyset each proof issued names, which its DLEQ proof verifies against.
     keyset_of: HashMap<u64, u64>,
     /// Proofs whose DLEQ proof is missing or invalid (any other's is valid).
@@ -304,6 +335,8 @@ struct Ledger {
     reads: u64,
     /// Key requests the seeder has sent, one per request, answered or held.
     key_requests: u64,
+    /// Those of them that asked for a keyset listing (NUT-02).
+    listing_requests: u64,
     /// Releases of held key requests so far: a request held before one was answered then.
     key_releases: u64,
     /// The most proofs or outputs one read may cover; more is refused at once.
@@ -341,6 +374,8 @@ struct Ledger {
     expired_ranges: Vec<(u64, u64)>,
     /// How the mint answers the seeder's reads of swap state.
     read_answers: Answers,
+    /// When the seeders, honest, ask for keyset listings beyond what they must.
+    listings: Listings,
     /// Reads answered from another thread whose reader has not been woken yet
     /// ([`Harness::answers_under_way`]).
     under_way: usize,
@@ -368,6 +403,21 @@ struct Ledger {
 }
 
 impl Ledger {
+    /// The keyset listing of the mint at `url` as it answers now: which keysets it names
+    /// ([`Listed::names`]), and the `final_expiry` of its active keyset: the one it alone
+    /// started last, if any ([`Harness::start_keyset_at`]), else the one every mint shares.
+    fn listing_at(&self, url: &str) -> Listed {
+        Listed {
+            active: self.active_keyset,
+            own_upto: OWN_KEYSETS + self.own_keysets.len() as u64,
+            final_expiry: self
+                .own_expiry
+                .get(url)
+                .copied()
+                .unwrap_or(self.final_expiry),
+        }
+    }
+
     /// The keyset of `proofs` expires, while the mint's own does not. Proofs of the older
     /// keyset the wallets hold take the whole of it with them.
     fn expire_inputs(&mut self, proofs: impl IntoIterator<Item = u64>) {
@@ -412,6 +462,19 @@ impl Ledger {
     }
 }
 
+/// When an honest mock seeder asks a mint for its keyset listing (NUT-02): where a check
+/// needs one (NFX-07 §3), and, as it may, at its start. The suite must pass each.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Listings {
+    /// Only where a check needs one: step 3, for a keyset the listing it holds does not
+    /// name; the keyset rule, when the one it holds was asked for before the payment's
+    /// turn's second.
+    #[default]
+    OnDemand,
+    /// Every quoted mint's at its start too ([`MockHarness::with_listings_at_start`]).
+    AtStart,
+}
+
 /// How the mint answers the seeder's reads of swap state (NUT-07 checks and NUT-09
 /// restores).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -447,16 +510,24 @@ impl MockNetwork {
         token
     }
 
-    fn fresh_proofs(&self, n: usize) -> Vec<u64> {
+    /// `n` fresh proofs of the mint at `mint`: of the keyset it alone started last, if any,
+    /// else of the active keyset every mint shares.
+    fn fresh_proofs(&self, mint: &str, n: usize) -> Vec<u64> {
         let mut l = self.ledger();
+        let keyset = l.own_active.get(mint).copied().unwrap_or(l.active_keyset);
         (0..n)
             .map(|_| {
                 l.next += 1;
-                let (id, keyset) = (l.next, l.active_keyset);
+                let id = l.next;
                 l.keyset_of.insert(id, keyset);
                 id
             })
             .collect()
+    }
+
+    /// The mint that alone started keyset `k`, if one did ([`Harness::start_keyset_at`]).
+    fn owner_of(&self, k: u64) -> Option<String> {
+        self.ledger().own_keysets.get(&k).cloned()
     }
 
     /// The mint's active keyset.
@@ -473,16 +544,17 @@ impl MockNetwork {
             .collect()
     }
 
-    /// Fresh proofs for `amount`: one per set bit, as a real mint splits.
-    fn proofs_for(&self, amount: u64) -> Vec<u64> {
-        self.fresh_proofs(amount.count_ones().max(1) as usize)
+    /// Fresh proofs of the mint at `mint` for `amount`: one per set bit, as a real mint
+    /// splits.
+    fn proofs_for(&self, mint: &str, amount: u64) -> Vec<u64> {
+        self.fresh_proofs(mint, amount.count_ones().max(1) as usize)
     }
 
     /// A fresh token worth `amount` sat from `mint`, of fresh proofs only: the wallets'
     /// older ones ([`Harness::fund_older_keyset`]) fund the watchers' payments alone.
     #[must_use]
     pub fn issue(&self, mint: &str, amount: u64) -> String {
-        let proofs = self.proofs_for(amount);
+        let proofs = self.proofs_for(mint, amount);
         self.mint_token(TokenInfo {
             proofs,
             mints: vec![mint.to_owned()],
@@ -507,7 +579,7 @@ impl MockNetwork {
         };
         let mut proofs = old.to_vec();
         if older > 0 {
-            let drawn = self.proofs_for(older);
+            let drawn = self.proofs_for(mint, older);
             let mut l = self.ledger();
             let keyset = l.older_keyset.unwrap_or_default();
             for p in &drawn {
@@ -521,7 +593,7 @@ impl MockNetwork {
             proofs.extend(drawn);
         }
         if older < amount || amount == 0 {
-            proofs.extend(self.proofs_for(amount - older));
+            proofs.extend(self.proofs_for(mint, amount - older));
         }
         let token = self.mint_token(TokenInfo {
             proofs,
@@ -637,8 +709,12 @@ impl MockNetwork {
             return None;
         }
         l.dialled.insert(url.to_owned());
-        let active = l.active_keyset;
-        Some(keysets.iter().all(|k| lists(active, *k)).then(|| MintKeys {
+        let listing = l.listing_at(url);
+        let known = keysets.iter().all(|k| {
+            let owner = l.own_keysets.get(k).map(String::as_str);
+            listing.names(url, *k, owner)
+        });
+        Some(known.then(|| MintKeys {
             mint: url.to_owned(),
             keysets: keysets.clone(),
         }))
@@ -647,27 +723,28 @@ impl MockNetwork {
     /// Ask the mint at `url` for its keyset listing (NUT-02), now: the request's place
     /// among the releases of held key requests, and the answer, as [`MockNetwork::listed`]
     /// gives it.
-    fn list_keysets(&self, url: &str, waker: &Waker) -> (u64, Option<u64>) {
+    fn list_keysets(&self, url: &str, waker: &Waker) -> (u64, Option<Listed>) {
         let released = {
             let mut l = self.ledger();
             l.key_requests += 1;
+            l.listing_requests += 1;
             l.dialled.insert(url.to_owned());
             l.key_releases
         };
-        (released, self.listed(released, waker))
+        (released, self.listed(url, released, waker))
     }
 
-    /// The answer to a keyset listing asked for when `released` releases of held key
-    /// requests had been made: `None` while key requests are held and none has been made
-    /// since, and then `waker` is woken at the next. Else the active keyset the mint lists
-    /// ([`lists`] says which others it lists).
-    fn listed(&self, released: u64, waker: &Waker) -> Option<u64> {
+    /// The answer to a keyset listing of the mint at `url` asked for when `released`
+    /// releases of held key requests had been made: `None` while key requests are held and
+    /// none has been made since, and then `waker` is woken at the next. Else the listing as
+    /// the mint answers it then.
+    fn listed(&self, url: &str, released: u64, waker: &Waker) -> Option<Listed> {
         let mut l = self.ledger();
         if l.hold_keys && l.key_releases == released {
             l.waiting.push(waker.clone());
             return None;
         }
-        Some(l.active_keyset)
+        Some(l.listing_at(url))
     }
 
     /// Swap every proof of `token` at its mint, atomically, now.
@@ -3217,6 +3294,241 @@ pub enum SeederFlaw {
     /// A payment that took a dead turn over as it arrived checks the keyset to swap to
     /// after its read: one the keyset rule refuses costs the mint a read.
     LateTakeoverKeysetAfterRead,
+    /// Asks its mints for keyset listings at step 3 at most once a second for all of them
+    /// together: a payment at one mint, its listing naming not a keyset of the payment's,
+    /// waits for the next second once another mint was asked in this one.
+    ListingBoundPerSeeder,
+    /// Judges a payment's keysets at step 3 by whichever mint's listing was asked for last:
+    /// one asked of another mint after the payment arrived refuses a keyset of its own
+    /// mint's `bad-token`.
+    ListingJudgesOtherMints,
+    /// Asks its mints for the keyset rule's listing at most once a second for all of them
+    /// together: a payment at one mint waits for the next second once another mint was
+    /// asked in this one.
+    KeysetListingBoundPerSeeder,
+    /// Judges the keyset rule by the listing asked for last of any of its mints, in the
+    /// payment's turn's second or later: another mint's `final_expiry` refuses it.
+    KeysetListingOfOtherMints,
+    /// Asks for the keyset rule's listing at every payment that reaches it, though one was
+    /// asked for in its turn's second.
+    KeysetListingEverySwap,
+    /// Waits for the keyset rule's listing without asking to be woken by its answer: a
+    /// payment on a task of its own is woken only by the clock.
+    KeysetListingWaitUnwoken,
+    /// Waits for the keyset rule's listing without watching the clock: a payment on a task
+    /// of its own is not woken at its deadline.
+    KeysetListingNoClockWatch,
+    /// Trusts at step 3 only a listing it asked for itself, or one asked for in a later
+    /// second than the payment arrived: one another entry asked for in that second, after
+    /// it arrived, judges nothing, and it waits for the next second's or asks again.
+    ListingFromArrivalSecondDistrusted,
+    /// Trusts at step 3 only a listing it asked for itself: one another entry asked for
+    /// after the payment arrived judges nothing, and it waits for the next second's or asks
+    /// again.
+    OthersListingsDistrusted,
+    /// Asks a payment's mint for its keyset listing at step 3 whenever none was asked for
+    /// in this second, whether a check needs one or not: a payment refused there costs the
+    /// mint a listing.
+    ListingAskedUnneeded,
+    /// Creates an empty account for a peer with none whose payment, having found its
+    /// account's turn free, is refused `mint-unavailable`, the keyset listing its keyset
+    /// rule judges by not come by its deadline.
+    UnwaitedNoKeysetListingCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for its
+    /// account's turn and taken it, is refused `mint-unavailable`, the keyset listing its
+    /// keyset rule judges by not come by its deadline.
+    WaitedNoKeysetListingCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `mint-unavailable`, the keyset listing its
+    /// keyset rule judges by not come by its deadline.
+    WaitedTakeoverNoKeysetListingCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead
+    /// turn over as it arrived, is refused `mint-unavailable`, the keyset listing its
+    /// keyset rule judges by not come by its deadline.
+    LateTakeoverNoKeysetListingCreatesAccount,
+    /// A payment that found its account's turn free, refused `mint-unavailable`, the keyset
+    /// listing its keyset rule judges by not come by its deadline, keeps its account's
+    /// turn.
+    UnwaitedNoKeysetListingKeepsTurn,
+    /// A payment that waited for its account's turn and took it, refused
+    /// `mint-unavailable`, the keyset listing its keyset rule judges by not come by its
+    /// deadline, keeps its account's turn.
+    WaitedNoKeysetListingKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `mint-unavailable`,
+    /// the keyset listing its keyset rule judges by not come by its deadline, keeps its
+    /// account's turn.
+    WaitedTakeoverNoKeysetListingKeepsTurn,
+    /// A payment that took a dead turn over as it arrived, refused `mint-unavailable`, the
+    /// keyset listing its keyset rule judges by not come by its deadline, keeps its
+    /// account's turn.
+    LateTakeoverNoKeysetListingKeepsTurn,
+    /// A payment that found its account's turn free, refused `mint-unavailable`, the keyset
+    /// listing its keyset rule judges by not come by its deadline, bans its peer.
+    UnwaitedNoKeysetListingBans,
+    /// A payment that waited for its account's turn and took it, refused
+    /// `mint-unavailable`, the keyset listing its keyset rule judges by not come by its
+    /// deadline, bans its peer.
+    WaitedNoKeysetListingBans,
+    /// A payment that waited for a dead turn and took it over, refused `mint-unavailable`,
+    /// the keyset listing its keyset rule judges by not come by its deadline, bans its
+    /// peer.
+    WaitedTakeoverNoKeysetListingBans,
+    /// A payment that took a dead turn over as it arrived, refused `mint-unavailable`, the
+    /// keyset listing its keyset rule judges by not come by its deadline, bans its peer.
+    LateTakeoverNoKeysetListingBans,
+    /// Creates an empty account for a peer with none whose payment, having found its
+    /// account's turn free, is dropped while it waits for the keyset listing its keyset
+    /// rule judges by.
+    UnwaitedDropAwaitingKeysetListingCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for its
+    /// account's turn and taken it, is dropped while it waits for the keyset listing its
+    /// keyset rule judges by.
+    WaitedDropAwaitingKeysetListingCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is dropped while it waits for the keyset listing its
+    /// keyset rule judges by.
+    WaitedTakeoverDropAwaitingKeysetListingCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead
+    /// turn over as it arrived, is dropped while it waits for the keyset listing its keyset
+    /// rule judges by.
+    LateTakeoverDropAwaitingKeysetListingCreatesAccount,
+    /// A payment that found its account's turn free, dropped while it waits for the keyset
+    /// listing its keyset rule judges by, keeps its account's turn.
+    UnwaitedDropAwaitingKeysetListingKeepsTurn,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for
+    /// the keyset listing its keyset rule judges by, keeps its account's turn.
+    WaitedDropAwaitingKeysetListingKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, dropped while it waits for
+    /// the keyset listing its keyset rule judges by, keeps its account's turn.
+    WaitedTakeoverDropAwaitingKeysetListingKeepsTurn,
+    /// A payment that took a dead turn over as it arrived, dropped while it waits for the
+    /// keyset listing its keyset rule judges by, keeps its account's turn.
+    LateTakeoverDropAwaitingKeysetListingKeepsTurn,
+    /// A payment that found its account's turn free, dropped while it waits for the keyset
+    /// listing its keyset rule judges by, frees its account's turn and wakes nothing
+    /// waiting for it.
+    UnwaitedDropAwaitingKeysetListingWakesNone,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for
+    /// the keyset listing its keyset rule judges by, frees its account's turn and wakes
+    /// nothing waiting for it.
+    WaitedDropAwaitingKeysetListingWakesNone,
+    /// A payment that waited for a dead turn and took it over, dropped while it waits for
+    /// the keyset listing its keyset rule judges by, frees its account's turn and wakes
+    /// nothing waiting for it.
+    WaitedTakeoverDropAwaitingKeysetListingWakesNone,
+    /// A payment that took a dead turn over as it arrived, dropped while it waits for the
+    /// keyset listing its keyset rule judges by, frees its account's turn and wakes nothing
+    /// waiting for it.
+    LateTakeoverDropAwaitingKeysetListingWakesNone,
+    /// A payment that found its account's turn free, dropped while it waits for the keyset
+    /// listing its keyset rule judges by, frees its account's turn without noting the
+    /// floor: a read sent before then serves a `hello` that waited.
+    UnwaitedDropAwaitingKeysetListingNoFloor,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for
+    /// the keyset listing its keyset rule judges by, frees its account's turn without
+    /// noting the floor: a read sent before then serves a `hello` that waited.
+    WaitedDropAwaitingKeysetListingNoFloor,
+    /// Asks for the keyset rule's listing as soon as the mint check passes, before the
+    /// payment's other checks: one refused by them costs the mint a listing.
+    KeysetListingBeforeChecks,
+    /// Waits for the keyset rule's listing until a second past the payment's deadline: in
+    /// the deadline's second it is not answered.
+    KeysetListingWaitPastDeadline,
+    /// Watches the clock once while it waits for the keyset rule's listing: woken by the
+    /// clock before its deadline, it is not woken at it.
+    KeysetListingWatchOnce,
+    /// Asks for the keyset rule's listing again in every later second while the one it asked
+    /// for is held.
+    KeysetListingAskedWhileHeld,
+    /// Refuses a payment whose keyset rule's listing has not come by its deadline
+    /// `bad-token`, not `mint-unavailable`.
+    NoKeysetListingBadToken,
+    /// Takes a keyset listing whose answer was held as listing no `final_expiry`: the
+    /// keyset rule swaps to a keyset that expires too soon.
+    HeldListingExpiryDropped,
+    /// Asks for the keyset rule's listing again when the one of this second is held: two
+    /// listings in a second.
+    HeldListingAskedAgain,
+    /// Leaves the keyset rule's listings out of its count of listings asked for: a payment
+    /// that arrived before one is not judged by it at step 3, and waits for the next
+    /// second's.
+    KeysetListingUncounted,
+    /// Keeps the keyset rule's listings apart from step 3's: each asks for its own, two in
+    /// a second.
+    KeysetListingOwnCache,
+    /// Asks for the keyset rule's listing though the payment's step 3 asked for one in this
+    /// second: two in a second.
+    KeysetListingAfterStep3Asked,
+    /// Takes a keyset listing whose answer is held as listing no `final_expiry`: a payment
+    /// that finds it held swaps without waiting for it.
+    HeldListingJudgedUnlisted,
+    /// Takes its keyset listing as good for the second it was asked in only: a payment whose
+    /// keys it does not hold asks for the listing again, though the one it holds names
+    /// their keyset.
+    ListingAskedEachSecond,
+    /// Judges the keyset rule by the mint's `final_expiry` as it stands, with no listing
+    /// asked for.
+    KeysetRuleWithoutListing,
+    /// Judges the keyset rule's margin from the second the payment's turn came, not as it
+    /// judges: a keyset that expires too soon once its listing came is swapped to.
+    KeysetHorizonFromTurn,
+    /// Keeps one keyset listing for all its mints, and one bound: a payment at one mint is
+    /// judged by, or waits for, another mint's.
+    ListingOneForAllMints,
+    /// Takes a keyset that any of its mints' listings names as listed by the payment's mint:
+    /// a payment naming a keyset another mint alone started makes it ask the payment's mint
+    /// for that keyset's keys.
+    KeysetNamedByAnyMintsListing,
+    /// Trusts a listing whose held answer it waited for, though asked for before the
+    /// payment arrived: a keyset it does not name is `bad-token` at once, with no listing
+    /// asked for again and no wait for the next second's.
+    HeldListingTrustedFromBeforeArrival,
+    /// Takes a payment as arriving when its turn comes, at step 3: a listing another entry
+    /// asked for while it waited for its turn judges nothing, and it waits for the next
+    /// second's or asks again.
+    ListingArrivalAtTurn,
+    /// Judges the keyset rule's margin from the second its listing was asked for, not as it
+    /// judges: a keyset that expires too soon once a held listing came is swapped to.
+    KeysetHorizonFromListing,
+    /// A payment that waited for a dead turn and took it over judges the keyset rule by the
+    /// listing the seeder holds, whenever it was asked for.
+    WaitedTakeoverKeysetListingStale,
+    /// A payment that waited for a dead turn and took it over judges the keyset rule by a
+    /// listing asked for since it arrived, not since its turn came: one asked for while it
+    /// waited serves.
+    WaitedTakeoverKeysetListingFromArrival,
+    /// A payment that found its account's turn free judges the keyset rule by a listing
+    /// asked for in the second it judges, not its turn's: one whose keys came seconds after
+    /// its turn asks the mint for a listing it holds.
+    UnwaitedKeysetListingOfJudgingSecond,
+    /// A payment that waited for its account's turn and took it judges the keyset rule by a
+    /// listing asked for in the second it judges, not its turn's: one whose keys came
+    /// seconds after its turn asks the mint for a listing it holds.
+    WaitedKeysetListingOfJudgingSecond,
+    /// A payment that waited for a dead turn and took it over judges the keyset rule by a
+    /// listing asked for in the second it judges, not its turn's: one whose keys came
+    /// seconds after its turn asks the mint for a listing it holds.
+    WaitedTakeoverKeysetListingOfJudgingSecond,
+    /// A payment that took a dead turn over as it arrived judges the keyset rule by a
+    /// listing asked for in the second it judges, not its turn's: one whose keys came
+    /// seconds after its turn asks the mint for a listing it holds.
+    LateTakeoverKeysetListingOfJudgingSecond,
+    /// A payment that found its account's turn free, the listing the seeder holds asked for
+    /// before its turn's second and its answer held, waits for that one for its keyset rule,
+    /// and judges by it, rather than ask for one of its turn's second.
+    UnwaitedStaleHeldListingAwaited,
+    /// A payment that waited for its account's turn and took it, the listing the seeder
+    /// holds asked for before its turn's second and its answer held, waits for that one for
+    /// its keyset rule, and judges by it, rather than ask for one of its turn's second.
+    WaitedStaleHeldListingAwaited,
+    /// A payment that waited for a dead turn and took it over, the listing the seeder holds
+    /// asked for before its turn's second and its answer held, waits for that one for its
+    /// keyset rule, and judges by it, rather than ask for one of its turn's second.
+    WaitedTakeoverStaleHeldListingAwaited,
+    /// A payment that took a dead turn over as it arrived, the listing the seeder holds
+    /// asked for before its turn's second and its answer held, waits for that one for its
+    /// keyset rule, and judges by it, rather than ask for one of its turn's second.
+    LateTakeoverStaleHeldListingAwaited,
 }
 
 /// How a payment came to its account's turn: the paths of the suite's matrix of payments,
@@ -3259,6 +3571,8 @@ enum Check {
     BadDleq,
     Underpaid,
     Overpaid,
+    /// No keyset listing for the keyset rule by the deadline.
+    NoKeysetListing,
     /// The keyset to swap to expires too soon.
     Keyset,
     /// An earlier swap of the account is still unknown after the payment's read.
@@ -3283,6 +3597,7 @@ impl Check {
             ("not a quoted mint", _) => Self::BadMint,
             ("a keyset the mint does not list", _) => Self::UnlistedKeyset,
             ("no keys from the mint within 60 s", _) => Self::NoKeys,
+            ("no keyset listing from the mint within 60 s", _) => Self::NoKeysetListing,
             ("an invalid DLEQ", _) => Self::BadDleq,
             ("short of the chunks claimed", _) => Self::Underpaid,
             ("more than the chunks claimed", false) => Self::Overpaid,
@@ -3319,6 +3634,8 @@ enum Stage {
     Keys,
     /// Waiting for the next second, to ask for the mint's keyset listing again.
     Listing,
+    /// Waiting for the keyset listing its keyset rule judges by.
+    KeysetListing,
     /// During its read of its account's unknown swaps.
     Read,
 }
@@ -3355,6 +3672,20 @@ enum Early {
     KeysetBeforeAmount,
     /// The token's own mint dialled before the mint check.
     TokenMintDialled,
+}
+
+/// The keyset listing a defect judges the keyset rule by, instead of one asked for in the
+/// payment's turn's second or later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Judged {
+    /// The one the seeder holds, whenever it was asked for.
+    Stale,
+    /// One asked for since the payment arrived.
+    FromArrival,
+    /// One asked for in the second it judges.
+    OfJudgingSecond,
+    /// One asked for before the turn's second, its answer held: waited for.
+    HeldStale,
 }
 
 impl SeederFlaw {
@@ -3602,6 +3933,46 @@ impl SeederFlaw {
                 (Slip::Bans, Came::LateTakeover, Check::RecheckOverpaid)
             }
             Self::LateTakeoverUnsentBans => (Slip::Bans, Came::LateTakeover, Check::Unsent),
+            Self::UnwaitedNoKeysetListingCreatesAccount => {
+                (Slip::CreatesAccount, Came::Unwaited, Check::NoKeysetListing)
+            }
+            Self::WaitedNoKeysetListingCreatesAccount => {
+                (Slip::CreatesAccount, Came::Waited, Check::NoKeysetListing)
+            }
+            Self::WaitedTakeoverNoKeysetListingCreatesAccount => (
+                Slip::CreatesAccount,
+                Came::WaitedTakeover,
+                Check::NoKeysetListing,
+            ),
+            Self::LateTakeoverNoKeysetListingCreatesAccount => (
+                Slip::CreatesAccount,
+                Came::LateTakeover,
+                Check::NoKeysetListing,
+            ),
+            Self::UnwaitedNoKeysetListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Check::NoKeysetListing)
+            }
+            Self::WaitedNoKeysetListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::Waited, Check::NoKeysetListing)
+            }
+            Self::WaitedTakeoverNoKeysetListingKeepsTurn => (
+                Slip::KeepsTurn,
+                Came::WaitedTakeover,
+                Check::NoKeysetListing,
+            ),
+            Self::LateTakeoverNoKeysetListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::LateTakeover, Check::NoKeysetListing)
+            }
+            Self::UnwaitedNoKeysetListingBans => {
+                (Slip::Bans, Came::Unwaited, Check::NoKeysetListing)
+            }
+            Self::WaitedNoKeysetListingBans => (Slip::Bans, Came::Waited, Check::NoKeysetListing),
+            Self::WaitedTakeoverNoKeysetListingBans => {
+                (Slip::Bans, Came::WaitedTakeover, Check::NoKeysetListing)
+            }
+            Self::LateTakeoverNoKeysetListingBans => {
+                (Slip::Bans, Came::LateTakeover, Check::NoKeysetListing)
+            }
             _ => return None,
         })
     }
@@ -3661,6 +4032,52 @@ impl SeederFlaw {
                 (Slip::NoFloor, Came::Unwaited, Stage::Listing)
             }
             Self::WaitedDropAwaitingListingNoFloor => (Slip::NoFloor, Came::Waited, Stage::Listing),
+            Self::UnwaitedDropAwaitingKeysetListingCreatesAccount => {
+                (Slip::CreatesAccount, Came::Unwaited, Stage::KeysetListing)
+            }
+            Self::WaitedDropAwaitingKeysetListingCreatesAccount => {
+                (Slip::CreatesAccount, Came::Waited, Stage::KeysetListing)
+            }
+            Self::WaitedTakeoverDropAwaitingKeysetListingCreatesAccount => (
+                Slip::CreatesAccount,
+                Came::WaitedTakeover,
+                Stage::KeysetListing,
+            ),
+            Self::LateTakeoverDropAwaitingKeysetListingCreatesAccount => (
+                Slip::CreatesAccount,
+                Came::LateTakeover,
+                Stage::KeysetListing,
+            ),
+            Self::UnwaitedDropAwaitingKeysetListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Stage::KeysetListing)
+            }
+            Self::WaitedDropAwaitingKeysetListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::Waited, Stage::KeysetListing)
+            }
+            Self::WaitedTakeoverDropAwaitingKeysetListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Stage::KeysetListing)
+            }
+            Self::LateTakeoverDropAwaitingKeysetListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::LateTakeover, Stage::KeysetListing)
+            }
+            Self::UnwaitedDropAwaitingKeysetListingWakesNone => {
+                (Slip::WakesNone, Came::Unwaited, Stage::KeysetListing)
+            }
+            Self::WaitedDropAwaitingKeysetListingWakesNone => {
+                (Slip::WakesNone, Came::Waited, Stage::KeysetListing)
+            }
+            Self::WaitedTakeoverDropAwaitingKeysetListingWakesNone => {
+                (Slip::WakesNone, Came::WaitedTakeover, Stage::KeysetListing)
+            }
+            Self::LateTakeoverDropAwaitingKeysetListingWakesNone => {
+                (Slip::WakesNone, Came::LateTakeover, Stage::KeysetListing)
+            }
+            Self::UnwaitedDropAwaitingKeysetListingNoFloor => {
+                (Slip::NoFloor, Came::Unwaited, Stage::KeysetListing)
+            }
+            Self::WaitedDropAwaitingKeysetListingNoFloor => {
+                (Slip::NoFloor, Came::Waited, Stage::KeysetListing)
+            }
             _ => return None,
         })
     }
@@ -3713,6 +4130,31 @@ impl SeederFlaw {
             }
             Self::LateTakeoverKeysetBeforeAmount => (Early::KeysetBeforeAmount, Came::LateTakeover),
             Self::LateTakeoverTokenMintDialled => (Early::TokenMintDialled, Came::LateTakeover),
+            _ => return None,
+        })
+    }
+
+    /// The keyset listing a defect judges the keyset rule by, on which path.
+    fn judged(self) -> Option<(Judged, Came)> {
+        Some(match self {
+            Self::WaitedTakeoverKeysetListingStale => (Judged::Stale, Came::WaitedTakeover),
+            Self::WaitedTakeoverKeysetListingFromArrival => {
+                (Judged::FromArrival, Came::WaitedTakeover)
+            }
+            Self::UnwaitedKeysetListingOfJudgingSecond => (Judged::OfJudgingSecond, Came::Unwaited),
+            Self::WaitedKeysetListingOfJudgingSecond => (Judged::OfJudgingSecond, Came::Waited),
+            Self::WaitedTakeoverKeysetListingOfJudgingSecond => {
+                (Judged::OfJudgingSecond, Came::WaitedTakeover)
+            }
+            Self::LateTakeoverKeysetListingOfJudgingSecond => {
+                (Judged::OfJudgingSecond, Came::LateTakeover)
+            }
+            Self::UnwaitedStaleHeldListingAwaited => (Judged::HeldStale, Came::Unwaited),
+            Self::WaitedStaleHeldListingAwaited => (Judged::HeldStale, Came::Waited),
+            Self::WaitedTakeoverStaleHeldListingAwaited => {
+                (Judged::HeldStale, Came::WaitedTakeover)
+            }
+            Self::LateTakeoverStaleHeldListingAwaited => (Judged::HeldStale, Came::LateTakeover),
             _ => return None,
         })
     }
@@ -4567,6 +5009,11 @@ struct PayRecord {
     listings_seen: u64,
     /// Waiting for the next second, to ask for the listing again.
     listing_wait: bool,
+    /// Waiting for the keyset listing its keyset rule judges by (step 5).
+    keyset_wait: bool,
+    /// Its step 3 asked for a listing: its keyset rule asks for another
+    /// ([`SeederFlaw::KeysetListingAfterStep3Asked`] only).
+    force_listing: bool,
 }
 
 /// A mint's keyset listing (NUT-02), as the seeder last asked for it.
@@ -4578,8 +5025,8 @@ struct Listing {
     seq: u64,
     /// Its place among the releases of held key requests ([`MockNetwork::listed`]).
     released: u64,
-    /// The mint's active keyset as it answered ([`lists`]); `None` while the answer is held.
-    active: Option<u64>,
+    /// The mint's answer; `None` while it is held.
+    answer: Option<Listed>,
 }
 
 #[derive(Default)]
@@ -4593,6 +5040,8 @@ struct State {
     listings: HashMap<String, Listing>,
     /// Keyset listings asked for so far, of every mint.
     listings_asked: u64,
+    /// The keyset rule's own listings ([`SeederFlaw::KeysetListingOwnCache`] only).
+    keyset_listings: HashMap<String, Listing>,
     /// The keysets each mint's last listing was asked for
     /// ([`SeederFlaw::ListingRateLimitedPerKeyset`] only).
     listed_for: HashMap<String, HashSet<u64>>,
@@ -4872,6 +5321,33 @@ impl Inner {
         self.flaw == Some(f)
     }
 
+    /// When this seeder asks for keyset listings beyond what NFX-07 §3 requires.
+    fn listings(&self) -> Listings {
+        self.net.ledger().listings
+    }
+
+    /// Ask every quoted mint for its keyset listing, at the seeder's start.
+    fn list_at_start(&self) {
+        let now = self.clock.now();
+        for mint in &self.config.mints {
+            let seq = {
+                let mut st = self.state();
+                st.listings_asked += 1;
+                st.listings_asked
+            };
+            let (released, answer) = self.net.list_keysets(mint, Waker::noop());
+            self.state().listings.insert(
+                mint.clone(),
+                Listing {
+                    at: now,
+                    seq,
+                    released,
+                    answer,
+                },
+            );
+        }
+    }
+
     /// Whether a defect of the matrix of payments does `slip` with a payment that came to
     /// its turn so, refused by `check`.
     fn slips(&self, slip: Slip, came: Came, check: Option<Check>) -> bool {
@@ -4888,6 +5364,12 @@ impl Inner {
     /// its turn so.
     fn runs_early(&self, early: Early, came: Came) -> bool {
         self.flaw.and_then(SeederFlaw::early) == Some((early, came))
+    }
+
+    /// Whether a defect judges the keyset rule of a payment that came to its turn so by the
+    /// listing `judged` says.
+    fn judges(&self, judged: Judged, came: Came) -> bool {
+        self.flaw.and_then(SeederFlaw::judged) == Some((judged, came))
     }
 
     fn debt_key(&self, key: Key, generation: u64, n: u64) -> Debt {
@@ -5148,9 +5630,16 @@ impl Inner {
         (lost, flight)
     }
 
-    /// Whether the mint's active keyset, as it lists its `final_expiry`, expires sooner than
-    /// twice `account_ttl` away by this seeder's clock: then it is not swapped to.
+    /// Whether the mint's active keyset expires too soon to swap to, by its `final_expiry`
+    /// as the mint lists it now, with no listing asked for ([`SeederFlaw::KeysetFirst`] and
+    /// the like only: an honest seeder judges by a listing, [`Inner::keyset_listing`]).
     fn keyset_too_soon(&self) -> bool {
+        self.too_soon(self.net.keyset_final_expiry())
+    }
+
+    /// Whether a keyset whose `final_expiry` is `final_expiry` expires sooner than twice
+    /// `account_ttl` away by this seeder's clock: then it is not swapped to.
+    fn too_soon(&self, final_expiry: Option<u64>) -> bool {
         if self.has(SeederFlaw::IgnoresKeysetExpiry) {
             return false;
         }
@@ -5162,7 +5651,7 @@ impl Inner {
             self.config.account_ttl
         };
         let horizon = self.clock.now() + 2 * ttl.as_secs();
-        self.net.keyset_final_expiry().is_some_and(|t| {
+        final_expiry.is_some_and(|t| {
             if self.has(SeederFlaw::KeysetMarginInclusive) {
                 t <= horizon
             } else {
@@ -6331,6 +6820,8 @@ impl Inner {
                 read: false,
                 listings_seen,
                 listing_wait: false,
+                keyset_wait: false,
+                force_listing: false,
             },
         );
         id
@@ -6617,6 +7108,13 @@ impl Inner {
         pay: u64,
     ) -> Result<MintKeys, Rej> {
         let mut asked = false;
+        // The listing it asked for itself, if any ([`SeederFlaw::OthersListingsDistrusted`]
+        // and the like only), and whether it waited for a held one
+        // ([`SeederFlaw::HeldListingTrustedFromBeforeArrival`] only).
+        let (mut own_ask, mut held_waited) = (None, false);
+        // The mints that alone started the keysets named, if any: fixed as each starts.
+        let owners: HashMap<u64, Option<String>> =
+            named.iter().map(|k| (*k, self.net.owner_of(*k))).collect();
         poll_fn(|cx| {
             // Waiting for the next second to ask for the listing again.
             let mut next_second = false;
@@ -6649,10 +7147,25 @@ impl Inner {
                     Some(k) if !never => named.difference(&k.keysets).copied().collect(),
                     _ => named.clone(),
                 };
-                let listing = st.listings.get(mint).copied();
-                let unlisted = listing
-                    .and_then(|l| l.active)
-                    .map(|a| missing.iter().any(|k| !lists(a, *k)));
+                // The flaws: one listing for all mints; or a listing of an earlier second
+                // taken as none.
+                let key = self.listing_key(mint);
+                let listing = st.listings.get(key).copied().filter(|l| {
+                    l.at == self.clock.now() || !self.has(SeederFlaw::ListingAskedEachSecond)
+                });
+                // The flaw: a keyset any mint's listing names taken as this one's.
+                let any_mints = self.has(SeederFlaw::KeysetNamedByAnyMintsListing);
+                let unlisted = listing.and_then(|l| l.answer).map(|a| {
+                    missing.iter().any(|k| {
+                        let owner = owners.get(k).and_then(Option::as_deref);
+                        let elsewhere = any_mints
+                            && st
+                                .listings
+                                .iter()
+                                .any(|(m, l)| l.answer.is_some_and(|b| b.names(m, *k, owner)));
+                        !a.names(mint, *k, owner) && !elsewhere
+                    })
+                });
                 if unlisted == Some(false) || self.has(SeederFlaw::UnlistedKeysFetched) {
                     // Every keyset missing is the mint's: ask for their keys.
                     let ask = !std::mem::replace(&mut asked, true);
@@ -6676,10 +7189,46 @@ impl Inner {
                 }
                 let arrived = st.pays.get(&pay).map_or(u64::MAX, |r| r.listings_seen);
                 let now = self.clock.now();
+                // The flaw: another mint's listing, asked for since it arrived, judges it.
+                let other_judges = self.has(SeederFlaw::ListingJudgesOtherMints)
+                    && st
+                        .listings
+                        .iter()
+                        .filter(|(m, l)| m.as_str() != mint && l.seq > arrived)
+                        .max_by_key(|(_, l)| l.seq)
+                        .is_some_and(|(m, l)| {
+                            l.answer.is_some_and(|a| {
+                                missing.iter().any(|k| {
+                                    let owner = owners.get(k).and_then(Option::as_deref);
+                                    !a.names(m, *k, owner)
+                                })
+                            })
+                        });
+                if other_judges {
+                    break Some(Err(rej(
+                        RejCode::BadToken,
+                        "a keyset the mint does not list",
+                    )));
+                }
+                // The flaws: a listing another entry asked for is not trusted, or not if
+                // asked for in the second it arrived.
+                let arrival = st
+                    .pays
+                    .get(&pay)
+                    .map_or(0, |r| r.deadline.saturating_sub(SEEDER_DEADLINE.as_secs()));
+                let distrusted = listing.is_some_and(|l| {
+                    own_ask != Some(l.seq)
+                        && (self.has(SeederFlaw::OthersListingsDistrusted)
+                            || (l.at <= arrival
+                                && self.has(SeederFlaw::ListingFromArrivalSecondDistrusted)))
+                });
                 if let Some(l) = listing
                     && unlisted == Some(true)
+                    && !distrusted
                     && (l.seq > arrived
-                        || (l.at == now && self.has(SeederFlaw::ListingTrustedFromBeforeArrival)))
+                        || (l.at == now && self.has(SeederFlaw::ListingTrustedFromBeforeArrival))
+                        || (held_waited
+                            && self.has(SeederFlaw::HeldListingTrustedFromBeforeArrival)))
                 {
                     // Asked for since it arrived: a keyset it names not is not the mint's.
                     break Some(Err(rej(
@@ -6688,23 +7237,26 @@ impl Inner {
                     )));
                 }
                 if let Some(l) = listing
-                    && l.active.is_none()
+                    && l.answer.is_none()
                 {
                     // Its answer is held: wait for it.
                     drop(st);
-                    let Some(active) = self.net.listed(l.released, cx.waker()) else {
+                    let Some(answer) = self.net.listed(mint, l.released, cx.waker()) else {
                         break None;
                     };
-                    if let Some(l) = self.state().listings.get_mut(mint) {
-                        l.active = Some(active);
+                    held_waited = true;
+                    if let Some(l) = self.state().listings.get_mut(key) {
+                        l.answer = Some(answer);
                     }
                     continue;
                 }
-                // The flaws: asked again two seconds on; or for each keyset, not each mint.
+                // The flaws: asked again two seconds on; or for each keyset, not each mint;
+                // or once a second for every mint together.
                 let recent = listing.is_some_and(|l| {
                     l.at == now
                         || (l.at + 1 == now && self.has(SeederFlaw::ListingAskedEveryOtherSecond))
-                });
+                }) || (self.has(SeederFlaw::ListingBoundPerSeeder)
+                    && st.listings.values().any(|l| l.at == now));
                 let other_keyset = self.has(SeederFlaw::ListingRateLimitedPerKeyset)
                     && !st
                         .listed_for
@@ -6723,18 +7275,19 @@ impl Inner {
                     st.keys.remove(mint);
                 }
                 let seq = st.listings_asked;
+                own_ask = Some(seq);
                 drop(st);
-                let (released, active) = self.net.list_keysets(mint, cx.waker());
+                let (released, answer) = self.net.list_keysets(mint, cx.waker());
                 self.state().listings.insert(
-                    mint.to_owned(),
+                    key.to_owned(),
                     Listing {
                         at: now,
                         seq,
                         released,
-                        active,
+                        answer,
                     },
                 );
-                if active.is_none() {
+                if answer.is_none() {
                     break None;
                 }
             };
@@ -6775,6 +7328,175 @@ impl Inner {
             Poll::Pending
         })
         .await
+    }
+
+    /// The `final_expiry` the quoted mint `mint` lists for its active keyset, for payment
+    /// `pay`'s keyset rule (NFX-07 §3 step 5), by the mint's keyset listing asked for in
+    /// the second `since` (its turn's) or later: by any entry, before the payment arrived
+    /// or after. If the one the seeder holds is older, it asks for the listing now, in a
+    /// later second than that one; one whose answer is held it waits for.
+    /// `mint-unavailable` once its deadline passes first, or it has been abandoned: a
+    /// listing that comes at or past the deadline is not used. `stale_held`: one held asked
+    /// for before `since` is waited for too ([`SeederFlaw::UnwaitedStaleHeldListingAwaited`]
+    /// and the like only).
+    async fn keyset_listing(
+        &self,
+        mint: &str,
+        pay: u64,
+        since: u64,
+        stale_held: bool,
+    ) -> Result<Option<u64>, Rej> {
+        // Asked for by this payment ([`SeederFlaw::KeysetListingEverySwap`] and the like
+        // only), and the clock watched ([`SeederFlaw::KeysetListingWatchOnce`] only).
+        let (mut asked, mut watched) = (false, false);
+        let key = self.listing_key(mint);
+        let own = self.has(SeederFlaw::KeysetListingOwnCache);
+        poll_fn(|cx| {
+            // The flaw: woken by the clock alone.
+            let waker = if self.has(SeederFlaw::KeysetListingWaitUnwoken) {
+                Waker::noop()
+            } else {
+                cx.waker()
+            };
+            let found = loop {
+                let mut st = self.state();
+                let now = self.clock.now();
+                let cache = if own {
+                    &st.keyset_listings
+                } else {
+                    &st.listings
+                };
+                let mut listing = cache
+                    .get(key)
+                    .copied()
+                    .filter(|l| l.at >= since || (stale_held && l.answer.is_none()));
+                // The flaws: the last listing of any mint serves; one is asked for at every
+                // payment, or as its step 3 asked for one, or as it finds one held; one held
+                // is taken as listing no expiry, or asked for again in a later second.
+                if self.has(SeederFlaw::KeysetListingOfOtherMints)
+                    && let Some(last) = st
+                        .listings
+                        .values()
+                        .filter(|l| l.at >= since && l.answer.is_some())
+                        .max_by_key(|l| l.seq)
+                {
+                    listing = Some(*last);
+                }
+                let forced = st.pays.get(&pay).is_some_and(|r| r.force_listing);
+                let held = listing.is_some_and(|l| l.answer.is_none());
+                if !asked
+                    && (self.has(SeederFlaw::KeysetListingEverySwap)
+                        || forced
+                        || (held && self.has(SeederFlaw::HeldListingAskedAgain)))
+                {
+                    listing = None;
+                }
+                if held && self.has(SeederFlaw::HeldListingJudgedUnlisted) {
+                    break Some(None);
+                }
+                if listing.is_some_and(|l| l.answer.is_none() && l.at < now)
+                    && self.has(SeederFlaw::KeysetListingAskedWhileHeld)
+                {
+                    listing = None;
+                }
+                if let Some(l) = listing {
+                    if let Some(answer) = l.answer {
+                        break Some(answer.final_expiry);
+                    }
+                    // Its answer is held: wait for it.
+                    drop(st);
+                    let Some(mut answer) = self.net.listed(mint, l.released, waker) else {
+                        break None;
+                    };
+                    if self.has(SeederFlaw::HeldListingExpiryDropped) {
+                        answer.final_expiry = None;
+                    }
+                    let mut st = self.state();
+                    let cache = if own {
+                        &mut st.keyset_listings
+                    } else {
+                        &mut st.listings
+                    };
+                    if let Some(l) = cache.get_mut(key) {
+                        l.answer = Some(answer);
+                    }
+                    continue;
+                }
+                // The flaw: no mint asked once one was in this second.
+                if self.has(SeederFlaw::KeysetListingBoundPerSeeder)
+                    && st.listings.values().any(|l| l.at == now)
+                {
+                    break None;
+                }
+                asked = true;
+                if !self.has(SeederFlaw::KeysetListingUncounted) {
+                    st.listings_asked += 1;
+                }
+                let seq = st.listings_asked;
+                drop(st);
+                let (released, answer) = self.net.list_keysets(mint, waker);
+                let listed = Listing {
+                    at: now,
+                    seq,
+                    released,
+                    answer,
+                };
+                let mut st = self.state();
+                if let Some(r) = st.pays.get_mut(&pay) {
+                    r.force_listing = false;
+                }
+                if own {
+                    st.keyset_listings.insert(key.to_owned(), listed);
+                } else {
+                    st.listings.insert(key.to_owned(), listed);
+                }
+                if answer.is_none() {
+                    break None;
+                }
+            };
+            let st = self.state();
+            let now = self.clock.now();
+            let over = st.pays.get(&pay).is_none_or(|r| {
+                let past = if self.has(SeederFlaw::KeysetListingWaitPastDeadline) {
+                    now > r.deadline
+                } else {
+                    now >= r.deadline
+                };
+                r.abandoned || past
+            });
+            if over && !self.has(SeederFlaw::NoDeadline) {
+                let detail = "no keyset listing from the mint within 60 s";
+                return Poll::Ready(Err(if self.has(SeederFlaw::NoKeysetListingBadToken) {
+                    rej(RejCode::BadToken, detail)
+                } else {
+                    unavailable(detail)
+                }));
+            }
+            if let Some(found) = found {
+                return Poll::Ready(Ok(found));
+            }
+            drop(st);
+            if let Some(r) = self.state().pays.get_mut(&pay) {
+                r.keyset_wait = true;
+            }
+            let once = watched && self.has(SeederFlaw::KeysetListingWatchOnce);
+            if !self.has(SeederFlaw::KeysetListingNoClockWatch) && !once {
+                self.clock.watch(cx.waker());
+                watched = true;
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    /// The key a mint's keyset listing is cached under: the mint's own
+    /// ([`SeederFlaw::ListingOneForAllMints`] keeps one for all).
+    fn listing_key<'a>(&self, mint: &'a str) -> &'a str {
+        if self.has(SeederFlaw::ListingOneForAllMints) {
+            ""
+        } else {
+            mint
+        }
     }
 
     /// The swap's outcome has come, on whatever task: settle it in time, or as late.
@@ -7050,7 +7772,7 @@ impl Drop for PayGuard {
             r.finished = true;
             r.waker = None;
             let (key, sent, landed, reading, read) = (r.key, r.sent, r.landed, r.reading, r.read);
-            let listing_wait = r.listing_wait;
+            let (listing_wait, keyset_wait) = (r.listing_wait, r.keyset_wait);
             if sent && !landed && self.e.has(SeederFlaw::DropAbandonsInFlight) {
                 r.abandoned = true;
             }
@@ -7065,6 +7787,8 @@ impl Drop for PayGuard {
                 let waited = held && self.waited;
                 let stage = if reading {
                     Stage::Read
+                } else if keyset_wait {
+                    Stage::KeysetListing
                 } else if listing_wait {
                     Stage::Listing
                 } else {
@@ -7238,7 +7962,7 @@ impl MockEngine {
         if flaw != Some(SeederFlaw::NoValidate) {
             config.check(flaw)?;
         }
-        Ok(Self(Arc::new(Inner {
+        let e = Inner {
             config,
             videos: videos
                 .into_iter()
@@ -7248,7 +7972,11 @@ impl MockEngine {
             net,
             flaw,
             state: Mutex::new(State::default()),
-        })))
+        };
+        if e.listings() != Listings::OnDemand {
+            e.list_at_start();
+        }
+        Ok(Self(Arc::new(e)))
     }
 
     /// Per-identity records held.
@@ -7638,6 +8366,14 @@ impl MockSession {
         let e = self.e.clone();
         let took_over = matches!(came, Came::WaitedTakeover | Came::LateTakeover);
         let turn_came = e.clock.now();
+        if e.has(SeederFlaw::ListingArrivalAtTurn) {
+            // The flaw: the listings asked for so far counted as its turn comes.
+            let mut st = e.state();
+            let asked = st.listings_asked;
+            if let Some(r) = st.pays.get_mut(&id) {
+                r.listings_seen = asked;
+            }
+        }
         if e.has(SeederFlaw::KeysetFirst) && e.keyset_too_soon() {
             return Err(unavailable("the mint's keyset expires too soon to swap to"));
         }
@@ -7831,6 +8567,15 @@ impl MockSession {
         if e.has(SeederFlaw::AmountBeforeDleq) || e.runs_early(Early::AmountBeforeKeys, came) {
             self.check_amount(pay, acked, info.amount)?;
         }
+        if e.has(SeederFlaw::KeysetListingBeforeChecks) {
+            e.keyset_listing(&mint, id, turn_came, false).await?;
+        }
+        let listings_before = e.state().listings_asked;
+        if e.has(SeederFlaw::ListingAskedUnneeded) {
+            // The quoted mint's listing, asked for at every payment's step 3 at most once a
+            // second, whether a check needs it or not.
+            e.keyset_listing(&mint, id, e.clock.now(), false).await?;
+        }
         // 3. DLEQ, against the quoted mint's keys of the keysets its proofs name, fetched
         // within the deadline.
         let named = e.net.keysets_named(&info.proofs);
@@ -7873,6 +8618,9 @@ impl MockSession {
                 }
             }
         };
+        // Whether its step 3 asked for a listing
+        // ([`SeederFlaw::KeysetListingAfterStep3Asked`] only).
+        let step3_asked = e.state().listings_asked > listings_before;
         let read_before_amount = (took_over && e.has(SeederFlaw::TakeoverReadsBeforeAmount))
             || e.reads_at(ReadAt::Dleq, came);
         if read_before_amount {
@@ -7991,11 +8739,55 @@ impl MockSession {
             session_spent: self.session_spent.clone(),
         };
         // Outputs only from a keyset that outlives any wait to decide this swap: none whose
-        // listed `final_expiry` is sooner than twice `account_ttl` away. With none, no swap:
-        // the seeder's own keyset error, read nothing for.
+        // listed `final_expiry` is sooner than twice `account_ttl` away, by the mint's keyset
+        // listing asked for in the second its turn came or later. With none, no swap: the
+        // seeder's own keyset error, read nothing for.
         let keyset_after_read =
             e.has(SeederFlaw::KeysetAfterRead) || e.reads_at(ReadAt::KeysetAfter, came);
-        if !keyset_after_read && !e.has(SeederFlaw::KeysetFirst) && e.keyset_too_soon() {
+        let listed_too_soon = if keyset_after_read || e.has(SeederFlaw::KeysetFirst) {
+            false
+        } else if e.has(SeederFlaw::KeysetRuleWithoutListing) {
+            e.keyset_too_soon()
+        } else {
+            // The flaws: a listing of any second, of the payment's arrival's or of the second
+            // it judges, on one path.
+            let since = if e.judges(Judged::Stale, came) {
+                0
+            } else if e.judges(Judged::FromArrival, came) {
+                let st = e.state();
+                st.pays
+                    .get(&id)
+                    .map_or(0, |r| r.deadline.saturating_sub(SEEDER_DEADLINE.as_secs()))
+            } else if e.judges(Judged::OfJudgingSecond, came) {
+                e.clock.now()
+            } else {
+                turn_came
+            };
+            if step3_asked
+                && e.has(SeederFlaw::KeysetListingAfterStep3Asked)
+                && let Some(r) = e.state().pays.get_mut(&id)
+            {
+                r.force_listing = true;
+            }
+            let stale_held = e.judges(Judged::HeldStale, came);
+            let final_expiry = e.keyset_listing(&mint, id, since, stale_held).await?;
+            // The flaws: the margin from the turn's second, or from its listing's.
+            let from = if e.has(SeederFlaw::KeysetHorizonFromTurn) {
+                Some(turn_came)
+            } else if e.has(SeederFlaw::KeysetHorizonFromListing) {
+                let st = e.state();
+                st.listings.get(e.listing_key(&mint)).map(|l| l.at)
+            } else {
+                None
+            };
+            if let Some(from) = from {
+                let horizon = from + 2 * e.config.account_ttl.as_secs();
+                final_expiry.is_some_and(|t| t < horizon)
+            } else {
+                e.too_soon(final_expiry)
+            }
+        };
+        if listed_too_soon {
             if e.has(SeederFlaw::KeysetCreatesAccount) {
                 e.account(&mut e.state(), self.key);
             }
@@ -10163,6 +10955,16 @@ impl MockHarness {
         h
     }
 
+    /// An honest harness whose seeders ask every quoted mint for its keyset listing
+    /// (NUT-02) at their start too: a payment of a keyset a mint started in that second
+    /// then waits for the next second's listing (NFX-07 §3 step 3).
+    #[must_use]
+    pub fn with_listings_at_start() -> Self {
+        let h = Self::default();
+        h.net.ledger().listings = Listings::AtStart;
+        h
+    }
+
     /// A round-trip harness ([`MockHarness::with_round_trip_reads`]) whose seeders carry
     /// `flaw`: for defects the suite can show only where a read spans polls of its entry.
     /// A read is abandoned only as its entry is dropped between sending it and its return,
@@ -10192,7 +10994,7 @@ impl MockHarness {
     /// and its lock are then each proof's.
     fn token_with(&self, amount: u64, edit: impl FnOnce(&mut TokenInfo)) -> String {
         let mut info = TokenInfo {
-            proofs: self.net.proofs_for(amount),
+            proofs: self.net.proofs_for(&self.mint, amount),
             mints: vec![self.mint.clone()],
             amount,
             unit: "sat",
@@ -10350,8 +11152,25 @@ impl Harness for MockHarness {
                 drop(l);
                 token
             }
+            BadToken::OtherMintsKeyset => {
+                let token = self.token_with(amount, |_| {});
+                let mut l = self.net.ledger();
+                let keyset = l
+                    .own_active
+                    .iter()
+                    .filter(|(m, _)| **m != self.mint)
+                    .map(|(_, k)| *k)
+                    .max()
+                    .unwrap_or_else(|| unreachable!("asked for after another mint's start"));
+                let proofs = l.tokens.get(&token).map(|i| i.proofs.clone());
+                for p in proofs.unwrap_or_default() {
+                    l.keyset_of.insert(p, keyset);
+                }
+                drop(l);
+                token
+            }
             BadToken::TooManyProofs => {
-                let proofs = self.net.fresh_proofs(MAX_PROOFS + 1);
+                let proofs = self.net.fresh_proofs(&self.mint, MAX_PROOFS + 1);
                 self.token_with(amount, |i| i.proofs = proofs)
             }
             BadToken::Forged => {
@@ -10496,6 +11315,10 @@ impl Harness for MockHarness {
         self.net.ledger().key_requests
     }
 
+    fn listing_requests(&self) -> u64 {
+        self.net.ledger().listing_requests
+    }
+
     fn answers_under_way(&self) -> bool {
         self.net.ledger().under_way > 0
     }
@@ -10526,6 +11349,16 @@ impl Harness for MockHarness {
         let mut l = self.net.ledger();
         l.gather = (n, wait);
         l.gathered = 0;
+    }
+
+    fn start_keyset_at(&self, url: &str, final_expiry: Option<Duration>) {
+        let now = self.clock.now();
+        let mut l = self.net.ledger();
+        let k = OWN_KEYSETS + l.own_keysets.len() as u64 + 1;
+        l.own_keysets.insert(k, url.to_owned());
+        l.own_active.insert(url.to_owned(), k);
+        l.own_expiry
+            .insert(url.to_owned(), final_expiry.map(|d| now + d.as_secs()));
     }
 
     fn rotate_keyset(&self) {

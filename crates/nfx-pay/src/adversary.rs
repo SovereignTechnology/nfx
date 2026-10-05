@@ -11,7 +11,10 @@
 //! A future still pending after 100 turns of the runtime with no answer under way waits on
 //! the suite ([`Harness`] says how). So it holds whether a mint answers a read at once, on
 //! its reader's next poll (`tests/round_trip.rs`), or from another thread that wakes its
-//! reader, as a real mint's answer comes back (`tests/woken_reads.rs`).
+//! reader, as a real mint's answer comes back (`tests/woken_reads.rs`). Nor does it depend
+//! on when, beyond what NFX-07 §3 requires, an engine asks its mints for their keyset
+//! listings: one that asks at its start too passes as one that asks only where a check
+//! needs one (`tests/listings_at_start.rs`).
 //!
 //! **Run it with [`adversary_suite!`](crate::adversary_suite)**, which emits one test per
 //! scenario from the list kept here: a runner cannot choose a subset. The list is pinned
@@ -1071,24 +1074,29 @@ pub async fn foreign_and_lookalike_mints_are_refused<H: Harness>(h: &H) {
     assert!(h.dialled(&m), "keys come from the quoted mint");
 
     keys_are_the_quoted_keysets_own(h).await;
+    the_keyset_rule_asks_for_a_listing_once_a_second(h).await;
+    the_keyset_rule_judges_by_a_listing_of_its_turns_second(h).await;
     keys_held_are_used_without_asking(h).await;
     a_keyset_the_mint_does_not_list_is_bad_token(h).await;
     a_keyset_the_mint_started_is_listed_the_next_second(h).await;
+    a_listing_asked_after_a_payment_arrived_judges_it(h).await;
+    a_listing_is_per_mint(h).await;
 }
 
 /// Flaws `KeysOfAnyMint`, `KeysOfFirstProofOnly`, `KeysOfAnyNamedKeyset`,
-/// `UnfetchedKeysetTrusted` and `ListingAskedEveryOtherSecond`. A token's DLEQs are checked
-/// against the keys of its own quoted mint, of the keysets its proofs name (NFX-07 §3 step
-/// 3): a seeder may cache them, but none it holds serve another mint, or a keyset they are
-/// not of. The seeder quotes two mints, and a payment in the first is acknowledged: so is
-/// one in the second, checked against that mint's keys. The first mint then rotates its
-/// keyset, and a second later a payment of a token of the new keyset is answered and
-/// acknowledged, checked against that keyset's keys: the mint's listing, asked for again in
-/// the next second, names it. A seeder that holds no keys is paid a token of two keysets,
-/// an older one's proof first: it is acknowledged, checked against the keys of each. So is
-/// one that holds the active keyset's keys alone. And a proof of an older keyset whose keys
-/// the seeder does not hold, its DLEQ invalid, is refused `bad-token`: that keyset's keys
-/// are fetched to check it.
+/// `UnfetchedKeysetTrusted`, `ListingAskedEveryOtherSecond` and `ListingBoundPerSeeder`. A
+/// token's DLEQs are checked against the keys of its own quoted mint, of the keysets its
+/// proofs name (NFX-07 §3 step 3): a seeder may cache them, but none it holds serve another
+/// mint, or a keyset they are not of. The seeder quotes two mints, and a payment in the
+/// first is acknowledged: so is one in the second, at once, though the first mint was asked
+/// for its listing in that second, checked against that mint's keys. The first mint then
+/// rotates its keyset, and a second later a payment of a token of the new keyset is
+/// answered and acknowledged, checked against that keyset's keys: the mint's listing, asked
+/// for again in the next second, names it. A seeder that holds no keys is paid a token of
+/// two keysets, an older one's proof first: it is acknowledged, checked against the keys of
+/// each. So is one that holds the active keyset's keys alone. And a proof of an older
+/// keyset whose keys the seeder does not hold, its DLEQ invalid, is refused `bad-token`:
+/// that keyset's keys are fetched to check it.
 async fn keys_are_the_quoted_keysets_own<H: Harness>(h: &H) {
     let e = h
         .engine_checked(EngineParams {
@@ -1119,12 +1127,18 @@ async fn keys_are_the_quoted_keysets_own<H: Harness>(h: &H) {
         .expect("paid in the first mint");
     assert_eq!((ack.accepted_upto, ack.spent_total), (4, 4));
     serve(h, &mut s, 4, 4);
-    let r = s
-        .pay(&Pay {
-            upto_chunk: 8,
-            token: h.token_at(&second, 4).await,
-        })
-        .await;
+    let p = Pay {
+        upto_chunk: 8,
+        token: h.token_at(&second, 4).await,
+    };
+    let answered = {
+        let mut paying = Box::pin(s.pay(&p));
+        answer_of(h, paying.as_mut()).await
+    };
+    let r = answered.expect(
+        "a payment in the second quoted mint is answered at once, the first mint asked for its \
+         keyset listing in this second: asking one mint delays asking no other",
+    );
     assert!(
         r.as_ref()
             .is_ok_and(|ack| (ack.accepted_upto, ack.spent_total) == (8, 8)),
@@ -2497,6 +2511,7 @@ pub async fn a_seeder_answers_within_its_deadline<H: Harness>(h: &H) {
     a_turn_in_the_deadlines_second_reaches_no_refusal(h).await;
     every_turn_in_the_deadlines_second_reaches_no_refusal(h).await;
     a_listing_that_comes_late_judges_nothing(h).await;
+    the_keyset_rule_waits_for_its_listing(h).await;
 }
 
 /// A swap abandoned at the deadline is settled when its outcome comes: a claim is
@@ -5026,6 +5041,7 @@ pub async fn a_mint_outage_is_not_a_ban<H: Harness>(h: &H) {
         let e = h.engine(1, 4, 1000);
         let mut s = open(h, &e, 1).await;
         serve(h, &mut s, 0, 4);
+        h.advance(SECOND); // no listing asked for yet in the second the keyset changes
         h.keyset_expires_in(after);
         let pay = Pay {
             upto_chunk: 4,
@@ -5065,6 +5081,7 @@ pub async fn a_mint_outage_is_not_a_ban<H: Harness>(h: &H) {
             .expect("a valid configuration");
         let mut s = open(h, &e, 1).await;
         serve(h, &mut s, 0, 4);
+        h.advance(SECOND); // no listing asked for yet in the second the keyset changes
         h.keyset_expires_in(Some(after));
         let r = s
             .pay(&Pay {
@@ -5092,6 +5109,7 @@ pub async fn a_mint_outage_is_not_a_ban<H: Harness>(h: &H) {
             .expect("a valid configuration");
         let mut s = open(h, &e, 1).await;
         serve(h, &mut s, 0, 4);
+        h.advance(SECOND); // no listing asked for yet in the second the keyset changes
         h.keyset_expires_in(Some(after));
         let r = s
             .pay(&Pay {
@@ -7658,6 +7676,7 @@ async fn unavailable_payments_keep_nothing<H: Harness>(h: &H) {
         "free identities' payments refused as pending leave nothing behind"
     );
     h.keyset_expires_in(Some(h.account_ttl()));
+    h.advance(SECOND); // the mint's listing shows it from the next second
     for p in 33..=48u8 {
         let mut s = open(h, &e, p).await;
         let r = s
@@ -8484,6 +8503,7 @@ async fn refusals_after_a_wait_wake_what_waits<H: Harness>(h: &H) {
         };
         if code == RejCode::MintUnavailable {
             h.keyset_expires_in(Some(h.account_ttl()));
+            h.advance(SECOND); // the mint's listing shows it from the next second
         }
         hold_refetch(h, &e);
         let p = Pay {
@@ -10107,6 +10127,7 @@ pub async fn a_viewer_reclaims_a_refused_payment<H: Harness>(h: &H) {
         "its only proofs are listed expired: worth nothing, never paid with"
     );
     h.rotate_keyset();
+    h.advance(SECOND); // the mint lists the new keyset the next second
     let pay = v
         .due()
         .await
@@ -15859,6 +15880,7 @@ async fn last_pay_never_with_expired_proofs<H: Harness>(h: &H) {
         "its only proofs are listed expired: never paid with, at the end either"
     );
     h.rotate_keyset();
+    h.advance(SECOND); // the mint lists the new keyset the next second
     let pay = v
         .last_pay()
         .await
@@ -16588,6 +16610,7 @@ async fn good_held_proofs_kept_beside_expired<H: Harness>(h: &H) {
             .expect("its last payment answers")
             .expect("1 sat owed: paid with the good older proof the wallet kept");
         h.rotate_keyset();
+        h.advance(SECOND); // the mint lists the new keyset the next second
         let ack = s1
             .pay(&pay)
             .await
@@ -20446,6 +20469,7 @@ async fn refusals_after_a_wait_keep_nothing<H: Harness>(h: &H) {
                     drop(holding); // its connection closes before its swap is sent
                     if soon {
                         h.keyset_expires_in(Some(h.account_ttl()));
+                        h.advance(SECOND); // the mint's listing shows it from the next second
                     }
                     h.release_swaps().await; // the keys come
                     answer_of(h, waiting.as_mut())
@@ -20742,6 +20766,7 @@ async fn refusals_on_either_path_free_the_turn<H: Harness>(h: &H) {
                 }
                 if soon {
                     h.keyset_expires_in(Some(h.account_ttl()));
+                    h.advance(SECOND); // the mint's listing shows it from the next second
                 }
                 drop(holding); // its connection closes before its swap is sent
                 if keys {
@@ -21058,11 +21083,12 @@ async fn keys_held_are_used_without_asking<H: Harness>(h: &H) {
 /// for a keyset's keys only if the mint's keyset listing names it, and for the listing at
 /// most once a second. Sixteen peers, each paid to 4, pay for chunks 5 to 8 with tokens
 /// naming a keyset the mint never had, a fresh one each: every proof, or one among good
-/// ones, first, in the middle or last. They arrive in one second, the listing last asked
-/// for in an earlier one. The first asks for it again and is refused by it; those that find
-/// it asked for since they arrived are refused by it too, and the rest wait for the next
-/// second's. Each is refused `bad-token`, none is banned, and the mint has had at most two
-/// key requests for them all.
+/// ones, first, in the middle or last. They arrive in one second, one after another, the
+/// listing last asked for in an earlier one. The first asks for it again and is refused by
+/// it; the rest, arriving after that ask in its second, wait for the next second's. There
+/// the first of them asks again, and those after it, finding that listing asked for since
+/// they arrived, are refused by it too. Each is refused `bad-token`, none is banned, and the
+/// mint has had at most two key requests for them all.
 async fn a_keyset_the_mint_does_not_list_is_bad_token<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut sessions = Vec::new();
@@ -21113,14 +21139,14 @@ async fn a_keyset_the_mint_does_not_list_is_bad_token<H: Harness>(h: &H) {
     for (i, a) in answers.iter().enumerate() {
         let which = match i % 4 {
             0 => "every proof",
-            1 => "the first of three",
-            2 => "the second of three",
-            _ => "the last of three",
+            1 => "the first proof of three",
+            2 => "the second proof of three",
+            _ => "the last proof of three",
         };
         assert!(
             a.as_ref().is_some_and(|r| is_rej(r, &RejCode::BadToken)),
-            "a token whose {which} names a keyset the mint does not list is refused bad-token, \
-             by a listing asked for after it arrived: {a:?}"
+            "a token in which {which} names a keyset the mint does not list is refused \
+             bad-token, by a listing asked for after it arrived: {a:?}"
         );
     }
     assert!(
@@ -21169,6 +21195,702 @@ async fn a_keyset_the_mint_started_is_listed_the_next_second<H: Harness>(h: &H) 
         "the next second's listing names the keyset the mint started: the payment is checked \
          against its keys, and acknowledged: {r:?}"
     );
+}
+
+/// Flaws `KeysetListingEverySwap`, `ListingAskedUnneeded`, `KeysetRuleWithoutListing`,
+/// `KeysetListingBeforeChecks`, `ListingAskedEachSecond`, `KeysetListingOwnCache` and
+/// `KeysetListingAfterStep3Asked`. The seeder asks a mint for its keyset listing only where
+/// a check needs one, at most once a second (NFX-07 §3 steps 3 and 5): the keyset rule
+/// judges by one asked for in the payment's turn's second or later, and one listing serves
+/// both steps. Sixteen peers, each paid in an earlier second, pay again in one second, and
+/// each is acknowledged: their keyset rule costs the mint one listing between them. A second
+/// on, one more payment costs one more, the listing held being of an earlier second. Each a
+/// second on again: payments refused before the keyset rule, their keys held, cost none (an
+/// invalid DLEQ proof, short of the chunks or over them); nor, its keys dropped, does one
+/// with an invalid DLEQ proof, which asks for its keys alone, the listing held naming their
+/// keyset; and a payment of a keyset the mint started costs one, asked for by its step 3 and
+/// serving its keyset rule.
+async fn the_keyset_rule_asks_for_a_listing_once_a_second<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut sessions = Vec::new();
+    for p in 1..=16u8 {
+        let mut s = open(h, &e, p).await;
+        serve(h, &mut s, 0, 4);
+        settles_pay::<H>(&mut s, 4, h.token(4).await, 4).await;
+        sessions.push(s);
+    }
+    h.advance(SECOND);
+    let asked = h.listing_requests();
+    for s in &mut sessions {
+        serve(h, s, 4, 4);
+        settles_pay::<H>(s, 8, h.token(4).await, 8).await;
+    }
+    assert_eq!(
+        h.listing_requests() - asked,
+        1,
+        "16 payments in one second, each judged by the keyset rule, cost the mint one keyset \
+         listing between them"
+    );
+    h.advance(SECOND);
+    let asked = h.listing_requests();
+    let s = sessions.first_mut().expect("16 sessions");
+    serve(h, s, 8, 4);
+    settles_pay::<H>(s, 12, h.token(4).await, 12).await;
+    assert_eq!(
+        h.listing_requests() - asked,
+        1,
+        "a payment in a later second, the listing held asked for before its turn's second, asks \
+         for the listing again for its keyset rule"
+    );
+    h.advance(SECOND);
+    let asked = h.listing_requests();
+    for (s, token) in sessions.iter_mut().skip(1).zip([
+        h.bad_token(BadToken::BadDleq, 4).await,
+        h.token(3).await,
+        h.token(5).await,
+    ]) {
+        let r = s
+            .pay(&Pay {
+                upto_chunk: 12,
+                token,
+            })
+            .await;
+        assert!(
+            r.as_ref()
+                .is_err_and(|r| r.code != RejCode::MintUnavailable),
+            "refused by a check before the keyset rule: {r:?}"
+        );
+    }
+    assert_eq!(
+        h.listing_requests(),
+        asked,
+        "payments refused before the keyset rule, for an invalid DLEQ proof, short or over, \
+         their keys held, ask for no keyset listing: no check of theirs needs one"
+    );
+    h.advance(SECOND);
+    h.forget_keys(&e);
+    let (asked, keys) = (h.listing_requests(), h.key_requests());
+    let s = sessions.get_mut(4).expect("16 sessions");
+    let r = s
+        .pay(&Pay {
+            upto_chunk: 12,
+            token: h.bad_token(BadToken::BadDleq, 4).await,
+        })
+        .await;
+    assert!(is_rej(&r, &RejCode::BadToken), "an invalid DLEQ: {r:?}");
+    assert!(
+        h.listing_requests() == asked && h.key_requests() > keys,
+        "a payment whose keys the seeder no longer holds, of a keyset the listing it holds \
+         names, asks for its keys and for no listing: {} listing requests",
+        h.listing_requests() - asked
+    );
+    h.rotate_keyset();
+    h.advance(SECOND); // the mint lists the new keyset the next second
+    let asked = h.listing_requests();
+    let s = sessions.get_mut(5).expect("16 sessions");
+    serve(h, s, 8, 4);
+    settles_pay::<H>(s, 12, h.token(4).await, 12).await; // of the keyset the mint started
+    assert_eq!(
+        h.listing_requests() - asked,
+        1,
+        "a payment of a keyset the mint started costs one listing: its step 3 asks for it, \
+         and its keyset rule judges by it"
+    );
+}
+
+/// Flaws `ListingBoundPerSeeder`, `ListingJudgesOtherMints`, `KeysetListingBoundPerSeeder`,
+/// `KeysetListingOfOtherMints`, `ListingOneForAllMints` and `KeysetNamedByAnyMintsListing`.
+/// Each quoted mint's keyset listing is its own (NFX-07 §3 steps 3 and 5): it names no
+/// keyset of another mint's, it judges no payment at another mint, and asking one mint for
+/// it delays asking no other. A seeder quotes three mints; peers 1 and 3 are paid at the
+/// second, peers 1 and 2 at the first, so it holds those mints' keys and listings. Then,
+/// each in a second of its own:
+/// - the second mint starts a keyset alone; peer 2's payment at the first, naming a keyset
+///   it never had, makes the seeder ask the first for its listing; and peer 3's payment at
+///   the second, of the keyset it started, is acknowledged at once;
+/// - peer 2's payment at the first mint, its proofs of the keyset the second started, is
+///   refused `bad-token` by the first's listing, asked for again, and the first is asked
+///   for no keys of it;
+/// - peer 1's payment at the second holds the turn, its swap held, and the second mint
+///   starts another keyset; P, peer 1's payment of it, arrives and waits for the turn; a
+///   second on, peer 2's payment at the first makes the seeder ask the first for its
+///   listing; the swap comes back, and P is acknowledged at once: the first mint's
+///   listing, asked for after P arrived, names no keyset of the second's, and judges none;
+/// - the third mint starts a keyset alone that expires too soon to swap to: peer 2's
+///   payment of it is refused `mint-unavailable` by the keyset rule, and peer 3's at the
+///   second, whose listing lists no expiry, is acknowledged at once.
+async fn a_listing_is_per_mint<H: Harness>(h: &H) {
+    let e = h
+        .engine_checked(EngineParams {
+            price: 1,
+            window: 4,
+            global_cap: 1000,
+            debt_ttl: h.debt_ttl(),
+            account_ttl: h.account_ttl(),
+            ban_ttl: h.ban_ttl(),
+            mints: 3,
+            extra_mint: None,
+        })
+        .expect("a seeder quoting three mints");
+    let (mut s1, mut s2, mut s3) = (
+        open(h, &e, 1).await,
+        open(h, &e, 2).await,
+        open(h, &e, 3).await,
+    );
+    let mut waiter = open(h, &e, 1).await;
+    let first = h.mint();
+    let second = s1.quote().mints.get(1).cloned().expect("a second mint");
+    let third = s1.quote().mints.get(2).cloned().expect("a third mint");
+    serve(h, &mut s1, 0, 4);
+    settles_pay::<H>(&mut s1, 4, h.token_at(&second, 4).await, 4).await;
+    serve(h, &mut s3, 0, 4);
+    settles_pay::<H>(&mut s3, 4, h.token_at(&second, 4).await, 4).await;
+    serve(h, &mut s1, 4, 4);
+    settles_pay::<H>(&mut s1, 8, h.token_at(&first, 4).await, 8).await;
+    serve(h, &mut s2, 0, 4);
+    settles_pay::<H>(&mut s2, 4, h.token_at(&first, 4).await, 4).await;
+    let unknown = Pay {
+        upto_chunk: 8,
+        token: h.bad_token(BadToken::UnknownKeyset, 4).await, // at the first mint
+    };
+    // Asking the first mint for its listing delays asking the second for its own.
+    h.start_keyset_at(&second, None);
+    h.advance(SECOND);
+    let r = s2.pay(&unknown).await;
+    assert!(is_rej(&r, &RejCode::BadToken), "{r:?}");
+    serve(h, &mut s3, 4, 4);
+    let p = Pay {
+        upto_chunk: 8,
+        token: h.token_at(&second, 4).await,
+    };
+    let r = {
+        let mut paying = Box::pin(s3.pay(&p));
+        answer_of(h, paying.as_mut()).await
+    };
+    assert!(
+        r.as_ref()
+            .is_some_and(|r| r.as_ref().is_ok_and(|a| a.accepted_upto == 8)),
+        "a payment at the second mint, of a keyset it started, is acknowledged at once, the \
+         first mint asked for its listing in this second: asking one mint delays asking no \
+         other: {r:?}"
+    );
+    // The second mint's listing names no keyset of the first's.
+    h.advance(SECOND);
+    let (keys, listings) = (h.key_requests(), h.listing_requests());
+    let r = s2
+        .pay(&Pay {
+            upto_chunk: 8,
+            token: h.bad_token(BadToken::OtherMintsKeyset, 4).await,
+        })
+        .await;
+    let (keys, listings) = (h.key_requests() - keys, h.listing_requests() - listings);
+    assert!(
+        is_rej(&r, &RejCode::BadToken) && keys == listings,
+        "a token at the first mint, its proofs of the keyset the second mint started, is \
+         refused bad-token by the first mint's listing, which does not name it, and the first \
+         mint is asked for no keys of it, though the second's listing names it: {r:?}, {keys} \
+         requests, {listings} of them listings"
+    );
+    // The first mint's listing judges no keyset of the second's.
+    serve(h, &mut s1, 8, 4);
+    let held = Pay {
+        upto_chunk: 12,
+        token: h.token_at(&second, 4).await, // of the keyset whose keys the seeder holds
+    };
+    h.advance(SECOND);
+    h.hold_next_swap();
+    let mut holding = Box::pin(s1.pay(&held));
+    assert!(waits(h, holding.as_mut()).await, "its swap is held");
+    h.start_keyset_at(&second, None);
+    let p = Pay {
+        upto_chunk: 16,
+        token: h.token_at(&second, 4).await,
+    };
+    let mut paying = Box::pin(waiter.pay(&p));
+    assert!(waits(h, paying.as_mut()).await, "P waits for the turn");
+    h.advance(SECOND);
+    let r = s2.pay(&unknown).await;
+    assert!(is_rej(&r, &RejCode::BadToken), "{r:?}");
+    h.release_swaps().await;
+    let r = answer_of(h, holding.as_mut()).await;
+    assert!(
+        r.as_ref().is_some_and(Result::is_ok),
+        "its swap came back: {r:?}"
+    );
+    let r = answer_of(h, paying.as_mut()).await;
+    assert!(
+        r.as_ref()
+            .is_some_and(|r| r.as_ref().is_ok_and(|a| a.accepted_upto == 16)),
+        "a payment at the second mint, of a keyset it started, is acknowledged at once though \
+         the first mint's listing, asked for after it arrived, does not name it: that listing \
+         judges no keyset of the second mint's: {r:?}"
+    );
+    drop((holding, paying));
+    // The keyset rule judges by the payment's own mint's listing.
+    h.start_keyset_at(&third, Some(h.account_ttl()));
+    h.advance(SECOND);
+    let r = s2
+        .pay(&Pay {
+            upto_chunk: 8,
+            token: h.token_at(&third, 4).await,
+        })
+        .await;
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "a keyset the third mint lists to expire too soon: {r:?}"
+    );
+    serve(h, &mut s3, 8, 4);
+    let p = Pay {
+        upto_chunk: 12,
+        token: h.token_at(&second, 4).await,
+    };
+    let r = {
+        let mut paying = Box::pin(s3.pay(&p));
+        answer_of(h, paying.as_mut()).await
+    };
+    assert!(
+        r.as_ref()
+            .is_some_and(|r| r.as_ref().is_ok_and(|a| a.accepted_upto == 12)),
+        "a payment at the second mint is judged by the keyset rule against its own mint's \
+         listing, asked for at once though the third mint was asked in this second: \
+         acknowledged: {r:?}"
+    );
+}
+
+/// Flaws `ListingFromArrivalSecondDistrusted`, `OthersListingsDistrusted`,
+/// `KeysetListingUncounted` and `ListingArrivalAtTurn`. A keyset that a listing asked for after a payment arrived does
+/// not name refuses it `bad-token` (NFX-07 §3 step 3), whichever entry asked for that
+/// listing, for whichever check, in whichever second. Peers 1 and 2 are paid in an earlier
+/// second. P, peer 1's payment naming a keyset the mint never had, waits for its account's
+/// turn while peer 2's payment makes the seeder ask for the listing: in P's own second, P0
+/// holding the turn while its keys come, for a keyset the mint never had or for its keyset
+/// rule, acknowledged; or, P0's swap at the mint and its connection closed, for a keyset the
+/// mint never had, in the second P arrived 30 s later, or 10 s after it. P takes the turn as
+/// P0 is acknowledged, or takes it over at P0's deadline, and is refused `bad-token` at once,
+/// by that listing, asking for none.
+async fn a_listing_asked_after_a_payment_arrived_judges_it<H: Harness>(h: &H) {
+    for (later, rule) in [
+        (None, false),
+        (None, true),
+        (Some(0), false),
+        (Some(10), false),
+    ] {
+        let e = h.engine(1, 4, 1000);
+        let (mut s0, mut s1) = (open(h, &e, 1).await, open(h, &e, 1).await);
+        let mut s2 = open(h, &e, 2).await;
+        serve(h, &mut s0, 0, 4);
+        settles_pay::<H>(&mut s0, 4, h.token(4).await, 4).await;
+        serve(h, &mut s2, 0, 4);
+        settles_pay::<H>(&mut s2, 4, h.token(4).await, 4).await;
+        h.advance(SECOND);
+        let p0 = Pay {
+            upto_chunk: 8,
+            token: h.token(4).await,
+        };
+        let p = Pay {
+            upto_chunk: 12,
+            token: h.bad_token(BadToken::UnknownKeyset, 4).await,
+        };
+        serve(h, &mut s2, 4, 4);
+        let other = Pay {
+            upto_chunk: 8,
+            token: if rule {
+                h.token(4).await // its keyset rule asks for the listing
+            } else {
+                h.bad_token(BadToken::UnknownKeyset, 4).await
+            },
+        };
+        let mut holding = None;
+        if later.is_none() {
+            hold_refetch(h, &e);
+            let mut first = Box::pin(s0.pay(&p0));
+            assert!(
+                waits_for_keys(h, first.as_mut()).await,
+                "P0 holds the turn, waiting for keys"
+            );
+            holding = Some(first);
+        } else {
+            h.hold_next_swap();
+            poll_once(s0.pay(&p0)).await; // its connection closes, its swap at the mint
+            h.advance(Duration::from_secs(30));
+        }
+        let mut paying = Box::pin(s1.pay(&p));
+        assert!(waits(h, paying.as_mut()).await, "P waits for the turn");
+        let when = match later {
+            None if rule => "in its own second, for its keyset rule, P0 holding the turn",
+            None => "in its own second, P0 holding the turn",
+            Some(0) => "in its own second, past P0's deadline",
+            Some(_) => "a later second, past P0's deadline",
+        };
+        if let Some(after) = later.filter(|a| *a > 0) {
+            h.advance(Duration::from_secs(after));
+        }
+        if let Some(mut first) = holding {
+            let mut asking = Box::pin(s2.pay(&other));
+            assert!(
+                waits_for_keys(h, asking.as_mut()).await,
+                "peer 2's payment asks the mint, held"
+            );
+            h.release_swaps().await; // the listing and P0's keys come
+            let r = answer_of(h, asking.as_mut()).await;
+            if rule {
+                assert!(
+                    r.as_ref().is_some_and(Result::is_ok),
+                    "peer 2's payment, its keys come, is acknowledged: {r:?}"
+                );
+            } else {
+                assert!(
+                    r.as_ref().is_some_and(|r| is_rej(r, &RejCode::BadToken)),
+                    "a token naming a keyset the mint does not list is refused bad-token: {r:?}"
+                );
+            }
+            let r0 = answer_of(h, first.as_mut()).await;
+            assert!(
+                r0.as_ref().is_some_and(Result::is_ok),
+                "P0 acknowledged: {r0:?}"
+            );
+        } else {
+            let r = s2.pay(&other).await;
+            assert!(
+                is_rej(&r, &RejCode::BadToken),
+                "a token naming a keyset the mint does not list is refused bad-token: {r:?}"
+            );
+            h.advance(Duration::from_secs(30 - later.unwrap_or(0))); // P0's deadline
+        }
+        let asked = h.key_requests();
+        let r = answer_of(h, paying.as_mut()).await;
+        assert!(
+            r.as_ref().is_some_and(|r| is_rej(r, &RejCode::BadToken)) && h.key_requests() == asked,
+            "P, naming a keyset the mint does not list, is refused bad-token at once by the \
+             listing another payment asked for after it arrived, {when}, and asks the mint for \
+             nothing: {r:?}, {} requests",
+            h.key_requests() - asked
+        );
+        drop(paying);
+        assert!(!s1.banned(), "a keyset the mint does not list bans nobody");
+        h.release_swaps().await;
+    }
+}
+
+/// Flaws `KeysetListingWaitUnwoken`, `KeysetListingNoClockWatch`, `KeysetListingWatchOnce`,
+/// `KeysetListingAskedWhileHeld`, `HeldListingAskedAgain`, `HeldListingJudgedUnlisted`,
+/// `HeldListingExpiryDropped`, `KeysetHorizonFromTurn` and `KeysetHorizonFromListing`. A payment whose keyset rule
+/// needs the mint's listing waits for it, holding the turn (NFX-07 §3 step 5), and is woken
+/// by whatever ends the wait; another payment that finds that listing asked for in its
+/// turn's second waits for the same one, asking for none. Peers 1 and 2 are paid in an
+/// earlier second, their keys held, and the seeder's key requests are held. Peer 1's
+/// payment, on a task of its own, polled only when it is woken, asks for the listing, and
+/// peer 2's waits for it too. Then:
+/// - the listing comes: both are woken and acknowledged, the mint asked for one listing;
+/// - the clock moves 5 s, waking the payment, which still waits, and the listing comes,
+///   the keyset listed to expire twice `account_ttl` and 2 s after their turn: as they
+///   are judged it expires too soon, and both are refused `mint-unavailable`, nothing
+///   swapped;
+/// - none comes: the clock moves 20 s, waking the payment, then to its deadline, and it is
+///   woken and answered `mint-unavailable`, having read nothing and asked for no other
+///   listing.
+async fn the_keyset_rule_waits_for_its_listing<H: Harness>(h: &H) {
+    for comes in [Some(0), Some(5), None] {
+        let e = h.engine(1, 4, 1000);
+        let (mut s, mut t) = (open(h, &e, 1).await, open(h, &e, 2).await);
+        for s in [&mut s, &mut t] {
+            serve(h, s, 0, 4);
+            settles_pay::<H>(s, 4, h.token(4).await, 4).await;
+            serve(h, s, 4, 4);
+        }
+        h.advance(SECOND);
+        if comes == Some(5) {
+            h.keyset_expires_in(Some(h.account_ttl() * 2 + 2 * SECOND));
+        }
+        h.hold_key_fetches(); // their keys held: only their keyset rule asks the mint
+        let (p, q) = (
+            Pay {
+                upto_chunk: 8,
+                token: h.token(4).await,
+            },
+            Pay {
+                upto_chunk: 8,
+                token: h.token(4).await,
+            },
+        );
+        let (reads, asked) = (h.state_reads(), h.listing_requests());
+        let mut other = Box::pin(t.pay(&q));
+        let woken = match comes {
+            Some(0) => {
+                "the payment waiting for the keyset listing its keyset rule judges by, on a \
+                 task of its own, is woken as the listing comes"
+            }
+            Some(_) => {
+                "the payment waiting for the keyset listing its keyset rule judges by, on a \
+                 task of its own, is woken as the listing comes 5 s later"
+            }
+            None => {
+                "the payment waiting for the keyset listing its keyset rule judges by, on a \
+                 task of its own, woken by the clock 20 s on, is woken again at its deadline \
+                 and answered then, the listing not come"
+            }
+        };
+        let r = woken_on_its_own_task(
+            h,
+            s.pay(&p),
+            async {
+                assert!(
+                    waits(h, other.as_mut()).await,
+                    "a payment finding the keyset listing its keyset rule needs asked for in its \
+                     turn's second, its answer held, waits for it"
+                );
+                match comes {
+                    Some(after) => {
+                        if after > 0 {
+                            h.advance(Duration::from_secs(after));
+                            settle(h).await; // the clock wakes it: still waiting
+                        }
+                        h.release_swaps().await; // the listing comes
+                    }
+                    None => {
+                        h.advance(Duration::from_secs(20));
+                        settle(h).await;
+                        h.advance(Duration::from_secs(40)); // its deadline
+                    }
+                }
+            },
+            "the payment holds the turn, waiting for the keyset listing its keyset rule judges by",
+            woken,
+        )
+        .await;
+        let r2 = answer_of(h, other.as_mut()).await;
+        match comes {
+            Some(0) => assert!(
+                r.as_ref()
+                    .is_ok_and(|a| (a.accepted_upto, a.spent_total) == (8, 8))
+                    && r2
+                        .as_ref()
+                        .is_some_and(|r| r.as_ref().is_ok_and(|a| a.accepted_upto == 8))
+                    && h.listing_requests() - asked == 1,
+                "the listing came: both payments are judged by it, the mint asked for that one \
+                 alone, and acknowledged: {r:?}, {r2:?}, {} listing requests",
+                h.listing_requests() - asked
+            ),
+            Some(_) => assert!(
+                is_rej(&r, &RejCode::MintUnavailable)
+                    && r2
+                        .as_ref()
+                        .is_some_and(|r| is_rej(r, &RejCode::MintUnavailable))
+                    && !h.claimed_any(&p.token).await
+                    && !h.claimed_any(&q.token).await,
+                "the listing came 5 s after their turn, the keyset listed to expire sooner than \
+                 twice account_ttl away as they are judged: refused mint-unavailable, nothing \
+                 swapped: {r:?}, {r2:?}"
+            ),
+            None => assert!(
+                is_rej(&r, &RejCode::MintUnavailable)
+                    && h.state_reads() == reads
+                    && h.listing_requests() - asked == 1,
+                "no listing by its deadline: mint-unavailable, its keyset rule not judged, \
+                 nothing read, and no other listing asked for while it waited: {r:?}, {} \
+                 listing requests",
+                h.listing_requests() - asked
+            ),
+        }
+        drop(other);
+        h.keyset_expires_in(None);
+        h.release_swaps().await;
+    }
+}
+
+/// The listing the seeder holds as a payment's turn comes, in
+/// [`the_keyset_rule_judges_by_a_listing_of_its_turns_second`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListingHeld {
+    /// Asked for a second before the turn, and answered.
+    Stale,
+    /// Asked for a second before the turn, its answer still held.
+    StaleHeld,
+    /// Asked for in the turn's second, before the turn came.
+    OfTheTurn,
+}
+
+/// Flaws `WaitedTakeoverKeysetListingStale`, `WaitedTakeoverKeysetListingFromArrival`,
+/// `UnwaitedKeysetListingOfJudgingSecond` and `UnwaitedStaleHeldListingAwaited` (and the
+/// like, one for each path). The keyset rule judges by a listing asked for in the payment's
+/// turn's second or later (NFX-07 §3 step 5), on every path to the turn: never by one asked
+/// for before, though after the payment arrived ([`a_keyset_rule_on_its_path`]).
+async fn the_keyset_rule_judges_by_a_listing_of_its_turns_second<H: Harness>(h: &H) {
+    for path in [
+        Path::Free,
+        Path::Waited,
+        Path::TakenOverAtTheDeadline,
+        Path::TakenOverAsItArrives,
+    ] {
+        for held in [
+            ListingHeld::Stale,
+            ListingHeld::StaleHeld,
+            ListingHeld::OfTheTurn,
+        ] {
+            a_keyset_rule_on_its_path(h, path, held).await;
+        }
+    }
+}
+
+/// P, peer 1's payment, comes to its turn on `path`: P1, of the same account, ahead of it on
+/// every path but the first, its swap held, waiting for it, or its connection closed. Peer
+/// 2's payment makes the seeder ask for the mint's keyset listing, its keyset rule judging
+/// by it, as `held` says:
+/// - a second before P's turn comes, after P arrived where it waited, and the mint then
+///   lists its keyset to expire too soon: P asks for a listing of its turn's second, and is
+///   refused `mint-unavailable` before any read, nothing swapped;
+/// - the same, the listing's answer held: P asks for its own rather than wait for that one,
+///   and is refused so once they come;
+/// - in P's turn's second, before its turn, P's keys coming 5 s after its turn: P is judged
+///   by that listing, and asks for none.
+async fn a_keyset_rule_on_its_path<H: Harness>(h: &H, path: Path, held: ListingHeld) {
+    let how = path.how();
+    let e = h.engine(1, 4, 1000);
+    let (mut s1, mut s) = (open(h, &e, 1).await, open(h, &e, 1).await);
+    let mut t = open(h, &e, 2).await;
+    serve(h, &mut s1, 0, 4);
+    settles_pay::<H>(&mut s1, 4, h.token(4).await, 4).await;
+    serve(h, &mut t, 0, 4);
+    settles_pay::<H>(&mut t, 4, h.token(4).await, 4).await;
+    serve(h, &mut t, 4, 4);
+    let start = h.clock_secs();
+    h.advance(SECOND);
+    let p1 = Pay {
+        upto_chunk: 8,
+        token: h.token(4).await,
+    };
+    let p = Pay {
+        upto_chunk: if path == Path::Waited { 12 } else { 8 },
+        token: h.token(4).await,
+    };
+    let q = Pay {
+        upto_chunk: 8,
+        token: h.token(4).await, // peer 2's: its keyset rule asks for the listing
+    };
+    let mut first = None;
+    if path != Path::Free {
+        h.hold_next_swap();
+        let mut holding = Box::pin(s1.pay(&p1));
+        assert!(waits(h, holding.as_mut()).await, "P1's swap is held");
+        if path == Path::Waited {
+            first = Some(holding); // P1 holds the turn, waiting for its swap
+        } // else its connection closes, its swap at the mint
+    }
+    let mut paying = Box::pin(s.pay(&p));
+    let waited = matches!(path, Path::Waited | Path::TakenOverAtTheDeadline);
+    if path == Path::TakenOverAtTheDeadline {
+        h.advance(Duration::from_secs(30));
+    }
+    if waited {
+        assert!(waits(h, paying.as_mut()).await, "P waits for the turn");
+    }
+    // The second of P's turn, from the start: on the takeover paths P1's deadline, or 4 s
+    // past it.
+    let turn = start
+        + match path {
+            Path::Free => 2,
+            Path::Waited => 3,
+            Path::TakenOverAtTheDeadline => 61,
+            _ => 65,
+        };
+    let ask = if held == ListingHeld::OfTheTurn {
+        turn
+    } else {
+        turn - 1
+    };
+    h.advance(Duration::from_secs(ask - h.clock_secs()));
+    if held == ListingHeld::StaleHeld {
+        h.hold_key_fetches();
+    }
+    let mut asking = Box::pin(t.pay(&q));
+    if held == ListingHeld::StaleHeld {
+        assert!(
+            waits(h, asking.as_mut()).await,
+            "peer 2's payment waits for the listing it asked for, its answer held"
+        );
+    } else {
+        let r = answer_of(h, asking.as_mut()).await;
+        assert!(
+            r.as_ref().is_some_and(Result::is_ok),
+            "peer 2's payment, judged by the listing it asked for, is acknowledged: {r:?}"
+        );
+    }
+    if held == ListingHeld::OfTheTurn {
+        hold_refetch(h, &e); // P's keys come 5 s after its turn
+    } else {
+        h.keyset_expires_in(Some(h.account_ttl()));
+        h.advance(SECOND); // P's turn's second
+    }
+    let (asked, reads) = (h.listing_requests(), h.state_reads());
+    if let Some(mut holding) = first.take() {
+        h.release_oldest_swap().await; // P1's swap comes back: P takes the turn
+        let r = answer_of(h, holding.as_mut()).await;
+        assert!(
+            r.as_ref().is_some_and(Result::is_ok),
+            "P1 acknowledged: {r:?}"
+        );
+    }
+    let since = if waited { ", after P arrived" } else { "" };
+    match held {
+        ListingHeld::Stale => {
+            let r = answer_of(h, paying.as_mut()).await;
+            assert!(
+                r.as_ref()
+                    .is_some_and(|r| is_rej(r, &RejCode::MintUnavailable))
+                    && h.state_reads() == reads
+                    && h.listing_requests() - asked == 1
+                    && !h.claimed_any(&p.token).await,
+                "P {how}, the listing the seeder holds asked for a second before its turn \
+                 came{since}, the keyset listed to expire too soon since: its keyset rule asks \
+                 for a listing of its turn's second, and refuses it mint-unavailable before any \
+                 read, nothing swapped: {r:?}, {} listing requests, {} reads",
+                h.listing_requests() - asked,
+                h.state_reads() - reads
+            );
+        }
+        ListingHeld::StaleHeld => {
+            let waiting = waits(h, paying.as_mut()).await;
+            assert!(
+                waiting && h.listing_requests() - asked == 1,
+                "P {how}, the listing the seeder holds asked for a second before its turn \
+                 came{since}, its answer held: its keyset rule asks for one of its turn's second \
+                 rather than wait for that one: {} listing requests",
+                h.listing_requests() - asked
+            );
+            h.release_swaps().await; // the listings come
+            let r = answer_of(h, paying.as_mut()).await;
+            assert!(
+                r.as_ref()
+                    .is_some_and(|r| is_rej(r, &RejCode::MintUnavailable))
+                    && h.state_reads() == reads,
+                "P {how}, judged by the listing of its turn's second as it comes, the keyset \
+                 listed to expire too soon: refused mint-unavailable before any read: {r:?}"
+            );
+        }
+        ListingHeld::OfTheTurn => {
+            assert!(
+                waits_for_keys(h, paying.as_mut()).await,
+                "P {how}, and holds the turn waiting for its keys"
+            );
+            let asked = h.listing_requests();
+            h.advance(Duration::from_secs(5));
+            h.release_swaps().await; // its keys come
+            let r = answer_of(h, paying.as_mut()).await;
+            let acked = path.in_flight()
+                || r.as_ref()
+                    .is_some_and(|r| r.as_ref().is_ok_and(|a| a.accepted_upto == p.upto_chunk));
+            assert!(
+                r.is_some() && acked && h.listing_requests() == asked,
+                "P {how}, its keys coming 5 s after its turn: its keyset rule judges by the \
+                 listing peer 2's payment asked for in its turn's second, and asks for none: \
+                 {r:?}, {} listing requests",
+                h.listing_requests() - asked
+            );
+        }
+    }
+    drop((paying, asking));
+    h.keyset_expires_in(None);
+    h.release_swaps().await;
 }
 
 /// Flaws `DleqOfFirstProofOnly`, `MissingDleqOfFirstProofOnly`, `LockOfFirstProofOnly`,
@@ -21284,6 +22006,9 @@ enum Refusal {
     NoKeys,
     Underpaid,
     Overpaid,
+    /// Its checks passed, the keyset listing its keyset rule judges by (step 5) not come by
+    /// its deadline.
+    NoKeysetListing,
     /// Its checks passed, the mint's keyset expires too soon to swap to.
     KeysetTooSoon,
     /// Its checks passed, its read leaves an earlier swap of the account unknown.
@@ -21307,8 +22032,9 @@ const FOREIGN_MINT: &str = "https://foreign-mint.example";
 /// step 1 refuses, a proof locked or lacking a DLEQ proof after good ones, the mint, a
 /// keyset the mint does not list, in every proof or in the last only, keys that do not
 /// come, an invalid DLEQ proof, in every proof or in the last only, the amount, the keyset
-/// to swap to, and what the read finds: an earlier swap unknown, a claim that covers it
-/// whole or in part, or no answer by the deadline.
+/// listing the keyset rule judges by not come, the keyset to swap to, and what the read
+/// finds: an earlier swap unknown, a claim that covers it whole or in part, or no answer by
+/// the deadline.
 fn refusals() -> Vec<Refusal> {
     let mut all = vec![Refusal::Banned, Refusal::Stale];
     for kind in [
@@ -21332,6 +22058,7 @@ fn refusals() -> Vec<Refusal> {
         Refusal::LastProof(BadToken::BadDleq),
         Refusal::Underpaid,
         Refusal::Overpaid,
+        Refusal::NoKeysetListing,
         Refusal::KeysetTooSoon,
         Refusal::EarlierUnknown,
         Refusal::StaleOnRecheck,
@@ -21351,6 +22078,7 @@ impl Refusal {
             Refusal::Underpaid => RejCode::Underpaid,
             Refusal::Overpaid | Refusal::OverpaidOnRecheck => RejCode::Overpaid,
             Refusal::NoKeys
+            | Refusal::NoKeysetListing
             | Refusal::KeysetTooSoon
             | Refusal::EarlierUnknown
             | Refusal::Unsent => RejCode::MintUnavailable,
@@ -21368,6 +22096,11 @@ impl Refusal {
             Refusal::NoKeys => "mint-unavailable, its keys not come by its deadline".into(),
             Refusal::Underpaid => "underpaid".into(),
             Refusal::Overpaid => "overpaid".into(),
+            Refusal::NoKeysetListing => {
+                "mint-unavailable, the keyset listing its keyset rule judges by not come by its \
+                 deadline"
+                    .into()
+            }
             Refusal::KeysetTooSoon => "mint-unavailable for a keyset too near its expiry".into(),
             Refusal::EarlierUnknown => "mint-unavailable, an earlier swap unknown".into(),
             Refusal::StaleOnRecheck => "stale, its read learning a claim that covers it".into(),
@@ -21378,9 +22111,10 @@ impl Refusal {
         }
     }
 
-    /// Whether it comes only once the payment's keys have come (NFX-07 §3 step 3), the turn
-    /// held while they are awaited. The rest come as the payment takes the turn, or, for
-    /// `Unsent`, as its read runs into its deadline, its keys held already.
+    /// Whether it comes only once the payment's keys have come (NFX-07 §3 step 3), or for
+    /// `NoKeysetListing` the keyset listing its keyset rule judges by, its keys held already:
+    /// the turn held while they are awaited. The rest come as the payment takes the turn, or,
+    /// for `Unsent`, as its read runs into its deadline, its keys held already.
     fn after_keys(self) -> bool {
         !matches!(
             self,
@@ -21458,6 +22192,9 @@ enum Stage {
     /// the mint does not list, and the listing was asked for in its second before it came.
     /// Not when it waited for a dead turn: it came seconds before taking it over.
     Listing,
+    /// It holds the turn, its keys held, waiting for the keyset listing its keyset rule
+    /// judges by (step 5): none asked for in its turn's second yet but one held.
+    KeysetListing,
     /// Its read of the account's swaps is under way: on round trips.
     Read,
 }
@@ -21470,6 +22207,7 @@ fn ends(path: Path) -> Vec<End> {
     if path != Path::TakenOverAtTheDeadline {
         all.push(End::Dropped(Stage::Listing));
     }
+    all.push(End::Dropped(Stage::KeysetListing));
     all.push(End::Dropped(Stage::Read));
     all
 }
@@ -21548,7 +22286,11 @@ async fn hellos_behind_then<H: Harness, F: Future<Output = Result<Ack, Rej>>>(
 /// when an unknown swap refuses P2, or has, its answer held, when a claim does). Where P2's
 /// swap is not sent by its deadline, A or P1 found its proofs spent at the mint, its answer
 /// held until it lands during P2's read, which goes unanswered to P2's deadline; P1 then
-/// holds the turn on the waited path for the mint's keyset listing, P2's keys held already.
+/// holds the turn on the waited path for the next second's keyset listing, another payment
+/// of the peer's having asked for it in that second, P2's keys held already. Where P2
+/// waits for the keyset listing its keyset rule judges by, its keys held, the seeder's key
+/// requests are held from a second no listing was asked for in, P1 on the waited path
+/// waiting for the same listing.
 /// A refusal before P2's read comes with the mint's keyset expiring too soon to swap to,
 /// and a token that fails the later checks too ([`Refusal::token`]): only the order NFX-07
 /// §3 sets gives its refusal. What the seeder holds afterwards, every swap settled, in a
@@ -21581,7 +22323,12 @@ async fn a_payment_on_its_path<H: Harness>(
     let claim = refusal.and_then(Refusal::claim);
     let unsent = is(Refusal::Unsent);
     let listing = end == End::Dropped(Stage::Listing);
-    // On the waited path P1 holds the turn for the mint's keyset listing, its answer held.
+    // P2 waits for the keyset listing its keyset rule judges by, its keys held.
+    let keyset_listing = matches!(
+        end,
+        End::Dropped(Stage::KeysetListing) | End::Refused(Refusal::NoKeysetListing)
+    );
+    // On the waited path P1 holds the turn for the next second's keyset listing.
     let p1_lists = (unsent || listing) && path == Path::Waited;
     if !path.in_flight() {
         let a = Pay {
@@ -21646,7 +22393,7 @@ async fn a_payment_on_its_path<H: Harness>(
     let reads_at_once = path.in_flight() && refusal.is_some_and(Refusal::after_read);
     let keys = match end {
         End::Refused(r) => r.after_keys() && !reads_at_once,
-        End::Dropped(stage) => stage == Stage::Keys,
+        End::Dropped(stage) => stage == Stage::Keys || stage == Stage::KeysetListing,
     };
     let mut holding = None;
     match path {
@@ -21660,6 +22407,20 @@ async fn a_payment_on_its_path<H: Harness>(
             }
         }
         Path::Waited => {
+            if p1_lists {
+                // Another payment of the peer's, on video 1, asks for the listing in this
+                // second, just before P1 comes: P1 waits for the next second's.
+                let r = other
+                    .pay(&Pay {
+                        upto_chunk: 2,
+                        token: h.bad_token(BadToken::UnknownKeyset, 1).await,
+                    })
+                    .await;
+                assert!(
+                    is_rej(&r, &RejCode::BadToken),
+                    "a token naming a keyset the mint does not list is refused bad-token: {r:?}"
+                );
+            }
             if banned {
                 h.hold_swap_responses();
             }
@@ -21670,16 +22431,29 @@ async fn a_payment_on_its_path<H: Harness>(
                     "the double spend's answer is held"
                 );
             }
-            if p1_lists {
-                h.hold_key_fetches(); // P2's keys are held already
-            } else {
+            // Where P1 waits for the next second's listing, nothing is held.
+            if keyset_listing {
+                h.hold_key_fetches(); // P1's and P2's keys are held already
+            } else if !p1_lists {
                 hold_refetch(h, &e);
             }
             let mut first = Box::pin(s1.pay(&p1));
-            assert!(
-                waits_for_keys(h, first.as_mut()).await,
-                "P1 holds the turn, waiting for keys"
-            );
+            if p1_lists {
+                assert!(
+                    waits(h, first.as_mut()).await,
+                    "P1 holds the turn, waiting for the next second's keyset listing"
+                );
+            } else if keyset_listing {
+                assert!(
+                    waits_for_keys(h, first.as_mut()).await,
+                    "P1 holds the turn, waiting for the keyset listing its keyset rule judges by"
+                );
+            } else {
+                assert!(
+                    waits_for_keys(h, first.as_mut()).await,
+                    "P1 holds the turn, waiting for keys"
+                );
+            }
             if let Some(mut d) = doubling.take() {
                 h.release_oldest_swap().await; // its answer lands: the peer is banned
                 let r = answer_of(h, d.as_mut())
@@ -21732,7 +22506,9 @@ async fn a_payment_on_its_path<H: Harness>(
     if refusal.is_some_and(|r| !r.after_read()) {
         h.keyset_expires_in(Some(h.account_ttl()));
     }
-    if keys && path != Path::Waited {
+    if keyset_listing && path != Path::Waited {
+        h.hold_key_fetches(); // P2's keys are held already
+    } else if keys && path != Path::Waited {
         hold_refetch(h, &e);
     }
     if listing && path != Path::Waited {
@@ -21775,10 +22551,19 @@ async fn a_payment_on_its_path<H: Harness>(
             } else {
                 waits_for_keys(h, paying.as_mut()).await
             };
-            assert!(
-                waiting,
-                "P2 {how}, and holds it waiting for keys: no check it runs before them refuses it"
-            );
+            if keyset_listing {
+                assert!(
+                    waiting,
+                    "P2 {how}, and holds it waiting for the keyset listing its keyset rule \
+                     judges by: no check it runs before it refuses it"
+                );
+            } else {
+                assert!(
+                    waiting,
+                    "P2 {how}, and holds it waiting for keys: no check it runs before them \
+                     refuses it"
+                );
+            }
             if path.in_flight() && look == Look::Turn {
                 // P1's swap lands, late: nothing. Deciding it wakes what waits for the
                 // account's turn, which only P2 may do here.
@@ -21790,8 +22575,9 @@ async fn a_payment_on_its_path<H: Harness>(
                 let (what, code) = (refusal.what(), refusal.code());
                 let refused = format!("{what} after it {how}");
                 let deadline = Duration::from_secs(arrived + 60 - h.clock_secs());
-                let r = if look == Look::Turn && refusal == Refusal::NoKeys {
-                    let then = async { h.advance(deadline) }; // its deadline, its keys not come
+                let unanswered = refusal == Refusal::NoKeys || refusal == Refusal::NoKeysetListing;
+                let r = if look == Look::Turn && unanswered {
+                    let then = async { h.advance(deadline) }; // its deadline, nothing come
                     let ended = format!("refused {refused}");
                     hellos_behind_then(h, &e, paying.as_mut(), then, &ended).await
                 } else if look == Look::Turn && keys {
@@ -21802,8 +22588,8 @@ async fn a_payment_on_its_path<H: Harness>(
                         Some(r) => r, // synchronous reads: refused at once
                     }
                 } else {
-                    if refusal == Refusal::NoKeys {
-                        h.advance(deadline); // its keys not come
+                    if unanswered {
+                        h.advance(deadline); // its keys, or its listing, not come
                     } else if keys {
                         if path.in_flight() {
                             // P1's swap, released with them, stays unknown: its answer is
@@ -21839,9 +22625,6 @@ async fn a_payment_on_its_path<H: Harness>(
                     }
                 }
                 if stage == Stage::Listing {
-                    if path == Path::Waited {
-                        h.release_swaps().await; // the listing P1 asked for comes
-                    }
                     assert!(
                         waits(h, paying.as_mut()).await,
                         "P2 {how}, and holds it waiting for the next second's keyset listing"
@@ -21850,6 +22633,9 @@ async fn a_payment_on_its_path<H: Harness>(
                 let when = match stage {
                     Stage::Keys => "waiting for keys",
                     Stage::Listing => "waiting for the next second's keyset listing",
+                    Stage::KeysetListing => {
+                        "waiting for the keyset listing its keyset rule judges by"
+                    }
                     Stage::Read => "during its read",
                 };
                 if !dropped_early && look == Look::Turn {
@@ -21918,11 +22704,12 @@ async fn a_payment_on_its_path<H: Harness>(
 /// `LateTakeoverReadsBeforeMint` and the like), and those that run a check before one
 /// NFX-07 §3 runs first (`WaitedStaleBeforeBan`, `LateTakeoverStructureBeforeStale` and the
 /// like). Payments refused on every path to their account's turn, by every check (NFX-07
-/// §3), and payments dropped as they wait for keys or for the next second's keyset listing,
-/// or during their reads, leave nothing behind: the seeder holds as much as it does in the
-/// same run without them ([`a_payment_on_its_path`]). Each is refused by the first check
-/// NFX-07 §3 runs that it fails, and fetches nothing from a foreign mint. And a payment
-/// refused before its own read, the keyset rule's refusal included, reads nothing for it.
+/// §3), and payments dropped as they wait for keys, for the next second's keyset listing or
+/// for the one their keyset rule judges by, or during their reads, leave nothing behind:
+/// the seeder holds as much as it does in the same run without them
+/// ([`a_payment_on_its_path`]). Each is refused by the first check NFX-07 §3 runs that it
+/// fails, and fetches nothing from a foreign mint. And a payment refused before its own
+/// read, the keyset rule's refusal included, reads nothing for it.
 async fn payments_on_every_path_keep_nothing<H: Harness>(h: &H) {
     for path in PATHS {
         for end in ends(path) {
@@ -21934,6 +22721,9 @@ async fn payments_on_every_path_keep_nothing<H: Harness>(h: &H) {
                     End::Dropped(Stage::Keys) => "dropped waiting for keys".into(),
                     End::Dropped(Stage::Listing) => {
                         "dropped waiting for the next second's keyset listing".into()
+                    }
+                    End::Dropped(Stage::KeysetListing) => {
+                        "dropped waiting for the keyset listing its keyset rule judges by".into()
                     }
                     End::Dropped(Stage::Read) => "dropped during its read".into(),
                 };
@@ -21952,9 +22742,9 @@ async fn payments_on_every_path_keep_nothing<H: Harness>(h: &H) {
 /// `LateTakeoverDropInReadWakesNone` and the like, one for each path and check or drop
 /// they mishandle). A payment refused on any path to its account's turn, by any check, or
 /// dropped before its swap is sent, frees the turn then, and wakes what waits for it
-/// (NFX-07 §3): the `hello`s waiting for one that holds the turn while its keys come or its
-/// read is under way are answered once it is, each on a task of its own, and a `hello`
-/// right after it is answered at once ([`a_payment_on_its_path`]).
+/// (NFX-07 §3): the `hello`s waiting for one that holds the turn while its keys or its
+/// keyset listing come, or its read is under way, are answered once it is, each on a task
+/// of its own, and a `hello` right after it is answered at once ([`a_payment_on_its_path`]).
 async fn payments_on_every_path_free_the_turn<H: Harness>(h: &H) {
     for path in PATHS {
         for end in ends(path) {
@@ -21984,23 +22774,31 @@ async fn payments_on_every_path_free_the_turn<H: Harness>(h: &H) {
 ///
 /// Where P2 is dropped waiting for the next second's listing, it names a keyset the mint
 /// does not list, and the listing was asked for in its second before it came: by P1, which
-/// held the turn for its answer, or, past P1's deadline, by a payment on video 1.
+/// held the turn for its answer, or, past P1's deadline, by a payment on video 1. Where it
+/// is dropped waiting for the keyset listing its keyset rule judges by, its keys are held
+/// and the seeder's key requests are held: P1 holds the turn waiting for that listing, or,
+/// past P1's deadline, P2 asks for it.
 async fn a_hello_behind_a_refusal_on_its_path<H: Harness>(h: &H, path: Path, end: End) {
     let how = path.how();
-    let (refusal, listing) = match end {
-        End::Refused(r) => (r, false),
-        End::Dropped(_) => (Refusal::Stale, true), // never refused: dropped
+    let (refusal, dropped) = match end {
+        End::Refused(r) => (r, None),
+        End::Dropped(stage) => (Refusal::Stale, Some(stage)), // never refused: dropped
     };
-    let (what, code) = if listing {
-        (
+    let listing = dropped == Some(Stage::Listing);
+    let keyset_listing = dropped == Some(Stage::KeysetListing);
+    let (what, code) = match dropped {
+        Some(Stage::Listing) => (
             "dropped waiting for the next second's keyset listing".to_owned(),
             RejCode::MintUnavailable,
-        )
-    } else {
-        (refusal.what(), refusal.code())
+        ),
+        Some(_) => (
+            "dropped waiting for the keyset listing its keyset rule judges by".to_owned(),
+            RejCode::MintUnavailable,
+        ),
+        None => (refusal.what(), refusal.code()),
     };
-    let banned = refusal == Refusal::Banned && !listing;
-    let ended = if listing {
+    let banned = refusal == Refusal::Banned && dropped.is_none();
+    let ended = if dropped.is_some() {
         what.clone()
     } else {
         format!("refused {what}")
@@ -22030,13 +22828,15 @@ async fn a_hello_behind_a_refusal_on_its_path<H: Harness>(h: &H, path: Path, end
             token: h.token(4).await,
         },
         Pay {
-            upto_chunk: if refusal == Refusal::Stale && !listing {
+            upto_chunk: if refusal == Refusal::Stale && dropped.is_none() {
                 4
             } else {
                 8
             },
             token: if listing {
                 h.bad_token(BadToken::UnknownKeyset, 4).await
+            } else if keyset_listing {
+                h.token(4).await
             } else {
                 refusal.token(h).await
             },
@@ -22138,8 +22938,8 @@ async fn a_hello_behind_a_refusal_on_its_path<H: Harness>(h: &H, path: Path, end
             "the double spend's answer is held"
         );
     }
-    if p1_lists {
-        h.hold_key_fetches();
+    if p1_lists || keyset_listing {
+        h.hold_key_fetches(); // keys held for every payment but P1's own, if any
     } else if !listing {
         hold_refetch(h, &e);
     }
@@ -22185,7 +22985,7 @@ async fn a_hello_behind_a_refusal_on_its_path<H: Harness>(h: &H, path: Path, end
     if refusal == Refusal::KeysetTooSoon {
         h.keyset_expires_in(Some(h.account_ttl()));
     }
-    if refusal == Refusal::EarlierUnknown && !listing {
+    if refusal == Refusal::EarlierUnknown && dropped.is_none() {
         h.restore_outage(true); // P2's read cannot learn A's claim
     }
     if listing {
@@ -22210,6 +23010,13 @@ async fn a_hello_behind_a_refusal_on_its_path<H: Harness>(h: &H, path: Path, end
         assert!(
             waits(h, paying.as_mut()).await,
             "P2 {how}, and holds it waiting for the next second's keyset listing"
+        );
+    } else if keyset_listing {
+        let r = poll_next(h, paying.as_mut()).await;
+        assert!(
+            r.is_none() && waits(h, paying.as_mut()).await,
+            "P2 {how}, and holds it waiting for the keyset listing its keyset rule judges by: \
+             {r:?}"
         );
     } else {
         let r = match poll_next(h, paying.as_mut()).await {
@@ -22262,22 +23069,27 @@ async fn a_hello_behind_a_refusal_on_its_path<H: Harness>(h: &H, path: Path, end
 
 /// The matrix's flaws that note no floor (`WaitedShapeNoFloor`,
 /// `UnwaitedDropAwaitingListingNoFloor` and the like, one for each path and check or drop
-/// they mishandle). A `hello` that waited reads after the turn was last freed, whatever
-/// refused the payment that freed it, on whatever path that payment came to the turn (NFX-07
-/// §3): every refusal before the payment's own read, and one after it that leaves an
-/// earlier swap unknown, and a drop as it waits for the next second's keyset listing
-/// ([`a_hello_behind_a_refusal_on_its_path`]). Refusals after its own read that learns a
-/// claim, or at its deadline, and those of a payment that took a dead turn over before any
-/// read, have no read of that second before them to serve the `hello`.
+/// they mishandle), and `HeldListingTrustedFromBeforeArrival`, which does not wait for the
+/// next second's listing. A `hello` that waited reads after the turn was last freed, whatever
+/// refused the payment that freed it, on whatever path that payment came to the turn
+/// (NFX-07 §3): every refusal before the payment's own read, and one after it that leaves
+/// an earlier swap unknown, and a drop as it waits for the next second's keyset listing or
+/// for the one its keyset rule judges by ([`a_hello_behind_a_refusal_on_its_path`]).
+/// Refusals after its own read that learns a claim, or at its deadline, and those of a
+/// payment that took a dead turn over before any read, have no read of that second before
+/// them to serve the `hello`.
 async fn hellos_behind_every_refusal_read_after_it<H: Harness>(h: &H) {
     for path in [Path::Waited, Path::Free, Path::AfterTheDeadline] {
         for refusal in refusals() {
             let later = refusal.after_read() && refusal != Refusal::EarlierUnknown;
-            if !later && refusal != Refusal::NoKeys {
+            let at_deadline = refusal == Refusal::NoKeys || refusal == Refusal::NoKeysetListing;
+            if !later && !at_deadline {
                 a_hello_behind_a_refusal_on_its_path(h, path, End::Refused(refusal)).await;
             }
         }
         a_hello_behind_a_refusal_on_its_path(h, path, End::Dropped(Stage::Listing)).await;
+        let end = End::Dropped(Stage::KeysetListing);
+        a_hello_behind_a_refusal_on_its_path(h, path, end).await;
     }
     for path in [Path::TakenOverAtTheDeadline, Path::TakenOverAsItArrives] {
         let end = End::Refused(Refusal::EarlierUnknown);
@@ -22805,6 +23617,7 @@ async fn a_listing_that_comes_late_judges_nothing<H: Harness>(h: &H) {
         let e = h.engine(1, 4, 1000);
         let mut s = open(h, &e, 1).await;
         serve(h, &mut s, 0, 4);
+        h.advance(SECOND); // the listing last asked for in an earlier second, if at all
         h.hold_key_fetches();
         let p = Pay {
             upto_chunk: 4,
