@@ -2992,6 +2992,7 @@ catches!(
     others_listing_unwoken_round_trip: r(S::OthersListingUnwoken) => every_answer_wakes_the_entry_awaiting_it,
     others_listing_unwoken_woken: w(S::OthersListingUnwoken) => every_answer_wakes_the_entry_awaiting_it,
     others_listing_unwoken_on_tasks: t(S::OthersListingUnwoken) => every_answer_wakes_the_entry_awaiting_it,
+    others_listing_unwoken_at_start: l(S::OthersListingUnwoken) => every_answer_wakes_the_entry_awaiting_it,
     others_listing_woken_early_on_tasks: t(S::OthersListingWokenEarly) => every_answer_wakes_the_entry_awaiting_it,
     other_mint_keys_unwoken: s(S::OtherMintKeysUnwoken) => every_answer_wakes_the_entry_awaiting_it,
     other_mint_keys_unwoken_round_trip: r(S::OtherMintKeysUnwoken) => every_answer_wakes_the_entry_awaiting_it,

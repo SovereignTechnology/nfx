@@ -3361,7 +3361,8 @@ async fn a_refused_key_request_wakes_its_payment<H: Harness>(h: &H) {
 /// (NFX-07 §3 step 3 has the seeder ask once a second for each mint, so a second payment
 /// of that second waits for the first's). The seeder holds no keys, its key requests held.
 /// A payment asks the mint, and waits. A payment of another peer, on a task of its own,
-/// arrives in the same second, and waits too. The mint answers: both are acknowledged.
+/// arrives in the same second, and waits too. The mint answers: both are acknowledged. So
+/// is a payment that waits for the listing a seeder asked for at its start, held since.
 async fn a_listing_another_asked_for_wakes_its_payment<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let (mut s1, mut s2) = (open(h, &e, 1).await, open(h, &e, 2).await);
@@ -3402,6 +3403,35 @@ async fn a_listing_another_asked_for_wakes_its_payment<H: Harness>(h: &H) {
     );
     close(h, first).await;
     close(h, (answered, paying, s1)).await;
+
+    // The same where the one that asked is the seeder, at its start. Its key requests are
+    // held from before it starts, so a listing it asks for then is held too, and a payment
+    // of that second waits for it; on a seeder that asks only as a check needs, for the
+    // one it asks for itself.
+    h.hold_key_fetches();
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    let p = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    let done = flag();
+    let paying = pay_on_a_task(h, s, &p, &done);
+    settle(h).await;
+    assert!(
+        !is_set(&done),
+        "it waits for the mint, whose answers are held since before the seeder started"
+    );
+    release(h).await; // the mint answers
+    let answered = answer_of(h, pin!(&paying)).await;
+    let r = answered.as_ref().map(|(_, r)| r);
+    assert!(
+        r.is_some_and(Result::is_ok),
+        "a payment on a task of its own that waits for a keyset listing held since before the \
+         seeder started is woken as it comes, and answered: {r:?}"
+    );
+    close(h, (answered, paying)).await;
 }
 
 /// Flaws `OtherMintKeysUnwoken`, `OtherMintListingUnwoken`,
