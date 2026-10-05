@@ -1074,11 +1074,11 @@ pub async fn foreign_and_lookalike_mints_are_refused<H: Harness>(h: &H) {
     assert!(h.dialled(&m), "keys come from the quoted mint");
 
     keys_are_the_quoted_keysets_own(h).await;
-    the_keyset_rule_asks_for_a_listing_once_a_second(h).await;
-    the_keyset_rule_judges_by_a_listing_of_its_turns_second(h).await;
     keys_held_are_used_without_asking(h).await;
     a_keyset_the_mint_does_not_list_is_bad_token(h).await;
     a_keyset_the_mint_started_is_listed_the_next_second(h).await;
+    the_keyset_rule_asks_for_a_listing_once_a_second(h).await;
+    the_keyset_rule_judges_by_a_listing_of_its_turns_second(h).await;
     a_listing_asked_after_a_payment_arrived_judges_it(h).await;
     a_listing_is_per_mint(h).await;
 }
@@ -20988,10 +20988,16 @@ async fn hellos_behind_each_refusal_read_after_it<H: Harness>(h: &H) {
     }
 }
 
+/// The seeder's requests for keys (NUT-01) so far: its asks for the mint's keyset listing
+/// (NUT-02) left out.
+fn keys_asked<H: Harness>(h: &H) -> u64 {
+    h.key_requests() - h.listing_requests()
+}
+
 /// Flaws `KeysNeverCached` and `KeysDroppedWithListing`. Keys the seeder holds it uses
 /// without asking the mint (NFX-07 §3 step 3). Paid to 4, then to 8, and sent tokens whose
-/// DLEQ proofs are invalid by 16 free identities, the mint has had no key request since the
-/// first payment. Nor, once the keys of an older keyset the wallets spend first were asked
+/// DLEQ proofs are invalid by 16 free identities, the mint has had no request for keys
+/// since the first payment ([`keys_asked`]: its listing apart). Nor, once the keys of an older keyset the wallets spend first were asked
 /// for, for 16 more such tokens of it. Nor, a second on, the seeder having asked for the
 /// mint's keyset listing again for a token naming a keyset the mint never had, for a
 /// payment to 12 of the keyset whose keys it holds.
@@ -21000,11 +21006,11 @@ async fn keys_held_are_used_without_asking<H: Harness>(h: &H) {
     let mut s = open(h, &e, 1).await;
     serve(h, &mut s, 0, 4);
     settles_pay::<H>(&mut s, 4, h.token(4).await, 4).await;
-    let asked = h.key_requests();
+    let asked = keys_asked(h);
     serve(h, &mut s, 4, 4);
     settles_pay::<H>(&mut s, 8, h.token(4).await, 8).await;
     assert_eq!(
-        h.key_requests(),
+        keys_asked(h),
         asked,
         "the keys of the keyset its tokens name, held since the first payment, are used without \
          asking the mint again"
@@ -21020,7 +21026,7 @@ async fn keys_held_are_used_without_asking<H: Harness>(h: &H) {
         assert!(is_rej(&r, &RejCode::BadToken), "an invalid DLEQ: {r:?}");
     }
     assert_eq!(
-        h.key_requests(),
+        keys_asked(h),
         asked,
         "free identities' tokens whose DLEQ proofs are invalid, of a keyset whose keys the seeder \
          holds, cost the mint no request: the keys held are used"
@@ -21034,7 +21040,7 @@ async fn keys_held_are_used_without_asking<H: Harness>(h: &H) {
         })
         .await;
     assert!(is_rej(&r, &RejCode::BadToken), "an invalid DLEQ: {r:?}");
-    let asked = h.key_requests();
+    let asked = keys_asked(h);
     for p in 19..=34u8 {
         let mut forger = open(h, &e, p).await;
         let r = forger
@@ -21046,7 +21052,7 @@ async fn keys_held_are_used_without_asking<H: Harness>(h: &H) {
         assert!(is_rej(&r, &RejCode::BadToken), "an invalid DLEQ: {r:?}");
     }
     assert_eq!(
-        h.key_requests(),
+        keys_asked(h),
         asked,
         "tokens of an older keyset whose keys the seeder asked for once cost the mint no request \
          more: the keys held are used"
@@ -21066,11 +21072,11 @@ async fn keys_held_are_used_without_asking<H: Harness>(h: &H) {
         is_rej(&r, &RejCode::BadToken),
         "a token naming a keyset the mint does not list is refused bad-token: {r:?}"
     );
-    let asked = h.key_requests();
+    let asked = keys_asked(h);
     serve(h, &mut s, 8, 4);
     settles_pay::<H>(&mut s, 12, h.token(4).await, 12).await;
     assert_eq!(
-        h.key_requests(),
+        keys_asked(h),
         asked,
         "the keys held are used after the mint's keyset listing was asked for again: a new \
          listing drops none"
@@ -22032,7 +22038,7 @@ const FOREIGN_MINT: &str = "https://foreign-mint.example";
 /// step 1 refuses, a proof locked or lacking a DLEQ proof after good ones, the mint, a
 /// keyset the mint does not list, in every proof or in the last only, keys that do not
 /// come, an invalid DLEQ proof, in every proof or in the last only, the amount, the keyset
-/// listing the keyset rule judges by not come, the keyset to swap to, and what the read
+/// to swap to, expiring too soon or the listing it is judged by not come, and what the read
 /// finds: an earlier swap unknown, a claim that covers it whole or in part, or no answer by
 /// the deadline.
 fn refusals() -> Vec<Refusal> {
@@ -22058,8 +22064,8 @@ fn refusals() -> Vec<Refusal> {
         Refusal::LastProof(BadToken::BadDleq),
         Refusal::Underpaid,
         Refusal::Overpaid,
-        Refusal::NoKeysetListing,
         Refusal::KeysetTooSoon,
+        Refusal::NoKeysetListing,
         Refusal::EarlierUnknown,
         Refusal::StaleOnRecheck,
         Refusal::OverpaidOnRecheck,
