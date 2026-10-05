@@ -440,7 +440,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        suite waits: no progress judged by a count of polls, engine state read only once
        settled, every mint answer of the third harness coming by a wake, and the planted
        defects given the suite's own time limit) are in progress on `m2/r29-d`. The
-       audit's record follows them;
+       audit's [record](reviews/2026-09-24-m2.0-twenty-ninth-audit.md) is a draft until
+       they are merged;
      - then a thirtieth independent audit, until one reports nothing;
      - sovtech's OK to push M2.0 (given, once the audits are clean);
      - the testnet mint: sovtech approved its deployment once its runbook's checks
