@@ -327,6 +327,11 @@ pub enum BadToken {
     /// Well formed, its proofs naming a keyset the mint never had, a fresh one at each call:
     /// the mint does not list it (NUT-02), and answers a request for its keys 12001.
     UnknownKeyset,
+    /// Well formed, naming this harness's mint, its proofs of the keyset another mint alone
+    /// started last ([`Harness::start_keyset_at`]), whose keys that mint serves: this
+    /// harness's mint does not list it (NUT-02), and answers a request for its keys 12001.
+    /// Asked for only after such a start.
+    OtherMintsKeyset,
 }
 
 /// A seeder's configuration, as the suite asks for one.
@@ -480,8 +485,12 @@ pub trait Harness {
     /// listing alike. An engine uses the keys it holds without asking (NFX-07 §3 step 3
     /// caches them), and may hold keys from its start or from any fetch, for the payment's
     /// mint or for all it quotes: the suite holds keys only after
-    /// [`Harness::forget_keys`]. Its swap requests and its reads of swap state go through,
-    /// unless something else holds them.
+    /// [`Harness::forget_keys`]. So with key requests held, a payment waits on the mint
+    /// wherever it must ask for the mint's keyset listing, every key it needs held or not:
+    /// for a keyset the listing the engine holds does not name, the listing asked for
+    /// before the payment arrived, or for the keyset rule (step 5), no listing of that mint
+    /// asked for in the payment's turn's second or later. Its swap requests and its reads
+    /// of swap state go through, unless something else holds them.
     fn hold_key_fetches(&self);
     /// `engine` drops the mint keys it holds, however it came by them (at its start, or by
     /// any fetch), and nothing else: its next payment at a mint fetches that mint's keys
@@ -542,6 +551,8 @@ pub trait Harness {
     /// Key requests the seeder has sent the mint (NUT-01 and NUT-02), one per request,
     /// answered or held ([`Harness::hold_key_fetches`]).
     fn key_requests(&self) -> u64;
+    /// Those of [`Harness::key_requests`] that asked for the mint's keyset listing (NUT-02).
+    fn listing_requests(&self) -> u64;
     /// Whether an answer a seeder or a watcher awaits is under way: its call has left the
     /// engine or the watcher, to the mint or to anything else that answers from off the
     /// suite's runtime (a store's worker thread, say), and it has not yet been answered and
@@ -590,15 +601,27 @@ pub trait Harness {
     /// (NUT-02) from now: a seeder that asked for the listing in this second asks again
     /// only in the next (NFX-07 §3 step 3).
     fn rotate_keyset(&self);
+    /// The mint at `url` alone starts a keyset of its own, its active one, which it lists
+    /// (NUT-02) from now, its `final_expiry` that far from now (`None`: none), and issues
+    /// its tokens from until it starts another: no other mint lists it or serves its keys.
+    /// Its earlier keysets, and every other mint's, stay as they were. A seeder that asked
+    /// that mint for its listing in this second asks it again only in the next (NFX-07 §3
+    /// step 3).
+    fn start_keyset_at(&self, url: &str, final_expiry: Option<Duration>);
     /// The mint's keyset expires now, as [`MintEvent::ExpireKeyset`] does before a swap:
-    /// proofs of older keysets ([`Harness::fund_older_keyset`]) stay valid.
+    /// proofs of older keysets ([`Harness::fund_older_keyset`]) stay valid. Tokens issued
+    /// from then on are of a new keyset, which the mint lists from now, as after
+    /// [`Harness::rotate_keyset`].
     fn expire_keyset(&self);
-    /// The mint's active keyset lists a `final_expiry` (NUT-02) `after` from now, or none.
+    /// The mint's active keyset lists a `final_expiry` (NUT-02) `after` from now, or none,
+    /// from its listing's next answer: a seeder that asked for the listing in this second
+    /// may judge the keyset rule by that one until the next (NFX-07 §3 step 5).
     fn keyset_expires_in(&self, after: Option<Duration>);
     /// The mint's active keyset expires, and stays active (CDK does not rotate an expired
     /// keyset): outputs derived from it, and every proof it issued since the last rotation
     /// (those a wallet already holds included), are refused (12003), while proofs of older
-    /// keysets stay valid, until [`Harness::rotate_keyset`].
+    /// keysets stay valid, until [`Harness::rotate_keyset`]. Its listing shows the
+    /// `final_expiry` from its next answer, as [`Harness::keyset_expires_in`] says.
     fn expire_active_keyset(&self);
     /// The watchers' wallets hold `amount` sat (0: none) in proofs of an older keyset than
     /// the active one, which a wallet spends first (CDK selects an inactive keyset's proofs
