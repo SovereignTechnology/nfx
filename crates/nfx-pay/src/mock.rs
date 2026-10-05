@@ -569,7 +569,7 @@ impl MockNetwork {
     /// only small proofs selects it ([`ViewerFlaw::PaysInUnitProofs`] and the like only).
     fn unit_token(&self, mint: &str, amount: u64) -> String {
         let n = usize::try_from(amount).map_or(usize::MAX, |n| n.max(1));
-        let proofs = self.fresh_proofs(n.min(4 * MAX_PROOFS));
+        let proofs = self.fresh_proofs(mint, n.min(4 * MAX_PROOFS));
         self.mint_token(TokenInfo {
             proofs,
             mints: vec![mint.to_owned()],
@@ -3549,6 +3549,69 @@ pub enum SeederFlaw {
     /// asked for before its turn's second and its answer held, waits for that one for its
     /// keyset rule, and judges by it, rather than ask for one of its turn's second.
     LateTakeoverStaleHeldListingAwaited,
+    /// Refuses `unknown-video` to a peer with an account on a video it no longer serves: a
+    /// payment there that credited late, awaiting the quote that shows it, is never
+    /// settled, and the watcher pays the seeder nothing on any video.
+    DroppedVideoRefusesAccounts,
+    /// Answers a `hello` for a video it no longer serves from any peer, one with no account
+    /// there included, where it refuses it `unknown-video`.
+    DroppedVideoQuotesAnyone,
+    /// Still admits requests for a video it no longer serves, counting chunks it does not
+    /// serve.
+    DroppedVideoAdmits,
+    /// Refuses `unknown-video` to a peer whose only record on a video it no longer serves is
+    /// a swap whose outcome is unknown: a pre-payment there that credited late is never
+    /// shown to its watcher.
+    DroppedVideoIgnoresUnknownSwap,
+    /// Refuses a banned peer's `hello` for a video it no longer serves `unknown-video`, where
+    /// it refuses it `banned`.
+    DroppedVideoBanUnchecked,
+    /// Refuses the `hello` of a peer whose ban has expired, for a video it no longer serves,
+    /// as banned: it does not age the bans first.
+    DroppedVideoBanNotAged,
+    /// Refuses a `pay` on the session of a video it no longer serves `unknown-video`, which
+    /// stops the watcher, where it verifies it as any other.
+    DroppedVideoRefusesPay,
+    /// Admits a peer's pre-paid chunks of a video it no longer serves, which it has no file
+    /// of.
+    DroppedVideoAdmitsPrepaid,
+    /// Answers a `hello` for a video it no longer serves outside the per-peer cap on open
+    /// sessions.
+    DroppedVideoSkipsSessionCap,
+    /// Answers a `hello` for a video it no longer serves without waiting for a payment in
+    /// progress on its account: its quote misses that payment.
+    DroppedVideoHelloNoWait,
+    /// Answers a `hello` for a video it no longer serves from a peer with an account on its
+    /// other video only, where it refuses it `unknown-video`.
+    DroppedVideoAnyAccount,
+    /// Answers a `hello` for a video it no longer serves under an open session's id, where it
+    /// refuses it `bad-session`.
+    DroppedVideoSkipsIdCheck,
+    /// Does not check the peer's ban again as it answers a `hello` for a video it no longer
+    /// serves: a peer banned while the `hello` waited or read is quoted.
+    DroppedVideoNoBanRecheck,
+    /// Does not check the session id again as it answers a `hello` for a video it no longer
+    /// serves: one opened by another peer while the `hello` waited or read is opened twice.
+    DroppedVideoNoIdRecheck,
+    /// Checks the peer's ban again as it answers a `hello` for a video it no longer serves
+    /// without ageing the bans first: a ban that lapsed while the `hello` waited refuses it.
+    DroppedVideoRecheckBanNotAged,
+    /// Does not check the peer's ban again as it answers a `hello` for a video it no longer
+    /// serves that waited for no payment: a peer banned while it read is quoted.
+    DroppedVideoUnwaitedNoBanRecheck,
+    /// Does not check the session id again as it answers a `hello` for a video it no longer
+    /// serves that waited for no payment: one opened by another peer while it read is
+    /// opened twice.
+    DroppedVideoUnwaitedNoIdRecheck,
+    /// Does not count a peer's waiting `hello`s toward its cap on open sessions when a
+    /// `hello` for a video it no longer serves arrives.
+    DroppedVideoWaitUncapped,
+    /// Does not check the peer's ban again as it answers a `hello` for a video it no longer
+    /// serves that took a dead turn over: a peer banned while it waited is quoted.
+    DroppedVideoTakeoverNoBanRecheck,
+    /// Reads a `hello`'s account before its wait, not after, for a video it no longer
+    /// serves: its quote misses a claim that reached the mint while it waited.
+    DroppedVideoReadsBeforeTurn,
 }
 
 /// How a payment came to its account's turn: the paths of the suite's matrix of payments,
@@ -4178,69 +4241,6 @@ impl SeederFlaw {
             _ => return None,
         })
     }
-    /// Refuses `unknown-video` to a peer with an account on a video it no longer serves: a
-    /// payment there that credited late, awaiting the quote that shows it, is never
-    /// settled, and the watcher pays the seeder nothing on any video.
-    DroppedVideoRefusesAccounts,
-    /// Answers a `hello` for a video it no longer serves from any peer, one with no account
-    /// there included, where it refuses it `unknown-video`.
-    DroppedVideoQuotesAnyone,
-    /// Still admits requests for a video it no longer serves, counting chunks it does not
-    /// serve.
-    DroppedVideoAdmits,
-    /// Refuses `unknown-video` to a peer whose only record on a video it no longer serves is
-    /// a swap whose outcome is unknown: a pre-payment there that credited late is never
-    /// shown to its watcher.
-    DroppedVideoIgnoresUnknownSwap,
-    /// Refuses a banned peer's `hello` for a video it no longer serves `unknown-video`, where
-    /// it refuses it `banned`.
-    DroppedVideoBanUnchecked,
-    /// Refuses the `hello` of a peer whose ban has expired, for a video it no longer serves,
-    /// as banned: it does not age the bans first.
-    DroppedVideoBanNotAged,
-    /// Refuses a `pay` on the session of a video it no longer serves `unknown-video`, which
-    /// stops the watcher, where it verifies it as any other.
-    DroppedVideoRefusesPay,
-    /// Admits a peer's pre-paid chunks of a video it no longer serves, which it has no file
-    /// of.
-    DroppedVideoAdmitsPrepaid,
-    /// Answers a `hello` for a video it no longer serves outside the per-peer cap on open
-    /// sessions.
-    DroppedVideoSkipsSessionCap,
-    /// Answers a `hello` for a video it no longer serves without waiting for a payment in
-    /// progress on its account: its quote misses that payment.
-    DroppedVideoHelloNoWait,
-    /// Answers a `hello` for a video it no longer serves from a peer with an account on its
-    /// other video only, where it refuses it `unknown-video`.
-    DroppedVideoAnyAccount,
-    /// Answers a `hello` for a video it no longer serves under an open session's id, where it
-    /// refuses it `bad-session`.
-    DroppedVideoSkipsIdCheck,
-    /// Does not check the peer's ban again as it answers a `hello` for a video it no longer
-    /// serves: a peer banned while the `hello` waited or read is quoted.
-    DroppedVideoNoBanRecheck,
-    /// Does not check the session id again as it answers a `hello` for a video it no longer
-    /// serves: one opened by another peer while the `hello` waited or read is opened twice.
-    DroppedVideoNoIdRecheck,
-    /// Checks the peer's ban again as it answers a `hello` for a video it no longer serves
-    /// without ageing the bans first: a ban that lapsed while the `hello` waited refuses it.
-    DroppedVideoRecheckBanNotAged,
-    /// Does not check the peer's ban again as it answers a `hello` for a video it no longer
-    /// serves that waited for no payment: a peer banned while it read is quoted.
-    DroppedVideoUnwaitedNoBanRecheck,
-    /// Does not check the session id again as it answers a `hello` for a video it no longer
-    /// serves that waited for no payment: one opened by another peer while it read is
-    /// opened twice.
-    DroppedVideoUnwaitedNoIdRecheck,
-    /// Does not count a peer's waiting `hello`s toward its cap on open sessions when a
-    /// `hello` for a video it no longer serves arrives.
-    DroppedVideoWaitUncapped,
-    /// Does not check the peer's ban again as it answers a `hello` for a video it no longer
-    /// serves that took a dead turn over: a peer banned while it waited is quoted.
-    DroppedVideoTakeoverNoBanRecheck,
-    /// Reads a `hello`'s account before its wait, not after, for a video it no longer
-    /// serves: its quote misses a claim that reached the mint while it waited.
-    DroppedVideoReadsBeforeTurn,
 }
 
 /// A defect planted in a mock viewer, to prove the adversary suite catches it.
