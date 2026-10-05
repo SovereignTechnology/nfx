@@ -6131,6 +6131,15 @@ pub enum ViewerFlaw {
     /// Takes a quote whose `served` is at most the `upto_chunk` of another video's payment
     /// in flight on its live session.
     ServedCountsOtherLive,
+    /// Drops a payment answered by an ack whose `spent_total` alone does not match: its
+    /// proofs are never reclaimed.
+    WrongAckBySpentNoReclaim,
+    /// Drops a payment answered by an ack whose `accepted_upto` alone does not match: its
+    /// proofs are never reclaimed.
+    WrongAckByUptoNoReclaim,
+    /// Ends a refusal's licence to pay ahead when `last_pay` makes a payment: the `due` that
+    /// follows the refusal pays nothing ahead.
+    LastPaymentEndsLicence,
 }
 
 /// Whose history a defect planted on one history keys on: the paying ledger's own, or that
@@ -12275,6 +12284,9 @@ impl MockViewer {
             sent_at
         };
         self.behind_other = false;
+        if last && self.has(ViewerFlaw::LastPaymentEndsLicence) {
+            self.pay_ahead = false;
+        }
         if self.first_pay_window.is_none() {
             self.first_pay_window = Some(q.window);
         }
@@ -13024,9 +13036,17 @@ impl Viewer for MockViewer {
         // unsolicited ack answers no payment, and reclaims nothing.
         if let Some(mut p) = expected {
             p.by_ack = true;
+            // Dropped, by the field that does not match (flaws).
+            let (upto, spent) = (
+                ack.accepted_upto == p.upto,
+                ack.spent_total == self.spent + p.amount,
+            );
+            let dropped = self.has(ViewerFlaw::WrongAckNoReclaim)
+                || (upto && !spent && self.has(ViewerFlaw::WrongAckBySpentNoReclaim))
+                || (spent && !upto && self.has(ViewerFlaw::WrongAckByUptoNoReclaim));
             if self.has(ViewerFlaw::WrongAckReclaimWaits) {
                 self.standing().unsettled.push((self.id, p));
-            } else if !self.has(ViewerFlaw::WrongAckNoReclaim) {
+            } else if !dropped {
                 self.standing().reclaiming.push((self.id, p));
             }
         }

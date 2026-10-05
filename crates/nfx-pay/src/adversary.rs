@@ -11274,6 +11274,35 @@ async fn a_refusal_licenses_the_due_that_follows_it<H: Harness>(h: &H) {
     );
     drop(s);
     lands(h).await;
+    // Nor does a last_pay that pays end it: the due that follows the refusal pays ahead.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).expect("an honest quote is accepted");
+    assert!(s.admit(&h.chunk(0)), "within the window");
+    v.requested();
+    v.requested();
+    v.refused();
+    let tail = v
+        .last_pay()
+        .await
+        .expect("last_pay answers after a refusal")
+        .expect("one chunk is owed");
+    assert_eq!(
+        tail.upto_chunk, 1,
+        "last_pay pays for the chunk owed, and nothing ahead"
+    );
+    v.ack(&s.pay(&tail).await.expect("the seeder takes it"))
+        .expect("its honest ack is taken");
+    let ahead = v.due().await.expect("due answers after a refusal");
+    assert_eq!(
+        ahead.map(|pay| pay.upto_chunk),
+        Some(3),
+        "a last_pay that paid between a refusal and the due that follows it leaves the licence \
+         to that due: it pays ahead half the window"
+    );
+    drop(s);
+    lands(h).await;
     // A refusal on one video licenses nothing on another.
     let e = h.engine(1, 4, 1000);
     let s0 = open_on(h, &e, 1, 0).await;
@@ -11316,6 +11345,14 @@ const WRONG_ACK_ENDS: [&str; 4] = [
     "its proofs found spent once the mint is back",
 ];
 
+/// How an ack fails to match the payment it answers, for the same case: in either field,
+/// or in both.
+const WRONG_ACKS: [&str; 3] = [
+    "short of its upto_chunk",
+    "over its spent_total",
+    "wrong in both fields",
+];
+
 /// Where that reclaim runs: the calls that finish an incomplete reclaim, on the payment's
 /// session, with none, or from another video's ledger.
 const WRONG_ACK_RECLAIMED: [&str; 3] = [
@@ -11324,7 +11361,8 @@ const WRONG_ACK_RECLAIMED: [&str; 3] = [
     "from another video's ledger",
 ];
 
-/// A payment answered by an ack that does not match is a refused payment (NFX-07 §3a): the
+/// A payment answered by an ack that does not match, in whichever field ([`WRONG_ACKS`]),
+/// is a refused payment (NFX-07 §3a): the
 /// watcher stops, and reclaims its proofs as any refused payment's, with no 180 s wait, in
 /// the calls that finish an incomplete reclaim ([`CATCH_UPS`], [`WRONG_ACK_RECLAIMED`]).
 /// Every proof comes back; or, the seeder having swapped it, a proof is found spent, and a
@@ -11333,108 +11371,119 @@ const WRONG_ACK_RECLAIMED: [&str; 3] = [
 /// answers no payment, and reclaims nothing: not another video's payment in flight on its
 /// live session, nor one a closed session left.
 async fn a_wrong_acks_payment_is_reclaimed<H: Harness>(h: &H) {
-    for ends in WRONG_ACK_ENDS {
-        for place in WRONG_ACK_RECLAIMED {
-            for call in CATCH_UPS {
-                let e = h.engine(1, 4, 1000);
-                let mut s = open(h, &e, 1).await;
-                let mut v = h.viewer(1);
-                let mut other = v.sibling();
-                v.quote(s.quote()).expect("an honest quote is accepted");
-                for i in 0..2 {
-                    assert!(s.admit(&h.chunk(i)), "within the window");
-                    v.requested();
-                }
-                let pay = v.due().await.expect("due answers").expect("due");
-                let spent = ends.starts_with("its proofs found spent");
-                if spent {
-                    s.pay(&pay)
-                        .await
-                        .expect("the seeder swaps it, and answers with a wrong ack");
-                }
-                let wrong = Ack {
-                    accepted_upto: pay.upto_chunk + 1,
-                    spent_total: 2,
-                };
-                assert!(
-                    v.ack(&wrong).is_err() && v.stopped(),
-                    "an ack that does not match the payment is refused, and the watcher stops"
-                );
-                let what = format!(
-                    "a payment answered by an ack that does not match, reclaimed by {call} \
-                     {place}"
-                );
-                let down = ends.ends_with("once the mint is back");
-                h.mint_outage(down);
-                if place != "on its session" {
-                    drop(s);
-                    lands(h).await;
-                    v.end();
-                    s = open(h, &e, 1).await;
-                }
-                for left in (0..=u8::from(down)).rev() {
-                    let w = if place == "from another video's ledger" {
-                        &mut other
-                    } else {
-                        &mut v
-                    };
-                    let paid = if call == CATCH_UPS[1] {
-                        w.last_pay().await.expect("last_pay answers once stopped")
-                    } else {
-                        w.due().await.expect("due answers once stopped")
-                    };
-                    assert!(paid.is_none(), "{what}: stopped, it pays nothing");
-                    if left > 0 {
-                        assert!(
-                            spent || !h.claimed_any(&pay.token).await,
-                            "the mint down, nothing is taken back yet"
-                        );
-                        h.mint_outage(false);
+    for wrongly in WRONG_ACKS {
+        for ends in WRONG_ACK_ENDS {
+            for place in WRONG_ACK_RECLAIMED {
+                for call in CATCH_UPS {
+                    let e = h.engine(1, 4, 1000);
+                    let mut s = open(h, &e, 1).await;
+                    let mut v = h.viewer(1);
+                    let mut other = v.sibling();
+                    v.quote(s.quote()).expect("an honest quote is accepted");
+                    for i in 0..2 {
+                        assert!(s.admit(&h.chunk(i)), "within the window");
+                        v.requested();
                     }
-                }
-                if !spent {
+                    let pay = v.due().await.expect("due answers").expect("due");
+                    let spent = ends.starts_with("its proofs found spent");
+                    if spent {
+                        s.pay(&pay)
+                            .await
+                            .expect("the seeder swaps it, and answers with a wrong ack");
+                    }
+                    let wrong = match wrongly {
+                        "short of its upto_chunk" => Ack {
+                            accepted_upto: pay.upto_chunk - 1,
+                            spent_total: 2,
+                        },
+                        "over its spent_total" => Ack {
+                            accepted_upto: pay.upto_chunk,
+                            spent_total: 3,
+                        },
+                        _ => Ack {
+                            accepted_upto: pay.upto_chunk + 1,
+                            spent_total: 0,
+                        },
+                    };
                     assert!(
-                        h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
-                        "{what}: {ends}: it is a refused payment, and its proofs are taken back \
-                         with no 180 s wait: the seeder cannot claim them"
+                        v.ack(&wrong).is_err() && v.stopped(),
+                        "an ack that does not match the payment is refused, and the watcher stops"
+                    );
+                    let what = format!(
+                        "a payment answered by an ack {wrongly}, reclaimed by {call} {place}"
+                    );
+                    let down = ends.ends_with("once the mint is back");
+                    h.mint_outage(down);
+                    if place != "on its session" {
+                        drop(s);
+                        lands(h).await;
+                        v.end();
+                        s = open(h, &e, 1).await;
+                    }
+                    for left in (0..=u8::from(down)).rev() {
+                        let w = if place == "from another video's ledger" {
+                            &mut other
+                        } else {
+                            &mut v
+                        };
+                        let paid = if call == CATCH_UPS[1] {
+                            w.last_pay().await.expect("last_pay answers once stopped")
+                        } else {
+                            w.due().await.expect("due answers once stopped")
+                        };
+                        assert!(paid.is_none(), "{what}: stopped, it pays nothing");
+                        if left > 0 {
+                            assert!(
+                                spent || !h.claimed_any(&pay.token).await,
+                                "the mint down, nothing is taken back yet"
+                            );
+                            h.mint_outage(false);
+                        }
+                    }
+                    if !spent {
+                        assert!(
+                            h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
+                            "{what}: {ends}: it is a refused payment, and its proofs are taken back \
+                             with no 180 s wait: the seeder cannot claim them"
+                        );
+                        drop(s);
+                        lands(h).await;
+                        continue;
+                    }
+                    // Found spent: a quote showing it settles it into the ledger, and no more.
+                    if place == "on its session" {
+                        drop(s);
+                        lands(h).await;
+                        v.end();
+                        s = open(h, &e, 1).await;
+                    }
+                    assert_eq!(
+                        (s.quote().accepted_upto, s.quote().spent_total),
+                        (2, 2),
+                        "the seeder credited the payment it swapped"
+                    );
+                    assert!(
+                        v.quote(s.quote()).is_ok(),
+                        "{what}: {ends}: it awaits a quote as any refused payment found spent, and a \
+                         quote showing it settles it into the ledger"
+                    );
+                    for i in 2..4 {
+                        assert!(s.admit(&h.chunk(i)), "within the window");
+                        v.requested();
+                    }
+                    assert!(
+                        v.stopped()
+                            && !v.awaiting_quote()
+                            && v.due()
+                                .await
+                                .expect("due answers after the quote that showed the payment")
+                                .is_none(),
+                        "{what}: {ends}: the quote that shows it settles it into the ledger and \
+                         nothing more: the watcher stays stopped, awaits no quote, and pays nothing"
                     );
                     drop(s);
                     lands(h).await;
-                    continue;
                 }
-                // Found spent: a quote showing it settles it into the ledger, and no more.
-                if place == "on its session" {
-                    drop(s);
-                    lands(h).await;
-                    v.end();
-                    s = open(h, &e, 1).await;
-                }
-                assert_eq!(
-                    (s.quote().accepted_upto, s.quote().spent_total),
-                    (2, 2),
-                    "the seeder credited the payment it swapped"
-                );
-                assert!(
-                    v.quote(s.quote()).is_ok(),
-                    "{what}: {ends}: it awaits a quote as any refused payment found spent, and a \
-                     quote showing it settles it into the ledger"
-                );
-                for i in 2..4 {
-                    assert!(s.admit(&h.chunk(i)), "within the window");
-                    v.requested();
-                }
-                assert!(
-                    v.stopped()
-                        && !v.awaiting_quote()
-                        && v.due()
-                            .await
-                            .expect("due answers after the quote that showed the payment")
-                            .is_none(),
-                    "{what}: {ends}: the quote that shows it settles it into the ledger and \
-                     nothing more: the watcher stays stopped, awaits no quote, and pays nothing"
-                );
-                drop(s);
-                lands(h).await;
             }
         }
     }

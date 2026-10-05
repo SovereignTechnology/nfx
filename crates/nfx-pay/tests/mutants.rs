@@ -2306,4 +2306,7 @@ catches!(
     dropped_video_late_takeover_no_id_recheck_round_trip_woken: w(S::DroppedVideoLateTakeoverNoIdRecheck) => only_the_sessions_video_is_admitted,
     dropped_video_late_takeover_recheck_id_before_ban_round_trip: r(S::DroppedVideoLateTakeoverRecheckIdBeforeBan) => only_the_sessions_video_is_admitted,
     dropped_video_late_takeover_recheck_id_before_ban_round_trip_woken: w(S::DroppedVideoLateTakeoverRecheckIdBeforeBan) => only_the_sessions_video_is_admitted,
+    viewer_wrong_ack_by_spent_no_reclaim: v(V::WrongAckBySpentNoReclaim) => a_viewer_stops_on_a_wrong_or_unsolicited_ack,
+    viewer_wrong_ack_by_upto_no_reclaim: v(V::WrongAckByUptoNoReclaim) => a_viewer_stops_on_a_wrong_or_unsolicited_ack,
+    viewer_last_payment_ends_licence: v(V::LastPaymentEndsLicence) => a_viewer_pays_ahead_only_after_a_refusal,
 );
