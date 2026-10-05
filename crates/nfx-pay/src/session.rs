@@ -324,6 +324,9 @@ pub enum BadToken {
     /// Well formed, with valid DLEQs, but the mint refuses its proofs as invalid at the
     /// swap. This one also bans the peer.
     Forged,
+    /// Well formed, its proofs naming a keyset the mint never had, a fresh one at each call:
+    /// the mint does not list it (NUT-02), and answers a request for its keys 12001.
+    UnknownKeyset,
 }
 
 /// A seeder's configuration, as the suite asks for one.
@@ -427,7 +430,9 @@ pub trait Harness {
     async fn bad_token(&self, kind: BadToken, amount: u64) -> String;
     /// The same proofs as `token` in a different string.
     async fn reencode(&self, token: &str) -> String;
-    /// One token holding all the tokens' proofs, in the order given.
+    /// One token holding all the tokens' proofs, in the order given, each as it was: a
+    /// proof that is locked, lacks a DLEQ proof, has an invalid one or names a keyset the
+    /// mint never had stays so.
     async fn combine(&self, tokens: &[&str]) -> String;
 
     /// Whether any of `token`'s proofs has been claimed at its mint, by anyone.
@@ -471,9 +476,10 @@ pub trait Harness {
     /// to the mint), and let the ones after it through at once.
     fn hold_next_swap(&self);
     /// The seeder's key requests go unanswered until [`Harness::release_swaps`], on a slow
-    /// link between the seeder and the mint. An engine uses the keys it holds without asking
-    /// (NFX-07 §3 step 3 caches them), and may hold keys from its start or from any fetch,
-    /// for the payment's mint or for all it quotes: the suite holds keys only after
+    /// link between the seeder and the mint: its asks for keys and for the mint's keyset
+    /// listing alike. An engine uses the keys it holds without asking (NFX-07 §3 step 3
+    /// caches them), and may hold keys from its start or from any fetch, for the payment's
+    /// mint or for all it quotes: the suite holds keys only after
     /// [`Harness::forget_keys`]. Its swap requests and its reads of swap state go through,
     /// unless something else holds them.
     fn hold_key_fetches(&self);
@@ -580,7 +586,9 @@ pub trait Harness {
     fn sweep_during_next_read(&self, engine: &Self::Engine);
     /// The mint rotates its active keyset: every output set made so far belongs to the
     /// old one, and a swap to one of them is refused for good (CDK 12002), whatever its
-    /// inputs. Tokens issued from then on are of the new keyset.
+    /// inputs. Tokens issued from then on are of the new keyset, which the mint lists
+    /// (NUT-02) from now: a seeder that asked for the listing in this second asks again
+    /// only in the next (NFX-07 §3 step 3).
     fn rotate_keyset(&self);
     /// The mint's keyset expires now, as [`MintEvent::ExpireKeyset`] does before a swap:
     /// proofs of older keysets ([`Harness::fund_older_keyset`]) stay valid.
