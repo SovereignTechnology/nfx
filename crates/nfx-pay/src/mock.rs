@@ -1113,6 +1113,11 @@ impl MockNetwork {
         .await;
     }
 
+    /// Whether the mint at `url` refuses its keys now ([`Harness::refuse_keys`]).
+    fn refuses_keys(&self, url: &str) -> bool {
+        self.ledger().keys_refused.contains(url)
+    }
+
     /// Fetch something (keys) from the mint at `url`, now.
     fn dial(&self, url: &str) {
         self.ledger().dialled.insert(url.to_owned());
@@ -4651,6 +4656,32 @@ pub enum SeederFlaw {
     /// task of its own, polled between the two, finds the turn held and is never woken
     /// again.
     TurnWokenEarly,
+    /// Asks for a mint's keys so that the mint's refusal of them (12001) does not wake the
+    /// payment that waits for the answer: on a task of its own, it is never polled again.
+    KeysRefusalUnwoken,
+    /// The same as [`SeederFlaw::KeysWokenEarly`] for a refusal of the keys asked for.
+    KeysRefusalWokenEarly,
+    /// Asks every quoted mint but the first for its keys without asking to be woken as
+    /// they come.
+    OtherMintKeysUnwoken,
+    /// The same for the keyset listing a payment asks such a mint for at step 3.
+    OtherMintListingUnwoken,
+    /// The same for the keyset listing a payment's keyset rule judges by at such a mint:
+    /// woken by the clock alone.
+    OtherMintKeysetListingUnwoken,
+    /// The same as [`SeederFlaw::KeysWokenEarly`] at every quoted mint but the first.
+    OtherMintKeysWokenEarly,
+    /// The same as [`SeederFlaw::ListingWokenEarly`] at every quoted mint but the first.
+    OtherMintListingWokenEarly,
+    /// The same as [`SeederFlaw::KeysetListingWokenEarly`] at every quoted mint but the
+    /// first.
+    OtherMintKeysetListingWokenEarly,
+    /// A payment that waits for a keyset listing another entry asked for, its answer held,
+    /// does not ask to be woken as it comes: only the one that asked is.
+    OthersListingUnwoken,
+    /// The same as [`SeederFlaw::ListingWokenEarly`] for a payment that waits for a keyset
+    /// listing another entry asked for.
+    OthersListingWokenEarly,
 }
 
 /// How a payment came to its account's turn: the paths of the suite's matrix of payments,
@@ -9740,16 +9771,34 @@ impl Inner {
         // and `listing_seen` false meanwhile).
         let keys_seen = Arc::new(AtomicBool::new(true));
         let listing_seen = Arc::new(AtomicBool::new(true));
+        let other_mint = self.other_mint(mint);
+        // The flaws planted on one kind of answer alone: a refusal of the keys, an answer
+        // of a mint other than the first, a listing another entry asked for (`others`).
         let keys_waker = |cx: &Context<'_>| {
-            if self.has(SeederFlaw::KeysUnwoken) {
+            let refused = self.net.refuses_keys(mint);
+            if self.has(SeederFlaw::KeysUnwoken)
+                || (refused && self.has(SeederFlaw::KeysRefusalUnwoken))
+                || (other_mint && self.has(SeederFlaw::OtherMintKeysUnwoken))
+            {
                 Waker::noop().clone()
+            } else if refused && self.has(SeederFlaw::KeysRefusalWokenEarly) {
+                self.early_waker(SeederFlaw::KeysRefusalWokenEarly, cx, &keys_seen)
+            } else if other_mint && self.has(SeederFlaw::OtherMintKeysWokenEarly) {
+                self.early_waker(SeederFlaw::OtherMintKeysWokenEarly, cx, &keys_seen)
             } else {
                 self.early_waker(SeederFlaw::KeysWokenEarly, cx, &keys_seen)
             }
         };
-        let listing_waker = |cx: &Context<'_>| {
-            if self.has(SeederFlaw::ListingUnwoken) {
+        let listing_waker = |cx: &Context<'_>, others: bool| {
+            if self.has(SeederFlaw::ListingUnwoken)
+                || (other_mint && self.has(SeederFlaw::OtherMintListingUnwoken))
+                || (others && self.has(SeederFlaw::OthersListingUnwoken))
+            {
                 Waker::noop().clone()
+            } else if others && self.has(SeederFlaw::OthersListingWokenEarly) {
+                self.early_waker(SeederFlaw::OthersListingWokenEarly, cx, &listing_seen)
+            } else if other_mint && self.has(SeederFlaw::OtherMintListingWokenEarly) {
+                self.early_waker(SeederFlaw::OtherMintListingWokenEarly, cx, &listing_seen)
             } else {
                 self.early_waker(SeederFlaw::ListingWokenEarly, cx, &listing_seen)
             }
@@ -9757,7 +9806,6 @@ impl Inner {
         // Polled once already, waiting ([`SeederFlaw::KeysGiveUpOnWake`] only), and the clock
         // watched ([`SeederFlaw::KeysWaitWatchOnce`] only).
         let (mut waited, mut watched) = (false, false);
-        let other_mint = self.other_mint(mint);
         poll_fn(|cx| {
             // Waiting for the next second to ask for the listing again.
             let mut next_second = false;
@@ -9922,9 +9970,10 @@ impl Inner {
                         break None; // the flaw: not to be seen yet
                     }
                     drop(st);
+                    let others = own_ask != Some(l.seq);
                     let Some(answer) =
                         self.net
-                            .listed(mint, l.released, l.call, &listing_waker(cx))
+                            .listed(mint, l.released, l.call, &listing_waker(cx, others))
                     else {
                         break None;
                     };
@@ -9966,7 +10015,8 @@ impl Inner {
                 let seq = st.listings_asked;
                 own_ask = Some(seq);
                 drop(st);
-                let (released, call, answer) = self.net.list_keysets(mint, &listing_waker(cx));
+                let (released, call, answer) =
+                    self.net.list_keysets(mint, &listing_waker(cx, false));
                 self.state().listings.insert(
                     key.to_owned(),
                     Listing {
@@ -10053,8 +10103,12 @@ impl Inner {
             // The flaws: woken by the clock alone; or by a task of the seeder's own, before
             // the listing can be seen (`seen` false meanwhile).
             let waker = || {
-                if self.has(SeederFlaw::KeysetListingWaitUnwoken) {
+                if self.has(SeederFlaw::KeysetListingWaitUnwoken)
+                    || (other_mint && self.has(SeederFlaw::OtherMintKeysetListingUnwoken))
+                {
                     Waker::noop().clone()
+                } else if other_mint && self.has(SeederFlaw::OtherMintKeysetListingWokenEarly) {
+                    self.early_waker(SeederFlaw::OtherMintKeysetListingWokenEarly, cx, &seen)
                 } else {
                     self.early_waker(SeederFlaw::KeysetListingWokenEarly, cx, &seen)
                 }

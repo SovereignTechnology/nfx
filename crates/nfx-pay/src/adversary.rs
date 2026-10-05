@@ -3170,7 +3170,10 @@ pub async fn a_seeder_answers_within_its_deadline<H: Harness>(h: &H) {
 /// awaits wakes it as it comes, and not before the entry can see it: NFX-07 §3 sets no
 /// poll, and an entry on a task of its own is polled when it is woken, and only then. So
 /// does the turn of a payment whose connection closed, as its swap is settled
-/// (`DroppedLandWakesNone`, `TurnWokenEarly`). Each
+/// (`DroppedLandWakesNone`, `TurnWokenEarly`); a mint's refusal of the keys asked for
+/// (`KeysRefusalUnwoken`, `KeysRefusalWokenEarly`); a keyset listing another entry asked for
+/// (`OthersListingUnwoken`, `OthersListingWokenEarly`); and the answers of a second quoted
+/// mint (`OtherMintKeysUnwoken` and the like). Each
 /// entry here is such a one, and is answered once its answers have come back and the
 /// engine has settled, no clock moving meanwhile. They are every call an entry or a sweep
 /// sends its mint and awaits, by each kind of answer that takes a wake of its own:
@@ -3310,6 +3313,201 @@ pub async fn every_answer_wakes_the_entry_awaiting_it<H: Harness>(h: &H) {
     a_sweeps_read_wakes_it(h).await;
     a_swap_the_mint_abandons_wakes_its_payment(h).await;
     a_closed_payments_outcome_wakes_what_waits_for_its_turn(h).await;
+    a_refused_key_request_wakes_its_payment(h).await;
+    a_listing_another_asked_for_wakes_its_payment(h).await;
+    a_second_mints_answers_wake_its_payment(h).await;
+}
+
+/// Flaws `KeysRefusalUnwoken` and `KeysRefusalWokenEarly`. A mint's refusal of the keys a
+/// payment asked for is an answer too, and wakes the payment as it comes (NFX-07 §3 step
+/// 3). The seeder holds this second's listing and no keys, its key requests held, and the
+/// mint, which lists the keyset, refuses its keys from now on (12001). A payment, on a
+/// task of its own, asks for its keys and waits. The mint answers: the payment is woken,
+/// and refused `bad-token`.
+async fn a_refused_key_request_wakes_its_payment<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    settles(h, &mut s, 4, 4, 0).await;
+    serve(h, &mut s, 4, 4);
+    hold_refetch(h, &e);
+    h.refuse_keys(&h.mint(), true);
+    let asked = h.key_requests();
+    let p = Pay {
+        upto_chunk: 8,
+        token: h.token(4).await,
+    };
+    let done = flag();
+    let paying = pay_on_a_task(h, s, &p, &done);
+    settle(h).await;
+    assert!(
+        !is_set(&done) && h.key_requests() > asked,
+        "it waits for the keys it asked for, the mint's answer held"
+    );
+    release(h).await; // the mint answers: it serves no keys of that keyset
+    let answered = answer_of(h, pin!(&paying)).await;
+    let r = answered.as_ref().map(|(_, r)| r);
+    assert!(
+        r.is_some_and(|r| is_rej(r, &RejCode::BadToken)),
+        "a payment on a task of its own is woken as the mint refuses the keys it asked for, \
+         held and released, and refused bad-token: {r:?}"
+    );
+    h.refuse_keys(&h.mint(), false);
+    close(h, (answered, paying)).await;
+}
+
+/// Flaws `OthersListingUnwoken` and `OthersListingWokenEarly`. A payment that waits for a
+/// keyset listing another entry asked for is woken as it comes, as the one that asked is
+/// (NFX-07 §3 step 3 has the seeder ask once a second for each mint, so a second payment
+/// of that second waits for the first's). The seeder holds no keys, its key requests held.
+/// A payment asks the mint, and waits. A payment of another peer, on a task of its own,
+/// arrives in the same second, and waits too. The mint answers: both are acknowledged.
+async fn a_listing_another_asked_for_wakes_its_payment<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let (mut s1, mut s2) = (open(h, &e, 1).await, open(h, &e, 2).await);
+    serve(h, &mut s1, 0, 4);
+    serve(h, &mut s2, 0, 4);
+    hold_refetch(h, &e);
+    let (p1, p2) = (
+        Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        },
+        Pay {
+            upto_chunk: 4,
+            token: h.token(4).await,
+        },
+    );
+    let mut first = Box::pin(s1.pay(&p1));
+    assert!(
+        waits_for_keys(h, first.as_mut()).await,
+        "the first payment asks the mint, and waits"
+    );
+    let done = flag();
+    let paying = pay_on_a_task(h, s2, &p2, &done);
+    settle(h).await;
+    assert!(!is_set(&done), "the second payment waits for the mint too");
+    release(h).await; // the mint answers
+    let answered = answer_of(h, pin!(&paying)).await;
+    let r = answered.as_ref().map(|(_, r)| r);
+    assert!(
+        r.is_some_and(Result::is_ok),
+        "a payment on a task of its own that waits for a keyset listing another payment asked \
+         for is woken as it comes, and answered: {r:?}"
+    );
+    let r1 = answer_of(h, first.as_mut()).await;
+    assert!(
+        r1.as_ref().is_some_and(Result::is_ok),
+        "the payment that asked is answered too: {r1:?}"
+    );
+    close(h, first).await;
+    close(h, (answered, paying, s1)).await;
+}
+
+/// Flaws `OtherMintKeysUnwoken`, `OtherMintListingUnwoken`,
+/// `OtherMintKeysetListingUnwoken`, `OtherMintKeysWokenEarly`, `OtherMintListingWokenEarly`
+/// and `OtherMintKeysetListingWokenEarly`. The answers of every mint a seeder quotes wake
+/// the payment that awaits them, not the first's alone. A seeder quotes two mints. Holding
+/// no keys, its key requests held, a payment in the second mint, on a task of its own,
+/// asks that mint and waits; the mint answers, and the payment is acknowledged. So is one
+/// that asks for that mint's keys alone, the seeder holding its listing of that second.
+/// And on a fresh seeder, a second after a payment in the second mint, another, on a task
+/// of its own, is woken by the listing its keyset rule judges by.
+async fn a_second_mints_answers_wake_its_payment<H: Harness>(h: &H) {
+    let two_mints = || {
+        h.engine_checked(EngineParams {
+            price: 1,
+            window: 4,
+            global_cap: 1000,
+            debt_ttl: h.debt_ttl(),
+            account_ttl: h.account_ttl(),
+            ban_ttl: h.ban_ttl(),
+            mints: 2,
+            extra_mint: None,
+        })
+        .expect("a seeder quoting two mints")
+    };
+    let e = two_mints();
+    let mut s = open(h, &e, 1).await;
+    let second = s
+        .quote()
+        .mints
+        .get(1)
+        .cloned()
+        .expect("the quote lists a second mint");
+    serve(h, &mut s, 0, 4);
+    hold_refetch(h, &e);
+    let asked = h.key_requests();
+    let p = Pay {
+        upto_chunk: 4,
+        token: h.token_at(&second, 4).await,
+    };
+    let done = flag();
+    let paying = pay_on_a_task(h, s, &p, &done);
+    settle(h).await;
+    assert!(
+        !is_set(&done) && h.key_requests() > asked,
+        "it waits for the second mint's keyset listing or the keys it asked that mint for"
+    );
+    release(h).await; // they come
+    let answered = answer_of(h, pin!(&paying)).await;
+    let r = answered.as_ref().map(|(_, r)| r);
+    assert!(
+        r.is_some_and(Result::is_ok),
+        "a payment in the second quoted mint, on a task of its own, is woken by that mint's \
+         keyset listing and the keys it asked it for, held and released, and answered: {r:?}"
+    );
+    close(h, (answered, paying)).await;
+
+    // Its keys alone held, the seeder holding that mint's listing of this second.
+    let e = two_mints();
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    settles_pay::<H>(&mut s, 4, h.token_at(&second, 4).await, 4).await;
+    serve(h, &mut s, 4, 4);
+    hold_refetch(h, &e);
+    let (asked, listed) = (h.key_requests(), h.listing_requests());
+    let p = Pay {
+        upto_chunk: 8,
+        token: h.token_at(&second, 4).await,
+    };
+    let done = flag();
+    let paying = pay_on_a_task(h, s, &p, &done);
+    settle(h).await;
+    assert!(
+        !is_set(&done) && h.key_requests() > asked && h.listing_requests() == listed,
+        "it waits for the keys it asked the second mint for, that mint's keyset listing of \
+         its second held"
+    );
+    release(h).await; // its keys come
+    let answered = answer_of(h, pin!(&paying)).await;
+    let r = answered.as_ref().map(|(_, r)| r);
+    assert!(
+        r.is_some_and(Result::is_ok),
+        "a payment in the second quoted mint, on a task of its own, is woken by the keys it \
+         asked that mint for, held and released, and answered: {r:?}"
+    );
+    close(h, (answered, paying)).await;
+
+    let e = two_mints();
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    settles_pay::<H>(&mut s, 4, h.token_at(&second, 4).await, 4).await;
+    serve(h, &mut s, 4, 4);
+    advance(h, SECOND).await;
+    let p = Pay {
+        upto_chunk: 8,
+        token: h.token_at(&second, 4).await,
+    };
+    let paying = pay_on_a_task(h, s, &p, &flag());
+    let answered = answer_of(h, pin!(&paying)).await;
+    let r = answered.as_ref().map(|(_, r)| r);
+    assert!(
+        r.is_some_and(Result::is_ok),
+        "a payment in the second quoted mint, on a task of its own, is woken by the keyset \
+         listing its keyset rule judges by, and answered: {r:?}"
+    );
+    close(h, (answered, paying)).await;
 }
 
 /// Flaw `ListingUnwoken`, against a seeder that asked for its mints' listings at its start
