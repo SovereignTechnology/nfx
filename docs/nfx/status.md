@@ -400,7 +400,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
      every target of theirs, failing closed; other crates are out of scope. With sovtech's OK, the minimum role for GitLab pipeline variables on
      the private GitLab project is *no one* since 2026-09-24 (fifth audit, #13).
      - A refused watcher pays ahead, so free identities cannot lock out paying ones.
-     - A lying seeder gets at most one payment.
+     - A lying seeder gets at most one payment per seeder identity the watcher pays.
      - An unsettled payment survives a dropped connection.
      - **NFX-07 changed shape.**
        - The seeder swaps before it acks.
