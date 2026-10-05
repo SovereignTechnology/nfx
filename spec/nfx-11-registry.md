@@ -75,8 +75,8 @@ them.
 
 | Surface | Spec |
 |---|---|
-| `GET /<sha256>[.<ext>]` (+ HEAD) | NFX-05 §6 |
-| `GET /<root>`, `GET /<root>/master.m3u8`, `GET /<root>/<sha256>.<ext>` | NFX-05 §6 |
+| `GET <base>/<sha256>[.<ext>]` (+ HEAD), `<base>` an origin's base URL | NFX-05 §6 |
+| `GET <base>/<root>`, `GET <base>/<root>/master.m3u8`, `GET <base>/<root>/<sha256>.<ext>` | NFX-05 §6 |
 | `Cache-Control: public, max-age=31536000, immutable` (and its limits) | NFX-05 §6.1 |
 | `X-NFX-Pay` / `X-NFX-Price` / `X-NFX-Mints` / 402 / 503 | NFX-07 §4 |
 | `POST /v1/nfx/{escrow,license,redeem,claim}` | NFX-09 §2 |
@@ -91,7 +91,7 @@ them.
 | `spent` | a proof of the token is already spent (the peer is banned) | NFX-07 §3 |
 | `bad-lock` | licensed chunk proof not P2PK-locked to the mint's `redeem_pubkey`, locktime too near, or no valid DLEQ | NFX-08 §4.1, NFX-09 §2 |
 | `stale` | `pay.upto_chunk` ≤ last acked watermark | NFX-07 §2 |
-| `bad-token` | token unreadable, not unit `sat`, of more than one mint, with more than 64 proofs, with locked proofs, with a missing or invalid DLEQ, or with proofs the mint refuses as invalid (the last is also a ban) | NFX-07 §3 |
+| `bad-token` | token unreadable, not unit `sat`, of more than one mint, with more than 64 proofs, with locked proofs (in open mode: a licensed video's are P2PK-locked, and `bad-lock` if not), with a missing or invalid DLEQ, or with proofs the mint refuses as invalid (the last is also a ban) | NFX-07 §3 |
 | `banned` | the peer is banned by this seeder (a spent or invalid proof), until `ban_ttl` | NFX-07 §3 |
 | `mint-unavailable` | the seeder could not complete the swap: the mint could not be reached, the seeder's own swap failed or was refused as pending, or no answer came within 60 s of the `pay`'s arrival; or it did not swap, because an earlier payment's outcome on the account is still unknown. Not a ban, and nothing credited by then (a late claim is credited later) | NFX-07 §3 |
 | `bad-session` | the session id names a session that is open, or the peer holds too many open or waiting sessions | NFX-07 §3 |
@@ -219,3 +219,7 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
 - 2026-09-25 (M2.0 thirteenth audit) — `mint-unavailable` also lists a swap refused as
   pending, and a payment refused without a swap while an earlier outcome on the account
   is unknown (NFX-07 §3).
+- 2026-09-29 (M2.0 twenty-ninth audit) — §5 writes the hash-addressed paths under an
+  origin's base URL, as NFX-05 §6 and NFX-07 §4 do (was: from a host's root).
+  `bad-token`'s locked proofs are open mode's: a licensed video's proofs are P2PK-locked
+  and judged `bad-lock` (NFX-08 §4.1).

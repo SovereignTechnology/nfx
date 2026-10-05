@@ -27,7 +27,8 @@ and `mpv`/ffmpeg natively, and hash-addressed chunks dedupe across renditions.
 The manifest (NFX-02) anchors one document: the **hash list**, whose sha256 is the
 manifest's `root` tag. The hash list is fetched by `root` (so it is itself
 hash-verified on arrival) from any origin/seeder and MUST NOT be trusted from any
-other source. Canonical address: `GET {origin}/{root-hex}`.
+other source. Canonical address: `GET <base>/<root-hex>`, `<base>` being an origin's
+base URL (§6).
 
 Format: UTF-8 JSON (schema: `schemas/hashlist.schema.json`). No canonicalization
 rules are needed — `root` commits to the exact bytes.
@@ -107,21 +108,26 @@ serve a subset; the hash list is always served whole.
 
 ## 6. Origin (HTTPS) serving
 
-An **origin** is an HTTPS host serving hash-addressed bytes; every network needs ≥1
-(manifest mirroring, browser genesis, censored-shutdown backstop):
+An **origin** is an HTTPS base URL serving hash-addressed bytes under it: scheme, host,
+port and path, any trailing `/` dropped, with no query, fragment or credentials, as a
+beacon's `https` endpoint names one (NFX-03 §4) and as NFX-07 §4 pays one. So one host
+may hold several origins, each under a path of its own, and one at a host's root has an
+empty path. Every network needs ≥1 (manifest mirroring, browser genesis,
+censored-shutdown backstop). With `<base>` the origin's base URL:
 
-- `GET /<sha256-hex>[.<ext>]` → file bytes. The extension is optional and ignored for
-  lookup (as in BUD-01), so the content names of §3 (`<hex>.m4s`, `<hex>.mp4`,
+- `GET <base>/<sha256-hex>[.<ext>]` → file bytes. The extension is optional and ignored
+  for lookup (as in BUD-01), so the content names of §3 (`<hex>.m4s`, `<hex>.mp4`,
   `<hex>.m3u8`) resolve directly. `Content-Type` per role (playlists
   `application/vnd.apple.mpegurl`, segments `video/iso.segment`, inits `video/mp4`);
   MUST support `HEAD`. Range support OPTIONAL (files are small).
-- `GET /<root-hex>` → the hash list itself.
-- `GET /<root-hex>/master.m3u8` → the master playlist (same bytes as its sha256
+- `GET <base>/<root-hex>` → the hash list itself.
+- `GET <base>/<root-hex>/master.m3u8` → the master playlist (same bytes as its sha256
   address; convenience so players can be pointed at one URL).
-- `GET /<root-hex>/<sha256-hex>.<ext>` → the same bytes as `GET /<sha256-hex>`, for
-  any file listed in that root's hash list. This is what a player pointed at the
-  convenience URL actually requests, because playlist URIs are relative (§3). Origins
-  MAY answer `404` for hashes that the named hash list does not contain.
+- `GET <base>/<root-hex>/<sha256-hex>.<ext>` → the same bytes as
+  `GET <base>/<sha256-hex>`, for any file listed in that root's hash list. This is what
+  a player pointed at the convenience URL actually requests, because playlist URIs are
+  relative (§3). Origins MAY answer `404` for hashes that the named hash list does not
+  contain.
 - CORS: origins MUST send `Access-Control-Allow-Origin: *` on hash-addressed GETs
   (the browser mesh depends on it).
 
@@ -206,3 +212,10 @@ server generalizes to an origin when its admin pins NFX-05 content.
 - **Frozen at M1, 2026-09-24** (sovtech). From here on, a behaviour change needs a
   `specver` bump (NFX-01 §4); only clarifications that change no behaviour are edited in
   place. Record: `docs/nfx/freeze-m1-candidate.md`.
+- 2026-09-29 (clarification, no behaviour change; M2.0 twenty-ninth audit,
+  `docs/nfx/reviews/2026-09-24-m2.0-twenty-ninth-audit.md`): §6 defines an origin as an
+  HTTPS base URL and writes every path under it (`GET <base>/<sha256-hex>`), §2's
+  canonical address with them, as NFX-03 §4 and NFX-07 §4 do. It said "an HTTPS host"
+  and wrote the paths from the host's root, while NFX-03 §4 already had a beacon's
+  `https` endpoint serve `GET <base>/<sha256>` under a base path, and the M1 player
+  already fetched under one.
