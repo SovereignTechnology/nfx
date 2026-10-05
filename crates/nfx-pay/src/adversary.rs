@@ -609,7 +609,7 @@ pub fn run_on_a_thread(secs: u64, body: impl FnOnce() + Send + 'static) -> Ran {
 }
 
 /// Run `body`, a scenario's whole run on this thread, with `start` to start a task on the
-/// runtime it runs in: the suite runs an entry on a task of its own there ([`on_a_task`]),
+/// runtime it runs in: the suite runs an entry on a task of its own there (`on_a_task`),
 /// which that runtime polls when it is woken, in turn with the engine's own tasks.
 pub fn with_tasks<T>(
     start: impl Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + 'static,
