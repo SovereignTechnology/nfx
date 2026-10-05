@@ -240,10 +240,19 @@ whatever it offers. The checks run in this order:
 2. **The mint** is exactly a quoted URL, else `bad-mint`. Nothing is fetched from any
    mint before this check.
 3. **DLEQ.** Every proof's DLEQ proof verifies against the keys of that quoted mint for
-   the keyset the proof names (fetched from it, then cached: keys cached for another mint
-   or another keyset serve it not, and a keyset a proof names that the cache does not
-   hold, such as one the mint started since or an older one a wallet still spends, is
-   fetched), else `bad-token`.
+   the keyset the proof names, else `bad-token`. The keys are fetched from that mint,
+   then cached: the seeder uses keys it holds without asking the mint, and keys cached
+   for another mint or another keyset serve no proof they are not for.
+   - **Keysets it does not hold.** The seeder asks the mint for a keyset's keys only if
+     the mint's keyset listing (NUT-02) names it: one the mint started since, say, or an
+     older one a wallet still spends. It caches the listing per mint and asks for it at
+     most once a second. A payment naming a keyset that the listing does not name, the
+     listing asked for before the payment arrived, makes it ask again; if it last asked
+     in the same second, the payment waits for the next second's listing.
+   - A keyset that a listing asked for after the payment arrived does not name is
+     `bad-token`, without a ban. So is one whose keys the mint answers 12001 (a keyset it
+     does not know). A token naming keysets the mint never had so costs the mint at most
+     a listing a second, whoever sends it.
 4. **The face value** exactly covers the new chunks. Short is `underpaid`, over is
    `overpaid`. A product above 2^53−1 is `underpaid`. An exact payment that would take
    the account's `spent_total` above 2^53−1 is `overpaid`: no `ack` or quote could carry
@@ -307,22 +316,22 @@ whatever it offers. The checks run in this order:
      whichever payment takes it next. Deadlines and the seeder's clock count whole
      seconds, and a deadline is as its second began: what comes in the deadline's second
      came after it. So a payment whose turn comes then or later runs none of its checks,
-     the ban's included; keys that come then or later are not used, and nothing that needs
-     them (DLEQ, amount) is judged; a swap's outcome the seeder settles then is late
-     (below); and a payment whose swap is not sent by then is not rechecked against the
-     watermark (step 5). Each is answered `mint-unavailable`. The turn is freed at the
-     deadline, however late that answer goes out, the swap's outcome comes, or an entry
-     takes the turn over: a read sent in the deadline's second or later was sent after
-     the freeing. A payment dropped before its swap is sent (its connection closed) is
-     abandoned unswapped, and frees the turn then; one dropped after is settled as its
-     swap completes (step 5). The payment that takes the turn, once its checks pass,
-     reads the abandoned swap (below), whether it waited for the turn or came after the
-     deadline; while that outcome is still unknown, it is answered `mint-unavailable`
-     without a swap (bounded state, above). A payment's own reads and completions (below)
-     count too, and so do the reads and requests that settle a retry or a completion: all
-     end at its deadline, however late they start (after a wait for the account's turn,
-     or a slow key fetch). One still unanswered then is abandoned, proves nothing, and
-     the payment is answered `mint-unavailable` at the deadline.
+     the ban's included; keys or a keyset listing that come then or later are not used,
+     and nothing that needs them (DLEQ, amount) is judged; a swap's outcome the seeder
+     settles then is late (below); and a payment whose swap is not sent by then is not
+     rechecked against the watermark (step 5). Each is answered `mint-unavailable`. The
+     turn is freed at the deadline, however late that answer goes out, the swap's outcome
+     comes, or an entry takes the turn over: a read sent in the deadline's second or
+     later was sent after the freeing. A payment dropped before its swap is sent (its
+     connection closed) is abandoned unswapped, and frees the turn then; one dropped
+     after is settled as its swap completes (step 5). The payment that takes the turn,
+     once its checks pass, reads the abandoned swap (below), whether it waited for the
+     turn or came after the deadline; while that outcome is still unknown, it is answered
+     `mint-unavailable` without a swap (bounded state, above). A payment's own reads and
+     completions (below) count too, and so do the reads and requests that settle a retry
+     or a completion: all end at its deadline, however late they start (after a wait for
+     the account's turn, or a slow key fetch). One still unanswered then is abandoned,
+     proves nothing, and the payment is answered `mint-unavailable` at the deadline.
    - **Late outcomes.** A swap the seeder has answered `mint-unavailable` for, at the
      deadline or earlier, is still settled when its outcome becomes known. The seeder
      MUST learn it: from a late response, or, when none comes, by reading the swap's
@@ -1096,3 +1105,13 @@ therefore loses nothing:
     pay/1 sends only for a `hello` or one of another spec's included, the watcher stops
     paying that seeder; a `hello` refused with any code but `banned`, known or not, changes
     nothing.
+- Draft 2026-09-29 (M2.0 twenty-ninth audit, `docs/nfx/reviews/2026-09-24-m2.0-twenty-ninth-audit.md`).
+  - §3: in step 3 the seeder uses the keys it holds without asking the mint, and asks for
+    a keyset's keys only if the mint's keyset listing (NUT-02) names it. It caches the
+    listing per mint and asks for it at most once a second: a payment that finds it asked
+    for in the same second, before the payment arrived, waits for the next second's. A
+    keyset that a listing asked for after the payment arrived does not name, or whose
+    keys the mint answers 12001, is `bad-token` without a ban (was: a keyset a proof named
+    that the cache did not hold was fetched, with no bound, and one the mint did not know
+    had no stated outcome). A listing that comes at the payment's deadline or later is not
+    used, as keys that come then are not.
