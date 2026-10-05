@@ -523,8 +523,13 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   seeder's structure check (§3 step 1): of one quoted mint, by its exact URL (§2), in unit
   `sat`, of at most 64 proofs, none locked to a spending condition (in open mode: a
   licensed video's are P2PK-locked as NFX-08 §4 requires), each carrying its DLEQ
-  proof (NUT-12). A wallet whose selection would hold more than 64 proofs swaps to fewer
-  first. CDK 0.18.1 sends an exact selection as it is, whatever its count, unless
+  proof (NUT-12). A wallet whose selection would hold more than 64 proofs, or whose
+  token would not fit its `pay` line (§2: 32 KiB with the rest of the message), swaps to
+  fewer proofs first: the count does not bound the size. The same proofs take nearly
+  twice the bytes written as `cashuA` that they take as `cashuB`: 64 proofs of the
+  watcher's own, each with its DLEQ proof, come to about 18 KiB as `cashuB` and to more
+  than 32 KiB as `cashuA`.
+  CDK 0.18.1 sends an exact selection as it is, whatever its count, unless
   `SendOptions::max_proofs` is set, so a watcher built on it sets it to 64. Every payment
   meets it, however it is made (due, ahead after a refusal, or at a session's end), on
   whichever of the seeder's ledgers, and whatever came before it: an `ack`, a
@@ -732,13 +737,16 @@ query, a fragment or credentials names no origin, and the client pays it nothing
 paths on one host are two origins.
 
 - `GET <base>/<sha256>` with header `X-NFX-Pay: cashuB…`, a token worth exactly one chunk
-  at the origin's price that passes the origin's structure check (§3 step 1): of one
-  mint, in unit `sat`, of at most 64 proofs (a wallet whose selection would hold more
-  swaps to fewer first), none locked to a spending condition, each carrying its DLEQ
-  proof (NUT-12). A paid request is a `GET` for the whole file, with no `Range` or
-  conditional (`If-…`) header, and the client follows no redirect with it. It is sent
-  over HTTPS only, since anyone who reads a token can spend it (plain HTTP to a loopback
-  host only where a deployment permits it, as for a mint, §2).
+  at the origin's price that passes the origin's structure check (§3 step 1) and fits
+  the header (below): of one mint, in unit `sat`, of at most 64 proofs and at most
+  32 KiB as written (a client whose selection would hold more proofs, or whose token
+  would be longer, swaps to fewer proofs first, as a watcher does, §3a), none locked to
+  a spending condition (in open mode: a licensed video's are P2PK-locked as NFX-08 §4
+  requires), each carrying its DLEQ proof (NUT-12). A paid request is a `GET` for the
+  whole file, with no `Range` or conditional (`If-…`) header, and the client follows no
+  redirect with it. It is sent over HTTPS only, since anyone who reads a token can spend
+  it (plain HTTP to a loopback host only where a deployment permits it, as for a mint,
+  §2).
 - The client pays only at a price within its own price cap, and only with a token of a
   mint the origin names, by its exact URL (§2), as it takes a quote (§3a): it pays no
   price above the cap, whether a beacon's `price_hint` or a `402` names it. Its token
@@ -767,19 +775,36 @@ paths on one host are two origins.
   - `X-NFX-Pay`: one token, as `pay.token` (§2), of at most 32 KiB, as a `pay` line is.
     An origin SHOULD accept a field that long, whatever limit its server or a proxy in
     front of it sets on other header fields, so that it refuses no token for its size.
+    The client sends none longer (above).
   - `X-NFX-Price`: the price of one chunk in sat, as `price_per_chunk` (§2): a decimal
     integer from 1 to 2^53−1, digits only, the first not `0`.
-  - `X-NFX-Mints`: 1 to 16 mint URLs (§2), each written with every `%` in it as `%25`
-    and every `,` as `%2C`, then joined with commas (the list syntax of RFC 9110
-    §5.6.1: spaces or tabs around a comma are allowed, and empty items are ignored).
-    The client reads each item back in one pass, left to right, each `%2C` giving `,`
-    and each `%25` giving `%`, and compares the URL it gets byte for byte (§2). The
-    header does not parse if an item holds any other `%` or reads back as no mint URL
-    (§2), or if it has no item or more than 16. So a list is read only as it was
-    written: `https://m.example/?k=a,b` and `https://n.example` are sent as
-    `https://m.example/?k=a%2Cb, https://n.example`; the value
-    `https://m.example/?k=a,https://n.example` is two items, and the one URL with that
-    comma is sent as `https://m.example/?k=a%2Chttps://n.example`.
+  - `X-NFX-Mints`: 1 to 16 mint URLs (§2), each written with every `%` in it as `%25`,
+    every `,` as `%2C`, every `"` as `%22`, every `(` as `%28` and every `)` as `%29`,
+    then joined with commas (the list syntax of RFC 9110 §5.6.1: spaces or tabs around
+    a comma are allowed, and empty items are ignored). Those are the bytes of a mint
+    URL that a reader of field values may take for more than themselves: a comma parts
+    items, a double quote opens a quoted string, in which a comma parts nothing, and a
+    parenthesis opens a comment, in a field that has them (RFC 9110 §5.5, §5.6.4,
+    §5.6.5). The other bytes such a reader treats so, a space, a tab and `\`, are in no
+    mint URL (§2). So the value as written holds no `"`, `(`, `)` or `\`, and a comma
+    only between items: a reader that splits it at every comma and one that parses it
+    as an RFC 9110 list part it alike. The client reads each item back in one pass,
+    left to right, each `%2C` giving `,`, each `%22` giving `"`, each `%28` giving `(`,
+    each `%29` giving `)` and each `%25` giving `%`, and compares the URL it gets byte
+    for byte (§2). The header does not parse if its value holds a `"`, a `(` or a `)`
+    anywhere, if an item holds any other `%` or reads back as no mint URL (§2), or if
+    it has no item or more than 16. So a list is read only as it was written:
+    - `https://m.example/?k=a,b` and `https://n.example` are sent as
+      `https://m.example/?k=a%2Cb, https://n.example`;
+    - the value `https://m.example/?k=a,https://n.example` is two items, and the one
+      URL with that comma is sent as `https://m.example/?k=a%2Chttps://n.example`;
+    - `https://m.example/?q="a,b"` is sent as `https://m.example/?q=%22a%2Cb%22`, and
+      `https://m.example/v(1,2)` as `https://m.example/v%281%2C2%29`. The value
+      `https://m.example/?q="a,https://n.example/?q=b"` does not parse: split at commas
+      it would be two items, and read as a list with a quoted string, one;
+    - `https://m.example/a%2Cb`, a URL that itself holds those three bytes, is sent as
+      `https://m.example/a%252Cb`, and read back as it was, not as
+      `https://m.example/a,b`.
 
   An origin sends these headers only in this form. A `402` whose `X-NFX-Price` or
   `X-NFX-Mints` is missing or does not parse names no price and no mint, as a `503`
@@ -1295,6 +1320,22 @@ paths on one host are two origins.
     taking no payment, and expose `X-NFX-Price` and `X-NFX-Mints` on every `402`.
     NFX-10 §3.1 says how a browser pays (was: nothing, so no browser could make a paid
     request or read a `402`).
+  - §4: `X-NFX-Mints` writes a mint URL's `"`, `(` and `)` percent-encoded too (`%22`,
+    `%28`, `%29`), and a value that holds one of them raw does not parse. Those, with
+    `,`, are the bytes of a mint URL that a reader of field values may take for more
+    than themselves (RFC 9110's list, quoted string and comment; a mint URL holds no
+    space, tab or `\`), so a reader that splits at commas and one that parses an RFC 9110
+    list part every value alike (was: only `%` and `,` were written so, and a value with
+    a `"` in two of its URLs was two items split at commas and one read as a list).
+  - §4: the client's token is at most 32 KiB as written, the header's limit, as well as
+    at most 64 proofs: a client whose token would be longer swaps to fewer proofs first.
+    §3a says the same of a watcher's token and its `pay` line (was: only the count, which
+    does not bound the size. Measured on synthetic NUT-00 tokens of one-sat proofs with
+    64-hex secrets, their DLEQ proofs, a 16-hex keyset id and a 20-byte mint URL: 64
+    proofs are 34,912 bytes as `cashuA` and 18,845 as `cashuB`, and the most that fit
+    32 KiB are 60 as `cashuA` and 111 as `cashuB`).
+  - §4: "none locked" is open mode's, as §2, §3 step 1 and §3a say: a licensed video's
+    `X-NFX-Pay` proofs are P2PK-locked as NFX-08 §4 requires.
   - §3a: a watcher whose wallet other clients may share pays only with outputs of a
     request of its own at the mint (a swap or a mint), kept where no other client takes
     them, and derives every output from a seed and counters no other client derives
