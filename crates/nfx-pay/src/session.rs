@@ -7,7 +7,7 @@
 //!   and outlives its sessions.
 //! - **Admission.** Every request for a file of the session's video is admitted, or not,
 //!   as one chunk: whole, ranged or aborted alike, counted at admission. A pre-paid chunk
-//!   is always served.
+//!   of a video the seeder serves is always served; one it no longer serves admits nothing.
 //! - **Limits.** Uncovered chunks are admitted only while the account owes fewer than
 //!   `window`, and while the unpaid chunks admitted in the last `debt_ttl`, across all
 //!   peers and videos, stay under the global cap.
@@ -48,10 +48,12 @@ pub trait SeederEngine {
     ///   again as it answers, after its wait and its reads;
     /// - `unknown-video` for a video this seeder does not serve. A video it no longer serves
     ///   is answered as before for a peer it keeps an account for there, or a swap of one
-    ///   whose outcome is unknown: its wait for a payment in progress, its reads, its bans,
-    ///   session ids and cap as ever, its session's payments verified as any others, and
-    ///   nothing of the video admitted, pre-paid chunks included. So a payment there
-    ///   awaiting a quote is still settled. Any other peer is refused `unknown-video`;
+    ///   whose outcome is unknown: its wait for a payment in progress (a dead turn taken
+    ///   over included), its reads after it, its ban and session id checked as it arrives
+    ///   and again as it answers (the ban as it then stands), and the cap, waiting hellos
+    ///   counted, as ever; its session's payments verified as any others, and nothing of the
+    ///   video admitted, pre-paid chunks included. So a payment there awaiting a quote is
+    ///   still settled. Any other peer is refused `unknown-video`;
     /// - `bad-session` for a session id that is open, on any video, or beyond the per-peer
     ///   cap on open and waiting sessions, counted across all videos.
     ///
@@ -142,8 +144,9 @@ pub trait SeederSession {
 /// the seeder (a payment left unsettled by a closed session included), and the count of
 /// `mint-unavailable` answers in a row. A seeder is its long-term identity, whatever
 /// transport identity it takes (NFX-07 §3a): the ledger lasts as long as the watcher's own
-/// identity toward it, and the standing as long as the wallet the watcher pays from, so a
-/// lying seeder takes one payment per identity. Implementations: the real wallet-backed
+/// identity toward it, which the watcher keeps while a payment of the ledger is not yet
+/// settled, and the standing as long as the wallet the watcher pays from, so a lying seeder
+/// takes one payment per seeder identity the watcher pays. Implementations: the real wallet-backed
 /// viewer (locked until the M2 security stage) and [`crate::mock::MockViewer`]. It keeps
 /// time on the harness's clock.
 #[allow(async_fn_in_trait)]
@@ -161,8 +164,9 @@ pub trait Viewer {
     /// settles it as accepted (and cancels that reclaim); one equal to the ledger settles
     /// nothing, and leaves such a reclaim incomplete. `Err`,
     /// and the viewer stops, when the quote is not honest about the account:
-    /// - it claims more chunks than were requested and not refused, whatever the viewer
-    ///   paid for: credit it holds, or a payment the quote settles;
+    /// - it claims more chunks than were requested of its video and not refused, whatever
+    ///   the viewer paid for: credit it holds, or a payment the quote settles; nothing a
+    ///   ledger for another of the seeder's videos holds counts;
     /// - its `accepted_upto` or `spent_total` is anything else, below the ledger included.
     ///
     /// Also `Err`, without stopping: a price over this viewer's cap, a `window` over its
@@ -200,12 +204,17 @@ pub trait Viewer {
 
     /// The payment due now, if any. It covers requested chunks at the quoted price, made
     /// once the unpaid count reaches half the session's quoted window, rounded up, so a
-    /// payment in flight never stalls the seeder, or pays ahead after a refusal. Its token,
-    /// as [`Viewer::last_pay`]'s, meets the seeder's structure check (NFX-07 §3 step 1): of
-    /// one mint, a quoted one by its exact URL, in `sat`, of at most 64 proofs, none locked,
-    /// each with its DLEQ proof, whatever it pays from (due, ahead, again after a reclaim,
-    /// after a quote that settled a payment, or on another video). A selection that would
-    /// hold more than 64 proofs is swapped to fewer first. One is in flight toward the seeder
+    /// payment in flight never stalls the seeder, or pays ahead after a refusal half the
+    /// window, rounded down, less the credit the ledger holds. Its token, as
+    /// [`Viewer::last_pay`]'s, meets the seeder's structure check (NFX-07 §3 step 1): of one
+    /// mint, a quoted one by its exact URL, in `sat`, of at most 64 proofs, none locked (open
+    /// mode), each with its DLEQ proof. A selection that would hold more than 64 proofs is
+    /// swapped to fewer first. The due point, the pay-ahead and the token hold so for every
+    /// payment, on whichever of the seeder's ledgers, and whatever came before it: an ack, a
+    /// `mint-unavailable` answer, a reclaim (its proofs back, late or less those lost to the
+    /// expiry), a quote that settled a payment, a resumed session, or credit held. A
+    /// payment's 180 s count from its own sending (NFX-07 §3a), whatever it is and wherever
+    /// they are counted. One is in flight toward the seeder
     /// at a time, across its videos, and none is made:
     /// - once the viewer has stopped, ahead after a refusal included;
     /// - while a reclaim is incomplete or a payment awaits a quote;
