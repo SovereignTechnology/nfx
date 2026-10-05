@@ -7,9 +7,10 @@
 //! - Swaps can be held (not processed), or processed with their responses held, and
 //!   released all at once or oldest first. Key requests can be held too.
 //! - The mint can be taken down.
-//! - The seeder's reads of swap state are answered in the poll that sends them, on the
-//!   reader's next poll, or from another thread that wakes the reader a few milliseconds
-//!   later, as a real mint's answer comes back.
+//! - The seeder's reads of swap state are answered in the poll that sends them, or on the
+//!   reader's next poll. Or every call the seeder makes to the mint (its reads, swaps, key
+//!   requests and keyset listings) is answered from another thread that wakes the caller a
+//!   few milliseconds later, as a real mint's answer comes back.
 //! - The seeder and the viewers keep time on the harness's clock, so debt ages, deadlines
 //!   pass and answers can be late. Moving the clock wakes whatever waits on it.
 //!
@@ -257,6 +258,10 @@ enum Reclaim {
 
 type Done = Box<dyn FnOnce(Swap) + Send>;
 
+/// A swap's answer on its way back: the request, its outcome, its completion, and whether
+/// the outcome reaches a client (not one that gave up).
+type SwapAnswer = (u64, Swap, Done, bool);
+
 #[derive(Default)]
 struct Ledger {
     tokens: HashMap<String, TokenInfo>,
@@ -372,13 +377,18 @@ struct Ledger {
     active_expired_since: Option<u64>,
     /// Ids of keysets that expired while active, since rotated out.
     expired_ranges: Vec<(u64, u64)>,
-    /// How the mint answers the seeder's reads of swap state.
-    read_answers: Answers,
+    /// How the mint answers the seeder's calls.
+    answering: Answers,
     /// When the seeders, honest, ask for keyset listings beyond what they must.
     listings: Listings,
-    /// Reads answered from another thread whose reader has not been woken yet
+    /// Calls answered from another thread whose caller has not been woken yet
     /// ([`Harness::answers_under_way`]).
     under_way: usize,
+    /// Key requests and keyset listings answered from another thread ([`Answers::Woken`]),
+    /// by their handle: the answer once back, and who waits for it.
+    calls: HashMap<u64, Call>,
+    /// The handle of the last such call.
+    last_call: u64,
     /// What happens just before the next swap request reaches the mint, in order.
     before_swap: Vec<MintEvent>,
     /// The output sets the mint signed, one per swap request and its retries (NUT-13):
@@ -475,23 +485,45 @@ enum Listings {
     AtStart,
 }
 
-/// How the mint answers the seeder's reads of swap state (NUT-07 checks and NUT-09
-/// restores).
+/// How the mint answers the seeder's calls: its reads of swap state (NUT-07 checks and
+/// NUT-09 restores), its swaps, and its key requests and keyset listings (NUT-01, NUT-02).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Answers {
-    /// In the poll that sends the read.
+    /// In the poll that sends the call.
     #[default]
     AtOnce,
-    /// On its reader's next poll ([`MockHarness::with_round_trip_reads`]).
+    /// A read on its reader's next poll, and every other call at once
+    /// ([`MockHarness::with_round_trip_reads`]).
     NextPoll,
-    /// From another thread, [`WOKEN_AFTER`] after it is sent, waking its reader
-    /// ([`MockHarness::with_woken_reads`]).
+    /// Every call from another thread, [`WOKEN_AFTER`] after it reaches the mint, waking
+    /// its caller ([`MockHarness::with_woken_answers`]). The mint answers a call as it
+    /// reaches it; its answer comes back by the wake.
     Woken,
 }
 
-/// How long a read answered from another thread takes: a few milliseconds, as a real
-/// mint's answer takes to come back.
+/// How long a call answered from another thread takes to come back: a few milliseconds,
+/// as a real mint's answer does.
 const WOKEN_AFTER: Duration = Duration::from_millis(2);
+
+/// A key request or keyset listing answered from another thread ([`Answers::Woken`]).
+#[derive(Default)]
+struct Call {
+    /// Its answer, once back.
+    answer: Option<Called>,
+    /// Whether the mint has it: sent, and not held ([`Harness::hold_key_fetches`]).
+    sent: bool,
+    /// The wakers of those waiting for it.
+    waiters: Vec<Waker>,
+}
+
+/// What came back for a [`Call`].
+#[derive(Clone)]
+enum Called {
+    /// A key request's: the keys, or `None` for a keyset the mint does not know (12001).
+    Keys(Option<MintKeys>),
+    /// A keyset listing's.
+    Listing(Listed),
+}
 
 /// Every mock mint's ledger, shared.
 #[derive(Clone, Default)]
@@ -663,13 +695,78 @@ impl MockNetwork {
 
     /// Whether a read of swap state is a round trip, answered on a later poll of its reader.
     fn round_trips(&self) -> bool {
-        self.ledger().read_answers != Answers::AtOnce
+        self.ledger().answering != Answers::AtOnce
+    }
+
+    /// Whether every call to the mint is answered from another thread ([`Answers::Woken`]).
+    fn woken(&self) -> bool {
+        self.ledger().answering == Answers::Woken
+    }
+
+    /// A key request or keyset listing the mint has answered with `answer`, as call `call`:
+    /// its answer comes back from another thread [`WOKEN_AFTER`] from now, and wakes those
+    /// waiting for it.
+    fn call_back_later(&self, l: &mut Ledger, call: u64, answer: Called) {
+        l.calls.entry(call).or_default().sent = true;
+        l.under_way += 1;
+        let net = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(WOKEN_AFTER);
+            let waiters = {
+                let mut l = net.ledger();
+                let c = l.calls.entry(call).or_default();
+                c.answer = Some(answer);
+                std::mem::take(&mut c.waiters)
+            };
+            wake_all(waiters);
+            net.ledger().under_way -= 1;
+        });
+    }
+
+    /// A new call's handle ([`Answers::Woken`]).
+    fn new_call(l: &mut Ledger) -> u64 {
+        l.last_call += 1;
+        l.last_call
+    }
+
+    /// A swap's answer: its completion run, and its outcome delivered unless its client gave
+    /// up (`deliver` false). Now; or, when every call is answered from another thread, kept
+    /// in `later` for [`MockNetwork::answer_swaps_later`].
+    fn answer_swap(&self, later: &mut Vec<SwapAnswer>, (id, outcome, done, deliver): SwapAnswer) {
+        if self.woken() {
+            later.push((id, outcome, done, deliver));
+            return;
+        }
+        done(outcome);
+        if deliver {
+            self.deliver(id, outcome);
+        }
+    }
+
+    /// The swap answers kept in `later`, in order, from another thread [`WOKEN_AFTER`] from
+    /// now: the mint processed each as it reached it, and its answer comes back by a wake.
+    fn answer_swaps_later(&self, later: Vec<SwapAnswer>) {
+        if later.is_empty() {
+            return;
+        }
+        self.ledger().under_way += 1;
+        let net = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(WOKEN_AFTER);
+            for (id, outcome, done, deliver) in later {
+                done(outcome);
+                if deliver {
+                    net.deliver(id, outcome);
+                }
+            }
+            net.ledger().under_way -= 1;
+        });
     }
 
     /// A read's round trip, from its sending: back on its reader's next poll, or once another
     /// thread has answered it and woken its reader ([`Answers::Woken`]).
     async fn round_trip(&self) {
-        if self.ledger().read_answers != Answers::Woken {
+        if !self.woken() {
             return next_poll().await;
         }
         // Whether it is back, and the waker of its reader's last poll.
@@ -712,15 +809,29 @@ impl MockNetwork {
     /// Fetch the keys of `keysets` from the mint at `url` (`ask`: the request is sent now,
     /// not one sent before and held): `None` while key requests are held, and then `waker`
     /// is woken at their release. Else the keys it served: that mint's, of those keysets; or
-    /// `Some(None)`, a keyset it does not know (CDK 12001).
+    /// `Some(None)`, a keyset it does not know (CDK 12001). When every call is answered from
+    /// another thread ([`Answers::Woken`]), the answer comes back by a wake: `None` until
+    /// then, the request under way as `call` (0: none yet), and `waker` woken as it does.
     fn fetch_keys(
         &self,
         url: &str,
         keysets: &HashSet<u64>,
         ask: bool,
+        call: &mut u64,
         waker: &Waker,
     ) -> Option<Option<MintKeys>> {
         let mut l = self.ledger();
+        if *call != 0 {
+            let id = std::mem::take(call);
+            let c = l.calls.entry(id).or_default();
+            let Some(Called::Keys(keys)) = c.answer.clone() else {
+                c.waiters.push(waker.clone());
+                *call = id;
+                return None;
+            };
+            l.calls.remove(&id);
+            return Some(keys);
+        }
         if ask {
             l.key_requests += 1;
         }
@@ -734,34 +845,69 @@ impl MockNetwork {
             let owner = l.own_keysets.get(k).map(String::as_str);
             listing.names(url, *k, owner)
         });
-        Some(known.then(|| MintKeys {
+        let keys = known.then(|| MintKeys {
             mint: url.to_owned(),
             keysets: keysets.clone(),
-        }))
+        });
+        if l.answering == Answers::Woken {
+            *call = Self::new_call(&mut l);
+            l.calls
+                .entry(*call)
+                .or_default()
+                .waiters
+                .push(waker.clone());
+            self.call_back_later(&mut l, *call, Called::Keys(keys));
+            return None;
+        }
+        Some(keys)
     }
 
     /// Ask the mint at `url` for its keyset listing (NUT-02), now: the request's place
-    /// among the releases of held key requests, and the answer, as [`MockNetwork::listed`]
-    /// gives it.
-    fn list_keysets(&self, url: &str, waker: &Waker) -> (u64, Option<Listed>) {
-        let released = {
+    /// among the releases of held key requests, its handle when every call is answered from
+    /// another thread (0 otherwise), and the answer, as [`MockNetwork::listed`] gives it.
+    fn list_keysets(&self, url: &str, waker: &Waker) -> (u64, u64, Option<Listed>) {
+        let (released, call) = {
             let mut l = self.ledger();
             l.key_requests += 1;
             l.listing_requests += 1;
             l.dialled.insert(url.to_owned());
-            l.key_releases
+            let call = if l.answering == Answers::Woken {
+                Self::new_call(&mut l)
+            } else {
+                0
+            };
+            (l.key_releases, call)
         };
-        (released, self.listed(url, released, waker))
+        (released, call, self.listed(url, released, call, waker))
     }
 
     /// The answer to a keyset listing of the mint at `url` asked for when `released`
     /// releases of held key requests had been made: `None` while key requests are held and
     /// none has been made since, and then `waker` is woken at the next. Else the listing as
-    /// the mint answers it then.
-    fn listed(&self, url: &str, released: u64, waker: &Waker) -> Option<Listed> {
+    /// the mint answers it then. A listing answered from another thread (`call` not 0)
+    /// reaches the mint once key requests are not held, and its answer comes back by a wake:
+    /// `None` until then, and `waker` woken as it does.
+    fn listed(&self, url: &str, released: u64, call: u64, waker: &Waker) -> Option<Listed> {
         let mut l = self.ledger();
+        if call != 0
+            && let Some(c) = l.calls.get_mut(&call)
+        {
+            if let Some(Called::Listing(answer)) = &c.answer {
+                return Some(*answer);
+            }
+            if c.sent {
+                c.waiters.push(waker.clone());
+                return None;
+            }
+        }
         if l.hold_keys && l.key_releases == released {
             l.waiting.push(waker.clone());
+            return None;
+        }
+        if call != 0 {
+            let answer = l.listing_at(url);
+            l.calls.entry(call).or_default().waiters.push(waker.clone());
+            self.call_back_later(&mut l, call, Called::Listing(answer));
             return None;
         }
         Some(l.listing_at(url))
@@ -1204,10 +1350,11 @@ impl MockNetwork {
                 .filter(|q| !l.gave_up.remove(&q.0))
                 .collect::<Vec<_>>()
         };
+        let mut later = Vec::new();
         for (id, _, _, done) in dropped {
-            done(Swap::Lost);
-            self.deliver(id, Swap::Lost);
+            self.answer_swap(&mut later, (id, Swap::Lost, done, true));
         }
+        self.answer_swaps_later(later);
     }
 
     /// After a read of a swap's state: process the requests whose client gave up, if the
@@ -1226,9 +1373,26 @@ impl MockNetwork {
                 Vec::new()
             }
         };
+        let mut later = Vec::new();
         for (id, outcome, done) in held {
-            done(outcome);
-            self.deliver(id, outcome);
+            self.answer_swap(&mut later, (id, outcome, done, true));
+        }
+        if !later.is_empty() {
+            // They land while the read is out, from another thread: the read goes on once
+            // they have.
+            let net = self.clone();
+            let landed = std::thread::spawn(move || {
+                for (id, outcome, done, deliver) in later {
+                    done(outcome);
+                    if deliver {
+                        net.deliver(id, outcome);
+                    }
+                }
+            })
+            .join();
+            if let Err(panic) = landed {
+                std::panic::resume_unwind(panic);
+            }
         }
         let now = {
             let mut l = self.ledger();
@@ -1415,8 +1579,9 @@ impl MockNetwork {
                 return id;
             }
         }
-        done(outcome);
-        self.deliver(id, outcome);
+        let mut later = Vec::new();
+        self.answer_swap(&mut later, (id, outcome, done, true));
+        self.answer_swaps_later(later);
         id
     }
 
@@ -1581,17 +1746,16 @@ impl MockNetwork {
                 (Some(l.queued.remove(0)), None)
             }
         };
+        let mut later = Vec::new();
         if let Some((id, token, outputs, done)) = queued {
             let outcome = self.lose(self.process(&token, outputs));
-            done(outcome);
-            if !self.ledger().gave_up.remove(&id) {
-                self.deliver(id, outcome);
-            }
+            let deliver = !self.ledger().gave_up.remove(&id);
+            self.answer_swap(&mut later, (id, outcome, done, deliver));
         }
         if let Some((id, outcome, done)) = response {
-            done(outcome);
-            self.deliver(id, outcome);
+            self.answer_swap(&mut later, (id, outcome, done, true));
         }
+        self.answer_swaps_later(later);
     }
 
     fn release(&self) {
@@ -1612,17 +1776,16 @@ impl MockNetwork {
         for w in waiting {
             w.wake();
         }
+        let mut later = Vec::new();
         for (id, token, outputs, done) in queued {
             let outcome = self.lose(self.process(&token, outputs));
-            done(outcome);
-            if !self.ledger().gave_up.remove(&id) {
-                self.deliver(id, outcome);
-            }
+            let deliver = !self.ledger().gave_up.remove(&id);
+            self.answer_swap(&mut later, (id, outcome, done, deliver));
         }
         for (id, outcome, done) in responses {
-            done(outcome);
-            self.deliver(id, outcome);
+            self.answer_swap(&mut later, (id, outcome, done, true));
         }
+        self.answer_swaps_later(later);
         for (token, then) in deferred {
             then(self.swap_now(&token));
         }
@@ -5348,7 +5511,9 @@ struct Listing {
     seq: u64,
     /// Its place among the releases of held key requests ([`MockNetwork::listed`]).
     released: u64,
-    /// The mint's answer; `None` while it is held.
+    /// Its handle, when its answer comes back from another thread (0: it does not).
+    call: u64,
+    /// The mint's answer; `None` while it is held, or on its way back.
     answer: Option<Listed>,
 }
 
@@ -5660,13 +5825,14 @@ impl Inner {
                 st.listings_asked += 1;
                 st.listings_asked
             };
-            let (released, answer) = self.net.list_keysets(mint, Waker::noop());
+            let (released, call, answer) = self.net.list_keysets(mint, Waker::noop());
             self.state().listings.insert(
                 mint.clone(),
                 Listing {
                     at: now,
                     seq,
                     released,
+                    call,
                     answer,
                 },
             );
@@ -7432,7 +7598,8 @@ impl Inner {
         named: &HashSet<u64>,
         pay: u64,
     ) -> Result<MintKeys, Rej> {
-        let mut asked = false;
+        // Whether it has asked, and its key request on its way back, if any.
+        let (mut asked, mut call) = (false, 0);
         // The listing it asked for itself, if any ([`SeederFlaw::OthersListingsDistrusted`]
         // and the like only), and whether it waited for a held one
         // ([`SeederFlaw::HeldListingTrustedFromBeforeArrival`] only).
@@ -7495,7 +7662,10 @@ impl Inner {
                     // Every keyset missing is the mint's: ask for their keys.
                     let ask = !std::mem::replace(&mut asked, true);
                     drop(st);
-                    break match self.net.fetch_keys(mint, &missing, ask, cx.waker()) {
+                    break match self
+                        .net
+                        .fetch_keys(mint, &missing, ask, &mut call, cx.waker())
+                    {
                         None => None,
                         Some(None) => Some(Err(rej(
                             RejCode::BadToken,
@@ -7566,7 +7736,7 @@ impl Inner {
                 {
                     // Its answer is held: wait for it.
                     drop(st);
-                    let Some(answer) = self.net.listed(mint, l.released, cx.waker()) else {
+                    let Some(answer) = self.net.listed(mint, l.released, l.call, cx.waker()) else {
                         break None;
                     };
                     held_waited = true;
@@ -7602,13 +7772,14 @@ impl Inner {
                 let seq = st.listings_asked;
                 own_ask = Some(seq);
                 drop(st);
-                let (released, answer) = self.net.list_keysets(mint, cx.waker());
+                let (released, call, answer) = self.net.list_keysets(mint, cx.waker());
                 self.state().listings.insert(
                     key.to_owned(),
                     Listing {
                         at: now,
                         seq,
                         released,
+                        call,
                         answer,
                     },
                 );
@@ -7730,7 +7901,7 @@ impl Inner {
                     }
                     // Its answer is held: wait for it.
                     drop(st);
-                    let Some(mut answer) = self.net.listed(mint, l.released, waker) else {
+                    let Some(mut answer) = self.net.listed(mint, l.released, l.call, waker) else {
                         break None;
                     };
                     if self.has(SeederFlaw::HeldListingExpiryDropped) {
@@ -7759,11 +7930,12 @@ impl Inner {
                 }
                 let seq = st.listings_asked;
                 drop(st);
-                let (released, answer) = self.net.list_keysets(mint, waker);
+                let (released, call, answer) = self.net.list_keysets(mint, waker);
                 let listed = Listing {
                     at: now,
                     seq,
                     released,
+                    call,
                     answer,
                 };
                 let mut st = self.state();
@@ -11665,18 +11837,20 @@ impl MockHarness {
     #[must_use]
     pub fn with_round_trip_reads() -> Self {
         let h = Self::default();
-        h.net.ledger().read_answers = Answers::NextPoll;
+        h.net.ledger().answering = Answers::NextPoll;
         h
     }
 
-    /// An honest harness whose mint answers each read of swap state from another thread, a
-    /// few milliseconds after it is sent, and wakes its reader, as a real mint's answer comes
-    /// back: at no count of polls. An engine whose reads are real round trips passes the
-    /// suite so.
+    /// An honest harness whose mint answers each of the seeder's calls (a read of swap
+    /// state, a swap, a key request or a keyset listing) from another thread, a few
+    /// milliseconds after it reaches the mint, and wakes its caller, as a real mint's answer
+    /// comes back: at no count of polls, and with the engine's own state changing off the
+    /// suite's thread (a swap's completion runs there). An engine whose calls are real round
+    /// trips passes the suite so.
     #[must_use]
-    pub fn with_woken_reads() -> Self {
+    pub fn with_woken_answers() -> Self {
         let h = Self::default();
-        h.net.ledger().read_answers = Answers::Woken;
+        h.net.ledger().answering = Answers::Woken;
         h
     }
 
@@ -11702,7 +11876,17 @@ impl MockHarness {
     #[must_use]
     pub fn with_seeder_flaw_round_trip(flaw: SeederFlaw) -> Self {
         let h = Self::with_seeder_flaw(flaw);
-        h.net.ledger().read_answers = Answers::NextPoll;
+        h.net.ledger().answering = Answers::NextPoll;
+        h
+    }
+
+    /// A harness whose mint answers every call from another thread
+    /// ([`MockHarness::with_woken_answers`]) and whose seeders carry `flaw`: the suite must
+    /// fail against it at the same check as where the mint answers on a later poll.
+    #[must_use]
+    pub fn with_seeder_flaw_woken(flaw: SeederFlaw) -> Self {
+        let h = Self::with_seeder_flaw(flaw);
+        h.net.ledger().answering = Answers::Woken;
         h
     }
 

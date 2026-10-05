@@ -14,8 +14,9 @@ macro_rules! catches {
             fn $test() {
                 // The defect must fail a check of the suite: a hang, a panic raised in the
                 // engine, the harness or a runtime, or one at a line of the suite that makes
-                // no check (a bare unwrap), names no behaviour, so none is a catch.
-                let run = adversary::run_on_a_thread(10, || {
+                // no check (a bare unwrap), names no behaviour, so none is a catch. The time
+                // allowed is the suite's own: a late catch under load is not taken for a hang.
+                let run = adversary::run_on_a_thread(adversary::SCENARIO_SECS, || {
                     tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -59,6 +60,14 @@ fn v(flaw: V) -> MockHarness {
 /// in an order real time alone sets.
 fn r(flaw: S) -> MockHarness {
     MockHarness::with_seeder_flaw_round_trip(flaw)
+}
+
+/// A flawed seeder whose mint answers every call (a read, a swap, a key request, a keyset
+/// listing) from another thread a few milliseconds later, waking its caller, as a real
+/// mint's answer comes back: each defect registered here fails the check it fails on round
+/// trips, against an engine whose every mint answer comes by a wake.
+fn w(flaw: S) -> MockHarness {
+    MockHarness::with_seeder_flaw_woken(flaw)
 }
 
 catches!(
