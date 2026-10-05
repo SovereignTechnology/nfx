@@ -491,7 +491,10 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   of its videos' ledgers does the standing's catching up (the 180 s reclaim below).
   Identities are free, a seeder's as a watcher's (§3): a lying seeder takes one payment per
   seeder identity the watcher pays, however many identities the watcher takes toward it,
-  as a lying origin takes one per standing the client keeps (§4).
+  as a lying origin takes one per standing the client keeps (§4). Watchers that pay from
+  one wallet keep a standing each, as two devices do, or two browser partitions (NFX-10
+  §3), and each pays with proofs of its own (below): a lying seeder takes one payment per
+  seeder identity from each.
 - **Take a quote only if it is honest about the account:**
   - its `served` is at most the chunks requested of its video and not refused, whatever
     the watcher has paid for: credit it holds, or a payment the quote settles; nothing a
@@ -1339,7 +1342,8 @@ paths on one host are two origins.
     quote pays that seeder nothing more, for as long as it keeps the wallet. A lying seeder
     takes one payment per seeder identity the watcher pays, as a lying origin takes one per
     standing the client keeps (§4) (was: nothing said of what identifies a seeder or how
-    long the standing lasts, and "gets nothing more" unqualified).
+    long the standing lasts, and "gets nothing more" unqualified). Watchers that pay from
+    one wallet keep a standing each, as §4's clients do.
   - §2, §3 step 1 and §3a: the watcher pays with a token that passes the seeder's structure
     check: of one quoted mint by its exact URL, in `sat`, of at most 64 proofs, none locked
     (open mode: a licensed video's are P2PK-locked, NFX-08 §4), each with its DLEQ proof. A
