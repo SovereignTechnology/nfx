@@ -123,12 +123,13 @@ pub trait SeederSession {
     /// with `mint-unavailable`, however its checks would have ended, and its swap is
     /// abandoned: no further request is sent for those proofs, and the account is
     /// released. Deadlines count whole seconds, and what comes in the deadline's second
-    /// came after it: a payment whose turn comes then or later runs none of its checks, the
-    /// ban's included; keys that come then or later are not used, a swap's outcome settled
-    /// then is late, and a payment whose swap is not sent by then is not rechecked. Its
-    /// turn is freed at the deadline, however late this answer goes out, the swap's
-    /// outcome comes, or another entry takes the turn over. A payment that takes a turn
-    /// over reads the abandoned swap, as above.
+    /// came after it: a payment whose turn comes then or later, or has not come by then,
+    /// another payment holding it, runs none of its checks, the ban's included, asks the
+    /// mint for nothing (keys and keyset listing alike) and sends no read; keys that come
+    /// then or later are not used, a swap's outcome settled then is late, and a payment
+    /// whose swap is not sent by then is not rechecked. Its turn is freed at the deadline,
+    /// however late this answer goes out, the swap's outcome comes, or another entry takes
+    /// the turn over. A payment that takes a turn over reads the abandoned swap, as above.
     ///
     /// **Late outcomes:** an abandoned swap is settled when its outcome comes. A claim is
     /// credited (the next quote shows it), creating the account if there was none; a spent
@@ -527,6 +528,11 @@ pub trait Harness {
     async fn token_at(&self, url: &str, amount: u64) -> String;
     /// A token of the given bad shape, face value `amount`.
     async fn bad_token(&self, kind: BadToken, amount: u64) -> String;
+    /// The same naming the mint at `url`, quoted or not, as this harness's mint is named
+    /// otherwise: its second mint, for [`BadToken::TwoMints`], is another again, and
+    /// [`BadToken::OtherMintsKeyset`]'s keyset is one a mint other than `url` alone started
+    /// last.
+    async fn bad_token_at(&self, url: &str, kind: BadToken, amount: u64) -> String;
     /// The same proofs as `token` in a different string.
     async fn reencode(&self, token: &str) -> String;
     /// One token holding all the tokens' proofs, in the order given, each as it was: a
@@ -586,6 +592,15 @@ pub trait Harness {
     /// asked for in the payment's turn's second or later. Its swap requests and its reads
     /// of swap state go through, unless something else holds them.
     fn hold_key_fetches(&self);
+    /// The mint at `url` answers every request for a keyset's keys 12001, a keyset it does
+    /// not know (`true`), while its keyset listing (NUT-02) names its keysets as before; or
+    /// serves keys again (`false`). It stands for a mint that lists a keyset whose keys it
+    /// no longer serves: one that lost them, or whose listing a cache in front of it
+    /// outlived. A real mint's harness answers the mint's keys endpoint so. A seeder refuses
+    /// a payment whose keys it is so refused `bad-token`, without a ban, and keeps nothing of
+    /// the answer: it asks again for the next payment that names the keyset (NFX-07 §3 step
+    /// 3).
+    fn refuse_keys(&self, url: &str, refused: bool);
     /// `engine` drops the mint keys it holds, however it came by them (at its start, or by
     /// any fetch), and nothing else: its next payment at a mint fetches that mint's keys
     /// again, or waits for a request for them still unanswered. A real engine's harness
@@ -672,6 +687,10 @@ pub trait Harness {
     /// answered or held ([`Harness::hold_key_fetches`]).
     fn key_requests(&self) -> u64;
     /// Those of [`Harness::key_requests`] that asked for the mint's keyset listing (NUT-02).
+    /// A seeder asks a mint for it at its own start or where a check of a payment's needs
+    /// one, at most once a second, an ask at its start included: a `hello` asks for none,
+    /// nor does a payment refused by an earlier check, or whose turn has not come by its
+    /// deadline (NFX-07 §3 step 3).
     fn listing_requests(&self) -> u64;
     /// Whether an answer a seeder or a watcher awaits is under way: its call has left the
     /// engine or the watcher, to the mint or to anything else that answers from off the
@@ -770,6 +789,7 @@ pub trait Harness {
     fn debt_ttl(&self) -> Duration;
     /// How long a never-paid account with no open session is kept.
     fn account_ttl(&self) -> Duration;
-    /// How long a ban lasts.
+    /// How long a ban lasts, from the refusal that earned it: what the ban itself refuses (a
+    /// `hello`, a request, a `pay`) extends nothing.
     fn ban_ttl(&self) -> Duration;
 }

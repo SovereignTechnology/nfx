@@ -307,6 +307,9 @@ struct Ledger {
     locked: HashSet<u64>,
     /// Keysets no mint ever had, named so far ([`BadToken::UnknownKeyset`]).
     unknown_keysets: u64,
+    /// The mints that answer every request for keys 12001, their listings naming their
+    /// keysets as before ([`Harness::refuse_keys`]).
+    keys_refused: HashSet<String>,
     down: bool,
     dialled: HashSet<String>,
     /// Swaps sent while held, with their output sets: not yet processed.
@@ -1126,14 +1129,16 @@ impl MockNetwork {
     }
 
     /// The mint at `url`'s answer to a request for the keys of `keysets`, now: that mint's,
-    /// of those keysets; or `None`, a keyset it does not know (CDK 12001).
+    /// of those keysets; or `None`, a keyset it does not know (CDK 12001), or any keyset
+    /// while it refuses its keys ([`Harness::refuse_keys`]).
     fn keys_of(l: &mut Ledger, url: &str, keysets: &HashSet<u64>) -> Option<MintKeys> {
         l.dialled.insert(url.to_owned());
         let listing = l.listing_at(url);
-        let known = keysets.iter().all(|k| {
-            let owner = l.own_keysets.get(k).map(String::as_str);
-            listing.names(url, *k, owner)
-        });
+        let known = !l.keys_refused.contains(url)
+            && keysets.iter().all(|k| {
+                let owner = l.own_keysets.get(k).map(String::as_str);
+                listing.names(url, *k, owner)
+            });
         known.then(|| MintKeys {
             mint: url.to_owned(),
             keysets: keysets.clone(),
@@ -4163,6 +4168,394 @@ pub enum SeederFlaw {
     /// as it arrived, checks its session id before its peer's ban: a banned peer under an
     /// open id is refused `bad-session`.
     DroppedVideoLateTakeoverRecheckIdBeforeBan,
+    /// Takes a payment's turn that comes later than its deadline's second as come in time:
+    /// only in that second itself is the turn late, and past it the payment's checks run.
+    TurnPastDeadlineSecondTaken,
+    /// Checks the ban and the watermark of a payment whose turn has not come by its
+    /// deadline, another payment holding it: it is refused `banned` or `stale`, where it
+    /// runs no check.
+    TurnNeverComeBanStale,
+    /// Checks the structure and the mint of a payment whose turn has not come by its
+    /// deadline, another payment holding it: it is refused `bad-token` or `bad-mint`, where
+    /// it runs no check.
+    TurnNeverComeStructureMint,
+    /// Verifies the DLEQ proofs of a token's first three proofs only: a later proof's
+    /// invalid one passes.
+    DleqOfFirstThreeProofsOnly,
+    /// Refuses a token lacking a DLEQ proof only when one of its first three proofs lacks
+    /// one.
+    MissingDleqOfFirstThreeProofsOnly,
+    /// Refuses a token holding locked proofs only when one of its first three proofs is
+    /// locked.
+    LockOfFirstThreeProofsOnly,
+    /// Fetches the keys of the keysets its token's first and last proofs name alone: a
+    /// proof of another keyset between them is checked against keys that are not its own,
+    /// and the token is refused `bad-token`.
+    KeysOfEndProofsOnly,
+    /// Fetches the keys of the keyset its token's last proof names alone: a proof of
+    /// another keyset before it is checked against keys that are not its own, and the token
+    /// is refused `bad-token`.
+    KeysOfLastProofOnly,
+    /// Bans the peer whose payment names a keyset the mint lists and answers a request for
+    /// its keys 12001.
+    KeysRefusedBans,
+    /// Answers a payment naming a keyset the mint lists and answers a request for its keys
+    /// 12001 `mint-unavailable`, as if the mint could not be reached.
+    KeysRefusedUnavailable,
+    /// Keeps a keyset whose keys the mint answered 12001 as refused: a later payment naming
+    /// it is refused `bad-token` without the mint being asked, though it serves the keys by
+    /// then.
+    KeysRefusalCached,
+    /// Asks its first quoted mint for its keyset listing, at most once a second, for a
+    /// payment it refuses `banned`: no check of that payment's needs one.
+    BannedPayAsksListing,
+    /// Asks its first quoted mint for its keyset listing, at most once a second, for a
+    /// payment it refuses `stale`: no check of that payment's needs one.
+    StalePayAsksListing,
+    /// Asks its first quoted mint for its keyset listing, at most once a second, for a
+    /// payment whose token it cannot read: no check of that payment's needs one.
+    UnreadablePayAsksListing,
+    /// Asks its first quoted mint for its keyset listing, at most once a second, for a
+    /// payment it refuses for its token's shape (step 1): no check of that payment's needs
+    /// one.
+    ShapePayAsksListing,
+    /// Asks its first quoted mint for its keyset listing, at most once a second, for a
+    /// payment it refuses `bad-mint`: no check of that payment's needs one.
+    BadMintPayAsksListing,
+    /// Asks its first quoted mint for its keyset listing at every `hello`, and discards the
+    /// answer: no check of a `hello`'s needs one.
+    HelloAsksListing,
+    /// Caches the keys of its first quoted mint alone: every payment at another quoted mint
+    /// asks that mint for its keys again.
+    KeysCachedForFirstMintOnly,
+    /// Asks every quoted mint but its first for the keyset rule's listing at every payment
+    /// that reaches it, though one was asked for in its turn's second.
+    KeysetListingEverySwapAtOtherMints,
+    /// Bounds its asks for a keyset listing at step 3 to one a second at its first quoted
+    /// mint alone: at another, a payment naming a keyset the listing it holds does not name
+    /// asks again at once, though that mint was asked in this second.
+    ListingBoundFirstMintOnly,
+    /// Bans the peer whose payment at a quoted mint other than its first names a keyset
+    /// that mint does not list.
+    UnlistedKeysetBansAtOtherMints,
+    /// Answers a payment at a quoted mint other than its first that names a keyset that
+    /// mint does not list `mint-unavailable`, as if the mint could not be reached.
+    UnlistedKeysetUnavailableAtOtherMints,
+    /// Bans the peer whose payment at a quoted mint other than its first names a keyset
+    /// that mint lists and answers a request for its keys 12001.
+    KeysRefusedBansAtOtherMints,
+    /// Answers a payment at a quoted mint other than its first that names a keyset that
+    /// mint lists and answers a request for its keys 12001 `mint-unavailable`.
+    KeysRefusedUnavailableAtOtherMints,
+    /// Asks its first quoted mint for its keyset listing, at most once a second, for a
+    /// payment whose turn has not come by its deadline, which runs no check.
+    TurnTimeoutAsksListing,
+    /// Asks its first quoted mint for its keys for a payment whose turn has not come by its
+    /// deadline, which runs no check.
+    TurnTimeoutAsksKeys,
+    /// Reads its account's unknown swaps for a payment whose turn has not come by its
+    /// deadline: a read sent at or past its entry's deadline.
+    TurnTimeoutReads,
+    /// Creates an empty account for a peer with none whose payment took a dead turn over
+    /// only in its own deadline's second or later.
+    TakenTurnTimeoutCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited, found
+    /// its account's turn free only in its own deadline's second or later.
+    FreedTurnTimeoutCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment's turn had not come by
+    /// its deadline, another payment holding it.
+    HeldTurnTimeoutCreatesAccount,
+    /// A payment waiting for a turn held by a payment that arrived after it does not
+    /// register with the clock: on a task of its own, it is not woken at its own deadline.
+    PayTurnOwnDeadlineUnwatched,
+    /// On a turn it waited for or took over, verifies the DLEQ proof of a token's last proof
+    /// alone: an earlier proof's invalid one passes.
+    AfterWaitDleqOfLastProofOnly,
+    /// On a turn it waited for or took over, refuses a token lacking a DLEQ proof only when
+    /// its last proof lacks one.
+    AfterWaitMissingDleqOfLastProofOnly,
+    /// On a turn it waited for or took over, refuses a token holding locked proofs only when
+    /// its last proof is locked.
+    AfterWaitLockOfLastProofOnly,
+    /// Discards the keyset listings it asked for at its start: its first payment at a mint
+    /// asks that mint again, a second listing in the second of the first.
+    StartListingDiscarded,
+    /// A `hello` waiting for its account's turn registers with the clock on its first wait
+    /// only: once a clock move has woken it and it waits on, the deadline of a turn held
+    /// past it no longer wakes it.
+    HelloTurnWatchOnce,
+    /// Waits for keys registering with the clock on its first wait only: once a clock move
+    /// has woken it and it waits on, its deadline no longer wakes it.
+    KeysWaitWatchOnce,
+    /// Waits for its swap's outcome registering with the clock on its first wait only: once
+    /// a clock move has woken it and it waits on, its deadline no longer wakes it.
+    AnswerWatchOnce,
+    /// Waits for its swap's outcome without registering with the clock: on a task of its
+    /// own, a payment whose outcome does not come is not woken at its deadline.
+    AnswerNoClockWatch,
+    /// A payment that took a dead turn over asks the mint for its keys whatever keys the
+    /// seeder holds.
+    TakeoverKeysRefetched,
+    /// A payment that waited for its account's turn and took it asks the mint for its keys
+    /// whatever keys the seeder holds.
+    WaitedKeysRefetched,
+    /// Bans a banned peer again as it refuses its request: the ban then counts from that
+    /// refusal, not from when it was earned.
+    BannedAdmitRenewsBan,
+    /// Bans a banned peer again as it refuses its `hello` on arrival: the ban then counts
+    /// from that refusal, not from when it was earned.
+    BannedHelloRenewsBan,
+    /// Bans a banned peer again as it refuses its `hello` for a video it does not serve: the
+    /// ban then counts from that refusal, not from when it was earned.
+    UnknownVideoBannedHelloRenewsBan,
+    /// Bans a banned peer again as it refuses its `hello` as it answers, after its wait and
+    /// its reads: the ban then counts from that refusal, not from when it was earned.
+    BannedHelloRecheckRenewsBan,
+    /// Creates an empty account for a peer with none whose payment, having found its account's turn
+    /// free, is refused `bad-token`, the mint answering a request for its keys 12001.
+    UnwaitedKeysRefusedCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for its account's
+    /// turn and taken it, is refused `bad-token`, the mint answering a request for its keys 12001.
+    WaitedKeysRefusedCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a dead turn
+    /// and taken it over, is refused `bad-token`, the mint answering a request for its keys 12001.
+    WaitedTakeoverKeysRefusedCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead turn over
+    /// as it arrived, is refused `bad-token`, the mint answering a request for its keys 12001.
+    LateTakeoverKeysRefusedCreatesAccount,
+    /// A payment that found its account's turn free, refused `bad-token`, the mint answering a
+    /// request for its keys 12001, keeps its account's turn.
+    UnwaitedKeysRefusedKeepsTurn,
+    /// A payment that waited for its account's turn and took it, refused `bad-token`, the mint
+    /// answering a request for its keys 12001, keeps its account's turn.
+    WaitedKeysRefusedKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token`, the mint
+    /// answering a request for its keys 12001, keeps its account's turn.
+    WaitedTakeoverKeysRefusedKeepsTurn,
+    /// A payment that took a dead turn over as it arrived, refused `bad-token`, the mint answering
+    /// a request for its keys 12001, keeps its account's turn.
+    LateTakeoverKeysRefusedKeepsTurn,
+    /// A payment that found its account's turn free, refused `bad-token`, the mint answering a
+    /// request for its keys 12001, frees its account's turn and wakes nothing waiting for it.
+    UnwaitedKeysRefusedWakesNone,
+    /// A payment that waited for its account's turn and took it, refused `bad-token`, the mint
+    /// answering a request for its keys 12001, frees its account's turn and wakes nothing waiting
+    /// for it.
+    WaitedKeysRefusedWakesNone,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token`, the mint
+    /// answering a request for its keys 12001, frees its account's turn and wakes nothing waiting
+    /// for it.
+    WaitedTakeoverKeysRefusedWakesNone,
+    /// A payment that took a dead turn over as it arrived, refused `bad-token`, the mint answering
+    /// a request for its keys 12001, frees its account's turn and wakes nothing waiting for it.
+    LateTakeoverKeysRefusedWakesNone,
+    /// A payment that found its account's turn free, refused `bad-token`, the mint answering a
+    /// request for its keys 12001, bans its peer.
+    UnwaitedKeysRefusedBans,
+    /// A payment that waited for its account's turn and took it, refused `bad-token`, the mint
+    /// answering a request for its keys 12001, bans its peer.
+    WaitedKeysRefusedBans,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token`, the mint
+    /// answering a request for its keys 12001, bans its peer.
+    WaitedTakeoverKeysRefusedBans,
+    /// A payment that took a dead turn over as it arrived, refused `bad-token`, the mint answering
+    /// a request for its keys 12001, bans its peer.
+    LateTakeoverKeysRefusedBans,
+    /// A payment that found its account's turn free, refused `bad-token`, the mint answering a
+    /// request for its keys 12001, frees its account's turn without noting the floor: a read sent
+    /// before then serves a `hello` that waited.
+    UnwaitedKeysRefusedNoFloor,
+    /// A payment that waited for its account's turn and took it, refused `bad-token`, the mint
+    /// answering a request for its keys 12001, frees its account's turn without noting the floor: a
+    /// read sent before then serves a `hello` that waited.
+    WaitedKeysRefusedNoFloor,
+    /// A payment that found its account's turn free, refused `overpaid` at its account's
+    /// `spent_total` bound, keeps its account's turn.
+    UnwaitedSpentTotalBoundKeepsTurn,
+    /// A payment that waited for its account's turn and took it, refused `overpaid` at its
+    /// account's `spent_total` bound, keeps its account's turn.
+    WaitedSpentTotalBoundKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `overpaid` at its account's
+    /// `spent_total` bound, keeps its account's turn.
+    WaitedTakeoverSpentTotalBoundKeepsTurn,
+    /// A payment that took a dead turn over as it arrived, refused `overpaid` at its account's
+    /// `spent_total` bound, keeps its account's turn.
+    LateTakeoverSpentTotalBoundKeepsTurn,
+    /// A payment that found its account's turn free, refused `overpaid` at its account's
+    /// `spent_total` bound, frees its account's turn and wakes nothing waiting for it.
+    UnwaitedSpentTotalBoundWakesNone,
+    /// A payment that waited for its account's turn and took it, refused `overpaid` at its
+    /// account's `spent_total` bound, frees its account's turn and wakes nothing waiting for it.
+    WaitedSpentTotalBoundWakesNone,
+    /// A payment that waited for a dead turn and took it over, refused `overpaid` at its account's
+    /// `spent_total` bound, frees its account's turn and wakes nothing waiting for it.
+    WaitedTakeoverSpentTotalBoundWakesNone,
+    /// A payment that took a dead turn over as it arrived, refused `overpaid` at its account's
+    /// `spent_total` bound, frees its account's turn and wakes nothing waiting for it.
+    LateTakeoverSpentTotalBoundWakesNone,
+    /// A payment that found its account's turn free, refused `overpaid` at its account's
+    /// `spent_total` bound, bans its peer.
+    UnwaitedSpentTotalBoundBans,
+    /// A payment that waited for its account's turn and took it, refused `overpaid` at its
+    /// account's `spent_total` bound, bans its peer.
+    WaitedSpentTotalBoundBans,
+    /// A payment that waited for a dead turn and took it over, refused `overpaid` at its account's
+    /// `spent_total` bound, bans its peer.
+    WaitedTakeoverSpentTotalBoundBans,
+    /// A payment that took a dead turn over as it arrived, refused `overpaid` at its account's
+    /// `spent_total` bound, bans its peer.
+    LateTakeoverSpentTotalBoundBans,
+    /// A payment that found its account's turn free, refused `overpaid` at its account's
+    /// `spent_total` bound, frees its account's turn without noting the floor: a read sent before
+    /// then serves a `hello` that waited.
+    UnwaitedSpentTotalBoundNoFloor,
+    /// A payment that waited for its account's turn and took it, refused `overpaid` at its
+    /// account's `spent_total` bound, frees its account's turn without noting the floor: a read
+    /// sent before then serves a `hello` that waited.
+    WaitedSpentTotalBoundNoFloor,
+    /// A payment that found its account's turn free, refused `banned`, bans its peer again: the ban
+    /// then counts from that refusal, not from when it was earned.
+    UnwaitedBannedRenewsBan,
+    /// A payment that waited for its account's turn and took it, refused `banned`, bans its peer
+    /// again: the ban then counts from that refusal, not from when it was earned.
+    WaitedBannedRenewsBan,
+    /// A payment that waited for a dead turn and took it over, refused `banned`, bans its peer
+    /// again: the ban then counts from that refusal, not from when it was earned.
+    WaitedTakeoverBannedRenewsBan,
+    /// A payment that took a dead turn over as it arrived, refused `banned`, bans its peer again:
+    /// the ban then counts from that refusal, not from when it was earned.
+    LateTakeoverBannedRenewsBan,
+    /// A payment that found its account's turn free, dropped while it waits for keys, frees its
+    /// account's turn and wakes the first of what waits for it alone.
+    UnwaitedDropAwaitingKeysWakesOne,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for keys,
+    /// frees its account's turn and wakes the first of what waits for it alone.
+    WaitedDropAwaitingKeysWakesOne,
+    /// A payment that waited for a dead turn and took it over, dropped while it waits for keys,
+    /// frees its account's turn and wakes the first of what waits for it alone.
+    WaitedTakeoverDropAwaitingKeysWakesOne,
+    /// A payment that took a dead turn over as it arrived, dropped while it waits for keys, frees
+    /// its account's turn and wakes the first of what waits for it alone.
+    LateTakeoverDropAwaitingKeysWakesOne,
+    /// A payment that found its account's turn free, dropped while it waits for the next second's
+    /// keyset listing, frees its account's turn and wakes the first of what waits for it alone.
+    UnwaitedDropAwaitingListingWakesOne,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for the
+    /// next second's keyset listing, frees its account's turn and wakes the first of what waits for
+    /// it alone.
+    WaitedDropAwaitingListingWakesOne,
+    /// A payment that took a dead turn over as it arrived, dropped while it waits for the next
+    /// second's keyset listing, frees its account's turn and wakes the first of what waits for it
+    /// alone.
+    LateTakeoverDropAwaitingListingWakesOne,
+    /// A payment that found its account's turn free, dropped while it waits for the keyset listing
+    /// its keyset rule judges by, frees its account's turn and wakes the first of what waits for it
+    /// alone.
+    UnwaitedDropAwaitingKeysetListingWakesOne,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for the
+    /// keyset listing its keyset rule judges by, frees its account's turn and wakes the first of
+    /// what waits for it alone.
+    WaitedDropAwaitingKeysetListingWakesOne,
+    /// A payment that waited for a dead turn and took it over, dropped while it waits for the
+    /// keyset listing its keyset rule judges by, frees its account's turn and wakes the first of
+    /// what waits for it alone.
+    WaitedTakeoverDropAwaitingKeysetListingWakesOne,
+    /// A payment that took a dead turn over as it arrived, dropped while it waits for the keyset
+    /// listing its keyset rule judges by, frees its account's turn and wakes the first of what
+    /// waits for it alone.
+    LateTakeoverDropAwaitingKeysetListingWakesOne,
+    /// A payment that found its account's turn free, dropped during its read, frees its account's
+    /// turn and wakes the first of what waits for it alone.
+    UnwaitedDropInReadWakesOne,
+    /// A payment that waited for its account's turn and took it, dropped during its read, frees its
+    /// account's turn and wakes the first of what waits for it alone.
+    WaitedDropInReadWakesOne,
+    /// A payment that waited for a dead turn and took it over, dropped during its read, frees its
+    /// account's turn and wakes the first of what waits for it alone.
+    WaitedTakeoverDropInReadWakesOne,
+    /// A payment that took a dead turn over as it arrived, dropped during its read, frees its
+    /// account's turn and wakes the first of what waits for it alone.
+    LateTakeoverDropInReadWakesOne,
+    /// A payment that found its account's turn free, dropped while it waits for the next second to
+    /// read, frees its account's turn and wakes the first of what waits for it alone.
+    UnwaitedDropAwaitingNextSecondWakesOne,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for the
+    /// next second to read, frees its account's turn and wakes the first of what waits for it
+    /// alone.
+    WaitedDropAwaitingNextSecondWakesOne,
+    /// Creates an empty account for a peer with none whose payment, having found its account's turn
+    /// free, is dropped while it waits for another entry's read under way.
+    UnwaitedDropAwaitingOthersReadCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for its account's
+    /// turn and taken it, is dropped while it waits for another entry's read under way.
+    WaitedDropAwaitingOthersReadCreatesAccount,
+    /// A payment that found its account's turn free, dropped while it waits for another entry's
+    /// read under way, keeps its account's turn.
+    UnwaitedDropAwaitingOthersReadKeepsTurn,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for another
+    /// entry's read under way, keeps its account's turn.
+    WaitedDropAwaitingOthersReadKeepsTurn,
+    /// A payment that found its account's turn free, dropped while it waits for another entry's
+    /// read under way, frees its account's turn and wakes nothing waiting for it.
+    UnwaitedDropAwaitingOthersReadWakesNone,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for another
+    /// entry's read under way, frees its account's turn and wakes nothing waiting for it.
+    WaitedDropAwaitingOthersReadWakesNone,
+    /// A payment that found its account's turn free, dropped while it waits for another entry's
+    /// read under way, frees its account's turn and wakes the first of what waits for it alone.
+    UnwaitedDropAwaitingOthersReadWakesOne,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for another
+    /// entry's read under way, frees its account's turn and wakes the first of what waits for it
+    /// alone.
+    WaitedDropAwaitingOthersReadWakesOne,
+    /// A payment that found its account's turn free, dropped while it waits for another
+    /// entry's read under way, frees its account's turn without noting the floor: a read
+    /// sent before then serves a `hello` that waited.
+    UnwaitedDropAwaitingOthersReadNoFloor,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for
+    /// another entry's read under way, frees its account's turn without noting the floor: a
+    /// read sent before then serves a `hello` that waited.
+    WaitedDropAwaitingOthersReadNoFloor,
+    /// A `hello` that waited for a payment holding its account's turn asks its first quoted
+    /// mint for its keyset listing, and discards the answer: no check of a `hello`'s needs
+    /// one.
+    WaitedHelloAsksListing,
+    /// A `hello` that took a dead turn over asks its first quoted mint for its keyset
+    /// listing, and discards the answer.
+    TakeoverHelloAsksListing,
+    /// A `hello` that waited for no payment, a swap of its account's still unknown, asks
+    /// its first quoted mint for its keyset listing, and discards the answer.
+    ReadingHelloAsksListing,
+    /// Bans a peer whose payment is refused `bad-token`, the mint answering a request for
+    /// its keys 12001, where an earlier swap of its account's is still at the mint, past
+    /// its deadline.
+    KeysRefusedBansWithSwapOut,
+    /// Creates an empty account for a peer with none whose payment, having found its account's
+    /// turn free, is dropped while it waits for the next second to read.
+    UnwaitedDropAwaitingNextSecondCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for its
+    /// account's turn and taken it, is dropped while it waits for the next second to read.
+    WaitedDropAwaitingNextSecondCreatesAccount,
+    /// A payment that found its account's turn free, dropped while it waits for the next second
+    /// to read, keeps its account's turn.
+    UnwaitedDropAwaitingNextSecondKeepsTurn,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for the
+    /// next second to read, keeps its account's turn.
+    WaitedDropAwaitingNextSecondKeepsTurn,
+    /// A payment that found its account's turn free, dropped while it waits for the next second
+    /// to read, frees its account's turn and wakes nothing waiting for it.
+    UnwaitedDropAwaitingNextSecondWakesNone,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for the
+    /// next second to read, frees its account's turn and wakes nothing waiting for it.
+    WaitedDropAwaitingNextSecondWakesNone,
+    /// A payment that found its account's turn free, dropped while it waits for the next second
+    /// to read, frees its account's turn without noting the floor: a read sent before then
+    /// serves a `hello` that waited.
+    UnwaitedDropAwaitingNextSecondNoFloor,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for the
+    /// next second to read, frees its account's turn without noting the floor: a read sent
+    /// before then serves a `hello` that waited.
+    WaitedDropAwaitingNextSecondNoFloor,
 }
 
 /// How a payment came to its account's turn: the paths of the suite's matrix of payments,
@@ -4221,6 +4614,10 @@ enum Check {
     BadDleq,
     Underpaid,
     Overpaid,
+    /// The mint answers a request for its keys 12001, a keyset its listing names.
+    KeysRefused,
+    /// `overpaid`: an exact payment that would take `spent_total` past 2^53-1.
+    SpentTotalBound,
     /// No keyset listing for the keyset rule by the deadline.
     NoKeysetListing,
     /// The keyset to swap to expires too soon.
@@ -4246,6 +4643,8 @@ impl Check {
             ("not a single-mint sat token with DLEQs", _) => Self::Shape,
             ("not a quoted mint", _) => Self::BadMint,
             ("a keyset the mint does not list", _) => Self::UnlistedKeyset,
+            ("a keyset the mint does not know", _) => Self::KeysRefused,
+            ("spent_total would pass 2^53-1", _) => Self::SpentTotalBound,
             ("no keys from the mint within 60 s", _) => Self::NoKeys,
             ("no keyset listing from the mint within 60 s", _) => Self::NoKeysetListing,
             ("an invalid DLEQ", _) => Self::BadDleq,
@@ -4275,6 +4674,8 @@ enum Slip {
     NoFloor,
     /// It bans the payment's peer.
     Bans,
+    /// It frees the turn, and wakes the first of what waits for it alone (drops only).
+    WakesOne,
 }
 
 /// Where a payment that holds its account's turn is dropped, before its swap is sent.
@@ -4288,6 +4689,10 @@ enum Stage {
     KeysetListing,
     /// During its read of its account's unknown swaps.
     Read,
+    /// Waiting for the next second to read, the second's two reads spent.
+    NextSecond,
+    /// Waiting for another entry's read under way, which would serve it.
+    OthersRead,
 }
 
 /// The check before which a defect of the matrix of payments reads its account's unknown
@@ -4661,6 +5066,100 @@ impl SeederFlaw {
             Self::LateTakeoverNoKeysetListingBans => {
                 (Slip::Bans, Came::LateTakeover, Check::NoKeysetListing)
             }
+            Self::UnwaitedKeysRefusedCreatesAccount => {
+                (Slip::CreatesAccount, Came::Unwaited, Check::KeysRefused)
+            }
+            Self::WaitedKeysRefusedCreatesAccount => {
+                (Slip::CreatesAccount, Came::Waited, Check::KeysRefused)
+            }
+            Self::WaitedTakeoverKeysRefusedCreatesAccount => (
+                Slip::CreatesAccount,
+                Came::WaitedTakeover,
+                Check::KeysRefused,
+            ),
+            Self::LateTakeoverKeysRefusedCreatesAccount => {
+                (Slip::CreatesAccount, Came::LateTakeover, Check::KeysRefused)
+            }
+            Self::UnwaitedKeysRefusedKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Check::KeysRefused)
+            }
+            Self::WaitedKeysRefusedKeepsTurn => (Slip::KeepsTurn, Came::Waited, Check::KeysRefused),
+            Self::WaitedTakeoverKeysRefusedKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::KeysRefused)
+            }
+            Self::LateTakeoverKeysRefusedKeepsTurn => {
+                (Slip::KeepsTurn, Came::LateTakeover, Check::KeysRefused)
+            }
+            Self::UnwaitedKeysRefusedWakesNone => {
+                (Slip::WakesNone, Came::Unwaited, Check::KeysRefused)
+            }
+            Self::WaitedKeysRefusedWakesNone => (Slip::WakesNone, Came::Waited, Check::KeysRefused),
+            Self::WaitedTakeoverKeysRefusedWakesNone => {
+                (Slip::WakesNone, Came::WaitedTakeover, Check::KeysRefused)
+            }
+            Self::LateTakeoverKeysRefusedWakesNone => {
+                (Slip::WakesNone, Came::LateTakeover, Check::KeysRefused)
+            }
+            Self::UnwaitedKeysRefusedBans => (Slip::Bans, Came::Unwaited, Check::KeysRefused),
+            Self::WaitedKeysRefusedBans => (Slip::Bans, Came::Waited, Check::KeysRefused),
+            Self::WaitedTakeoverKeysRefusedBans => {
+                (Slip::Bans, Came::WaitedTakeover, Check::KeysRefused)
+            }
+            Self::LateTakeoverKeysRefusedBans => {
+                (Slip::Bans, Came::LateTakeover, Check::KeysRefused)
+            }
+            Self::UnwaitedKeysRefusedNoFloor => (Slip::NoFloor, Came::Unwaited, Check::KeysRefused),
+            Self::WaitedKeysRefusedNoFloor => (Slip::NoFloor, Came::Waited, Check::KeysRefused),
+            Self::UnwaitedSpentTotalBoundKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Check::SpentTotalBound)
+            }
+            Self::WaitedSpentTotalBoundKeepsTurn => {
+                (Slip::KeepsTurn, Came::Waited, Check::SpentTotalBound)
+            }
+            Self::WaitedTakeoverSpentTotalBoundKeepsTurn => (
+                Slip::KeepsTurn,
+                Came::WaitedTakeover,
+                Check::SpentTotalBound,
+            ),
+            Self::LateTakeoverSpentTotalBoundKeepsTurn => {
+                (Slip::KeepsTurn, Came::LateTakeover, Check::SpentTotalBound)
+            }
+            Self::UnwaitedSpentTotalBoundWakesNone => {
+                (Slip::WakesNone, Came::Unwaited, Check::SpentTotalBound)
+            }
+            Self::WaitedSpentTotalBoundWakesNone => {
+                (Slip::WakesNone, Came::Waited, Check::SpentTotalBound)
+            }
+            Self::WaitedTakeoverSpentTotalBoundWakesNone => (
+                Slip::WakesNone,
+                Came::WaitedTakeover,
+                Check::SpentTotalBound,
+            ),
+            Self::LateTakeoverSpentTotalBoundWakesNone => {
+                (Slip::WakesNone, Came::LateTakeover, Check::SpentTotalBound)
+            }
+            Self::UnwaitedSpentTotalBoundBans => {
+                (Slip::Bans, Came::Unwaited, Check::SpentTotalBound)
+            }
+            Self::WaitedSpentTotalBoundBans => (Slip::Bans, Came::Waited, Check::SpentTotalBound),
+            Self::WaitedTakeoverSpentTotalBoundBans => {
+                (Slip::Bans, Came::WaitedTakeover, Check::SpentTotalBound)
+            }
+            Self::LateTakeoverSpentTotalBoundBans => {
+                (Slip::Bans, Came::LateTakeover, Check::SpentTotalBound)
+            }
+            Self::UnwaitedSpentTotalBoundNoFloor => {
+                (Slip::NoFloor, Came::Unwaited, Check::SpentTotalBound)
+            }
+            Self::WaitedSpentTotalBoundNoFloor => {
+                (Slip::NoFloor, Came::Waited, Check::SpentTotalBound)
+            }
+            Self::UnwaitedBannedRenewsBan => (Slip::Bans, Came::Unwaited, Check::Banned),
+            Self::WaitedBannedRenewsBan => (Slip::Bans, Came::Waited, Check::Banned),
+            Self::WaitedTakeoverBannedRenewsBan => {
+                (Slip::Bans, Came::WaitedTakeover, Check::Banned)
+            }
+            Self::LateTakeoverBannedRenewsBan => (Slip::Bans, Came::LateTakeover, Check::Banned),
             _ => return None,
         })
     }
@@ -4765,6 +5264,103 @@ impl SeederFlaw {
             }
             Self::WaitedDropAwaitingKeysetListingNoFloor => {
                 (Slip::NoFloor, Came::Waited, Stage::KeysetListing)
+            }
+            Self::UnwaitedDropAwaitingKeysWakesOne => (Slip::WakesOne, Came::Unwaited, Stage::Keys),
+            Self::WaitedDropAwaitingKeysWakesOne => (Slip::WakesOne, Came::Waited, Stage::Keys),
+            Self::WaitedTakeoverDropAwaitingKeysWakesOne => {
+                (Slip::WakesOne, Came::WaitedTakeover, Stage::Keys)
+            }
+            Self::LateTakeoverDropAwaitingKeysWakesOne => {
+                (Slip::WakesOne, Came::LateTakeover, Stage::Keys)
+            }
+            Self::UnwaitedDropAwaitingListingWakesOne => {
+                (Slip::WakesOne, Came::Unwaited, Stage::Listing)
+            }
+            Self::WaitedDropAwaitingListingWakesOne => {
+                (Slip::WakesOne, Came::Waited, Stage::Listing)
+            }
+            Self::LateTakeoverDropAwaitingListingWakesOne => {
+                (Slip::WakesOne, Came::LateTakeover, Stage::Listing)
+            }
+            Self::UnwaitedDropAwaitingKeysetListingWakesOne => {
+                (Slip::WakesOne, Came::Unwaited, Stage::KeysetListing)
+            }
+            Self::WaitedDropAwaitingKeysetListingWakesOne => {
+                (Slip::WakesOne, Came::Waited, Stage::KeysetListing)
+            }
+            Self::WaitedTakeoverDropAwaitingKeysetListingWakesOne => {
+                (Slip::WakesOne, Came::WaitedTakeover, Stage::KeysetListing)
+            }
+            Self::LateTakeoverDropAwaitingKeysetListingWakesOne => {
+                (Slip::WakesOne, Came::LateTakeover, Stage::KeysetListing)
+            }
+            Self::UnwaitedDropInReadWakesOne => (Slip::WakesOne, Came::Unwaited, Stage::Read),
+            Self::WaitedDropInReadWakesOne => (Slip::WakesOne, Came::Waited, Stage::Read),
+            Self::WaitedTakeoverDropInReadWakesOne => {
+                (Slip::WakesOne, Came::WaitedTakeover, Stage::Read)
+            }
+            Self::LateTakeoverDropInReadWakesOne => {
+                (Slip::WakesOne, Came::LateTakeover, Stage::Read)
+            }
+            Self::UnwaitedDropAwaitingNextSecondWakesOne => {
+                (Slip::WakesOne, Came::Unwaited, Stage::NextSecond)
+            }
+            Self::WaitedDropAwaitingNextSecondWakesOne => {
+                (Slip::WakesOne, Came::Waited, Stage::NextSecond)
+            }
+            Self::UnwaitedDropAwaitingOthersReadCreatesAccount => {
+                (Slip::CreatesAccount, Came::Unwaited, Stage::OthersRead)
+            }
+            Self::WaitedDropAwaitingOthersReadCreatesAccount => {
+                (Slip::CreatesAccount, Came::Waited, Stage::OthersRead)
+            }
+            Self::UnwaitedDropAwaitingOthersReadKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Stage::OthersRead)
+            }
+            Self::WaitedDropAwaitingOthersReadKeepsTurn => {
+                (Slip::KeepsTurn, Came::Waited, Stage::OthersRead)
+            }
+            Self::UnwaitedDropAwaitingOthersReadWakesNone => {
+                (Slip::WakesNone, Came::Unwaited, Stage::OthersRead)
+            }
+            Self::WaitedDropAwaitingOthersReadWakesNone => {
+                (Slip::WakesNone, Came::Waited, Stage::OthersRead)
+            }
+            Self::UnwaitedDropAwaitingOthersReadWakesOne => {
+                (Slip::WakesOne, Came::Unwaited, Stage::OthersRead)
+            }
+            Self::WaitedDropAwaitingOthersReadWakesOne => {
+                (Slip::WakesOne, Came::Waited, Stage::OthersRead)
+            }
+            Self::UnwaitedDropAwaitingOthersReadNoFloor => {
+                (Slip::NoFloor, Came::Unwaited, Stage::OthersRead)
+            }
+            Self::WaitedDropAwaitingOthersReadNoFloor => {
+                (Slip::NoFloor, Came::Waited, Stage::OthersRead)
+            }
+            Self::UnwaitedDropAwaitingNextSecondCreatesAccount => {
+                (Slip::CreatesAccount, Came::Unwaited, Stage::NextSecond)
+            }
+            Self::WaitedDropAwaitingNextSecondCreatesAccount => {
+                (Slip::CreatesAccount, Came::Waited, Stage::NextSecond)
+            }
+            Self::UnwaitedDropAwaitingNextSecondKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Stage::NextSecond)
+            }
+            Self::WaitedDropAwaitingNextSecondKeepsTurn => {
+                (Slip::KeepsTurn, Came::Waited, Stage::NextSecond)
+            }
+            Self::UnwaitedDropAwaitingNextSecondWakesNone => {
+                (Slip::WakesNone, Came::Unwaited, Stage::NextSecond)
+            }
+            Self::WaitedDropAwaitingNextSecondWakesNone => {
+                (Slip::WakesNone, Came::Waited, Stage::NextSecond)
+            }
+            Self::UnwaitedDropAwaitingNextSecondNoFloor => {
+                (Slip::NoFloor, Came::Unwaited, Stage::NextSecond)
+            }
+            Self::WaitedDropAwaitingNextSecondNoFloor => {
+                (Slip::NoFloor, Came::Waited, Stage::NextSecond)
             }
             _ => return None,
         })
@@ -6566,6 +7162,15 @@ struct PayRecord {
     /// Its step 3 asked for a listing: its keyset rule asks for another
     /// ([`SeederFlaw::KeysetListingAfterStep3Asked`] only).
     force_listing: bool,
+    /// How it came to its turn, once it has ([`SeederFlaw::TakeoverKeysRefetched`] and
+    /// [`SeederFlaw::WaitedKeysRefetched`] only).
+    came: Option<Came>,
+    /// Its wait for its swap's outcome has registered with the clock
+    /// ([`SeederFlaw::AnswerWatchOnce`] only).
+    answer_watched: bool,
+    /// Where it waits in its read, the turn held: for the next second, or for another
+    /// entry's read (the defects planted on a drop there only).
+    read_wait: Option<Stage>,
 }
 
 /// A mint's keyset listing (NUT-02), as the seeder last asked for it.
@@ -6648,6 +7253,9 @@ struct State {
     read_waiters_on: Vec<(ReadState, Waker)>,
     /// The videos it no longer serves ([`Harness::drop_video`]): it keeps their accounts.
     dropped: HashSet<usize>,
+    /// Keysets whose keys a mint answered 12001, by mint ([`SeederFlaw::KeysRefusalCached`]
+    /// only).
+    keys_refused: HashSet<(String, u64)>,
 }
 
 /// An account's own reads in one second: the second, each read sent in it, and how many had
@@ -6909,6 +7517,9 @@ impl Inner {
                 st.listings_asked
             };
             let (released, call, answer) = self.net.list_keysets(mint, Waker::noop());
+            if self.has(SeederFlaw::StartListingDiscarded) {
+                continue;
+            }
             self.state().listings.insert(
                 mint.clone(),
                 Listing {
@@ -6919,6 +7530,54 @@ impl Inner {
                     answer,
                 },
             );
+        }
+    }
+
+    /// Whether `mint` is a quoted mint other than the first (the defects that keep a rule
+    /// at the first quoted mint alone).
+    fn other_mint(&self, mint: &str) -> bool {
+        self.config.mints.first().is_some_and(|m| m != mint)
+    }
+
+    /// Ask the first quoted mint for its keyset listing, unless it was asked in this
+    /// second: the defects that ask where no check needs one.
+    fn ask_listing_unneeded(&self) {
+        let Some(mint) = self.config.mints.first() else {
+            return;
+        };
+        let now = self.clock.now();
+        let seq = {
+            let mut st = self.state();
+            if st.listings.get(mint).is_some_and(|l| l.at == now) {
+                return;
+            }
+            st.listings_asked += 1;
+            st.listings_asked
+        };
+        let (released, call, answer) = self.net.list_keysets(mint, Waker::noop());
+        self.state().listings.insert(
+            mint.clone(),
+            Listing {
+                at: now,
+                seq,
+                released,
+                call,
+                answer,
+            },
+        );
+    }
+
+    /// Note where the payment holding `key`'s turn waits in its read, or that it waits no
+    /// more (the defects planted on a drop there only).
+    fn read_wait(&self, key: Key, stage: Option<Stage>) {
+        if self.flaw.and_then(SeederFlaw::drop_slip).is_none() {
+            return;
+        }
+        let mut st = self.state();
+        if let Some(id) = st.paying.get(&key).map(|h| h.pay)
+            && let Some(r) = st.pays.get_mut(&id)
+        {
+            r.read_wait = stage;
         }
     }
 
@@ -7462,6 +8121,9 @@ impl Inner {
                 Plan::Done => return,
                 Plan::WaitRead => {
                     waited_in.get_or_insert(now);
+                    if proofs.is_some() {
+                        self.read_wait(key, Some(Stage::OthersRead));
+                    }
                     if self.has(SeederFlaw::ReadWaitUnwokenByClock)
                         || (proofs.is_some() && self.has(SeederFlaw::PayReadWaitUnwokenByClock))
                     {
@@ -7473,6 +8135,9 @@ impl Inner {
                     } else {
                         next_poll().await;
                     }
+                    if proofs.is_some() {
+                        self.read_wait(key, None);
+                    }
                     if self.has(SeederFlaw::ReuseWaitsOnePoll) {
                         return;
                     }
@@ -7480,12 +8145,18 @@ impl Inner {
                 }
                 Plan::NextSecond => {
                     waited_in.get_or_insert(now);
+                    if proofs.is_some() {
+                        self.read_wait(key, Some(Stage::NextSecond));
+                    }
                     if self.has(SeederFlaw::NextSecondUnwoken)
                         || (proofs.is_some() && self.has(SeederFlaw::PayNextSecondUnwoken))
                     {
                         unwoken_poll().await;
                     } else {
                         next_poll().await;
+                    }
+                    if proofs.is_some() {
+                        self.read_wait(key, None);
                     }
                     continue;
                 }
@@ -8406,6 +9077,9 @@ impl Inner {
                 listing_wait: false,
                 keyset_wait: false,
                 force_listing: false,
+                came: None,
+                answer_watched: false,
+                read_wait: None,
             },
         );
         id
@@ -8573,7 +9247,9 @@ impl Inner {
                         || self.has(SeederFlaw::TurnAtDeadlineSecondStructure)
                         || (took_over && self.has(SeederFlaw::TakeoverAtDeadlineSecondStructure))
                         || (!took_over && self.has(SeederFlaw::FreedAtDeadlineSecondBanStale));
-                    let past = if free && late_turn {
+                    let past = if free && self.has(SeederFlaw::TurnPastDeadlineSecondTaken) {
+                        now == r.deadline
+                    } else if free && late_turn {
                         now > r.deadline
                     } else {
                         now >= r.deadline
@@ -8624,10 +9300,19 @@ impl Inner {
                     }
                     waited = true;
                     st.waiting.entry(key).or_default().push(cx.waker().clone());
-                    let once = watched && claim.is_some() && self.has(SeederFlaw::PayTurnWatchOnce);
+                    let once = watched
+                        && ((claim.is_some() && self.has(SeederFlaw::PayTurnWatchOnce))
+                            || (claim.is_none() && self.has(SeederFlaw::HelloTurnWatchOnce)));
+                    // The flaw: the turn's holder arrived after this payment.
+                    let own_unwatched = self.has(SeederFlaw::PayTurnOwnDeadlineUnwatched)
+                        && claim
+                            .and_then(|id| st.pays.get(&id))
+                            .zip(st.paying.get(&key))
+                            .is_some_and(|(own, holder)| holder.deadline > own.deadline);
                     if !self.has(SeederFlaw::TurnNoClockWatch)
                         && !(claim.is_some() && self.has(SeederFlaw::PayTurnNoClockWatch))
                         && !once
+                        && !own_unwatched
                     {
                         self.clock.watch(cx.waker());
                         watched = true;
@@ -8681,7 +9366,8 @@ impl Inner {
     /// keyset, at most once a second per mint: a payment that finds it asked for this
     /// second, before it arrived, waits for the next second's. A keyset the mint does not
     /// list, by a listing asked for after the payment arrived, or whose keys it answers
-    /// 12001, is `bad-token`. `mint-unavailable` once its deadline passes first, or it has
+    /// 12001, is `bad-token`; of a 12001 it keeps nothing, and the next payment naming the
+    /// keyset asks again. `mint-unavailable` once its deadline passes first, or it has
     /// been abandoned: keys it finds at or past its deadline (whole seconds: in the
     /// deadline's second too) came after it, and are not used, since the checks they serve
     /// would be reached late.
@@ -8715,8 +9401,10 @@ impl Inner {
                 cx.waker().clone()
             }
         };
-        // Polled once already, waiting ([`SeederFlaw::KeysGiveUpOnWake`] only).
-        let mut waited = false;
+        // Polled once already, waiting ([`SeederFlaw::KeysGiveUpOnWake`] only), and the clock
+        // watched ([`SeederFlaw::KeysWaitWatchOnce`] only).
+        let (mut waited, mut watched) = (false, false);
+        let other_mint = self.other_mint(mint);
         poll_fn(|cx| {
             // Waiting for the next second to ask for the listing again.
             let mut next_second = false;
@@ -8724,8 +9412,15 @@ impl Inner {
                 let mut st = self.state();
                 let own = st.keys.get(mint);
                 // The flaws: keys of the keysets it held then, used for any; or one named
-                // keyset's, used for all; or none used, asked for again at every payment.
-                let never = self.has(SeederFlaw::KeysNeverCached) && !asked;
+                // keyset's, used for all; or none used, asked for again at every payment, at
+                // every mint but the first, or on a turn waited for or taken over.
+                let came = st.pays.get(&pay).and_then(|r| r.came);
+                let refetched = self.has(SeederFlaw::KeysNeverCached)
+                    || (other_mint && self.has(SeederFlaw::KeysCachedForFirstMintOnly))
+                    || (matches!(came, Some(Came::WaitedTakeover | Came::LateTakeover))
+                        && self.has(SeederFlaw::TakeoverKeysRefetched))
+                    || (came == Some(Came::Waited) && self.has(SeederFlaw::WaitedKeysRefetched));
+                let never = refetched && !asked;
                 let kept = own.is_some() && self.has(SeederFlaw::KeysKeptAcrossRotation);
                 let any_named = own.is_some_and(|k| !k.keysets.is_disjoint(named))
                     && self.has(SeederFlaw::KeysOfAnyNamedKeyset);
@@ -8749,6 +9444,17 @@ impl Inner {
                     Some(k) if !never => named.difference(&k.keysets).copied().collect(),
                     _ => named.clone(),
                 };
+                // The flaw: a keyset whose keys the mint once answered 12001 stays refused.
+                if self.has(SeederFlaw::KeysRefusalCached)
+                    && missing
+                        .iter()
+                        .any(|k| st.keys_refused.contains(&(mint.to_owned(), *k)))
+                {
+                    break Some(Err(rej(
+                        RejCode::BadToken,
+                        "a keyset the mint does not know",
+                    )));
+                }
                 // The flaws: one listing for all mints; or a listing of an earlier second
                 // taken as none.
                 let key = self.listing_key(mint);
@@ -8777,10 +9483,20 @@ impl Inner {
                         .fetch_keys(mint, &missing, ask, &mut call, &keys_waker(cx))
                     {
                         None => None,
-                        Some(None) => Some(Err(rej(
-                            RejCode::BadToken,
-                            "a keyset the mint does not list",
-                        ))),
+                        Some(None) => {
+                            // A keyset the mint lists, and answers a request for its keys
+                            // 12001: nothing is kept of the answer (the flaw keeps it).
+                            if self.has(SeederFlaw::KeysRefusalCached) {
+                                let mut st = self.state();
+                                for k in &missing {
+                                    st.keys_refused.insert((mint.to_owned(), *k));
+                                }
+                            }
+                            Some(Err(rej(
+                                RejCode::BadToken,
+                                "a keyset the mint does not know",
+                            )))
+                        }
                         Some(Some(served)) => {
                             let mut st = self.state();
                             let held = st.keys.entry(mint.to_owned()).or_insert_with(|| MintKeys {
@@ -8870,7 +9586,11 @@ impl Inner {
                         .listed_for
                         .get(mint)
                         .is_some_and(|k| missing.is_subset(k));
-                if recent && !other_keyset && !self.has(SeederFlaw::ListingEveryPayment) {
+                if recent
+                    && !other_keyset
+                    && !self.has(SeederFlaw::ListingEveryPayment)
+                    && !(other_mint && self.has(SeederFlaw::ListingBoundFirstMintOnly))
+                {
                     // Asked for this second, before it arrived: the next second's serves it.
                     next_second = true;
                     break None;
@@ -8935,8 +9655,10 @@ impl Inner {
                 r.listing_wait = next_second;
             }
             let unwoken = next_second && self.has(SeederFlaw::ListingWaitUnwoken);
-            if !self.has(SeederFlaw::FetchNoClockWatch) && !unwoken {
+            let once = watched && !next_second && self.has(SeederFlaw::KeysWaitWatchOnce);
+            if !self.has(SeederFlaw::FetchNoClockWatch) && !unwoken && !once {
                 self.clock.watch(cx.waker());
+                watched = true;
             }
             Poll::Pending
         })
@@ -8964,6 +9686,7 @@ impl Inner {
         let (mut asked, mut watched) = (false, false);
         let key = self.listing_key(mint);
         let own = self.has(SeederFlaw::KeysetListingOwnCache);
+        let other_mint = self.other_mint(mint);
         poll_fn(|cx| {
             // The flaw: woken by the clock alone.
             let waker = if self.has(SeederFlaw::KeysetListingWaitUnwoken) {
@@ -8999,6 +9722,7 @@ impl Inner {
                 let held = listing.is_some_and(|l| l.answer.is_none());
                 if !asked
                     && (self.has(SeederFlaw::KeysetListingEverySwap)
+                        || (other_mint && self.has(SeederFlaw::KeysetListingEverySwapAtOtherMints))
                         || forced
                         || (held && self.has(SeederFlaw::HeldListingAskedAgain)))
                 {
@@ -9221,7 +9945,12 @@ impl Inner {
             }
             if !expired {
                 r.waker = Some(cx.waker().clone());
-                self.clock.watch(cx.waker());
+                // The flaws: the clock watched on its first wait only, or never.
+                let once = r.answer_watched && self.has(SeederFlaw::AnswerWatchOnce);
+                if !once && !self.has(SeederFlaw::AnswerNoClockWatch) {
+                    self.clock.watch(cx.waker());
+                    r.answer_watched = true;
+                }
                 return Poll::Pending;
             }
             r.answer = None;
@@ -9397,7 +10126,8 @@ impl Drop for PayGuard {
             r.finished = true;
             r.waker = None;
             let (key, sent, landed, reading, read) = (r.key, r.sent, r.landed, r.reading, r.read);
-            let (listing_wait, keyset_wait) = (r.listing_wait, r.keyset_wait);
+            let (listing_wait, keyset_wait, read_wait) =
+                (r.listing_wait, r.keyset_wait, r.read_wait);
             if sent && !landed && self.e.has(SeederFlaw::DropAbandonsInFlight) {
                 r.abandoned = true;
             }
@@ -9410,7 +10140,9 @@ impl Drop for PayGuard {
                 let dropped = !self.answered;
                 let held = st.paying.get(&key).is_some_and(|h| h.pay == self.id);
                 let waited = held && self.waited;
-                let stage = if reading {
+                let stage = if let Some(wait) = read_wait {
+                    wait
+                } else if reading {
                     Stage::Read
                 } else if keyset_wait {
                     Stage::KeysetListing
@@ -9498,7 +10230,9 @@ impl Drop for PayGuard {
                         self.e.has(SeederFlaw::RefusalWakesNone) || self.quiet
                     };
                     let mut wake = wake;
-                    if dropped && self.took && self.e.has(SeederFlaw::TakeoverDropWakesOne) {
+                    if (dropped && self.took && self.e.has(SeederFlaw::TakeoverDropWakesOne))
+                        || slips(Slip::WakesOne)
+                    {
                         wake.truncate(1);
                     }
                     if quiet { Vec::new() } else { wake }
@@ -9680,6 +10414,9 @@ impl SeederEngine for MockEngine {
                     e.age(&mut st);
                 }
                 if st.banned.contains_key(peer) && !e.has(SeederFlaw::UnknownVideoBeforeBan) {
+                    if e.has(SeederFlaw::UnknownVideoBannedHelloRenewsBan) {
+                        st.banned.insert(*peer, e.clock.now());
+                    }
                     return Err(rej(RejCode::Banned, "this peer is banned"));
                 }
                 if e.has(SeederFlaw::UnknownVideoCounted) {
@@ -9742,6 +10479,9 @@ impl SeederEngine for MockEngine {
                 return Err(rej(RejCode::BadSession, "too many open sessions"));
             }
             if e.peer_banned(&st, key) && !e.has(SeederFlaw::HelloBanNotAtArrival) {
+                if e.has(SeederFlaw::BannedHelloRenewsBan) {
+                    e.ban(&mut st, key);
+                }
                 return Err(rej(RejCode::Banned, "this peer is banned"));
             }
             let dropped_id =
@@ -9789,6 +10529,11 @@ impl SeederEngine for MockEngine {
             took: false,
             waited: false,
         };
+        if e.has(SeederFlaw::HelloAsksListing)
+            && let Some(mint) = e.config.mints.first()
+        {
+            let _ = e.net.list_keysets(mint, Waker::noop());
+        }
         let read_first = e.has(SeederFlaw::HelloReadsBeforeTurn)
             || (e.has(SeederFlaw::DroppedVideoReadsBeforeTurn)
                 && e.state().dropped.contains(&video));
@@ -9803,6 +10548,16 @@ impl SeederEngine for MockEngine {
             (_, floor, took_over) = e.wait_turn_at(key, None).await;
         }
         (wait.reading, wait.took, wait.waited) = (true, took_over, floor.is_some() && !took_over);
+        // The flaws: a keyset listing asked for by a `hello`, on one of its paths.
+        let asks = (wait.waited && e.has(SeederFlaw::WaitedHelloAsksListing))
+            || (wait.took && e.has(SeederFlaw::TakeoverHelloAsksListing))
+            || (!wait.waited && !wait.took && e.has(SeederFlaw::ReadingHelloAsksListing) && {
+                let (lost, flight) = e.to_learn(Some(key));
+                !lost.is_empty() || !flight.is_empty()
+            });
+        if asks && let Some(mint) = e.config.mints.first() {
+            let _ = e.net.list_keysets(mint, Waker::noop());
+        }
         if e.has(SeederFlaw::HelloBanCheckBeforeRead) {
             let mut st = e.state();
             e.age(&mut st);
@@ -9889,6 +10644,9 @@ impl SeederEngine for MockEngine {
             return Err(rej(RejCode::BadSession, "that session is open"));
         }
         if recheck && e.peer_banned(&st, key) {
+            if e.has(SeederFlaw::BannedHelloRecheckRenewsBan) {
+                e.ban(&mut st, key);
+            }
             if e.has(SeederFlaw::BannedHelloCounted)
                 || (late && e.has(SeederFlaw::LateTakeoverBannedHelloCounted))
             {
@@ -10084,6 +10842,48 @@ impl MockSession {
         Ok(())
     }
 
+    /// What the defects planted on a payment whose turn did not come by its deadline do
+    /// with it (`held`: another payment holds the turn still): checks run, whose refusal
+    /// this is, a keyset listing or keys asked for, or a read sent. An honest seeder does
+    /// none of it.
+    async fn untaken_turn(&self, pay: &Pay, held: bool) -> Option<Rej> {
+        let e = &self.e;
+        if held && e.has(SeederFlaw::TurnNeverComeBanStale) {
+            let mut st = e.state();
+            e.age(&mut st);
+            if e.peer_banned(&st, self.key) {
+                return Some(rej(RejCode::Banned, "this peer is banned"));
+            }
+            if pay.upto_chunk <= st.accounts.get(&self.key).map_or(0, |a| a.acked) {
+                return Some(rej(RejCode::Stale, "already paid up to there"));
+            }
+        }
+        let info = e.net.read(&pay.token);
+        if held && e.has(SeederFlaw::TurnNeverComeStructureMint) {
+            match &info {
+                None => return Some(rej(RejCode::BadToken, "unreadable token")),
+                Some(i) if i.mints.first().is_none_or(|m| !e.config.mints.contains(m)) => {
+                    return Some(rej(RejCode::BadMint, "not a quoted mint"));
+                }
+                Some(_) => {}
+            }
+        }
+        if e.has(SeederFlaw::TurnTimeoutAsksListing) {
+            e.ask_listing_unneeded();
+        }
+        let proofs = info.map_or_else(Vec::new, |i| i.proofs);
+        if e.has(SeederFlaw::TurnTimeoutAsksKeys)
+            && let Some(mint) = e.config.mints.first()
+        {
+            let named = e.net.keysets_named(&proofs);
+            let _ = e.net.fetch_keys(mint, &named, true, &mut 0, Waker::noop());
+        }
+        if e.has(SeederFlaw::TurnTimeoutReads) {
+            e.learn_own(self.key, Some(proofs), None, None).await;
+        }
+        None
+    }
+
     fn settle_now(&self, upto: u64, amount: u64, outcome: Swap) -> Result<Ack, Rej> {
         let settle = Settle {
             key: self.key,
@@ -10128,24 +10928,42 @@ impl MockSession {
                 if e.has(SeederFlaw::BadTokenCreatesAccount) {
                     e.account(&mut e.state(), self.key);
                 }
+                if e.has(SeederFlaw::UnreadablePayAsksListing) {
+                    e.ask_listing_unneeded();
+                }
                 return Err(rej(RejCode::BadToken, "unreadable token"));
             };
             // The flaws: the first or the last proof's DLEQ proof or lock taken for every
-            // proof's.
+            // proof's, the last's on a turn waited for or taken over, or the first three's.
             let state_of =
                 |p: Option<&u64>| p.map_or((Dleq::Valid, false), |p| e.net.proof_state(*p));
             let (first, last) = (state_of(info.proofs.first()), state_of(info.proofs.last()));
+            let after_wait = came != Came::Unwaited;
+            let three: Vec<(Dleq, bool)> = info
+                .proofs
+                .iter()
+                .take(3)
+                .map(|p| e.net.proof_state(*p))
+                .collect();
             let missing = if e.has(SeederFlaw::MissingDleqOfFirstProofOnly) {
                 first.0 == Dleq::Missing
-            } else if e.has(SeederFlaw::MissingDleqOfLastProofOnly) {
+            } else if e.has(SeederFlaw::MissingDleqOfLastProofOnly)
+                || (after_wait && e.has(SeederFlaw::AfterWaitMissingDleqOfLastProofOnly))
+            {
                 last.0 == Dleq::Missing
+            } else if e.has(SeederFlaw::MissingDleqOfFirstThreeProofsOnly) {
+                three.iter().any(|s| s.0 == Dleq::Missing)
             } else {
                 info.dleq == Dleq::Missing
             };
             let locked = if e.has(SeederFlaw::LockOfFirstProofOnly) {
                 first.1
-            } else if e.has(SeederFlaw::LockOfLastProofOnly) {
+            } else if e.has(SeederFlaw::LockOfLastProofOnly)
+                || (after_wait && e.has(SeederFlaw::AfterWaitLockOfLastProofOnly))
+            {
                 last.1
+            } else if e.has(SeederFlaw::LockOfFirstThreeProofsOnly) {
+                three.iter().any(|s| s.1)
             } else {
                 info.locked
             };
@@ -10160,6 +10978,9 @@ impl MockSession {
             if shape_bad && !e.has(SeederFlaw::AcceptsBadTokens) {
                 if e.has(SeederFlaw::BadTokenCreatesAccount) {
                     e.account(&mut e.state(), self.key);
+                }
+                if e.has(SeederFlaw::ShapePayAsksListing) {
+                    e.ask_listing_unneeded();
                 }
                 return Err(rej(
                     RejCode::BadToken,
@@ -10229,6 +11050,10 @@ impl MockSession {
                 if e.has(SeederFlaw::BannedPayCreatesAccount) {
                     e.account(&mut st, self.key);
                 }
+                drop(st);
+                if e.has(SeederFlaw::BannedPayAsksListing) {
+                    e.ask_listing_unneeded();
+                }
                 return Err(rej(RejCode::Banned, "this peer is banned"));
             }
             let spent = if e.has(SeederFlaw::SpentTotalPeerWide) {
@@ -10256,6 +11081,9 @@ impl MockSession {
             && !e.has(SeederFlaw::IgnoresStale)
             && !(took_over && e.has(SeederFlaw::TakeoverStaleSkipped))
         {
+            if e.has(SeederFlaw::StalePayAsksListing) {
+                e.ask_listing_unneeded();
+            }
             return Err(rej(RejCode::Stale, "already paid up to there"));
         }
         let read_before_structure = e.reads_at(ReadAt::Structure, came);
@@ -10292,6 +11120,9 @@ impl MockSession {
         };
         if !quoted && !e.has(SeederFlaw::AcceptsForeignMint) {
             self.on_refusal(&pay.token, pay.upto_chunk, info.amount, false);
+            if e.has(SeederFlaw::BadMintPayAsksListing) {
+                e.ask_listing_unneeded();
+            }
             return Err(rej(RejCode::BadMint, "not a quoted mint"));
         }
         let read_before_keys = e.reads_at(ReadAt::Keys, came);
@@ -10326,6 +11157,18 @@ impl MockSession {
         let fetched = if e.has(SeederFlaw::KeysOfFirstProofOnly) {
             e.net
                 .keysets_named(&info.proofs[..info.proofs.len().min(1)])
+        } else if e.has(SeederFlaw::KeysOfLastProofOnly) {
+            e.net
+                .keysets_named(&info.proofs[info.proofs.len().saturating_sub(1)..])
+        } else if e.has(SeederFlaw::KeysOfEndProofsOnly) {
+            let ends: Vec<u64> = info
+                .proofs
+                .first()
+                .into_iter()
+                .chain(info.proofs.last())
+                .copied()
+                .collect();
+            e.net.keysets_named(&ends)
         } else {
             named.clone()
         };
@@ -10341,11 +11184,30 @@ impl MockSession {
                     return Err(r);
                 }
                 Err(r) => {
-                    // A keyset the mint does not list: bad-token, and no ban.
-                    if e.has(SeederFlaw::UnlistedKeysetUnavailable) {
+                    // A keyset the mint does not list, or whose keys it answers 12001:
+                    // bad-token, and no ban. The flaws, everywhere or at a quoted mint other
+                    // than the first: mint-unavailable, or a ban.
+                    let other = e.other_mint(&mint);
+                    let (as_outage, there_as_outage, bans, there_bans) =
+                        if Check::of(&r, false) == Some(Check::KeysRefused) {
+                            (
+                                SeederFlaw::KeysRefusedUnavailable,
+                                SeederFlaw::KeysRefusedUnavailableAtOtherMints,
+                                SeederFlaw::KeysRefusedBans,
+                                SeederFlaw::KeysRefusedBansAtOtherMints,
+                            )
+                        } else {
+                            (
+                                SeederFlaw::UnlistedKeysetUnavailable,
+                                SeederFlaw::UnlistedKeysetUnavailableAtOtherMints,
+                                SeederFlaw::UnlistedKeysetBans,
+                                SeederFlaw::UnlistedKeysetBansAtOtherMints,
+                            )
+                        };
+                    if e.has(as_outage) || (other && e.has(there_as_outage)) {
                         return Err(unavailable("no keys from the mint within 60 s"));
                     }
-                    if e.has(SeederFlaw::UnlistedKeysetBans) {
+                    if e.has(bans) || (other && e.has(there_bans)) {
                         let mut st = e.state();
                         e.ban(&mut st, self.key);
                     }
@@ -10365,7 +11227,9 @@ impl MockSession {
         // The flaws: the first or the last proof's DLEQ proof verified for every proof's.
         let one = if e.has(SeederFlaw::DleqOfFirstProofOnly) {
             Some(info.proofs.first())
-        } else if e.has(SeederFlaw::DleqOfLastProofOnly) {
+        } else if e.has(SeederFlaw::DleqOfLastProofOnly)
+            || (came != Came::Unwaited && e.has(SeederFlaw::AfterWaitDleqOfLastProofOnly))
+        {
             Some(info.proofs.last())
         } else {
             None
@@ -10373,6 +11237,14 @@ impl MockSession {
         let mut checked = info.clone();
         if let Some(p) = one {
             checked.dleq = p.map_or(Dleq::Valid, |p| e.net.proof_state(*p).0);
+        }
+        if e.has(SeederFlaw::DleqOfFirstThreeProofsOnly) {
+            let invalid = info
+                .proofs
+                .iter()
+                .take(3)
+                .any(|p| e.net.proof_state(*p).0 == Dleq::Invalid);
+            checked.dleq = if invalid { Dleq::Invalid } else { Dleq::Valid };
         }
         let verified = trusted || keys.is_some_and(|k| k.verify(&checked, &named));
         if !verified && !e.has(SeederFlaw::AcceptsBadTokens) {
@@ -10728,6 +11600,9 @@ impl SeederSession for MockSession {
             e.age(&mut st);
         }
         if e.peer_banned(&st, self.key) && !e.has(SeederFlaw::AdmitIgnoresBan) {
+            if e.has(SeederFlaw::BannedAdmitRenewsBan) {
+                e.ban(&mut st, self.key);
+            }
             if e.has(SeederFlaw::BannedAdmitCreatesAccount) {
                 e.account(&mut st, self.key);
             }
@@ -10857,9 +11732,22 @@ impl SeederSession for MockSession {
             let (came, floor, taken) = self.e.wait_turn_at(self.key, Some(id)).await;
             record.waited = floor.is_some() && !taken;
             record.came = Came::of(taken, floor.is_some());
+            if let Some(r) = self.e.state().pays.get_mut(&id) {
+                r.came = Some(record.came);
+            }
             if !came {
-                if self.e.has(SeederFlaw::TurnTimeoutCreatesAccount) {
+                // Another payment holds the turn still.
+                let held = !taken && self.e.state().paying.contains_key(&self.key);
+                let creates = self.e.has(SeederFlaw::TurnTimeoutCreatesAccount)
+                    || (taken && self.e.has(SeederFlaw::TakenTurnTimeoutCreatesAccount))
+                    || (!taken && !held && self.e.has(SeederFlaw::FreedTurnTimeoutCreatesAccount))
+                    || (held && self.e.has(SeederFlaw::HeldTurnTimeoutCreatesAccount));
+                if creates {
                     self.e.account(&mut self.e.state(), self.key);
+                }
+                if let Some(refusal) = self.untaken_turn(pay, held).await {
+                    record.answered = true;
+                    return Err(refusal);
                 }
                 if self.e.has(SeederFlaw::TimeoutFreesAnyTurn) {
                     let wake = {
@@ -10931,7 +11819,11 @@ impl SeederSession for MockSession {
         if unsent && (creates || slips(Slip::CreatesAccount)) {
             e.account(&mut e.state(), self.key);
         }
-        if slips(Slip::Bans) {
+        // The flaw: a ban for keys the mint refuses, where an earlier swap is still out.
+        let swap_out = check == Some(Check::KeysRefused)
+            && e.has(SeederFlaw::KeysRefusedBansWithSwapOut)
+            && !e.to_learn(Some(self.key)).1.is_empty();
+        if slips(Slip::Bans) || swap_out {
             let mut st = e.state();
             e.ban(&mut st, self.key);
         }
@@ -13420,6 +14312,18 @@ impl MockHarness {
         h
     }
 
+    /// A harness whose seeders ask every quoted mint for its keyset listing at their start
+    /// too ([`MockHarness::with_listings_at_start`]) and carry `flaw`: for the defects of
+    /// keys, keyset listings and the keyset rule, which must fail the suite there as where
+    /// a seeder asks only as a check needs, and for those only a seeder that asks at its
+    /// start can show.
+    #[must_use]
+    pub fn with_seeder_flaw_at_start(flaw: SeederFlaw) -> Self {
+        let h = Self::with_seeder_flaw(flaw);
+        h.net.ledger().listings = Listings::AtStart;
+        h
+    }
+
     /// A harness whose viewers carry `flaw` (the suite must fail against it).
     #[must_use]
     pub fn with_viewer_flaw(flaw: ViewerFlaw) -> Self {
@@ -13429,12 +14333,12 @@ impl MockHarness {
         }
     }
 
-    /// A token worth `amount` sat from the quoted mint, as `edit` leaves it: its DLEQ proofs
-    /// and its lock are then each proof's.
-    fn token_with(&self, amount: u64, edit: impl FnOnce(&mut TokenInfo)) -> String {
+    /// A token worth `amount` sat from the mint at `mint`, as `edit` leaves it: its DLEQ
+    /// proofs and its lock are then each proof's.
+    fn token_with(&self, mint: &str, amount: u64, edit: impl FnOnce(&mut TokenInfo)) -> String {
         let mut info = TokenInfo {
-            proofs: self.net.proofs_for(&self.mint, amount),
-            mints: vec![self.mint.clone()],
+            proofs: self.net.proofs_for(mint, amount),
+            mints: vec![mint.to_owned()],
             amount,
             unit: "sat",
             locked: false,
@@ -13565,17 +14469,21 @@ impl Harness for MockHarness {
     }
 
     async fn bad_token(&self, kind: BadToken, amount: u64) -> String {
+        self.bad_token_at(&self.mint, kind, amount).await
+    }
+
+    async fn bad_token_at(&self, url: &str, kind: BadToken, amount: u64) -> String {
         match kind {
             BadToken::Garbage => "cashuBgarbage-not-a-token".into(),
-            BadToken::WrongUnit => self.token_with(amount, |i| i.unit = "msat"),
-            BadToken::TwoMints => self.token_with(amount, |i| {
+            BadToken::WrongUnit => self.token_with(url, amount, |i| i.unit = "msat"),
+            BadToken::TwoMints => self.token_with(url, amount, |i| {
                 i.mints.push("https://other.mock.example".into())
             }),
-            BadToken::Locked => self.token_with(amount, |i| i.locked = true),
-            BadToken::NoDleq => self.token_with(amount, |i| i.dleq = Dleq::Missing),
-            BadToken::BadDleq => self.token_with(amount, |i| i.dleq = Dleq::Invalid),
+            BadToken::Locked => self.token_with(url, amount, |i| i.locked = true),
+            BadToken::NoDleq => self.token_with(url, amount, |i| i.dleq = Dleq::Missing),
+            BadToken::BadDleq => self.token_with(url, amount, |i| i.dleq = Dleq::Invalid),
             BadToken::OlderBadDleq => {
-                let (token, _) = self.net.draw(&self.mint, amount, &[]);
+                let (token, _) = self.net.draw(url, amount, &[]);
                 let info = self
                     .net
                     .read(&token)
@@ -13584,7 +14492,7 @@ impl Harness for MockHarness {
                 self.net.mint_token(info)
             }
             BadToken::UnknownKeyset => {
-                let token = self.token_with(amount, |_| {});
+                let token = self.token_with(url, amount, |_| {});
                 let mut l = self.net.ledger();
                 l.unknown_keysets += 1;
                 let keyset = UNKNOWN_KEYSETS + l.unknown_keysets;
@@ -13596,12 +14504,12 @@ impl Harness for MockHarness {
                 token
             }
             BadToken::OtherMintsKeyset => {
-                let token = self.token_with(amount, |_| {});
+                let token = self.token_with(url, amount, |_| {});
                 let mut l = self.net.ledger();
                 let keyset = l
                     .own_active
                     .iter()
-                    .filter(|(m, _)| **m != self.mint)
+                    .filter(|(m, _)| m.as_str() != url)
                     .map(|(_, k)| *k)
                     .max()
                     .unwrap_or_else(|| unreachable!("asked for after another mint's start"));
@@ -13613,11 +14521,11 @@ impl Harness for MockHarness {
                 token
             }
             BadToken::TooManyProofs => {
-                let proofs = self.net.fresh_proofs(&self.mint, MAX_PROOFS + 1);
-                self.token_with(amount, |i| i.proofs = proofs)
+                let proofs = self.net.fresh_proofs(url, MAX_PROOFS + 1);
+                self.token_with(url, amount, |i| i.proofs = proofs)
             }
             BadToken::Forged => {
-                let token = self.token_with(amount, |_| {});
+                let token = self.token_with(url, amount, |_| {});
                 let proofs = self.net.read(&token).map(|i| i.proofs).unwrap_or_default();
                 self.net.ledger().forged.extend(proofs);
                 token
@@ -13684,6 +14592,15 @@ impl Harness for MockHarness {
 
     fn hold_key_fetches(&self) {
         self.net.ledger().hold_keys = true;
+    }
+
+    fn refuse_keys(&self, url: &str, refused: bool) {
+        let mut l = self.net.ledger();
+        if refused {
+            l.keys_refused.insert(url.to_owned());
+        } else {
+            l.keys_refused.remove(url);
+        }
     }
 
     fn forget_keys(&self, engine: &MockEngine) {
