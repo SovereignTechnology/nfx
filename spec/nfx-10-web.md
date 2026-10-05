@@ -103,7 +103,12 @@ says of a page holds for a worker it pays or earns from. Whether a page pays an 
     seed drawn at random for the record. Every swap of the record derives its outputs
     from that seed (NFX-07 §3a). It names the page's partition (a random id kept in its
     storage), and only a page of that partition acts on it: it is no NIP-60 token event,
-    so no client pays from it, and every other client, browser or not, leaves it alone;
+    so no client pays from it, and every other client, browser or not, leaves it alone.
+    The id is made once, by the first page of the partition to pay or earn, before it
+    makes any record: holding the Web Lock under which the partition's standings are
+    changed (below), it reads the id from the partition's storage and, only if none is
+    there, draws one at random and writes it. So pages that open together make one id,
+    and every later page reads it;
   - its *plain part*, in the partition's storage, holding nothing that can spend: the
     payee or payer; the payment's **sending time**, by which the page sends the payment,
     if at all; the relays that accepted the secret part; the keyset and counters each
@@ -123,19 +128,34 @@ says of a page holds for a worker it pays or earns from. Whether a page pays an 
   learnt. A first swap that made nothing, because another client spent one of its inputs
   first, made no payment: the payment ends unsent, and no payee is judged by it. Beyond
   this, the record's form is the page's own.
+
+  This rule is open mode's (NFX-07), where every request of a page that moves value at
+  a mint is a swap (NUT-03). In licensed mode a page that pays or earns makes two that
+  move value and are no swaps: the licence purchase (`POST /v1/nfx/license`, §3.3,
+  NFX-08 §4) and an earning page's `redeem` (`POST /v1/nfx/redeem`, §3.2, NFX-09 §2).
+  Their records are specified with licensed mode (NFX-08, NFX-09), not here.
 - **One page acts on a record at a time.** Each record has a Web Lock of its own, named
   by the record. The page that makes a record takes its lock before anything names the
   record, and holds it until the record ends: its payment ended, what it came to in the
   partition's standing (below) for a payment made, and what it holds unspent in the
   wallet. A page acts on a record (sends its swaps or its payment, waits for an answer
   or a body, reclaims, learns what a swap did, or notes what it came to) only while it
-  holds that lock. The browser frees a page's locks when the page closes (one kept
-  frozen, in a back/forward cache or a background tab, holds them until it resumes or is
-  discarded, and its payments wait with it). A page that cannot take Web Locks (outside
-  a secure context) pays and earns nothing. Every page of the partition that pays or
-  earns asks for the lock of each record not yet ended, so it takes the record up once
-  the holder has closed, and only then. That page reads both parts again under the lock,
-  the secret part from the relays that accepted it, and then:
+  holds that lock. The browser frees a page's locks when the page closes, and when it
+  unloads the page into a back/forward cache, kept there or not (Web Locks §2.6: locks
+  end with the unloading of their document). So a page put in that cache has closed,
+  for this section, from the `pagehide` that puts it there: it acts on no record from
+  then on, and another page may take its records up. Shown again, it holds none of the
+  locks it held, whatever the browser did with them. It first lets go of every lock it
+  held, in case the browser kept one, since a request for a lock the page still holds
+  would wait behind the page's own hold; then it asks for each lock anew, and under a
+  lock so taken it reads both parts of the record again before it acts, as a page
+  taking the record up does (below). A page frozen in a background tab is not unloaded:
+  it holds its locks until it resumes or is discarded, and its payments wait with it. A
+  page that cannot take Web Locks (outside a secure context) pays and earns nothing.
+  Every page of the partition that pays or earns asks for the lock of each record not
+  yet ended that it does not hold, so it takes the record up once the holder has closed,
+  and only then. That page reads both parts again under the lock, the secret part from
+  the relays that accepted it, and then:
   - a record whose plain part names no relay that accepted its secret part sent no
     swap: it ends with nothing;
   - otherwise it learns what each swap of the record did as NFX-07 says for that swap
@@ -290,7 +310,8 @@ mesh, and it is NFX-07's:
 ### 3.3 Licensed mode
 
 One `POST /v1/nfx/license` (NFX-08) per video per session; key kept in a Web Worker /
-module scope only, never `localStorage`.
+module scope only, never `localStorage`. The purchase moves value and is no swap, so §3's
+record rule, which is open mode's, does not cover it (§3).
 
 ## 4. Product mapping
 
@@ -385,3 +406,19 @@ NFX-05 byte formats.
   - §3.2: a payment earned has a record too (§3), so what a closed tab earned and had
     not written through is its partition's to write (was: lost with the tab), and an
     earning page's swaps derive their outputs from their records' seeds.
+  - §3: a page put in a back/forward cache has closed, for this section, from its
+    `pagehide`: the browser frees its locks as it unloads the page (Web Locks §2.6), and
+    another page may take its records up. Shown again, it holds none of the locks it
+    held: it lets go of each first, asks for each anew, and reads both parts of a record
+    again under the new lock before it acts (was: such a page "holds them until it
+    resumes", which the Web Locks specification does not say, and under which a page
+    shown again would have acted on a record another page had taken up). A page frozen
+    in a background tab still holds its locks. A page asks for no lock it holds.
+  - §3: the partition's id is made once, by the first page of the partition to pay or
+    earn, before it makes any record, under the Web Lock its standings are changed under
+    (was: "a random id kept in its storage", with no page named to make it, so two
+    pages opening together could each have made one).
+  - §3: the record rule is open mode's. The two licensed-mode requests of a page that
+    pays or earns that move value and are no swaps, the licence purchase and an earning
+    page's `redeem`, have their records specified with licensed mode (NFX-08, NFX-09),
+    not here (was: nothing, while the rule spoke only of swaps). §3.3 points here.
