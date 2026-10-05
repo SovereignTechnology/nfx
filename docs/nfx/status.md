@@ -361,11 +361,12 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    wallet. It gets the locked-directory rule and its own security stage (ADR 0008 §4).
    Plan and decisions: [`m2-plan.md`](m2-plan.md). sovtech chose the demo's staging, and a
    persistent testnet mint.
-   - **M2.0 is built and reworked twenty-one times** on branch `m2/contracts`, not yet
+   - **M2.0 is built and reworked twenty-nine times** on branch `m2/contracts`, not yet
      pushed. It holds the pay/1 wire and vectors, the session contracts, the mock, and
-     the adversary suite. Twenty-one independent audits found 19, 30, 28, 20, 19, 22,
-     23, 8, 12, 17, 9, 7, 8, 8, 9, 7, 10, 8, 8, 7 and 7 gaps; the resolutions are recorded in each audit's file, and the
-     next audit checks them
+     the adversary suite. Twenty-nine independent audits found 19, 30, 28, 20, 19, 22,
+     23, 8, 12, 17, 9, 7, 8, 8, 9, 7, 10, 8, 8, 7, 7, 9, 23, 22, 22, 20, 15, 23 and 26
+     gaps; the resolutions are recorded in each audit's file, and the next audit checks
+     them
      ([first](reviews/2026-09-24-m2.0-independent-audit.md),
      [second](reviews/2026-09-24-m2.0-second-audit.md),
      [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -394,7 +395,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
      [twenty-fifth](reviews/2026-09-24-m2.0-twenty-fifth-audit.md),
      [twenty-sixth](reviews/2026-09-24-m2.0-twenty-sixth-audit.md),
      [twenty-seventh](reviews/2026-09-24-m2.0-twenty-seventh-audit.md),
-     [twenty-eighth](reviews/2026-09-24-m2.0-twenty-eighth-audit.md)). **sovtech's bar for the push
+     [twenty-eighth](reviews/2026-09-24-m2.0-twenty-eighth-audit.md),
+     [twenty-ninth](reviews/2026-09-24-m2.0-twenty-ninth-audit.md)). **sovtech's bar for the push
      is zero findings** (re-confirmed after the sixth). The lock's guarantee is now
      stated in `crates/ci/check-locked.sh`: the money crates' files and build inputs, and
      every target of theirs, failing closed; other crates are out of scope. With sovtech's OK, the minimum role for GitLab pipeline variables on
@@ -408,12 +410,15 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
          cap is a rate (`debt_ttl`).
        - `quote` carries the account's position, so a watcher can resume.
        - HTTPS origins take one payment per request.
-     - The suite has 63 scenarios, run four times (the second with the mint's reads as
-       round trips, the third with them answered from another thread, the fourth with
-       every quoted mint's keyset listing asked for at the engine's start), each on its own
-       thread under a real-time timeout, waiting on answers and never on a count of polls,
-       and each of 1,573
-       planted defects fails an assertion of the suite (a hang, a panic raised
+     - The suite has 66 scenarios, run on four harnesses (the mint answering at once; its
+       reads as round trips; every call an entry or a sweep awaits answered by a wake
+       from another thread; every quoted mint's keyset listing asked for at the engine's
+       start) and under eleven honest timings (answers late, out of order or woken for
+       nothing, outcomes and sweeps settled on tasks of the engine's own, more polls at
+       every step). Each runs on its own thread under a real-time timeout. The suite
+       judges progress by the answers an engine awaits and by its settling, never by how
+       many polls an answer or a step takes, and never blocks its runtime's thread. Each
+       of 2,092 planted defects fails an assertion of the suite (a hang, a panic raised
        elsewhere, or a runtime panic of Rust's own, is not a catch).
      - A swap with no answer is decided by reading its inputs (NUT-07), then its outputs
        (NUT-09), outside the engine's lock: unsigned outputs are nothing only once an
@@ -433,15 +438,11 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        restored cache cannot stand in for the build. Code in other crates is out of its
        scope, as the check itself states.
    - **Next:**
-     - the twenty-ninth independent audit (2026-09-29) reported 26 findings. The
-       resolutions of 1 to 19 and 23 to 26 (the seeder, the watcher, origins, the browser
-       client, the lock and CI) are merged on `m2/contracts`, each pinned as a whole class
-       by a table of cases, not as the one instance found. Those of 20 to 22 (how the
-       suite waits: no progress judged by a count of polls, engine state read only once
-       settled, every mint answer of the third harness coming by a wake, and the planted
-       defects given the suite's own time limit) are in progress on `m2/r29-d`. The
-       audit's [record](reviews/2026-09-24-m2.0-twenty-ninth-audit.md) is a draft until
-       they are merged;
+     - the twenty-ninth independent audit (2026-09-29) reported 26 findings, each
+       resolved by pinning its whole class with a table of cases, not the one instance
+       found. All are resolved on `m2/audit-loop`, where group d (how the suite waits,
+       20 to 22) was finished on the merge of groups a, b and c. See the audit's
+       [record](reviews/2026-09-24-m2.0-twenty-ninth-audit.md);
      - then a thirtieth independent audit, until one reports nothing;
      - sovtech's OK to push M2.0 (given, once the audits are clean);
      - the testnet mint: sovtech approved its deployment once its runbook's checks

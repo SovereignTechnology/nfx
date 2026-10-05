@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of twenty-one
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of twenty-nine
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -47,7 +47,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [twenty-fifth](reviews/2026-09-24-m2.0-twenty-fifth-audit.md),
 [twenty-sixth](reviews/2026-09-24-m2.0-twenty-sixth-audit.md),
 [twenty-seventh](reviews/2026-09-24-m2.0-twenty-seventh-audit.md),
-[twenty-eighth](reviews/2026-09-24-m2.0-twenty-eighth-audit.md)). sovtech's bar for the push
+[twenty-eighth](reviews/2026-09-24-m2.0-twenty-eighth-audit.md),
+[twenty-ninth](reviews/2026-09-24-m2.0-twenty-ninth-audit.md)). sovtech's bar for the push
 is zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -86,14 +87,35 @@ is zero findings, confirmed after the sixth:
     an older one of the payer's; restores blind to an expired keyset), events just
     before the next swap (given-up requests processed or starting, the mint or its
     restores going down, a rotation after the outputs were derived, an expiry), reads
-    answered on the reader's next poll, dial records;
-  - honest seeder and viewer engines, with a validated configuration.
-- **Suite:** `nfx_pay::adversary` has 63 scenarios, each on its own thread under a
-  real-time timeout, three of them threaded, run on three harnesses (reads at once, as
-  round trips, and answered from another thread), waiting on answers and never on a count
-  of polls, and **each of 982 planted defects fails a named check in its scenario**
+    answered on the reader's next poll, or every call an entry or a sweep awaits
+    answered by a wake from another thread (held ones at their release), dial records;
+  - honest seeder and viewer engines, with a validated configuration, and honest timings
+    of theirs (`mock::Timing`): answers late, out of order or woken for nothing, outcomes
+    and sweeps settled on tasks of the engine's own, more polls at every step.
+- **Suite:** `nfx_pay::adversary` has 66 scenarios, each on its own thread under a
+  real-time timeout, three of them threaded. They run on four harnesses: the mint
+  answering at once; its reads as round trips; every call an entry or a sweep awaits
+  answered by a wake from another thread; and keyset listings asked for at the engine's
+  start. They also run under eleven honest timings. The suite judges progress by answers
+  and settling, never by how many polls an answer or a step takes, and never blocks its
+  runtime's thread. **Each of 2,092 planted defects fails a named check in its scenario**
   (a hang, a panic raised outside the suite, a runtime panic of Rust's own, or a bare
-  unwrap, is not a catch), every surviving mutant from all twenty-eight audits among them.
+  unwrap, is not a catch). Every surviving mutant from all twenty-nine audits is among
+  them.
+- **Since the twenty-ninth audit:**
+  - the seeder's key cache, keyset listings and the keyset rule pinned per mint; one bad
+    proof spoils a token; the matrix of payments covers every path to the turn against
+    every check and drop (NFX-07 §3);
+  - a dropped video's accounts still quoted; the watcher's token shape, the anchor of its
+    wait, the due point on every window, and its identity toward a seeder all stated
+    and pinned (NFX-07 §2, §3, §3a);
+  - §4 names an origin by its base URL, gives its headers a grammar, and the browser
+    client of NFX-10 §3.1 pays as a page can; the lock pins every workflow, its guard
+    fails closed, and probe branches run no CI;
+  - the suite waits on answers and settling everywhere, never blocks its runtime, and runs
+    on a harness that answers every awaited call by a wake and under eleven honest
+    timings; every lost wake planted is caught at a check; the planted defects get the
+    suite's 30 s.
 - **Since the twenty-eighth audit:**
   - the honest mock caches keys per mint and per keyset, and NFX-07 §3 step 3 checks each
     proof against the keys of the keyset it names; a turn in the deadline's second runs no
