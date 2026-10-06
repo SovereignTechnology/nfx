@@ -217,33 +217,48 @@ entry=$(git ls-files -s -- "$pins")
 [[ $entry =~ ^100644\ [0-9a-f]+\ 0$'\t'crates/ci/locked\.sha256$ ]] \
   || fail "$pins must be a tracked regular file of mode 100644, not ${entry:-untracked or missing}"
 [ -f "$pins" ] && [ ! -L "$pins" ] || fail "$pins must be a regular file, not a link"
-while IFS= builtin read -r -d '' entry; do
-  path=${entry#*$'\t'}
-  [[ $entry =~ ^100644\ [0-9a-f]+\ 0$'\t' ]] && [ -f "$path" ] && [ ! -L "$path" ] \
-    || fail "a Cargo manifest or lock file must be a tracked regular file of mode 100644: ${entry@Q}"
-done < <(git ls-files -s -z -- '*Cargo.toml' '*Cargo.lock')
+# Each listing below is piped into its loop, never read from a process substitution, whose
+# exit status bash drops: a git or an env that fails, or lists nothing, would leave its loop
+# nothing to check, and the check passed. Piped, the failure is the script's (pipefail),
+# and each loop counts what a listing that worked cannot lack.
+git ls-files -s -z -- '*Cargo.toml' '*Cargo.lock' | {
+  seen=0
+  while IFS= builtin read -r -d '' entry; do
+    path=${entry#*$'\t'}
+    [[ $entry =~ ^100644\ [0-9a-f]+\ 0$'\t' ]] && [ -f "$path" ] && [ ! -L "$path" ] \
+      || fail "a Cargo manifest or lock file must be a tracked regular file of mode 100644: ${entry@Q}"
+    case $path in crates/Cargo.toml | crates/Cargo.lock) seen=$((seen + 1)) ;; esac
+  done
+  [ "$seen" = 2 ] || fail "git listed $seen of crates/Cargo.toml and crates/Cargo.lock"
+}
 
 # The build environment: nothing may redirect what cargo runs or compiles. In CI the lock
 # job runs under `env -i` (ci.yml), and every variable must be on the list below.
 allowed='CARGO_HOME CARGO_TERM_COLOR CARGO_BUILD_JOBS CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG CARGO_INCREMENTAL CARGO_DENY_VERSION CARGO_DENY_SHA256 RUSTUP_HOME RUST_VERSION'
 ci_allowed="$allowed PATH HOME CI CI_COMMIT_SHA PYTHON PWD OLDPWD SHLVL _ LOCKED_DIRS_UNLOCKED"
 # Names from `env -0`, so no value can forge a line. A name that is not a plain
-# identifier (BASH_FUNC_git%%, an exported function standing in for a command) fails.
-while IFS= builtin read -r -d '' entry; do
-  name=${entry%%=*}
-  [[ $name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || fail "a variable that is not a plain name is set: ${name@Q}"
-  if [ -n "$in_ci" ]; then
-    case " $ci_allowed " in
-      *" $name "*) ;;
-      *) fail "in CI, a variable outside the allow-list is set: $name" ;;
-    esac
-  elif [[ $name =~ ^(__)?(CARGO|RUST) ]]; then
-    case " $allowed " in
-      *" $name "*) ;;
-      *) fail "a build variable outside the allow-list is set: $name" ;;
-    esac
-  fi
-done < <(/usr/bin/env -0)
+# identifier (BASH_FUNC_git%%, an exported function standing in for a command) fails. The
+# listing is never empty: bash gives every command it runs `_`, at the least.
+/usr/bin/env -0 | {
+  seen=0
+  while IFS= builtin read -r -d '' entry; do
+    name=${entry%%=*}
+    [[ $name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || fail "a variable that is not a plain name is set: ${name@Q}"
+    if [ -n "$in_ci" ]; then
+      case " $ci_allowed " in
+        *" $name "*) ;;
+        *) fail "in CI, a variable outside the allow-list is set: $name" ;;
+      esac
+    elif [[ $name =~ ^(__)?(CARGO|RUST) ]]; then
+      case " $allowed " in
+        *" $name "*) ;;
+        *) fail "a build variable outside the allow-list is set: $name" ;;
+      esac
+    fi
+    seen=$((seen + 1))
+  done
+  [ "$seen" -gt 0 ] || fail "/usr/bin/env listed no variable"
+}
 if [ -n "$in_ci" ] && [ -n "${LOCKED_DIRS_UNLOCKED:-}" ]; then
   fail "LOCKED_DIRS_UNLOCKED is set in CI"
 fi
@@ -255,7 +270,12 @@ while :; do
   [ "$dir" = / ] && break
   dir=$(dirname "$dir")
 done
-config=$(git ls-files -z | tr '\0' '\n' | grep -E '(^|/)\.cargo(-home)?/|(^|/)rust-toolchain(\.toml)?$' || true)
+# The listing first, so that a git that fails is not taken for a grep that found nothing.
+tracked=$(git ls-files -z | tr '\0' '\n')
+[ -n "$tracked" ] || fail "git listed no tracked file"
+rc=0
+config=$(grep -E '(^|/)\.cargo(-home)?/|(^|/)rust-toolchain(\.toml)?$' <<<"$tracked") || rc=$?
+[ "$rc" -le 1 ] || fail "grep for tracked Cargo configuration or toolchain files failed ($rc)"
 [ -z "$config" ] || fail "tracked Cargo configuration or toolchain files: $config"
 home=${CARGO_HOME:-$HOME/.cargo}
 for f in "$home"/config "$home"/config.toml; do

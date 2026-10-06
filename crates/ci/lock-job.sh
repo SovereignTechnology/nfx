@@ -24,7 +24,10 @@ git diff --quiet HEAD -- || fail "tracked files differ from $CI_COMMIT_SHA"
 # job restores (gitlab-ci.yml's does, under a shared key); cargo has not run yet, so
 # registry/src and the rest are not there to allow. Renames and staged paths (any status
 # but ?? and !!) cannot appear after the diff check above; if one does, it fails here.
-while IFS= read -r -d '' entry; do
+# The listing is piped into the loop, never read from a process substitution, whose exit
+# status bash drops: a git that fails fails the job (pipefail), where its silence would
+# pass for a checkout that holds nothing. A listing that is empty is that checkout.
+git status --porcelain=v1 -z --ignored --untracked-files=all | while IFS= read -r -d '' entry; do
   status=${entry:0:2} path=${entry:3}
   case $status in
     '??' | '!!')
@@ -34,7 +37,7 @@ while IFS= read -r -d '' entry; do
       esac ;;
     *) fail "the working tree is not exactly $CI_COMMIT_SHA: ${entry@Q}" ;;
   esac
-done < <(git status --porcelain=v1 -z --ignored --untracked-files=all)
+done
 crates/ci/check-locked.sh
 crates/ci/check-locked.sh --sources
 (cd crates && cargo fetch --locked)
