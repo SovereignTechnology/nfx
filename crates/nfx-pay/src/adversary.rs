@@ -210,13 +210,14 @@ type Session<H> = <<H as Harness>::Engine as SeederEngine>::Session;
 /// ([`adversary_suite!`](crate::adversary_suite)) or a planted defect (`tests/mutants.rs`).
 /// It is there to end a run that hangs, not to time one that is slow, so it is sized for a
 /// machine far busier than any the suite is expected to run on. Measured on four cores, in
-/// an unoptimised build: the slowest scenario against an honest engine (`a_hello_holds_no_state`
-/// where every answer takes the mint 5 ms) takes 14 to 16 s with a test binary's tests run
-/// four at once, and the slowest planted defect 6 to 8 s; with forty busy loops beside them
-/// and 32 tests at once (eighteen runnable threads to a core), 125 to 150 s and 80 to 100 s,
-/// half the limit at most. What the suite waits for in real time besides (5 s, for an
-/// engine to settle) ended there on the engine settling, never on that limit: the suite
-/// counts an engine's turns and its polls, not the time they take.
+/// an unoptimised build: the slowest scenario against an honest engine (one or another of
+/// the six parts of the table of waits whose names end
+/// `beside_the_others_history_waits_from_its_sending`) takes about 10 s with a test binary's
+/// tests run four at once, and the slowest planted defect about 7 s; with forty busy loops
+/// beside them and 32 tests at once (eighteen runnable threads to a core), 136 to 181 s and
+/// 108 s, about three fifths of the limit at most. What the suite waits for in real time
+/// besides (5 s, for an engine to settle) ended there on the engine settling, never on that
+/// limit: the suite counts an engine's turns and its polls, not the time they take.
 pub const SCENARIO_SECS: u64 = 300;
 
 /// The stack a scenario's thread is given ([`run_on_a_thread`]). A scenario's frames hold
