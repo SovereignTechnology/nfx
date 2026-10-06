@@ -520,6 +520,20 @@ pub struct EngineParams {
 /// raised, and one lost there would leave a check of the suite's to fail in its stead. An
 /// engine may spawn tasks on the runtime it was made in (the suite makes each engine on its
 /// own task), never on whatever thread polls its futures.
+///
+/// **The panic hook.** The runner notes the first panic raised on a scenario's thread with
+/// a panic hook of its own, set over the hook that stood and handing every panic on to it
+/// ([`crate::adversary::run_on_a_thread`]). So a harness and its engine leave the process's
+/// panic hook as it is: neither replaces it (`std::panic::set_hook`,
+/// `std::panic::take_hook`), as it is made or while a scenario runs, and no test does in a
+/// binary that runs the suite. A harness may set a hook of its own over the runner's (an
+/// error report, say) only if that hook hands every panic on to the one it found. The
+/// runner looks before a scenario and after it, and reports a run under a hook that did not
+/// stand as not finished, whatever the scenario did. It cannot see a hook replaced and put
+/// back while a scenario ran, nor one that hands on some panics and not others: a harness
+/// does neither. And the rule is the scenario's thread's: what an engine runs on tasks of
+/// the runtime it was made in is polled there, the runner's runtime being a current-thread
+/// one, and what a harness runs on threads of its own it keeps, as above.
 #[allow(async_fn_in_trait)]
 pub trait Harness {
     /// An engine owns what it needs, and is a handle to its seeder: the suite shares one

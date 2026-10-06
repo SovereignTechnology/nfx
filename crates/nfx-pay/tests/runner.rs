@@ -2,16 +2,34 @@
 //! mutants both use: a body that blocks its thread is timed out, and a panic is reported
 //! with where it was raised, on a thread a scenario spawned too, so the mutants count only
 //! a failed check of the suite: never a panic at a line of it that makes no check, nor one
-//! Rust raises of its own at a line that does.
+//! Rust raises of its own at a line that does. And a run under a panic hook that replaced
+//! the runner's is never reported as finished.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use nfx_pay::adversary::{Ran, code_lines, keep_panic, makes_a_check, rejoin, run_on_a_thread};
+use nfx_pay::adversary::{Ran, code_lines, keep_panic, makes_a_check, rejoin};
 use std::hint::black_box as bb;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 /// The suite's own text, as the runner reads it.
 const SUITE: &str = include_str!("../src/adversary.rs");
+
+/// The process's panic hook is one for every test of this binary, which run on threads at
+/// once, and one test here replaces it for a while. Every run of the runner's here holds
+/// this shared ([`run_on_a_thread`]); that test holds it alone, so the hook is replaced
+/// under no other test's run, and is back before the next begins.
+static THE_HOOK: RwLock<()> = RwLock::new(());
+
+/// The runner (`nfx_pay::adversary::run_on_a_thread`), as every test of this file runs it
+/// but the one that replaces the panic hook: not while that one has it replaced.
+fn run_on_a_thread(secs: u64, body: impl FnOnce() + Send + 'static) -> Ran {
+    let _shared = THE_HOOK.read().unwrap_or_else(PoisonError::into_inner);
+    nfx_pay::adversary::run_on_a_thread(secs, body)
+}
+
+/// The process's panic hook, as `std::panic::take_hook` gives it.
+type Hook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
 
 #[test]
 fn a_body_that_returns_finishes() {
@@ -121,6 +139,136 @@ fn a_panic_caught_on_the_way_is_the_one_reported() {
     };
     assert_eq!(message(&ran), "raised in the engine");
     assert!(!ran.failed_the_suite(), "counted in the mock");
+}
+
+#[test]
+fn a_run_under_a_replaced_panic_hook_is_never_finished() {
+    // Alone in this binary: no other test's run goes on while the hook is replaced here,
+    // and each replacement is undone before anything is asserted.
+    let _alone = THE_HOOK.write().unwrap_or_else(PoisonError::into_inner);
+    use nfx_pay::adversary::run_on_a_thread as run;
+    // The runner sets its hook at its first run in the process.
+    assert!(matches!(run(5, || {}), Ran::Finished));
+
+    // A harness made in a scenario's body replaces the hook (with an error report of its
+    // own, say). The scenario then passes every check; or its engine panics on the way and
+    // something catches that, which nothing notes now; or it fails a check. None is a
+    // finished run, and none a failed check of the suite's: the run is not judged.
+    let then: [fn(); 3] = [
+        || {},
+        || {
+            let caught = std::panic::catch_unwind(|| panic!("raised in the engine"));
+            assert!(caught.is_err(), "it was caught");
+        },
+        a_behaviour,
+    ];
+    for (case, then) in then.into_iter().enumerate() {
+        let taken: Arc<Mutex<Option<Hook>>> = Arc::default();
+        let kept = taken.clone();
+        let ran = run(5, move || {
+            *kept.lock().unwrap() = Some(std::panic::take_hook());
+            std::panic::set_hook(Box::new(|info| eprintln!("the harness's own hook: {info}")));
+            then();
+        });
+        let runners = taken.lock().unwrap().take();
+        std::panic::set_hook(runners.expect("the body took the runner's hook"));
+        not_judged(&ran, &format!("replaced in the body (case {case})"));
+    }
+
+    // Replaced before the run, by whatever else the process holds: the body is not run.
+    static RAN: AtomicBool = AtomicBool::new(false);
+    let runners = std::panic::take_hook();
+    let ran = run(5, || RAN.store(true, Ordering::SeqCst));
+    std::panic::set_hook(runners);
+    not_judged(&ran, "replaced before the run");
+    assert!(
+        !RAN.load(Ordering::SeqCst),
+        "the body ran with no hook to judge it by"
+    );
+
+    // A hook set over the runner's that hands every panic on to it leaves it standing: the
+    // run is judged as ever, by the first panic raised on its thread, caught or not.
+    static RAISED: AtomicU32 = AtomicU32::new(0);
+    let under: Arc<Hook> = Arc::new(std::panic::take_hook());
+    let handed = under.clone();
+    std::panic::set_hook(Box::new(move |info| handed(info)));
+    let ran = run(5, || {
+        let caught = std::panic::catch_unwind(|| {
+            RAISED.store(line!(), Ordering::SeqCst);
+            panic!("raised in the engine");
+        });
+        assert!(caught.is_err(), "it was caught");
+    });
+    drop(std::panic::take_hook());
+    let runners = Arc::try_unwrap(under)
+        .unwrap_or_else(|_| panic!("the hook set over the runner's holds it still"));
+    std::panic::set_hook(runners);
+    let Ran::Panicked { file, line, .. } = &ran else {
+        panic!("the panic caught on the way is reported under a hook that hands it on");
+    };
+    assert!(file.ends_with("nfx-pay/tests/runner.rs"), "{file}");
+    assert_eq!(*line, RAISED.load(Ordering::SeqCst) + 1);
+    assert_eq!(message(&ran), "raised in the engine");
+
+    // With the runner's hook back, a run is judged as ever.
+    assert!(matches!(run(5, || {}), Ran::Finished));
+    let ran = run(5, a_behaviour);
+    let said = message(&ran);
+    assert!(
+        said.starts_with("assertion `left == right` failed: a behaviour"),
+        "{said}"
+    );
+}
+
+/// `ran` is reported as run under a panic hook that did not stand: panicked at no place,
+/// with a message that says so, and so no failed check of the suite's.
+fn not_judged(ran: &Ran, when: &str) {
+    let Ran::Panicked { file, line, .. } = ran else {
+        panic!("a run under a replaced hook is never finished, nor hung ({when})");
+    };
+    assert_eq!((file.as_str(), *line), ("", 0), "no place ({when})");
+    assert!(
+        message(ran).starts_with("the runner's panic hook was replaced"),
+        "it says why ({when}): {}",
+        message(ran)
+    );
+    assert!(!ran.failed_the_suite(), "counted ({when})");
+}
+
+#[test]
+fn the_runners_looks_at_its_hook_leave_a_run_as_it_was() {
+    // Before a body and after it the runner raises a panic of its own on the body's thread,
+    // and catches it, to see that its hook stands. Neither is that thread's first panic: a
+    // body that returns has finished, time after time, and a body's own panic, caught on
+    // the way or not, is the one reported, where it was raised and with what it said.
+    static RAISED: AtomicU32 = AtomicU32::new(0);
+    fn raise() {
+        RAISED.store(line!(), Ordering::SeqCst);
+        panic!("raised in the body");
+    }
+    for _ in 0..3 {
+        assert!(matches!(run_on_a_thread(5, || {}), Ran::Finished));
+    }
+    for caught in [false, true] {
+        let ran = run_on_a_thread(5, move || {
+            if bb(caught) {
+                assert!(std::panic::catch_unwind(raise).is_err(), "it was caught");
+            } else {
+                raise();
+            }
+        });
+        let Ran::Panicked { file, line, .. } = &ran else {
+            panic!("the body's panic is reported (caught on the way: {caught})");
+        };
+        assert!(file.ends_with("nfx-pay/tests/runner.rs"), "{file}");
+        assert_eq!(
+            *line,
+            RAISED.load(Ordering::SeqCst) + 1,
+            "where the body raised it (caught on the way: {caught})"
+        );
+        assert_eq!(message(&ran), "raised in the body");
+        assert!(matches!(run_on_a_thread(5, || {}), Ran::Finished));
+    }
 }
 
 #[test]

@@ -232,7 +232,9 @@ pub const SCENARIO_STACK: usize = 64 << 20;
 pub enum Ran {
     /// It returned.
     Finished,
-    /// It panicked, at `file`:`line` (where the panic was raised), with `payload`.
+    /// It panicked, at `file`:`line` (where the panic was raised), with `payload`. Or the
+    /// runner's panic hook did not stand as it ran, so that it could not be judged: it is
+    /// then reported at no place, with a message that says so ([`run_on_a_thread`]).
     Panicked {
         file: String,
         line: u32,
@@ -521,7 +523,32 @@ std::thread_local! {
     /// ([`with_tasks`]).
     static TASKS: std::cell::RefCell<Option<std::rc::Rc<Starts>>> =
         const { std::cell::RefCell::new(None) };
+
+    /// Whether the runner's panic hook has seen the `Probe` this thread raised last
+    /// (`hook_stands`).
+    static PROBED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
+
+/// What the runner raises on a scenario's thread, and catches, to see that its panic hook
+/// still stands (`hook_stands`): the hook marks it, says nothing of it, and hands it on to
+/// no hook that stood before.
+struct Probe;
+
+/// Whether the runner's panic hook stands: whether a panic raised on this thread reaches it
+/// now. It raises a `Probe` and catches it, and the hook, where it is reached, marks it. A
+/// hook set over the runner's that hands every panic on to the one it found leaves it
+/// standing; one that replaced it does not.
+fn hook_stands() -> bool {
+    PROBED.set(false);
+    let _: std::thread::Result<()> = std::panic::catch_unwind(|| std::panic::panic_any(Probe));
+    PROBED.replace(false)
+}
+
+/// What a run is reported to have panicked with, at no place, where the runner's panic hook
+/// did not stand as it ran ([`run_on_a_thread`]).
+const HOOK_REPLACED: &str = "the runner's panic hook was replaced: a run is judged by the \
+                             first panic raised on its thread, which only that hook notes, \
+                             so this run is not judged (nfx_pay::adversary::run_on_a_thread)";
 
 /// Starts a future as a task of a runtime.
 type Starts = dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>);
@@ -572,11 +599,30 @@ fn ended<T>(run: std::thread::Result<T>) -> Result<T, Raised> {
 /// raised: the first raised on that thread, whatever caught it. So a panic an engine raises
 /// on a task of its own, which its runtime catches, is the one reported, whether the body
 /// then fails a check of the suite or returns: it is never taken for either.
+///
+/// The first panic is noted by a panic hook, which the first run in a process sets over the
+/// hook that stood, handing every panic on to it. A run is judged only while that hook
+/// stands. So the runner looks, before `body` and after it, on its thread: it raises a
+/// panic of its own there and catches it, which its hook marks, and hands on to no one.
+/// Where either goes unmarked, something replaced the process's panic hook, and the run is
+/// reported as panicked, at no place and with a message that says so: never as finished,
+/// and never as a failed check of the suite. Where the first does, `body` is not run.
+/// Nothing, then, replaces the panic hook in a process that runs scenarios
+/// (`std::panic::set_hook`, `std::panic::take_hook`): no harness, no engine, and no other
+/// test of the same binary. A hook set over the runner's that hands every panic on to the
+/// one it found leaves it standing, and is handed the runner's own two panics with the
+/// rest. What the two looks cannot see is a hook replaced and put back while `body` ran,
+/// and one that hands on some panics and not others. The rule is that thread's: `body`
+/// polls there whatever it runs ([`with_tasks`]).
 pub fn run_on_a_thread(secs: u64, body: impl FnOnce() + Send + 'static) -> Ran {
     static HOOK: std::sync::Once = std::sync::Once::new();
     HOOK.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            if info.payload().is::<Probe>() {
+                PROBED.set(true);
+                return;
+            }
             let said = info.payload_as_str().map(str::to_owned);
             note_panic(info.location().map(|l| Kept {
                 file: l.file().to_owned(),
@@ -590,18 +636,31 @@ pub fn run_on_a_thread(secs: u64, body: impl FnOnce() + Send + 'static) -> Ran {
     std::thread::Builder::new()
         .stack_size(SCENARIO_STACK)
         .spawn(move || {
-            let run = ended(std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)));
-            let _ = done.send(run);
+            // The hook stands before the body, or the body is not run; and after it, where
+            // a harness the body made may have replaced it: else the run is not judged.
+            let run = hook_stands()
+                .then(|| ended(std::panic::catch_unwind(std::panic::AssertUnwindSafe(body))));
+            let _ = done.send(run.filter(|_| hook_stands()));
         })
         .expect("a thread to run the scenario on");
     match answer.recv_timeout(Duration::from_secs(secs)) {
-        Ok(Ok(())) => Ran::Finished,
-        Ok(Err(Raised { at, payload })) => {
+        Ok(Some(Ok(()))) => Ran::Finished,
+        Ok(Some(Err(Raised { at, payload }))) => {
             let (file, line) = at.map(|at| (at.file, at.line)).unwrap_or_default();
             Ran::Panicked {
                 file,
                 line,
                 payload,
+            }
+        }
+        Ok(None) => {
+            // Said here too: a payload raised again runs no hook, and the hook that stands
+            // may say nothing.
+            eprintln!("{HOOK_REPLACED}");
+            Ran::Panicked {
+                file: String::new(),
+                line: 0,
+                payload: Box::new(HOOK_REPLACED),
             }
         }
         Err(_) => Ran::Hung,
@@ -610,7 +669,11 @@ pub fn run_on_a_thread(secs: u64, body: impl FnOnce() + Send + 'static) -> Ran {
 
 /// Run `body`, a scenario's whole run on this thread, with `start` to start a task on the
 /// runtime it runs in: the suite runs an entry on a task of its own there (`on_a_task`),
-/// which that runtime polls when it is woken, in turn with the engine's own tasks.
+/// which that runtime polls when it is woken, in turn with the engine's own tasks. That
+/// runtime polls its tasks on this thread, as the current-thread runtime of
+/// [`run_scenario!`](crate::run_scenario) does: a run is judged by the first panic raised
+/// on its thread ([`run_on_a_thread`]), and a task polled on another thread would raise
+/// its panics there, where no run is judged by them.
 pub fn with_tasks<T>(
     start: impl Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + 'static,
     body: impl FnOnce() -> T,
