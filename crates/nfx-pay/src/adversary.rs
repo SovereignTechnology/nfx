@@ -3445,7 +3445,12 @@ async fn a_listing_another_asked_for_wakes_its_payment<H: Harness>(h: &H) {
 /// asks that mint and waits; the mint answers, and the payment is acknowledged. So is one
 /// that asks for that mint's keys alone, the seeder holding its listing of that second.
 /// And on a fresh seeder, a second after a payment in the second mint, another, on a task
-/// of its own, is woken by the listing its keyset rule judges by.
+/// of its own, is woken by the listing its keyset rule judges by. And, as
+/// [`a_listing_asked_for_again_wakes_its_payment`] at the first mint, whether or not the
+/// seeder asked at its start too: paid at the second mint, which then starts a keyset; a
+/// second on, the seeder's key requests held, a payment of the new keyset, on a task of
+/// its own, asks that mint for its listing again and waits. The listing comes, then its
+/// keys, and it is acknowledged.
 async fn a_second_mints_answers_wake_its_payment<H: Harness>(h: &H) {
     let two_mints = || {
         h.engine_checked(EngineParams {
@@ -3539,6 +3544,41 @@ async fn a_second_mints_answers_wake_its_payment<H: Harness>(h: &H) {
         r.is_some_and(Result::is_ok),
         "a payment in the second quoted mint, on a task of its own, is woken by the keyset \
          listing its keyset rule judges by, and answered: {r:?}"
+    );
+    close(h, (answered, paying)).await;
+
+    // The second mint's listing asked for again at step 3, for a keyset that mint started
+    // since the seeder last asked: a seeder that asked at its start holds a listing of it
+    // in the cases above, and its step 3 asks for none there.
+    let e = two_mints();
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    settles_pay::<H>(&mut s, 4, h.token_at(&second, 4).await, 4).await;
+    serve(h, &mut s, 4, 4);
+    h.start_keyset_at(&second, None);
+    advance(h, SECOND).await; // that mint's listing names its new keyset the next second
+    h.hold_key_fetches();
+    let listed = h.listing_requests();
+    let p = Pay {
+        upto_chunk: 8,
+        token: h.token_at(&second, 4).await, // of the keyset that mint started
+    };
+    let done = flag();
+    let paying = pay_on_a_task(h, s, &p, &done);
+    settle(h).await;
+    assert!(
+        !is_set(&done) && h.listing_requests() > listed,
+        "it waits for the second mint's keyset listing, asked for again for a keyset that \
+         mint started since the seeder last asked"
+    );
+    release(h).await; // the listing comes, then its keys
+    let answered = answer_of(h, pin!(&paying)).await;
+    let r = answered.as_ref().map(|(_, r)| r);
+    assert!(
+        r.is_some_and(Result::is_ok),
+        "a payment in the second quoted mint, on a task of its own, is woken by the keyset \
+         listing it asked that mint for again at step 3, held and released, then by its keys, \
+         and answered: {r:?}"
     );
     close(h, (answered, paying)).await;
 }
@@ -27374,7 +27414,8 @@ async fn a_listing_asked_after_a_payment_arrived_judges_it<H: Harness>(h: &H) {
 
 /// Flaws `KeysetListingWaitUnwoken`, `KeysetListingNoClockWatch`, `KeysetListingWatchOnce`,
 /// `KeysetListingAskedWhileHeld`, `HeldListingAskedAgain`, `HeldListingJudgedUnlisted`,
-/// `HeldListingExpiryDropped`, `KeysetHorizonFromTurn` and `KeysetHorizonFromListing`. A payment whose keyset rule
+/// `HeldListingExpiryDropped`, `KeysetHorizonFromTurn` and `KeysetHorizonFromListing`; and,
+/// at a second quoted mint, `OtherMintKeysetListingUnwoken`. A payment whose keyset rule
 /// needs the mint's listing waits for it, holding the turn (NFX-07 §3 step 5), and is woken
 /// by whatever ends the wait; another payment that finds that listing asked for in its
 /// turn's second waits for the same one, asking for none. Peers 1 and 2 are paid in an
