@@ -457,7 +457,7 @@ pub struct EngineParams {
 ///   (it drops a session, or a `hello` or a `pay` not yet answered) it lets the engine
 ///   settle before it acts again, the entries it polls on its own task not polled
 ///   meanwhile: an engine may take any of these on a task of its own, and stamp a close
-///   with the time it takes it. A few scenarios do otherwise. Some move the clock and go
+///   with the time it takes it. Some scenarios do otherwise. A few move the clock and go
 ///   on with an entry at once, with no settling first: the suite then waits for the answer
 ///   of an entry on a task of its own that the move wakes, or polls a payment it drives
 ///   (at that payment's own deadline, `hello`s waiting behind it; or before the runtime

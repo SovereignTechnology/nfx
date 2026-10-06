@@ -3550,8 +3550,8 @@ async fn a_second_mints_answers_wake_its_payment<H: Harness>(h: &H) {
     close(h, (answered, paying)).await;
 
     // The second mint's listing asked for again at step 3, for a keyset that mint started
-    // since the seeder last asked: a seeder that asked at its start holds a listing of it
-    // in the cases above, and its step 3 asks for none there.
+    // since the seeder last asked: a seeder that asked at its start holds that mint's
+    // listing in the cases above, and its step 3 asks for none there.
     let e = two_mints();
     let mut s = open(h, &e, 1).await;
     serve(h, &mut s, 0, 4);
