@@ -142,7 +142,10 @@ fi
 #     submodule, count as naming one). Money logic written afresh under other names on such
 #     a branch runs no lock: it is the change no lock can tell from other code (above).
 set -euo pipefail
-shopt -s inherit_errexit   # a failure inside $(...) fails the script, not just the subshell
+# A failure inside a plain x=$(...) fails the script, not just the subshell. Where bash
+# ignores -e (a condition, a command followed by && or ||) it ignores it inside the
+# substitution too, so a function that must stop at its first failure is assigned first.
+shopt -s inherit_errexit
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 py="${PYTHON:-python3} -I -S"   # isolated, and no site: locked.py needs only the stdlib
 pins=crates/ci/locked.sha256
@@ -217,10 +220,10 @@ entry=$(git ls-files -s -- "$pins")
 [[ $entry =~ ^100644\ [0-9a-f]+\ 0$'\t'crates/ci/locked\.sha256$ ]] \
   || fail "$pins must be a tracked regular file of mode 100644, not ${entry:-untracked or missing}"
 [ -f "$pins" ] && [ ! -L "$pins" ] || fail "$pins must be a regular file, not a link"
-# Each listing below is piped into its loop, never read from a process substitution, whose
-# exit status bash drops: a git or an env that fails, or lists nothing, would leave its loop
-# nothing to check, and the check passed. Piped, the failure is the script's (pipefail),
-# and each loop counts what a listing that worked cannot lack.
+# Each of the next two listings is piped into its loop, never read from a process
+# substitution, whose exit status bash drops: there a git or an env that fails, or lists
+# nothing, leaves its loop nothing to check, and the check passes. Piped, the failure is
+# the script's (pipefail), and each loop counts what a listing that worked cannot lack.
 git ls-files -s -z -- '*Cargo.toml' '*Cargo.lock' | {
   seen=0
   while IFS= builtin read -r -d '' entry; do
@@ -270,13 +273,19 @@ while :; do
   [ "$dir" = / ] && break
   dir=$(dirname "$dir")
 done
-# The listing first, so that a git that fails is not taken for a grep that found nothing.
+# The listing first, so that a git that fails is not taken for a grep that found nothing,
+# and grep's count, never its silence: a here-string bash cannot set up leaves grep unrun
+# with status 1, and a substitution bash cannot make a pipe for is empty with status 0.
+# Either reads as a grep that found nothing, and neither prints a count.
 tracked=$(git ls-files -z | tr '\0' '\n')
 [ -n "$tracked" ] || fail "git listed no tracked file"
+config_re='(^|/)\.cargo(-home)?/|(^|/)rust-toolchain(\.toml)?$'
 rc=0
-config=$(grep -E '(^|/)\.cargo(-home)?/|(^|/)rust-toolchain(\.toml)?$' <<<"$tracked") || rc=$?
-[ "$rc" -le 1 ] || fail "grep for tracked Cargo configuration or toolchain files failed ($rc)"
-[ -z "$config" ] || fail "tracked Cargo configuration or toolchain files: $config"
+found=$(grep -cE "$config_re" <<<"$tracked") || rc=$?
+[ "$rc" -le 1 ] && [ -n "$found" ] \
+  || fail "grep for tracked Cargo configuration or toolchain files failed or did not run ($rc)"
+[ "$found" = 0 ] \
+  || fail "tracked Cargo configuration or toolchain files: $(grep -E "$config_re" <<<"$tracked" || true)"
 home=${CARGO_HOME:-$HOME/.cargo}
 for f in "$home"/config "$home"/config.toml; do
   [ ! -e "$f" ] && [ ! -L "$f" ] || fail "a Cargo config in CARGO_HOME: $f"
@@ -319,8 +328,12 @@ case $mode in
   --facts) $py crates/ci/locked.py facts ;;
   --compiled)
     $py crates/ci/locked.py compiled
-    # The tests ran code: the pinned files must still be the pinned files.
-    [ "$(manifest)" = "$(cat "$pins")" ] || fail "guarded files changed during the build or the tests"
+    # The tests ran code: the pinned files must still be the pinned files. Assigned first,
+    # as `current` is above: in a command followed by `||` bash ignores -e, inside its
+    # substitutions too, and manifest() would go on past a git that could not list the
+    # untracked files as if the tree held none.
+    again=$(manifest)
+    [ "$again" = "$(cat "$pins")" ] || fail "guarded files changed during the build or the tests"
     echo "locked paths: the guarded files still match their pins"
     ;;
 esac
