@@ -527,6 +527,10 @@ std::thread_local! {
     /// Whether the runner's panic hook has seen the `Probe` this thread raised last
     /// (`hook_stands`).
     static PROBED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// The first panic that a thread this one started for an entry (`on_a_thread`) kept, and
+    /// that this thread, the scenario's, has not raised again yet (`raise_kept`).
+    static KEPT: Arc<Mutex<Option<Raised>>> = Arc::new(Mutex::new(None));
 }
 
 /// What the runner raises on a scenario's thread, and catches, to see that its panic hook
@@ -638,8 +642,16 @@ pub fn run_on_a_thread(secs: u64, body: impl FnOnce() + Send + 'static) -> Ran {
         .spawn(move || {
             // The hook stands before the body, or the body is not run; and after it, where
             // a harness the body made may have replaced it: else the run is not judged.
-            let run = hook_stands()
-                .then(|| ended(std::panic::catch_unwind(std::panic::AssertUnwindSafe(body))));
+            // And a panic kept on a thread the body started, not raised by its end, is
+            // raised then: a body that returns over one has not finished.
+            let run = hook_stands().then(|| {
+                ended(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || {
+                        body();
+                        raise_kept();
+                    },
+                )))
+            });
             let _ = done.send(run.filter(|_| hook_stands()));
         })
         .expect("a thread to run the scenario on");
@@ -727,6 +739,20 @@ pub fn rejoin<T>(joined: std::thread::Result<Result<T, Raised>>) -> T {
     }
 }
 
+/// Raise again on this thread, the scenario's, the panic a thread it started for an entry
+/// kept (`on_a_thread`), if one did and it is not raised yet: as from where it was first
+/// raised ([`rejoin`]). The suite does so after every turn it waits (`yield_once`), where it
+/// finds such a thread finished, where it waits for one, and as the scenario's body returns
+/// ([`run_on_a_thread`]). So a panic the engine raises on such a thread is the scenario's
+/// before a check fails in its stead that the suite waited for meanwhile. What stays out of
+/// reach is a panic raised there as the check fails, and not kept yet.
+fn raise_kept() {
+    let kept = KEPT.with(|k| k.lock().unwrap_or_else(PoisonError::into_inner).take());
+    if let Some(raised) = kept {
+        rejoin::<()>(Ok(Err(raised)));
+    }
+}
+
 std::thread_local! {
     /// How many [`lands`] wait on this thread: each holds the suite's futures but its own.
     static HOLDING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -792,7 +818,9 @@ fn held_by(holder: Option<(bool, u32)>, first: bool, before: u32) -> Option<(boo
 }
 
 /// A turn of the runtime: this task yields, so every other task it has ready runs, and so
-/// does the other future of a [`both`].
+/// does the other future of a [`both`]. A panic that a thread of the scenario's own has
+/// kept by then is raised here (`raise_kept`), before the suite looks at what it waited
+/// that turn for.
 async fn yield_once() {
     let mut yielded = false;
     poll_fn(|cx| {
@@ -805,6 +833,7 @@ async fn yield_once() {
         }
     })
     .await;
+    raise_kept();
 }
 
 /// Drive `f` until it waits on the suite, or finishes, then drop it, and let that land
@@ -1253,10 +1282,12 @@ fn flag() -> Arc<AtomicBool> {
 
 /// A future run on a thread of its own by an executor of the suite's ([`on_a_thread`]),
 /// while the suite's task goes on, and the engine's runtime keeps running on its thread.
+/// Dropped before it has finished, it is polled no more, and its thread ends.
 struct Side<T> {
     now: Arc<Mutex<SideNow>>,
-    /// Its output, or the panic it raised, once its thread has finished.
-    out: Arc<Mutex<Option<Result<T, Raised>>>>,
+    /// Its output, once its thread has finished, unless it panicked: its panic is kept
+    /// for the scenario's thread to raise (`raise_kept`).
+    out: Arc<Mutex<Option<T>>>,
 }
 
 /// How a [`Side`] stands, shared with its thread.
@@ -1270,6 +1301,8 @@ struct SideNow {
     held: bool,
     /// Its thread has finished.
     done: bool,
+    /// Its [`Side`] was dropped: it is polled no more.
+    dropped: bool,
     /// How many polls of it have begun, and how many have ended.
     polls: usize,
     ended: usize,
@@ -1304,8 +1337,10 @@ impl Wake for SideWaker {
 /// Run the future `entry` makes on a thread of its own, which the harness starts as the
 /// engine needs ([`Harness::spawn_thread`]), with an executor of the suite's there, polled
 /// whenever it is woken: an entry that waits at the mint (whose reads the mint holds, say)
-/// blocks that thread, never the suite's, whose runtime runs on. A panic there is raised
-/// again where [`Side::joined`] waits for it.
+/// blocks that thread, never the suite's, whose runtime runs on. A panic there is kept, and
+/// raised again on the scenario's thread (`raise_kept`): at the turn of a wait of the
+/// suite's that follows, where the suite finds the thread finished ([`Side::waits`]), or
+/// where it waits for it ([`Side::joined`]).
 fn on_a_thread<H, T, E, F>(h: &H, entry: E) -> Side<T>
 where
     H: Harness,
@@ -1313,12 +1348,25 @@ where
     E: FnOnce() -> F + Send + 'static,
     F: Future<Output = T>,
 {
+    side(|work| h.spawn_thread(work), entry)
+}
+
+/// [`on_a_thread`], the thread started by `spawn`: it needs no engine (`side_tests`).
+fn side<T, E, F>(spawn: impl FnOnce(Box<dyn FnOnce() + Send>), entry: E) -> Side<T>
+where
+    T: Send + 'static,
+    E: FnOnce() -> F + Send + 'static,
+    F: Future<Output = T>,
+{
     let now = Arc::new(Mutex::new(SideNow::default()));
     let out = Arc::new(Mutex::new(None));
     let (shared, slot) = (now.clone(), out.clone());
-    h.spawn_thread(Box::new(move || {
+    let kept = KEPT.with(Arc::clone);
+    spawn(Box::new(move || {
         let state = || shared.lock().unwrap_or_else(PoisonError::into_inner);
         state().thread = Some(std::thread::current());
+        // The entry's output, or `None` if its `Side` was dropped first: the entry is then
+        // dropped here, as this returns.
         let ran = keep_panic(|| {
             let waker = Waker::from(Arc::new(SideWaker {
                 now: shared.clone(),
@@ -1328,23 +1376,35 @@ where
             loop {
                 {
                     let mut now = state();
+                    if now.dropped {
+                        break None;
+                    }
                     now.woken = false;
                     now.polls += 1;
                 }
                 if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
-                    break v;
+                    break Some(v);
                 }
                 let mut now = state();
                 now.ended += 1;
                 now.idle = !now.woken;
-                while now.idle || now.held {
+                while (now.idle || now.held) && !now.dropped {
                     drop(now);
                     std::thread::park_timeout(Duration::from_millis(5));
                     now = state();
                 }
             }
         });
-        *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(ran);
+        match ran {
+            Ok(v) => *slot.lock().unwrap_or_else(PoisonError::into_inner) = v,
+            Err(raised) => {
+                // The first is the one the scenario's thread raises.
+                let mut first = kept.lock().unwrap_or_else(PoisonError::into_inner);
+                if first.is_none() {
+                    *first = Some(raised);
+                }
+            }
+        }
         let waiter = {
             let mut now = state();
             now.done = true;
@@ -1412,6 +1472,9 @@ impl<T> Side<T> {
                 (now.idle, now.done, now.polls, now.ended)
             };
             if done {
+                // Its panic, if it finished by one, is the scenario's here, before the
+                // check this answers fails in its stead.
+                raise_kept();
                 return false;
             }
             if h.answers_under_way() {
@@ -1430,7 +1493,7 @@ impl<T> Side<T> {
     }
 
     /// Its output, once its thread has finished: this task waits for it, its runtime
-    /// running meanwhile.
+    /// running meanwhile. A panic it raised is raised again here (`raise_kept`).
     async fn joined(self) -> T {
         poll_fn(|cx| {
             let mut now = self.now();
@@ -1441,16 +1504,38 @@ impl<T> Side<T> {
             Poll::Pending
         })
         .await;
+        raise_kept();
         let out = self
             .out
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        rejoin(Ok(out.unwrap_or_else(|| {
-            unreachable!("a side's thread sets its output before it is done")
-        })))
+        out.unwrap_or_else(|| {
+            unreachable!("a side's thread leaves its output, or keeps its panic, before it is done")
+        })
     }
 }
+
+impl<T> Drop for Side<T> {
+    /// Its thread ends: the entry, if it has not finished, is polled no more, and is dropped
+    /// on that thread, its connection closing, once the poll it is in, if any, returns. So a
+    /// side left behind as a check of the suite's fails, held or waiting, does not run on
+    /// for the life of the process, holding its engine.
+    fn drop(&mut self) {
+        let thread = {
+            let mut now = self.now();
+            now.dropped = true;
+            now.thread.clone()
+        };
+        if let Some(t) = thread {
+            t.unpark();
+        }
+    }
+}
+
+/// What the suite does with an entry on a thread of its own, whatever the entry is.
+#[cfg(test)]
+mod side_tests;
 
 const SECOND: Duration = Duration::from_secs(1);
 

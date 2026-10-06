@@ -623,6 +623,25 @@ impl Drop for ReadOut {
     }
 }
 
+/// A swap's outcome handed to a task of the seeder's own, not yet settled, while it lives
+/// (`Ledger::landing`). The task drops it as it ends; a task that panics, or is dropped
+/// unpolled with its runtime, drops it too, so the thread that brings a read back once the
+/// seeder has settled (`deliver_as_read`) is not left waiting for a count that never falls.
+struct Landing(MockNetwork);
+
+impl Landing {
+    fn begun(net: MockNetwork) -> Self {
+        net.ledger().landing += 1;
+        Self(net)
+    }
+}
+
+impl Drop for Landing {
+    fn drop(&mut self) {
+        self.0.ledger().landing -= 1;
+    }
+}
+
 /// A key request or keyset listing answered from another thread ([`Answers::Woken`]).
 #[derive(Default)]
 struct Call {
@@ -12097,12 +12116,12 @@ impl MockSession {
                     .clone()
                     .filter(|_| e3.flaw.is_some_and(SeederFlaw::settles_after_a_wake))
                 {
-                    net.ledger().landing += 1;
+                    let landing = Landing::begun(net);
                     spawn(Box::pin(async move {
                         next_poll().await;
                         e3.land_woken_early(id, &settle, &token, outputs, outcome)
                             .await;
-                        net.ledger().landing -= 1;
+                        drop(landing);
                     }));
                     return;
                 }
@@ -12122,11 +12141,11 @@ impl MockSession {
                 }
                 match spawn {
                     Some(spawn) => {
-                        net.ledger().landing += 1;
+                        let landing = Landing::begun(net);
                         spawn(Box::pin(async move {
                             next_poll().await;
                             land();
-                            net.ledger().landing -= 1;
+                            drop(landing);
                         }));
                     }
                     None => land(),

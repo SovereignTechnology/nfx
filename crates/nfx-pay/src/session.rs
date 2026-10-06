@@ -507,7 +507,11 @@ pub struct EngineParams {
 /// once it has been polled 100 times more with no answer under way, and is pending still.
 /// The suite does not wait for its own runtime to take a turn between each two of those
 /// polls: what an entry on a thread awaits of a task of the engine's own on the suite's
-/// runtime, it awaits by that task's wake, not by polling for it.
+/// runtime, it awaits by that task's wake, not by polling for it. A panic raised on such a
+/// thread, in the engine's code that the entry runs there, the suite keeps, and raises
+/// again on its own thread at the next turn of a wait, so that it is the scenario's before
+/// a check fails for want of what the entry was to do. An entry the suite leaves behind
+/// there, a check having failed, it polls no more, and drops.
 ///
 /// It waits 5 s in real time at most for an engine to settle, far above any honest answer,
 /// and a scenario that hangs is timed out by its runner. A release that races the clock runs
