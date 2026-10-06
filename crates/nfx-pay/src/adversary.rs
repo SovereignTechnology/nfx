@@ -3361,8 +3361,9 @@ async fn a_refused_key_request_wakes_its_payment<H: Harness>(h: &H) {
 /// (NFX-07 §3 step 3 has the seeder ask once a second for each mint, so a second payment
 /// of that second waits for the first's). The seeder holds no keys, its key requests held.
 /// A payment asks the mint, and waits. A payment of another peer, on a task of its own,
-/// arrives in the same second, and waits too. The mint answers: both are acknowledged. So
-/// is a payment that waits for the listing a seeder asked for at its start, held since.
+/// arrives in the same second, and waits too. The mint answers: both are acknowledged, the
+/// one that asked polled first. So is a payment that waits for the listing a seeder asked
+/// for at its start, held since.
 async fn a_listing_another_asked_for_wakes_its_payment<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let (mut s1, mut s2) = (open(h, &e, 1).await, open(h, &e, 2).await);
@@ -3389,17 +3390,19 @@ async fn a_listing_another_asked_for_wakes_its_payment<H: Harness>(h: &H) {
     settle(h).await;
     assert!(!is_set(&done), "the second payment waits for the mint too");
     release(h).await; // the mint answers
+    // The one that asked is polled first: an entry takes its own listing's answer in a later
+    // poll ([`Harness`]), and an engine may let the others that wait for it see it only then.
+    let r1 = answer_of(h, first.as_mut()).await;
+    assert!(
+        r1.as_ref().is_some_and(Result::is_ok),
+        "the payment that asked is answered: {r1:?}"
+    );
     let answered = answer_of(h, pin!(&paying)).await;
     let r = answered.as_ref().map(|(_, r)| r);
     assert!(
         r.is_some_and(Result::is_ok),
         "a payment on a task of its own that waits for a keyset listing another payment asked \
          for is woken as it comes, and answered: {r:?}"
-    );
-    let r1 = answer_of(h, first.as_mut()).await;
-    assert!(
-        r1.as_ref().is_some_and(Result::is_ok),
-        "the payment that asked is answered too: {r1:?}"
     );
     close(h, first).await;
     close(h, (answered, paying, s1)).await;
@@ -25746,7 +25749,6 @@ async fn a_payment_dropped_waiting_on_a_read<H: Harness>(
             "the payments behind P2, their tokens unreadable, are refused bad-token: {r1:?}, \
              {r2:?}"
         );
-        close(h, paying).await;
     } else {
         close(h, paying).await;
     }
@@ -26764,7 +26766,6 @@ async fn a_keyset_the_mint_does_not_list_is_bad_token<H: Harness>(h: &H, quoted:
             }
         }
     }
-    lands(h).await;
     for (i, a) in answers.iter().enumerate() {
         let which = match i % 4 {
             0 => "every proof",
@@ -28699,7 +28700,6 @@ async fn a_payment_on_its_path<H: Harness>(
             }
         }
         if !dropped_early && look == Look::Turn {
-            lands(h).await; // what the hellos behind it closed
             let (peer, hello) = (h.peer(1), h.hello());
             let quoted = {
                 let mut f = Box::pin(e.hello(&peer, &hello));
@@ -29908,7 +29908,7 @@ async fn a_turn_at_the_deadline<H: Harness>(
         _ => {}
     }
     let (reads, listings, keys) = (h.state_reads(), h.listing_requests(), keys_asked(h));
-    if let Some(mut paying) = paying.take() {
+    if let Some(paying) = paying.as_mut() {
         let came = match (late, secs) {
             (_, 59) => format!("P2's turn came a second before its own deadline, {how}"),
             (LateTurn::Held, 60) => {
@@ -29970,7 +29970,6 @@ async fn a_turn_at_the_deadline<H: Harness>(
                 "{came}: it asks the mint for no keys ({what})"
             );
         }
-        close(h, paying).await;
     }
     close(h, paying).await;
     close(h, first).await;
