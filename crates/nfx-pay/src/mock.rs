@@ -11,7 +11,7 @@
 //!   reader's next poll. Or every call the seeder's entries and sweeps send to the mint and
 //!   await (their reads, swaps, key requests and keyset listings) is answered from another
 //!   thread that wakes the caller a few milliseconds later, as a real mint's answer comes
-//!   back ([`Answers::Woken`] says which calls come back with another).
+//!   back (`Answers::Woken` says which calls come back with another).
 //! - The seeder and the viewers keep time on the harness's clock, so debt ages, deadlines
 //!   pass and answers can be late. Moving the clock wakes whatever waits on it.
 //!
@@ -557,7 +557,7 @@ pub struct Timing {
     /// The mint answers every call from another thread ([`MockHarness::with_woken_answers`]);
     /// otherwise each in the poll that sends it.
     pub woken: bool,
-    /// How long such an answer takes to come back; [`WOKEN_AFTER`] if `None`.
+    /// How long such an answer takes to come back; `WOKEN_AFTER` if `None`.
     pub answer_after: Option<Duration>,
     /// Each answer takes a different time, from none to twice that, so that answers
     /// overtake one another.
@@ -14832,7 +14832,7 @@ impl MockHarness {
     /// An honest harness whose mint answers each call the seeder's entries and sweeps await
     /// (a read of swap state, a swap, a key request or a keyset listing) from another
     /// thread, a few milliseconds after it reaches the mint, and wakes its caller, as a real
-    /// mint's answer comes back ([`Answers::Woken`]): at no count of polls, and with the
+    /// mint's answer comes back (`Answers::Woken`): at no count of polls, and with the
     /// engine's own state changing off the suite's thread (a swap's completion runs there).
     /// An engine whose calls are real round trips passes the suite so.
     #[must_use]

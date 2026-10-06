@@ -759,7 +759,7 @@ std::thread_local! {
 }
 
 /// Run two futures on this task, always polling `a` first: `a` reaches its first wait
-/// before `b` starts. While one of them waits in [`lands`], it alone is polled.
+/// before `b` starts. While one of them waits in `lands`, it alone is polled.
 pub async fn both<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
     let (mut a, mut b) = (pin!(a), pin!(b));
     let (mut ra, mut rb) = (None, None);
@@ -18778,7 +18778,7 @@ async fn a_payment_made_so<H: Harness>(
 const MIXED_PRICE: u64 = 3 * (1 << 32) - 2;
 
 /// Every payment of an honest watcher on the first ledger it made holds at most 64 proofs,
-/// however it is made, whatever came before it ([`MADE`] and [`histories`]): each pays 65 sat
+/// however it is made, whatever came before it (`MADE` and `histories`): each pays 65 sat
 /// or more, at 65 sat a chunk, and the seeder takes it.
 pub async fn every_payment_on_its_first_ledger_holds_at_most_64_proofs<H: Harness>(h: &H) {
     every_payment_holds_at_most_64_proofs(h, LEDGERS[0], false).await;
@@ -18791,7 +18791,7 @@ pub async fn every_payment_on_another_videos_ledger_holds_at_most_64_proofs<H: H
 
 /// Every selection of more than 64 proofs is swapped to fewer before it is paid with, on the
 /// first ledger the watcher made, however the payment is made, whatever came before it
-/// ([`MADE`] and [`histories`]): each is drawn from an older keyset's proofs topped up with
+/// (`MADE` and `histories`): each is drawn from an older keyset's proofs topped up with
 /// fresh ones, 65 in all, and the seeder takes it.
 pub async fn every_mixed_selection_on_its_first_ledger_is_swapped_to_fewer<H: Harness>(h: &H) {
     every_payment_holds_at_most_64_proofs(h, LEDGERS[0], true).await;
@@ -18841,7 +18841,7 @@ macro_rules! waits_from_its_sending {
     ($($name:ident: $on:expr, $how:expr, $by:expr, $beside:expr;)*) => {
         $(
             /// A payment's 180 s count from its own sending (NFX-07 §3a): a part of the table
-            /// of waits ([`every_payment_waits_from_its_sending`]), by the ledger that pays,
+            /// of waits (`every_payment_waits_from_its_sending`), by the ledger that pays,
             /// how the payment is made, the call that catches it up and whose history came
             /// before it.
             pub async fn $name<H: Harness>(h: &H) {
@@ -19121,7 +19121,7 @@ async fn a_payment_waits_from_its_sending<H: Harness>(
 }
 
 /// The due point holds for every payment on the first ledger the watcher made, whatever
-/// came before it ([`the_due_point_holds_whatever_came_before`]).
+/// came before it (`the_due_point_holds_whatever_came_before`).
 pub async fn the_due_point_holds_on_its_first_ledger_whatever_came_before<H: Harness>(h: &H) {
     the_due_point_holds_whatever_came_before(h, LEDGERS[0]).await;
 }
@@ -29001,7 +29001,7 @@ async fn payments_on_these_paths_keep_nothing<H: Harness>(h: &H, paths: &[Path])
 /// A payment that found its account's turn free, waited for it and took it, or arrived after
 /// a deadline freed it, refused by any check or dropped before its swap is sent, leaves
 /// nothing behind: the first three paths of the matrix of payments
-/// ([`payments_on_these_paths_keep_nothing`]).
+/// (`payments_on_these_paths_keep_nothing`).
 pub async fn payments_on_a_live_turn_keep_nothing<H: Harness>(h: &H) {
     let paths = [Path::Free, Path::Waited, Path::AfterTheDeadline];
     payments_on_these_paths_keep_nothing(h, &paths).await;
@@ -30225,7 +30225,7 @@ async fn late_turns_run_no_check<H: Harness>(h: &H, late: LateTurn) {
 }
 
 /// A payment that takes a dead turn over only in its own deadline's second, or later, runs
-/// none of its checks: [`late_turns_run_no_check`].
+/// none of its checks: `late_turns_run_no_check`.
 pub async fn a_turn_taken_over_at_the_deadline_runs_no_check<H: Harness>(h: &H) {
     late_turns_run_no_check(h, LateTurn::TakenOver).await;
 }
