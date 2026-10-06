@@ -617,9 +617,11 @@ fn ended<T>(run: std::thread::Result<T>) -> Result<T, Raised> {
 /// (`std::panic::set_hook`, `std::panic::take_hook`): no harness, no engine, and no other
 /// test of the same binary. A hook set over the runner's that hands every panic on to the
 /// one it found leaves it standing, and is handed the runner's own two panics with the
-/// rest. What the two looks cannot see is a hook replaced and put back while `body` ran,
-/// and one that hands on some panics and not others. The rule is that thread's: `body`
-/// polls there whatever it runs ([`with_tasks`]).
+/// rest; but to set it is to take the hook that stood and then set the new one, and
+/// between the two the runner's does not stand for any run of the process, so it is set
+/// only while no other run is under way. What the two looks cannot see is a hook replaced
+/// and put back while `body` ran, and one that hands on some panics and not others. The
+/// rule is that thread's: `body` polls there whatever it runs ([`with_tasks`]).
 pub fn run_on_a_thread(secs: u64, body: impl FnOnce() + Send + 'static) -> Ran {
     static HOOK: std::sync::Once = std::sync::Once::new();
     HOOK.call_once(|| {
@@ -746,8 +748,14 @@ pub fn rejoin<T>(joined: std::thread::Result<Result<T, Raised>>) -> T {
 /// raised ([`rejoin`]). The suite does so after every turn it waits (`yield_once`), where it
 /// finds such a thread finished, where it waits for one, and as the scenario's body returns
 /// ([`run_on_a_thread`]). So a panic the engine raises on such a thread is the scenario's
-/// before a check fails in its stead that the suite waited for meanwhile. What stays out of
-/// reach is a panic raised there as the check fails, and not kept yet.
+/// before a check fails in its stead that the suite waited for meanwhile, a turn at a time.
+/// Two panics stay out of reach, each judged as the check that fails. One was kept since the
+/// suite last looked, where that check is made with no turn between: of an answer the suite
+/// awaited of the engine itself, say, or took at the poll that followed its last turn
+/// (`settled`). The other is raised there as the check fails, and not kept yet. And while
+/// the suite waits with no turn of its own, for an answer of the engine itself or for
+/// another such thread to finish (`Side::joined`), it raises none: where that wait never
+/// ends, the run is timed out ([`Ran::Hung`]), whatever was kept.
 fn raise_kept() {
     let kept = KEPT.with(|k| k.lock().unwrap_or_else(PoisonError::into_inner).take());
     if let Some(raised) = kept {

@@ -531,7 +531,13 @@ pub struct EngineParams {
 /// panic hook as it is: neither replaces it (`std::panic::set_hook`,
 /// `std::panic::take_hook`), as it is made or while a scenario runs, and no test does in a
 /// binary that runs the suite. A harness may set a hook of its own over the runner's (an
-/// error report, say) only if that hook hands every panic on to the one it found. The
+/// error report, say) only if that hook hands every panic on to the one it found, and only
+/// while no other scenario runs in the process: to set it is to take the hook that stood
+/// and then set the new one, and between the two the default hook stands. A scenario on
+/// another thread is reported as not judged if one of the runner's looks falls there, and a
+/// panic raised on it there goes unnoted; a second harness that takes the hook there finds
+/// the default one, and its own, set last, leaves the runner's out for good. So a harness
+/// made in a scenario's body sets none where a binary's scenarios run several at once. The
 /// runner looks before a scenario and after it, and reports a run under a hook that did not
 /// stand as not finished, whatever the scenario did. It cannot see a hook replaced and put
 /// back while a scenario ran, nor one that hands on some panics and not others: a harness
