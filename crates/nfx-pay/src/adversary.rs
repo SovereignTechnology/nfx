@@ -827,8 +827,10 @@ async fn poll_in_task<F: Future>(mut f: Pin<&mut F>) -> Option<F::Output> {
 /// output, if it is ready. So an entry that reads is left with its read out, where the
 /// mint answers it on a later poll or from another thread, however many polls the entry
 /// takes to send it; where the mint answers a read in the poll that sends it, no read is
-/// ever out, and the entry has gone on with the answer. The suite calls this once the
-/// engine has settled, so that the read is `f`'s.
+/// ever out, and the entry has gone on with the answer. A read sent since this was called
+/// is taken for `f`'s, and the engine is not let settle before `f`'s first poll: where the
+/// suite polls an entry straight after one it left with a read out went out of scope, the
+/// close of that one has not been let land.
 async fn until_read<H: Harness, F: Future>(h: &H, mut f: Pin<&mut F>) -> Option<F::Output> {
     let before = h.state_reads();
     let (start, mut quiet) = (std::time::Instant::now(), 0);
@@ -14329,9 +14331,10 @@ pub async fn a_viewer_settles_a_lost_payment_after_180_s<H: Harness>(h: &H) {
 
     // The 180 s are counted from sending, whatever comes in between.
     the_wait_counts_from_sending(h).await;
-    // Whatever the payment, and wherever its wait is counted: on either ledger, each a
-    // scenario of its own ([`every_payment_on_its_first_ledger_waits_from_its_sending`],
-    // [`every_payment_on_another_videos_ledger_waits_from_its_sending`]).
+    // Whatever the payment, and wherever its wait is counted: the table of waits
+    // ([`every_payment_waits_from_its_sending`]), a scenario of its own for each combination
+    // of the ledger that pays, the way the payment is made, the ledger its history came on
+    // and the call that catches a closed session's payment up (`waits_from_its_sending!`).
 }
 
 /// The 180 s are counted from sending, and nothing that comes before they are up starts

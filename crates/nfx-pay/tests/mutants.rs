@@ -47,14 +47,15 @@ fn v(flaw: V) -> MockHarness {
     MockHarness::with_viewer_flaw(flaw)
 }
 
-/// A flawed seeder whose mint answers reads on a later poll: for defects the suite can show
-/// only where a read spans polls of its entry. A read is abandoned only as its entry is
-/// dropped between sending it and its return, and a synchronous read returns in the poll
-/// that sends it. A payment that took a dead turn over waits on no read but its own: of its
-/// second, only a `hello`'s read can come before it, and that serves no payment. And a read
-/// back while a later second's read is still out needs one held read to return before
-/// another: reads the mint holds on threads go on together, or each as its own wait ends,
-/// in an order real time alone sets.
+/// A flawed seeder whose mint answers reads on a later poll. Most defects registered here
+/// are registered on the synchronous harness too, and must fail the suite on round trips as
+/// well; the rest the suite can show only where a read spans polls of its entry. A read is
+/// abandoned only as its entry is dropped between sending it and its return, and a
+/// synchronous read returns in the poll that sends it. A payment that took a dead turn over
+/// waits on no read but its own: of its second, only a `hello`'s read can come before it,
+/// and that serves no payment. And a read back while a later second's read is still out
+/// needs one held read to return before another: reads the mint holds on threads go on
+/// together, or each as its own wait ends, in an order real time alone sets.
 fn r(flaw: S) -> MockHarness {
     MockHarness::with_seeder_flaw_round_trip(flaw)
 }
@@ -63,14 +64,18 @@ fn r(flaw: S) -> MockHarness {
 /// swap, a key request, a keyset listing) from another thread a few milliseconds later,
 /// waking its caller, as a real mint's answer comes back. Most defects registered here fail
 /// the check they fail on round trips; a few fail another, in the scenario each is
-/// registered with.
+/// registered with; and a few have no round-trip entry, among them each read sent without
+/// asking to be woken (`S::ReadUnwoken` and the like): on round trips such a read is back at
+/// its reader's next poll all the same.
 fn w(flaw: S) -> MockHarness {
     MockHarness::with_seeder_flaw_woken(flaw)
 }
 
 /// The same, the seeder settling each swap's outcome on a task of its own, on the runtime
 /// the scenario runs in: for defects that can arise only where the seeder has such tasks,
-/// one of which wakes an entry before it settles what the wake announces.
+/// one of which wakes an entry before it settles what the wake announces. The other
+/// defects registered here, each of a wake that never comes, are registered with another
+/// harness too: they must fail against such a seeder as well.
 fn t(flaw: S) -> MockHarness {
     let rt = tokio::runtime::Handle::current();
     MockHarness::with_seeder_flaw_on_tasks(

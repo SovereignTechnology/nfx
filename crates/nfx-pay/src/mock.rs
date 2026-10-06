@@ -551,7 +551,7 @@ pub type Enter = Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
 /// How an honest seeder and its mint take their time, beyond the harnesses' own
 /// ([`MockHarness::with_timing`]). Each is a way an honest engine or a real mint may
 /// behave, which NFX-07 leaves free, so the suite must pass every one: it judges progress by
-/// answers and settling, never by when or in how many polls they come.
+/// answers and settling, never by one poll or one turn, within the limits [`Harness`] gives.
 #[derive(Clone, Default)]
 pub struct Timing {
     /// The mint answers every call from another thread ([`MockHarness::with_woken_answers`]);
@@ -4676,11 +4676,13 @@ pub enum SeederFlaw {
     /// The same as [`SeederFlaw::KeysetListingWokenEarly`] at every quoted mint but the
     /// first.
     OtherMintKeysetListingWokenEarly,
-    /// A payment that waits for a keyset listing another entry asked for, its answer held,
-    /// does not ask to be woken as it comes: only the one that asked is.
+    /// A payment that waits at step 3 for a keyset listing it did not ask for (another
+    /// entry's, or one the seeder asked for at its start), its answer held, does not ask to
+    /// be woken as it comes: a payment that asked for it is. The keyset rule's wait for such
+    /// a listing is not touched.
     OthersListingUnwoken,
-    /// The same as [`SeederFlaw::ListingWokenEarly`] for a payment that waits for a keyset
-    /// listing another entry asked for.
+    /// The same as [`SeederFlaw::ListingWokenEarly`] for a payment that waits at step 3 for
+    /// a keyset listing it did not ask for.
     OthersListingWokenEarly,
 }
 
@@ -9773,7 +9775,7 @@ impl Inner {
         let listing_seen = Arc::new(AtomicBool::new(true));
         let other_mint = self.other_mint(mint);
         // The flaws planted on one kind of answer alone: a refusal of the keys, an answer
-        // of a mint other than the first, a listing another entry asked for (`others`).
+        // of a mint other than the first, a listing the payment did not ask for (`others`).
         let keys_waker = |cx: &Context<'_>| {
             let refused = self.net.refuses_keys(mint);
             if self.has(SeederFlaw::KeysUnwoken)
@@ -14832,7 +14834,9 @@ impl MockHarness {
     }
 
     /// A round-trip harness ([`MockHarness::with_round_trip_reads`]) whose seeders carry
-    /// `flaw`: for defects the suite can show only where a read spans polls of its entry.
+    /// `flaw`. Most defects registered against it (`tests/mutants.rs`) are registered
+    /// against [`MockHarness::with_seeder_flaw`] too, and must fail the suite on round trips
+    /// as well; the rest the suite can show only where a read spans polls of its entry.
     /// A read is abandoned only as its entry is dropped between sending it and its return,
     /// and a synchronous read returns in the poll that sends it. A payment that took a dead
     /// turn over waits on no read but its own: of its second, only a `hello`'s read can come
@@ -14867,8 +14871,11 @@ impl MockHarness {
     /// ([`MockHarness::with_woken_answers`]) and whose seeders carry `flaw`: the suite must
     /// fail against it too. Most defects fail there at the check they fail where the mint
     /// answers on a later poll; a few fail at another, where an answer that comes by a wake
-    /// leaves a different check first (`tests/mutants.rs` registers each with the scenario
-    /// that catches it).
+    /// leaves a different check first; and a few are registered there and not where the mint
+    /// answers on a later poll, among them each read sent without asking to be woken
+    /// ([`SeederFlaw::ReadUnwoken`] and the like): answered on a later poll, such a read is
+    /// back at its reader's next poll all the same (`tests/mutants.rs` registers each with
+    /// the scenario that catches it).
     #[must_use]
     pub fn with_seeder_flaw_woken(flaw: SeederFlaw) -> Self {
         let h = Self::with_seeder_flaw(flaw);
@@ -14879,7 +14886,9 @@ impl MockHarness {
     /// The same, the seeders settling each swap's outcome on a task of their own, started
     /// with `spawn` ([`Timing::spawn`]): for defects that can arise only where the seeder
     /// has such tasks (it wakes an entry from one before it settles what the wake
-    /// announces).
+    /// announces), and for those of a wake that never comes which `tests/mutants.rs`
+    /// registers there too: they must fail the suite there as where the seeder has no
+    /// such tasks.
     #[must_use]
     pub fn with_seeder_flaw_on_tasks(flaw: SeederFlaw, spawn: Spawner) -> Self {
         let h = Self::with_seeder_flaw_woken(flaw);

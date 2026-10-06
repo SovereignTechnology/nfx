@@ -165,12 +165,11 @@ pub trait SeederSession {
 /// the seeder (a payment left unsettled by a closed session included), and the count of
 /// `mint-unavailable` answers in a row. A seeder is its long-term identity, never a
 /// transport identity where it announces a long-term one (NFX-07 §3, §3a): the ledger lasts
-/// as long as the watcher's own
-/// identity toward it, which the watcher keeps while a payment of the ledger is not yet
-/// settled, and the standing as long as the wallet the watcher pays from, so a lying seeder
-/// takes one payment per seeder identity the watcher pays. Implementations: the real wallet-backed
-/// viewer (locked until the M2 security stage) and [`crate::mock::MockViewer`]. It keeps
-/// time on the harness's clock.
+/// as long as the watcher's own identity toward it, which the watcher keeps while a payment
+/// of the ledger is not yet settled, and the standing as long as the wallet the watcher pays
+/// from, so a lying seeder takes one payment per seeder identity the watcher pays.
+/// Implementations: the real wallet-backed viewer (locked until the M2 security stage) and
+/// [`crate::mock::MockViewer`]. It keeps time on the harness's clock.
 #[allow(async_fn_in_trait)]
 pub trait Viewer {
     /// A ledger for another video of the same seeder, sharing this one's standing: one made
@@ -184,8 +183,8 @@ pub trait Viewer {
     /// Start a session on its quote. A quote whose position equals the ledger plus a
     /// payment still unsettled, one awaiting a quote, or one whose reclaim is incomplete,
     /// settles it as accepted (and cancels that reclaim); one equal to the ledger settles
-    /// nothing, and leaves such a reclaim incomplete. `Err`,
-    /// and the viewer stops, when the quote is not honest about the account:
+    /// nothing, and leaves such a reclaim incomplete. `Err`, and the viewer stops, when the
+    /// quote is not honest about the account:
     /// - it claims more chunks than were requested of its video and not refused, whatever
     ///   the viewer paid for: credit it holds, or a payment the quote settles; nothing a
     ///   ledger for another of the seeder's videos holds counts;
@@ -233,20 +232,20 @@ pub trait Viewer {
     /// owes or holds counts for nothing. It pays ahead only as the first `due` after a
     /// refusal on this ledger's open session ([`Viewer::refused`]): if this call pays
     /// nothing, for whichever reason below or because nothing is payable, the refusal
-    /// licenses nothing later. Its token, as
-    /// [`Viewer::last_pay`]'s, meets the seeder's structure check (NFX-07 §3 step 1): of one
-    /// mint, a quoted one by its exact URL, in `sat`, of at most 64 proofs, none locked (open
-    /// mode), each with its DLEQ proof. A selection that would hold more than 64 proofs is
-    /// swapped to fewer first. The due point, the pay-ahead and the token hold so for every
-    /// payment, on whichever of the seeder's ledgers, and whatever came before it, on that
-    /// ledger or on another of the seeder's: an ack, a `mint-unavailable` answer, a reclaim
-    /// (of a refused payment, or of one a closed session left, by its own ledger or another
-    /// video's, in a session or not; its proofs back at once, late, or less those lost to
-    /// the expiry), a quote that settled a payment, a resumed session, credit held or chunks
-    /// owed, a quote or a `hello` refused, its tries used and restored, or another video's
-    /// payment in flight ahead of it. A payment's 180 s count from its own sending (NFX-07
-    /// §3a), whatever it is and wherever they are counted. One is in flight toward the seeder
-    /// at a time, across its videos, and none is made:
+    /// licenses nothing later. Its token, as [`Viewer::last_pay`]'s, meets the seeder's
+    /// structure check (NFX-07 §3 step 1): of one mint, a quoted one by its exact URL, in
+    /// `sat`, of at most 64 proofs, none locked (open mode), each with its DLEQ proof. A
+    /// selection that would hold more than 64 proofs is swapped to fewer first. The due
+    /// point, the pay-ahead and the token hold so for every payment, on whichever of the
+    /// seeder's ledgers, and whatever came before it, on that ledger or on another of the
+    /// seeder's: an ack, a `mint-unavailable` answer, a reclaim (of a refused payment, or of
+    /// one a closed session left, by its own ledger or another video's, in a session or not;
+    /// its proofs back at once, late, or less those lost to the expiry), a quote that settled
+    /// a payment, a resumed session, credit held or chunks owed, a quote or a `hello`
+    /// refused, its tries used and restored, or another video's payment in flight ahead of
+    /// it. A payment's 180 s count from its own sending (NFX-07 §3a), whatever it is and
+    /// wherever they are counted. One is in flight toward the seeder at a time, across its
+    /// videos, and none is made:
     /// - once the viewer has stopped, ahead after a refusal included;
     /// - while a reclaim is incomplete or a payment awaits a quote;
     /// - after three `mint-unavailable` answers to its payments in a row, until a new
@@ -338,11 +337,11 @@ pub trait Viewer {
     /// Whether paying waits for a new session: this ledger holds a payment whose proofs
     /// were found spent, awaiting a quote that shows it accepted (the watcher opens a new
     /// session for this video), or the standing has used its three `mint-unavailable`
-    /// tries (any new session's accepted quote restores them). A quote equal to the ledger leaves a
-    /// payment waiting, and the watcher paying nothing. A viewer whose standing has stopped
-    /// paying the seeder (not merely awaiting a quote) awaits no quote, whatever it holds: no
-    /// new session makes it pay. A stop holds whatever the viewer waits on when it comes, a
-    /// payment awaiting a quote included.
+    /// tries (any new session's accepted quote restores them). A quote equal to the ledger
+    /// leaves a payment waiting, and the watcher paying nothing. A viewer whose standing has
+    /// stopped paying the seeder (not merely awaiting a quote) awaits no quote, whatever it
+    /// holds: no new session makes it pay. A stop holds whatever the viewer waits on when it
+    /// comes, a payment awaiting a quote included.
     fn awaiting_quote(&self) -> bool;
 }
 
@@ -434,7 +433,7 @@ pub struct EngineParams {
 /// engine with an in-process mint in the M2 security stage.
 ///
 /// **How the suite waits.** It judges an engine's progress by the answers its calls await
-/// and by the engine settling, never by how many polls an answer or a step takes. It drives
+/// and by the engine settling, never by a single poll or turn of the runtime. It drives
 /// the engine's futures on the runtime its test runs it in, polled with their task's waker,
 /// and yields to that runtime between polls, so that tasks the engine spawns or wakes run
 /// too; it never blocks that runtime's thread while it waits for the engine. An engine
@@ -458,7 +457,20 @@ pub struct EngineParams {
 ///   (it drops a session, or a `hello` or a `pay` not yet answered) it lets the engine
 ///   settle before it acts again, the entries it polls on its own task not polled
 ///   meanwhile: an engine may take any of these on a task of its own, and stamp a close
-///   with the time it takes it;
+///   with the time it takes it. A few scenarios do otherwise. Some move the clock and go
+///   on with an entry at once, with no settling first: the suite then waits for the answer
+///   of an entry on a task of its own that the move wakes, or polls a payment it drives
+///   (at that payment's own deadline, `hello`s waiting behind it; or before the runtime
+///   polls a payment on a task of its own that the same move wakes, so that the one it
+///   drives takes a dead turn over first). That last poll sets the order only against an
+///   engine whose entry, polled, judges a turn's deadline by the clock as it then stands,
+///   as the mock's does: where an engine takes the clock on a task of its own, the payment
+///   on the task may take the turn first, and the case then shows no payment woken at its
+///   deadline behind one that arrived after it. And a connection a scenario lets go out
+///   of scope (a session opened for its quote alone, say, or an entry not yet answered,
+///   left with a read out) closes there, the suite going on to its next step at once. So
+///   an engine that takes a clock move or a close on a task of its own may be polled
+///   before that task has run;
 /// - it reads what the engine holds ([`Harness::identities_held`]) and a session's ban only
 ///   once the engine has settled since the suite last acted, an answer it took and a
 ///   connection that closed as a session went out of scope included.
@@ -468,10 +480,10 @@ pub struct EngineParams {
 /// is not tied to the `pay`'s connection (NFX-07 §3 step 5). An entry (a `hello` or a
 /// `pay`) awaits its own reads, key requests and keyset listings, and takes an answer that
 /// has woken it in a later poll: between its polls it sends its mint nothing more, so the
-/// suite sets the order of two entries' steps by the order it polls them in. It may reach
-/// the engine through tasks of the engine's own first, and its answer and its wakes may
-/// come back through them. What an entry decides with no call under way (a refusal as it
-/// arrives, say) it answers once it has decided it.
+/// suite sets the order of the steps of two entries it polls on its own task by the order
+/// it polls them in. It may reach the engine through tasks of the engine's own first, and
+/// its answer and its wakes may come back through them. What an entry decides with no call
+/// under way (a refusal as it arrives, say) it answers once it has decided it.
 ///
 /// **An entry on a task of its own** is a task of the runtime the suite runs in, which that
 /// runtime polls when it is woken, in turn with the engine's own tasks; the suite never

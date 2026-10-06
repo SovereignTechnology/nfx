@@ -455,9 +455,11 @@ fn the_suite_makes_no_bare_unwrap() {
 
 #[test]
 fn the_suite_closes_connections_through_its_helper() {
-    // From its scenarios' helpers on, the suite drops a session or an entry only through
-    // `close`, which lets the close land before it goes on. A bare `drop` there is a `Drop`
-    // impl's, or the guard's that lets the mint's held reads go on, which is no connection.
+    // From its scenarios' helpers on, the suite's code writes `drop(` on no session and no
+    // entry: `close` stands there, and lets the close land before the suite goes on. A bare
+    // `drop` there is a `Drop` impl's, or the guard's that lets the mint's held reads go on,
+    // which is no connection. This reads the text for `drop(` and no more: a session or an
+    // entry that closes as it goes out of scope, or is moved into a call, passes it.
     let from = suite_line(|l| l.starts_with("const SECOND: Duration")) as usize;
     let bare: Vec<usize> = (1..)
         .zip(code_lines(SUITE))
