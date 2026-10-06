@@ -413,18 +413,15 @@ NFX-05 byte formats.
     `pagehide`: the browser frees its locks as it unloads the page (Web Locks §2.6), and
     another page may take its records up. Shown again, it holds none of the locks it
     held: it lets go of each first, asks for each anew, and reads both parts of a record
-    again under the new lock before it acts (was: such a page "holds them until it
-    resumes", which the Web Locks specification does not say, and under which a page
-    shown again would have acted on a record another page had taken up). A page frozen
-    in a background tab still holds its locks. A page asks for no lock it holds.
+    again under the new lock before it acts. A page frozen in a background tab still
+    holds its locks. A page asks for no lock it holds.
   - §3: the partition's id is made once, by the first page of the partition to pay or
-    earn, before it makes any record, under the Web Lock its standings are changed under
-    (was: "a random id kept in its storage", with no page named to make it, so two
-    pages opening together could each have made one).
+    earn, before it makes any record, under the Web Lock its standings are changed
+    under, so pages that open together make one id.
   - §3: the record rule is open mode's. The two licensed-mode requests of a page that
     pays or earns that move value and are no swaps, the licence purchase and an earning
     page's `redeem`, have their records specified with licensed mode (NFX-08, NFX-09),
-    not here (was: nothing, while the rule spoke only of swaps). §3.3 points here.
+    not here (was: nothing; the rule speaks only of swaps). §3.3 points here.
   - §3: credit a page holds with a seeder is its ledger's, so its identity's: a seeder
     that refuses everything takes at most half a page's window ceiling for each video from
     each page (NFX-07 §3a, which now states that bound per identity).
