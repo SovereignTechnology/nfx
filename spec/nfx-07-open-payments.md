@@ -573,10 +573,13 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     credit, or the watcher had stopped, licenses nothing later. Nor does a licence outlive
     its session, or pass to another video's ledger. So a refusal that came while a payment
     was in flight pays nothing ahead once that payment is answered: the watcher asks
-    again, and a new refusal licenses anew. Credit on a video never grows beyond half its
-    window, so a seeder that refuses everything takes at most half the watcher's ceiling
-    for each video the watcher asks it for, under each identity the watcher takes toward
-    it: the ledger, and its credit, are that identity's (above).
+    again, and a new refusal licenses anew. What the watcher pays at a session's end is
+    not such a decision: it covers what is owed and nothing ahead, and, whether or not
+    anything is paid then, it neither uses the licence nor ends it, so the licence stays
+    for the decision that follows on that session, if one does. Credit on a video never
+    grows beyond half its window, so a seeder that refuses everything takes at most half
+    the watcher's ceiling for each video the watcher asks it for, under each identity the
+    watcher takes toward it: the ledger, and its credit, are that identity's (above).
   - Keep one payment in flight toward a seeder at a time, across its videos. One sent on a
     live session holds that place until it is answered or its 180 s are up (below): a
     second quote, a request refused or new, a timeout before then, a ledger made for
@@ -1362,15 +1365,15 @@ paths on one host are two origins.
     `,`, are the bytes of a mint URL that a reader of field values may take for more
     than themselves (RFC 9110's list, quoted string and comment; a mint URL holds no
     space, tab or `\`), so a reader that splits at commas and one that parses an RFC 9110
-    list part every value alike (was: only `%` and `,` were written so, and a value with
-    a `"` in two of its URLs was two items split at commas and one read as a list).
+    list part every value alike (with only `%` and `,` written so, a value with a `"` in
+    two of its URLs is two items split at commas and one read as a list).
   - §4: the client's token is at most 32 KiB as written, the header's limit, as well as
     at most 64 proofs: a client whose token would be longer swaps to fewer proofs first.
-    §3a says the same of a watcher's token and its `pay` line (was: only the count, which
-    does not bound the size. Measured on synthetic NUT-00 tokens of one-sat proofs with
-    64-hex secrets, their DLEQ proofs, a 16-hex keyset id and a 20-byte mint URL: 64
-    proofs are 34,912 bytes as `cashuA` and 18,845 as `cashuB`, and the most that fit
-    32 KiB are 60 as `cashuA` and 111 as `cashuB`).
+    §3a says the same of a watcher's token and its `pay` line (the count alone does not
+    bound the size. Measured on synthetic NUT-00 tokens of one-sat proofs with 64-hex
+    secrets, their DLEQ proofs, a 16-hex keyset id and a 20-byte mint URL: 64 proofs are
+    34,912 bytes as `cashuA` and 18,845 as `cashuB`, and the most that fit 32 KiB are 60
+    as `cashuA` and 111 as `cashuB`).
   - §4: "none locked" is open mode's, as §2, §3 step 1 and §3a say: a licensed video's
     `X-NFX-Pay` proofs are P2PK-locked as NFX-08 §4 requires.
   - §3a: a watcher whose wallet other clients may share pays only with outputs of a
@@ -1459,20 +1462,19 @@ paths on one host are two origins.
     or not the task serving the `pay`'s connection is waiting for it or running: a `pay`
     whose outcome was settled in time is answered with it, however late that task looks.
     What the adversary suite has assumed, now said.
-  - §3 (M2.0 twenty-ninth audit, completeness review): a `hello` for a video the seeder no
-    longer serves is judged as it arrives, by what the seeder keeps then: one it answers
-    stays answered whatever its reads learn, and one it refuses creates nothing; a peer with
-    no account whose first payment there is still in progress is refused `unknown-video`
-    until that payment lands; a session open when the video was dropped admits nothing and
-    has its payments verified, as one opened since. What "as it would before" left open.
-  - §3 step 3, after the round's completeness review: a keyset whose keys the mint answers
-    12001 though its listing names it is `bad-token` without a ban as before, and the
-    seeder keeps nothing of that answer: it asks for the keys again for the next payment
-    that names the keyset (was: silent, so a seeder could keep refusing a keyset the mint
-    serves again, which stops an honest watcher). An ask for a mint's listing at the
-    seeder's start counts toward that second's one; a `hello` asks for none, nor does a
-    payment whose turn has not come by its deadline. What "only where a check needs one"
-    said, now spelled out.
+  - §3: a `hello` for a video the seeder no longer serves is judged as it arrives, by what
+    the seeder keeps then: one it answers stays answered whatever its reads learn, and one
+    it refuses creates nothing; a peer with no account whose first payment there is still
+    in progress is refused `unknown-video` until that payment lands; a session open when
+    the video was dropped admits nothing and has its payments verified, as one opened
+    since. What "as it would before" left open.
+  - §3 step 3: a keyset whose keys the mint answers 12001 though its listing names it is
+    `bad-token` without a ban, as said above, and the seeder keeps nothing of that answer:
+    it asks for the keys again for the next payment that names the keyset (was: silent, so
+    a seeder could keep refusing a keyset the mint serves again, which stops an honest
+    watcher). An ask for a mint's listing at the seeder's start counts toward that second's
+    one; a `hello` asks for none, nor does a payment whose turn has not come by its
+    deadline. What "only where a check needs one" said, now spelled out.
   - §3, the deadline: a payment whose turn has not come by its deadline, another payment
     holding it, runs none of its checks either, as one whose turn comes then or later; and
     such a payment asks the mint for nothing, keys and keyset listing alike, and sends no
@@ -1489,12 +1491,15 @@ paths on one host are two origins.
     decides what to pay on that video's ledger, and no other; the licence ends there,
     whether or not it paid, and at the session's end (was: undefined, and the mock kept the
     licence until a payment was made).
+  - §3a: what the watcher pays at a session's end is not the decision a refusal licenses:
+    it covers what is owed and nothing ahead, and neither uses the licence nor ends it
+    (was: not said).
   - §3a: the half-window bound restated per identity: half the watcher's ceiling for each
     video, under each identity the watcher takes toward the seeder (as the one-payment bound
     was; NFX-10 §3 says so for a page).
   - §3a: a seeder is known by its long-term identity, never by a transport identity where
-    it announces a long-term one (was: "never by ... another transport identity", against
-    §3, where a mesh seeder's identity is the one its transport gives it); the list of what
-    may come before a payment names both ledgers, each place and end of a reclaim, a refused
-    quote or `hello`, tries used and restored, and another video's payment ahead of it; the
-    180 s are counted alike by a ledger made since the payment, and at a session's end.
+    it announces a long-term one (on the mesh, where it announces none, its identity is the
+    one its transport gives it, §3); the list of what may come before a payment names both
+    ledgers, each place and end of a reclaim, a refused quote or `hello`, tries used and
+    restored, and another video's payment ahead of it; the 180 s are counted alike by a
+    ledger made since the payment, and at a session's end.
