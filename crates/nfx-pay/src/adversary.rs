@@ -7820,8 +7820,10 @@ async fn a_dropped_videos_sessions_admit_nothing_and_verify<H: Harness>(h: &H) {
 /// yet, and no unknown swap: it is refused `unknown-video` while that payment holds its
 /// turn. From the payment's deadline its swap, still in flight, is a swap whose outcome is
 /// unknown, as one whose answer was lost: the peer's `hello` is answered, and quotes no
-/// account (flaw `DroppedVideoIgnoresSwapInFlight` refuses it until the swap lands). Once
-/// the swap has landed, a claim, the peer has an account, and its quote shows the payment.
+/// account (flaw `DroppedVideoIgnoresSwapInFlight` refuses it until the swap lands), or, the
+/// mint having made the claim, shows it: the `hello` reads the swap. Once the swap has
+/// landed, a claim, the peer has an account, and its quote shows the payment. And a swap of
+/// unknown outcome on the seeder's other video, of either kind, is no record on this one.
 async fn a_dropped_videos_hello_is_judged_as_it_arrives<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 4).await;
@@ -7867,56 +7869,121 @@ async fn a_dropped_videos_hello_is_judged_as_it_arrives<H: Harness>(h: &H) {
     );
     release(h).await;
 
+    // The swap in flight never reaches the mint until it is released; or (`claimed`) the
+    // mint has made the claim, and its answer is held.
+    for claimed in [false, true] {
+        let e = h.engine(1, 4, 1000);
+        let mut s = open(h, &e, 7).await;
+        if claimed {
+            h.hold_swap_responses();
+        } else {
+            h.hold_next_swap();
+        }
+        let first = Pay {
+            upto_chunk: 1,
+            token: h.token(1).await,
+        };
+        close_waiting(h, s.pay(&first)).await; // its connection closes, its swap in flight
+        close(h, s).await;
+        h.drop_video(&e, 0);
+        let (peer, hello) = (h.peer(7), h.hello());
+        let mut arriving = Box::pin(e.hello(&peer, &hello));
+        let r = answer_of(h, arriving.as_mut()).await.map(|r| r.map(|_| ()));
+        assert!(
+            r.as_ref()
+                .is_some_and(|r| is_rej(r, &RejCode::UnknownVideo)),
+            "a peer with no account on a video no longer served, its first payment there still \
+             in progress, has no account yet: its hello is refused unknown-video as it arrives \
+             (the mint has made the claim: {claimed}): {r:?}"
+        );
+        close(h, arriving).await;
+        advance(h, Duration::from_secs(60)).await; // that payment's deadline, its swap in flight
+        let r = e.hello(&peer, &h.hello()).await;
+        let quoted = r
+            .as_ref()
+            .map(|s| {
+                let q = s.quote();
+                (q.served, q.accepted_upto, q.spent_total)
+            })
+            .map_err(|rej| rej.code.clone());
+        if claimed {
+            assert_eq!(
+                quoted,
+                Ok((0, 1, 1)),
+                "from its deadline, a first payment's swap abandoned in flight is a swap whose \
+                 outcome is unknown: the hello of its peer for a video no longer served is \
+                 answered, and reads it as any hello reads its account's unknown swaps (flaw \
+                 `DroppedVideoInFlightHelloSkipsRead`): the mint has made the claim, and its \
+                 quote shows the payment"
+            );
+        } else {
+            assert_eq!(
+                quoted,
+                Ok((0, 0, 0)),
+                "from its deadline, a first payment's swap abandoned in flight is a swap whose \
+                 outcome is unknown, as one whose answer was lost: the hello of its peer for a \
+                 video no longer served is answered, and its read learning nothing yet, quotes \
+                 no account"
+            );
+        }
+        close(h, r).await;
+        release(h).await;
+        let r = e.hello(&peer, &h.hello()).await;
+        let quoted = r
+            .as_ref()
+            .map(|s| (s.quote().accepted_upto, s.quote().spent_total))
+            .map_err(|rej| rej.code.clone());
+        assert_eq!(
+            quoted,
+            Ok((1, 1)),
+            "once that payment has landed the peer has an account there: its hello is \
+             answered, and its quote shows the payment, once (the mint had made the claim: \
+             {claimed})"
+        );
+        close(h, r).await;
+    }
+
+    // A swap whose outcome is unknown on the seeder's other video is no record on this one
+    // (flaws `DroppedVideoAnyUnknownSwap`, `DroppedVideoAnySwapInFlight`): peer 8's answer
+    // was lost there, peer 9's swap abandoned in flight there, and neither has anything on
+    // video 0, which the seeder drops.
     let e = h.engine(1, 4, 1000);
-    let mut s = open(h, &e, 7).await;
+    let mut lost = open_on(h, &e, 8, 1).await;
+    h.time_out_next_swap();
+    h.mint_outage(true);
+    let r = pay_one(h, &mut lost, 1).await;
+    h.mint_outage(false);
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "a pre-payment on video 1 whose swap's outcome is unknown: {r:?}"
+    );
+    let mut flight = open_on(h, &e, 9, 1).await;
     h.hold_next_swap();
-    let first = Pay {
+    let ahead = Pay {
         upto_chunk: 1,
         token: h.token(1).await,
     };
-    close_waiting(h, s.pay(&first)).await; // its connection closes, its swap in flight
-    close(h, s).await;
-    h.drop_video(&e, 0);
-    let (peer, hello) = (h.peer(7), h.hello());
-    let mut arriving = Box::pin(e.hello(&peer, &hello));
-    let r = answer_of(h, arriving.as_mut()).await.map(|r| r.map(|_| ()));
+    let (r, ()) = both(flight.pay(&ahead), async {
+        settle(h).await;
+        advance(h, Duration::from_secs(60)).await;
+    })
+    .await;
     assert!(
-        r.as_ref()
-            .is_some_and(|r| is_rej(r, &RejCode::UnknownVideo)),
-        "a peer with no account on a video no longer served, its first payment there still in \
-         progress, has no account yet: its hello is refused unknown-video as it arrives: {r:?}"
+        is_rej(&r, &RejCode::MintUnavailable),
+        "a pre-payment on video 1 whose swap is abandoned in flight at its deadline: {r:?}"
     );
-    close(h, arriving).await;
-    advance(h, Duration::from_secs(60)).await; // that payment's deadline, its swap in flight
-    let r = e.hello(&peer, &h.hello()).await;
-    let quoted = r
-        .as_ref()
-        .map(|s| {
-            let q = s.quote();
-            (q.served, q.accepted_upto, q.spent_total)
-        })
-        .map_err(|rej| rej.code.clone());
-    assert_eq!(
-        quoted,
-        Ok((0, 0, 0)),
-        "from its deadline, a first payment's swap abandoned in flight is a swap whose outcome \
-         is unknown, as one whose answer was lost: the hello of its peer for a video no longer \
-         served is answered, and its read learning nothing yet, quotes no account"
-    );
-    close(h, r).await;
+    close(h, (lost, flight)).await;
+    h.drop_video(&e, 0);
+    for (peer, kind) in [(8, "its answer lost"), (9, "abandoned in flight")] {
+        let r = e.hello(&h.peer(peer), &h.hello()).await.map(|_| ());
+        assert!(
+            is_rej(&r, &RejCode::UnknownVideo),
+            "a peer whose only record is a swap of unknown outcome ({kind}) on the seeder's \
+             other video has none on the video no longer served: its hello for that one is \
+             refused unknown-video: {r:?}"
+        );
+    }
     release(h).await;
-    let r = e.hello(&peer, &h.hello()).await;
-    let quoted = r
-        .as_ref()
-        .map(|s| (s.quote().accepted_upto, s.quote().spent_total))
-        .map_err(|rej| rej.code.clone());
-    assert_eq!(
-        quoted,
-        Ok((1, 1)),
-        "once that payment has landed the peer has an account there: its hello is answered, \
-         and its quote shows the payment"
-    );
-    close(h, r).await;
 }
 
 /// How a `hello` for a video the seeder no longer serves reaches its account's turn, for
@@ -24352,6 +24419,15 @@ async fn keys_that_come_late_are_not_used<H: Harness>(h: &H, quoted: Quoted) {
             "keys the mint refuses ban nobody, whenever its answer comes{at}"
         );
         h.refuse_keys(&mint, false);
+        let asked = keys_asked(h);
+        let r = s.pay(&p).await;
+        assert!(
+            matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (8, 8))
+                && keys_asked(h) > asked,
+            "the mint serves its keys again: the seeder kept nothing of the 12001 that came \
+             {refused_at} s after P's arrival (flaw `LateKeysRefusalCached`), asks for them \
+             again for the same token, and acknowledges it{at}: {r:?}"
+        );
         close(h, s).await;
     }
 }

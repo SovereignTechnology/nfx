@@ -4804,6 +4804,20 @@ pub enum SeederFlaw {
     /// A sweep skips the swaps abandoned in flight on a video the seeder no longer serves,
     /// and reads those there whose answers were lost: one left unspent is never completed.
     SweepSkipsDroppedVideosInFlight,
+    /// Answers a `hello` for a video it no longer serves from a peer whose only record there
+    /// is a swap abandoned in flight, without reading that swap: a claim the mint has made
+    /// is not learnt, and the quote shows no account.
+    DroppedVideoInFlightHelloSkipsRead,
+    /// Answers a `hello` for a video it no longer serves from a peer whose only record is a
+    /// swap whose answer was lost on its other video, where it refuses it `unknown-video`.
+    DroppedVideoAnyUnknownSwap,
+    /// Answers a `hello` for a video it no longer serves from a peer whose only record is a
+    /// swap abandoned in flight on its other video, where it refuses it `unknown-video`.
+    DroppedVideoAnySwapInFlight,
+    /// A mint's refusal of the keys asked for (12001) that comes at the payment's deadline
+    /// or later is kept: the next payment naming the keyset is refused without asking,
+    /// though the mint serves the keys again.
+    LateKeysRefusalCached,
 }
 
 /// How a payment came to its account's turn: the paths of the suite's matrix of payments,
@@ -7635,7 +7649,7 @@ struct State {
     /// The videos it no longer serves ([`Harness::drop_video`]): it keeps their accounts.
     dropped: HashSet<usize>,
     /// Keysets whose keys a mint answered 12001, by mint ([`SeederFlaw::KeysRefusalCached`]
-    /// only).
+    /// and [`SeederFlaw::LateKeysRefusalCached`] only).
     keys_refused: HashSet<(String, u64)>,
     /// Payments woken before their swap's outcome was settled ([`SeederFlaw::OutcomeWokenEarly`]
     /// and the like only): its settlement wakes them no more.
@@ -10190,7 +10204,8 @@ impl Inner {
                     _ => named.clone(),
                 };
                 // The flaw: a keyset whose keys the mint once answered 12001 stays refused.
-                if self.has(SeederFlaw::KeysRefusalCached)
+                if (self.has(SeederFlaw::KeysRefusalCached)
+                    || self.has(SeederFlaw::LateKeysRefusalCached))
                     && missing
                         .iter()
                         .any(|k| st.keys_refused.contains(&(mint.to_owned(), *k)))
@@ -10241,6 +10256,16 @@ impl Inner {
                                 let mut st = self.state();
                                 for k in &missing {
                                     st.keys_refused.insert((mint.to_owned(), *k));
+                                }
+                            }
+                            // The flaw: a refusal that comes at its deadline or later is kept.
+                            if self.has(SeederFlaw::LateKeysRefusalCached) {
+                                let mut st = self.state();
+                                let now = self.clock.now();
+                                if st.pays.get(&pay).is_some_and(|r| now >= r.deadline) {
+                                    for k in &missing {
+                                        st.keys_refused.insert((mint.to_owned(), *k));
+                                    }
                                 }
                             }
                             // The flaw: the mint's listing is dropped with the refusal.
@@ -11375,6 +11400,14 @@ impl MockEngine {
                         && st.accounts.keys().any(|(p, _)| p == peer))
                     || (st.unknown.iter().any(|u| u.pay.key == key)
                         && !e.has(SeederFlaw::DroppedVideoIgnoresUnknownSwap))
+                    || (st.unknown.iter().any(|u| u.pay.key.0 == *peer)
+                        && e.has(SeederFlaw::DroppedVideoAnyUnknownSwap))
+                    || (st.pays.values().any(|r| {
+                        r.key.0 == *peer
+                            && r.sent
+                            && !r.landed
+                            && (r.abandoned || now >= r.deadline)
+                    }) && e.has(SeederFlaw::DroppedVideoAnySwapInFlight))
                     || (swap_abandoned_in_flight(&st)
                         && !e.has(SeederFlaw::DroppedVideoIgnoresSwapInFlight))
                     || (st.paying.contains_key(&key)
@@ -11513,6 +11546,13 @@ impl MockEngine {
         if read_first
             || (took_over && e.has(SeederFlaw::HelloTakeoverSkipsRead))
             || slip == Some(HelloSlip::SkipsRead)
+            || (e.has(SeederFlaw::DroppedVideoInFlightHelloSkipsRead) && {
+                // The flaw: let in by a swap abandoned in flight alone, it reads nothing.
+                let st = e.state();
+                st.dropped.contains(&video)
+                    && !st.accounts.contains_key(&key)
+                    && !st.unknown.iter().any(|u| u.pay.key == key)
+            })
         {
         } else if e.has(SeederFlaw::HelloReadsAll) {
             e.learn(None, None, Learner::Hello);
