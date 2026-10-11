@@ -15144,7 +15144,7 @@ const LIVE_TIMEOUT_ENDS: [&str; 3] = [
 /// comes meanwhile, then reclaims its payment and stops. If the seeder had swapped it and
 /// the answer was lost, the viewer stops without paying those chunks again, and nobody is
 /// banned; a quote showing the payment then settles it into the ledger only. Whatever its
-/// reclaim at 180 s finds, the viewer stops ([`LIVE_TIMEOUT_ENDS`]): a reclaim the
+/// reclaim at 180 s finds, the viewer stops (`LIVE_TIMEOUT_ENDS`): a reclaim the
 /// mint cannot serve then is finished once it can.
 pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
     let s = open(h, &h.engine(3, 2, 1000), 1).await;
