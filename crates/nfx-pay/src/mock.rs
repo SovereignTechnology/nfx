@@ -6938,11 +6938,22 @@ pub enum ViewerFlaw {
     RequestWhileAwaitingClearsStop,
     /// A request sent while a reclaim is incomplete undoes a stop.
     RequestWhileReclaimingClearsStop,
+    /// Pays every session's payments at the price of the first quote its ledger took.
+    PriceOfFirstQuote,
+    /// Pays its own cap a chunk, not the quoted price, for a payment ahead after a refusal.
+    PayAheadAtCap,
+    /// Pays its own cap a chunk, not the quoted price, on a ledger made for another video.
+    SiblingPaysAtCap,
+    /// Pays its own cap a chunk, not the quoted price, on a resumed session.
+    ResumedPaysAtCap,
     /// Once stopped, takes a matching ack without settling its payment into the ledger.
     StoppedAckNotSettled,
     /// On a ledger made for another video, a request sent while its payment is in flight
     /// on its session undoes a stop.
     SiblingRequestInFlightClearsStop,
+    /// Pays every ledger's payments at the price of the quote the standing took last, on
+    /// whichever of the seeder's videos.
+    PriceOfLastQuoteTaken,
     /// Takes a matching ack without settling its payment into the ledger where a `hello`
     /// refused `banned` on that ledger stopped it while the payment was in flight.
     OwnStopAckNotSettled,
@@ -12578,6 +12589,9 @@ struct Standing {
     pasts: Vec<(u64, Past)>,
     positions: Vec<(u64, u64, u64)>,
     lost_to_expiry: bool,
+    /// The price of the quote taken last, on whichever ledger
+    /// ([`ViewerFlaw::PriceOfLastQuoteTaken`] only: the price is the session's quote's).
+    last_price: Option<u64>,
 }
 
 /// An honest viewer's ledger with one seeder for one video, holding tokens from one mint
@@ -12639,6 +12653,9 @@ pub struct MockViewer {
     first_request_window: Option<u64>,
     made_with_unsettled: bool,
     tries_here: u32,
+    /// The price of the first quote this ledger took ([`ViewerFlaw::PriceOfFirstQuote`]
+    /// only: the price is the session's quote's).
+    first_price: Option<u64>,
     /// A `hello` refused `banned` came on this ledger while its payment was in flight
     /// ([`ViewerFlaw::OwnStopAckNotSettled`] only).
     banned_in_flight: bool,
@@ -12705,6 +12722,7 @@ impl MockViewer {
             first_request_window: None,
             made_with_unsettled: false,
             tries_here: 0,
+            first_price: None,
             banned_in_flight: false,
         }
     }
@@ -13749,8 +13767,21 @@ impl MockViewer {
         if upto <= self.acked {
             return Ok(None);
         }
-        let price = if self.has(ViewerFlaw::PaysAtCap) {
+        let price = if self.has(ViewerFlaw::PaysAtCap)
+            || (ahead > 0 && self.has(ViewerFlaw::PayAheadAtCap))
+            || (self.id != 0 && self.has(ViewerFlaw::SiblingPaysAtCap))
+            || (self.resumed && self.has(ViewerFlaw::ResumedPaysAtCap))
+        {
             self.max_price.max(q.price_per_chunk)
+        } else if let (Some(first), true) =
+            (self.first_price, self.has(ViewerFlaw::PriceOfFirstQuote))
+        {
+            first
+        } else if let (Some(last), true) = (
+            self.standing().last_price,
+            self.has(ViewerFlaw::PriceOfLastQuoteTaken),
+        ) {
+            last
         } else {
             q.price_per_chunk
         };
@@ -14265,6 +14296,10 @@ impl Viewer for MockViewer {
         }
         // A new session: `mint-unavailable` answers are counted afresh.
         self.standing().unavailable = 0;
+        if self.first_price.is_none() {
+            self.first_price = Some(quote.price_per_chunk);
+        }
+        self.standing().last_price = Some(quote.price_per_chunk);
         self.unavailable_here = 0;
         self.tries_here = 0;
         self.quote = Some(quote.clone());

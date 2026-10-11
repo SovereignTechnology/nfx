@@ -11638,7 +11638,9 @@ async fn a_takeover_hello_dropped_waiting_for_a_read_keeps_nothing<H: Harness + 
 
 /// A viewer pays for every request it sent and the seeder did not refuse, once half the
 /// window is unpaid, rounded up, whatever the window, never ahead of need (except half a
-/// window, rounded down, after a refusal), one payment at a time.
+/// window, rounded down, after a refusal), one payment at a time. Each payment is at the
+/// price of its own session's quote, whatever an earlier session's, another video's or the
+/// viewer's own cap.
 pub async fn a_viewer_pays_for_every_request_and_no_more<H: Harness>(h: &H) {
     let e = h.engine(2, 4, 1000);
     let mut s = open(h, &e, 1).await;
@@ -11706,6 +11708,148 @@ pub async fn a_viewer_pays_for_every_request_and_no_more<H: Harness>(h: &H) {
 
     // Half the window, rounded up, on odd windows as on even ones.
     the_due_point_is_half_the_window_rounded_up(h).await;
+    // And the price is each session's quote's, as its window is.
+    the_price_is_the_sessions_whatever_it_did_before(h).await;
+}
+
+/// What a ledger did on an earlier session, whose quote had another price, for
+/// [`the_price_is_the_sessions_whatever_it_did_before`].
+const EARLIER_PRICED: [&str; 3] = [
+    "took its quote, and no more",
+    "requested a chunk, and paid nothing",
+    "paid at its due point",
+];
+
+/// The price is the session's quote's (NFX-07 §2, §3a): a seeder may quote another, within
+/// the watcher's cap, on a later session, lower or higher, and every payment of that
+/// session, however it is made ([`MADE`]), is at its price, whatever the ledger did on the
+/// earlier one ([`EARLIER_PRICED`]). A new engine stands in for the seeder restarted with
+/// another price. Where the ledger paid before, the later quote shows the account as the
+/// restarted seeder would have kept it, and a seeder at the later price, shown the token
+/// for as many chunks on an account that paid nothing yet, says what it is worth: it takes
+/// a token worth exactly those chunks at its price, and no other. And each ledger pays its
+/// own session's price, where the seeder quotes two videos at different prices.
+async fn the_price_is_the_sessions_whatever_it_did_before<H: Harness>(h: &H) {
+    for (first, then) in [(1u64, 3u64), (3, 1)] {
+        for earlier in EARLIER_PRICED {
+            for how in MADE {
+                let paid = earlier == EARLIER_PRICED[2];
+                let e = h.engine(first, 4, 1000);
+                let mut s = open(h, &e, 1).await;
+                let mut v = h.viewer(3);
+                v.quote(s.quote()).expect("an honest quote is accepted");
+                let mut acked = 0;
+                if earlier != EARLIER_PRICED[0] {
+                    let chunks = if paid { 2 } else { 1 };
+                    for i in 0..chunks {
+                        assert!(s.admit(&h.chunk(i)), "within the window");
+                        v.requested();
+                    }
+                }
+                if paid {
+                    let pay = v
+                        .due()
+                        .await
+                        .expect("due answers at half the window")
+                        .expect("due at half the window");
+                    let ack = s.pay(&pay).await;
+                    assert!(
+                        ack.is_ok(),
+                        "{first} sat a chunk on its first session: the watcher pays exactly the \
+                         quoted price, and the seeder takes it: {ack:?}"
+                    );
+                    v.ack(&ack.expect("the seeder took it"))
+                        .expect("its honest ack is taken");
+                    acked = 2;
+                }
+                close(h, s).await;
+                v.end();
+                let e = h.engine(then, 4, 1000);
+                let s = open(h, &e, 1).await;
+                let mut q = s.quote().clone();
+                if paid {
+                    // The account as the restarted seeder kept it.
+                    (q.served, q.accepted_upto, q.spent_total) = (2, 2, 2 * first);
+                }
+                v.quote(&q)
+                    .expect("the next session's honest quote, at another price, is accepted");
+                // Due with two chunks owed, or at the session's end with one: the chunk it
+                // already owes counts.
+                if how == "ahead after a refusal" {
+                    v.requested();
+                    v.refused();
+                } else {
+                    let owed = u8::from(earlier == EARLIER_PRICED[1]);
+                    let owes = if how == "at the session's end" { 1 } else { 2 };
+                    for _ in owed..owes {
+                        v.requested();
+                    }
+                }
+                let pay = if how == "at the session's end" {
+                    v.last_pay().await.expect("last_pay answers")
+                } else {
+                    v.due().await.expect("due answers")
+                };
+                let Some(pay) = pay else {
+                    panic!(
+                        "{first} sat a chunk where it {earlier}, then {then}: a payment {how} is \
+                         made"
+                    )
+                };
+                // What the token is worth: a seeder at the session's price takes it for
+                // exactly the chunks it pays for.
+                let chunks = pay.upto_chunk - acked;
+                let mut scale = open(h, &e, 7).await;
+                let r = scale
+                    .pay(&Pay {
+                        upto_chunk: chunks,
+                        token: pay.token,
+                    })
+                    .await;
+                assert!(
+                    r.is_ok(),
+                    "{first} sat a chunk where it {earlier}, then {then} on a later session: a \
+                     payment {how}, for {chunks} chunks, is worth exactly as many at the price \
+                     its session's quote names: {r:?}"
+                );
+                close(h, (s, scale)).await;
+            }
+        }
+    }
+    // And each ledger's price is its own session's: a seeder may quote its videos at
+    // different prices. A second engine stands in for the seeder's other video.
+    for (zero, one) in [(1u64, 3u64), (3, 1)] {
+        let (e0, e1) = (h.engine(zero, 4, 1000), h.engine(one, 4, 1000));
+        let mut v0 = h.viewer(3);
+        let mut v1 = v0.sibling();
+        let mut s0 = open_on(h, &e0, 1, 0).await;
+        v0.quote(s0.quote())
+            .expect("video 0's honest quote is accepted");
+        let mut s1 = open_on(h, &e1, 1, 1).await;
+        v1.quote(s1.quote())
+            .expect("video 1's honest quote, at another price, is accepted");
+        for (v, s, video, price) in [(&mut v0, &mut s0, 0, zero), (&mut v1, &mut s1, 1, one)] {
+            for i in 0..2 {
+                assert!(s.admit(&h.chunk_of(video, i)), "within the window");
+                v.requested();
+            }
+            let pay = v
+                .due()
+                .await
+                .expect("due answers at half the window")
+                .expect("due at half the window");
+            let r = s.pay(&pay).await;
+            assert!(
+                r.is_ok(),
+                "video 0 quoted at {zero} sat a chunk and video 1 at {one}: video {video}'s \
+                 payment is at its own session's price, {price} sat a chunk, and the seeder \
+                 takes it: {r:?}"
+            );
+            v.ack(&r.expect("the seeder took it"))
+                .expect("its honest ack is taken");
+        }
+        close(h, (s0, s1)).await;
+    }
 }
 
 /// The watcher pays once the unpaid count reaches half the window, rounded up (NFX-07 §3a),
@@ -18674,7 +18818,14 @@ struct Payer<H: Harness> {
     next: u16,
 }
 
-/// A ledger `on` ([`LEDGERS`]) about to pay at `price`, on an engine of `window`, holding
+/// The price cap of the tables' watchers ([`a_payer`]): above the quoted `price`, so that a
+/// payment at the cap is not one at the quoted price.
+fn cap_above(price: u64) -> u64 {
+    price + 1
+}
+
+/// A ledger `on` ([`LEDGERS`]) about to pay at `price`, its own cap above it
+/// ([`cap_above`]), on an engine of `window`, holding
 /// nothing in flight, nothing awaiting a quote and no incomplete reclaim. It has been through
 /// `from` ([`FROM`]) itself; or, `beside`, the standing's other ledger has, on its own video,
 /// and its session has closed, while this one has only taken its session's quote
@@ -18695,7 +18846,7 @@ async fn a_payer<H: Harness>(
     };
     let half = window.div_ceil(2);
     let e = h.engine(price, window, 1000);
-    let first = h.viewer(price);
+    let first = h.viewer(cap_above(price));
     // The ledger the history is on: the paying one, or the standing's other.
     let (video, mut v, first) = if (on == LEDGERS[1]) != beside {
         (1, first.sibling(), Some(first))
@@ -18733,7 +18884,7 @@ async fn a_payer<H: Harness>(
                 s = open_on(h, &e, 1, video).await;
                 let mut q = s.quote().clone();
                 match refused {
-                    "over its price cap" => q.price_per_chunk = price + 1,
+                    "over its price cap" => q.price_per_chunk = cap_above(price) + 1,
                     "with a window over its ceiling" => q.window = h.window_ceiling() + 1,
                     _ => q.mints = vec![format!("{}/", h.mint())],
                 }
@@ -19020,7 +19171,7 @@ async fn a_payer_beside<H: Harness>(
 ) -> Payer<H> {
     let half = window.div_ceil(2);
     let e = h.engine(price, window, 1000);
-    let first = h.viewer(price);
+    let first = h.viewer(cap_above(price));
     let (video, mut v, mut other) = if on == LEDGERS[1] {
         (1, first.sibling(), first)
     } else {
@@ -19189,7 +19340,8 @@ pub async fn every_mixed_selection_on_another_videos_ledger_is_swapped_to_fewer<
 /// Every payment of an honest watcher `on` a ledger ([`LEDGERS`]) holds at most 64 proofs,
 /// however it is made, whatever came before it ([`MADE`] and [`histories`]): at 65 sat a
 /// chunk, or, `mixed`, a selection of 65 proofs of two keysets ([`a_payment_made_so`]), which
-/// it swaps to fewer first. The seeder takes each.
+/// it swaps to fewer first. And each is worth exactly its chunks at the quoted price, the
+/// watcher's own cap being above it ([`cap_above`]). The seeder takes each.
 async fn every_payment_holds_at_most_64_proofs<H: Harness>(h: &H, on: &str, mixed: bool) {
     let (price, drawn) = if mixed {
         (
@@ -19207,6 +19359,11 @@ async fn every_payment_holds_at_most_64_proofs<H: Harness>(h: &H, on: &str, mixe
                 panic!("a payment {how}, {from}, {on}: a payment is made")
             };
             let r = p.s.pay(&pay).await;
+            assert!(
+                !is_rej(&r, &RejCode::Overpaid) && !is_rej(&r, &RejCode::Underpaid),
+                "a payment {how}, {from}, {on}, {drawn}: an honest watcher pays exactly the \
+                 quoted price, whatever its own cap, here one sat a chunk above it: {r:?}"
+            );
             assert!(
                 r.is_ok(),
                 "a payment {how}, {from}, {on}, {drawn}: an honest watcher's payment holds at \

@@ -2349,6 +2349,12 @@ catches!(
     viewer_request_while_awaiting_clears_stop: v(V::RequestWhileAwaitingClearsStop) => a_stopped_viewer_pays_nothing,
     viewer_request_while_reclaiming_clears_stop: v(V::RequestWhileReclaimingClearsStop) => a_stopped_viewer_pays_nothing,
     viewer_sibling_request_in_flight_clears_stop: v(V::SiblingRequestInFlightClearsStop) => a_stopped_viewer_pays_nothing,
+    // Every payment is at its session's quoted price, whatever the watcher's cap.
+    viewer_price_of_first_quote: v(V::PriceOfFirstQuote) => a_viewer_pays_for_every_request_and_no_more,
+    viewer_price_of_last_quote_taken: v(V::PriceOfLastQuoteTaken) => a_viewer_pays_for_every_request_and_no_more,
+    viewer_pay_ahead_at_cap: v(V::PayAheadAtCap) => every_payment_on_its_first_ledger_holds_at_most_64_proofs,
+    viewer_sibling_pays_at_cap: v(V::SiblingPaysAtCap) => every_payment_on_another_videos_ledger_holds_at_most_64_proofs,
+    viewer_resumed_pays_at_cap: v(V::ResumedPaysAtCap) => every_payment_on_its_first_ledger_holds_at_most_64_proofs,
     viewer_stopped_ack_not_settled: v(V::StoppedAckNotSettled) => a_stopped_viewer_pays_nothing,
     viewer_own_stop_ack_not_settled: v(V::OwnStopAckNotSettled) => a_stopped_viewer_pays_nothing,
     // The defects of keys, keyset listings and the keyset rule, against a seeder that asks for
