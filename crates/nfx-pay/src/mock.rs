@@ -4705,6 +4705,93 @@ pub enum SeederFlaw {
     /// The same as [`SeederFlaw::ListingWokenEarly`] for a payment that waits at step 3 for
     /// a keyset listing it did not ask for.
     OthersListingWokenEarly,
+    /// A proof found spent by a swap at a quoted mint other than the first is refused
+    /// `spent` with no ban: the first mint's bans.
+    OtherMintSpentNoBan,
+    /// Proofs a quoted mint other than the first refuses as invalid are refused `bad-token`
+    /// with no ban: the first mint's ban.
+    OtherMintInvalidNoBan,
+    /// A claim at a quoted mint other than the first whose answer lands late is not
+    /// credited: the seeder holds the proofs, and the account shows nothing.
+    OtherMintLateClaimNotCredited,
+    /// A claim at a quoted mint other than the first that a read learns (an account's own
+    /// or a sweep's) is not credited: the swap is taken as decided, and the account shows
+    /// nothing.
+    OtherMintReadClaimNotCredited,
+    /// A swap whose outcome is unknown stops only the account's payments at its own mint:
+    /// one at another quoted mint is swapped, so an account holds one unknown swap for each
+    /// mint.
+    UnknownPerMint,
+    /// A swap that claims in time, its peer banned since its turn came (on its other
+    /// video), is answered `banned` and not credited: the proofs are claimed, and the
+    /// account shows nothing.
+    BannedClaimNotCredited,
+    /// A mint's refusal of the keys a payment asked for (12001) that comes at the payment's
+    /// deadline or later is used: the payment is refused `bad-token`, not
+    /// `mint-unavailable`.
+    LateKeysRefusalUsed,
+    /// A mint's refusal of the keys asked for (12001) drops the mint's keyset listing with
+    /// it: the next payment of that second that needs one asks for it again, so a mint is
+    /// asked for its listing more than once a second.
+    ListingDroppedOnKeysRefusal,
+    /// A payment that found its account's turn free checks its token's mint before its
+    /// structure: a token of a mint not quoted that step 1 refuses is refused `bad-mint`,
+    /// not `bad-token`.
+    UnwaitedMintBeforeStructure,
+    /// The same as [`SeederFlaw::UnwaitedMintBeforeStructure`] for a payment that waited
+    /// for its account's turn and took it.
+    WaitedMintBeforeStructure,
+    /// The same as [`SeederFlaw::UnwaitedMintBeforeStructure`] for a payment that waited
+    /// for a dead turn and took it over.
+    WaitedTakeoverMintBeforeStructure,
+    /// The same as [`SeederFlaw::UnwaitedMintBeforeStructure`] for a payment that took a
+    /// dead turn over as it arrived.
+    LateTakeoverMintBeforeStructure,
+    /// A payment that found its account's turn free checks its token's mint before the
+    /// watermark: a good token of a mint not quoted, for no chunk, is refused `bad-mint`,
+    /// not `stale`.
+    UnwaitedMintBeforeStale,
+    /// The same as [`SeederFlaw::UnwaitedMintBeforeStale`] for a payment that waited for
+    /// its account's turn and took it.
+    WaitedMintBeforeStale,
+    /// The same as [`SeederFlaw::UnwaitedMintBeforeStale`] for a payment that waited for a
+    /// dead turn and took it over.
+    WaitedTakeoverMintBeforeStale,
+    /// The same as [`SeederFlaw::UnwaitedMintBeforeStale`] for a payment that took a dead
+    /// turn over as it arrived.
+    LateTakeoverMintBeforeStale,
+    /// A sweep skips the unknown swaps of a video the seeder no longer serves: a claim there
+    /// is learnt only by its account's own entry, and a swap left unspent there is never
+    /// completed.
+    SweepSkipsDroppedVideos,
+    /// The unpaid chunks of a video leave the global count as the seeder stops serving it:
+    /// the cap they filled admits as many again within `debt_ttl`.
+    DroppedVideoFreesDebt,
+    /// The unpaid chunks of a video the seeder no longer serves never age out of the global
+    /// count: a cap they filled refuses unpaid service on every video for good.
+    DroppedVideoDebtNeverAges,
+    /// Refuses `unknown-video` to a peer whose only record on a video it no longer serves is
+    /// a swap abandoned in flight at its deadline, where that is a swap whose outcome is
+    /// unknown as one whose answer was lost: the peer is refused until the swap lands or a
+    /// sweep learns it.
+    DroppedVideoIgnoresSwapInFlight,
+    /// A payment whose turn came in time asks the mint for keys at its deadline or later
+    /// (as a keyset listing that names its keyset comes then), though nothing that needs
+    /// them is judged any more.
+    KeysAskedAtDeadline,
+    /// A payment whose turn came in time asks the mint for its keyset listing at its
+    /// deadline or later (one that waited for the next second's listing into its deadline,
+    /// say), though no check of it is judged any more.
+    ListingAskedAtDeadline,
+    /// A swap whose outcome is unknown stops only the account's payments that overlap it:
+    /// one for chunks beyond it is swapped.
+    UnknownBlocksOnlyOverlap,
+    /// A payment credits every other peer's account on its video up to the same chunk, as
+    /// well as its own.
+    CreditSpillsToPeers,
+    /// The ceilings on `debt_ttl`, `account_ttl` and `ban_ttl` are compared in whole
+    /// seconds: a ttl less than a second past its ceiling is accepted.
+    TtlsComparedInSeconds,
 }
 
 /// How a payment came to its account's turn: the paths of the suite's matrix of payments,
@@ -4876,6 +4963,10 @@ enum Early {
     KeysetBeforeAmount,
     /// The token's own mint dialled before the mint check.
     TokenMintDialled,
+    /// The mint before step 1.
+    MintBeforeStructure,
+    /// The mint before the watermark.
+    MintBeforeStale,
 }
 
 /// The keyset listing a defect judges the keyset rule by, instead of one asked for in the
@@ -5581,6 +5672,18 @@ impl SeederFlaw {
             }
             Self::LateTakeoverKeysetBeforeAmount => (Early::KeysetBeforeAmount, Came::LateTakeover),
             Self::LateTakeoverTokenMintDialled => (Early::TokenMintDialled, Came::LateTakeover),
+            Self::UnwaitedMintBeforeStructure => (Early::MintBeforeStructure, Came::Unwaited),
+            Self::WaitedMintBeforeStructure => (Early::MintBeforeStructure, Came::Waited),
+            Self::WaitedTakeoverMintBeforeStructure => {
+                (Early::MintBeforeStructure, Came::WaitedTakeover)
+            }
+            Self::LateTakeoverMintBeforeStructure => {
+                (Early::MintBeforeStructure, Came::LateTakeover)
+            }
+            Self::UnwaitedMintBeforeStale => (Early::MintBeforeStale, Came::Unwaited),
+            Self::WaitedMintBeforeStale => (Early::MintBeforeStale, Came::Waited),
+            Self::WaitedTakeoverMintBeforeStale => (Early::MintBeforeStale, Came::WaitedTakeover),
+            Self::LateTakeoverMintBeforeStale => (Early::MintBeforeStale, Came::LateTakeover),
             _ => return None,
         })
     }
@@ -7654,11 +7757,17 @@ impl EngineConfig {
         } else {
             MAX_DEBT_TTL
         };
-        if ceilings
-            && (self.debt_ttl > max_debt_ttl
+        // The flaw: the ceilings compared in whole seconds.
+        let over = if flaw == Some(SeederFlaw::TtlsComparedInSeconds) {
+            self.debt_ttl.as_secs() > max_debt_ttl.as_secs()
+                || self.account_ttl.as_secs() > MAX_STATE_TTL.as_secs()
+                || self.ban_ttl.as_secs() > MAX_STATE_TTL.as_secs()
+        } else {
+            self.debt_ttl > max_debt_ttl
                 || self.account_ttl > MAX_STATE_TTL
-                || self.ban_ttl > MAX_STATE_TTL)
-        {
+                || self.ban_ttl > MAX_STATE_TTL
+        };
+        if ceilings && over {
             return Err("debt_ttl is at most 24 h; account_ttl and ban_ttl at most 30 days".into());
         }
         let short = if flaw == Some(SeederFlaw::EqualTtlRefused) {
@@ -8041,6 +8150,37 @@ impl Inner {
         self.config.mints.first().is_some_and(|m| m != mint)
     }
 
+    /// Whether `token` is of a quoted mint other than the first (the defects that keep a
+    /// swap's outcomes right at the first quoted mint alone).
+    fn token_at_other_mint(&self, token: &str) -> bool {
+        self.net
+            .read(token)
+            .is_some_and(|i| i.mints.first().is_some_and(|m| self.other_mint(m)))
+    }
+
+    /// Whether payment `pay` asks its mint for nothing more: at or past its deadline, or
+    /// abandoned (NFX-07 §3, the deadline: no key request and no listing request is sent
+    /// then, judged at every look). The defects that ask there, or that use what comes
+    /// there, ask as before.
+    fn asks_no_more(&self, pay: u64, ask: SeederFlaw) -> bool {
+        let asks = [
+            ask,
+            SeederFlaw::NoDeadline,
+            SeederFlaw::LateKeysUsed,
+            SeederFlaw::LateListingUsed,
+            SeederFlaw::KeysInDeadlineSecondUsed,
+            SeederFlaw::KeysetListingWaitPastDeadline,
+        ];
+        if asks.iter().any(|f| self.has(*f)) {
+            return false;
+        }
+        let st = self.state();
+        let now = self.clock.now();
+        st.pays
+            .get(&pay)
+            .is_none_or(|r| r.abandoned || now >= r.deadline)
+    }
+
     /// Ask the first quoted mint for its keyset listing, unless it was asked in this
     /// second: the defects that ask where no check needs one.
     fn ask_listing_unneeded(&self) {
@@ -8244,7 +8384,9 @@ impl Inner {
                     None => continue,
                 }
                 if read == Read::Claimed {
-                    self.settle_late(&mut st, &u.pay, Swap::Claimed);
+                    if !self.read_claim_lost(&u.token) {
+                        self.settle_late(&mut st, &u.pay, Swap::Claimed);
+                    }
                 } else if self.nothing_frees(by, false) {
                     self.free_unpaid(&mut st, &u.pay);
                 }
@@ -8268,7 +8410,9 @@ impl Inner {
                         continue;
                     }
                     if read == Read::Claimed {
-                        self.settle_late(&mut st, pay, Swap::Claimed);
+                        if !self.read_claim_lost(&f.2) {
+                            self.settle_late(&mut st, pay, Swap::Claimed);
+                        }
                     } else if self.nothing_frees(by, true) {
                         self.free_unpaid(&mut st, pay);
                     }
@@ -8292,6 +8436,12 @@ impl Inner {
             }
         }
         wake_all(wake);
+    }
+
+    /// The flaw: a claim at a quoted mint other than the first, learnt by a read, is not
+    /// credited.
+    fn read_claim_lost(&self, token: &str) -> bool {
+        self.has(SeederFlaw::OtherMintReadClaimNotCredited) && self.token_at_other_mint(token)
     }
 
     /// Whether a swap learnt as nothing by `by` frees its account's chunks from the global
@@ -8341,7 +8491,9 @@ impl Inner {
                 } else {
                     s == k
                 }
-            })
+            }) && !(scope.is_none()
+                && st.dropped.contains(&k.1)
+                && self.has(SeederFlaw::SweepSkipsDroppedVideos))
         };
         let now = self.clock.now();
         let lost: Vec<Unknown> = st
@@ -9233,6 +9385,18 @@ impl Inner {
                 for d in aged {
                     st.live.remove(&d);
                 }
+            } else if self.has(SeederFlaw::DroppedVideoDebtNeverAges) {
+                // The flaw: the unpaid chunks of a video no longer served are kept.
+                let dropped = st.dropped.clone();
+                let mut kept = VecDeque::new();
+                while let Some((debt, t)) = st.debt.pop_front() {
+                    if t.saturating_add(ttl) > now || dropped.contains(&debt.0.1) {
+                        kept.push_back((debt, t));
+                    } else {
+                        st.live.remove(&debt);
+                    }
+                }
+                st.debt = kept;
             } else {
                 while let Some(&(debt, t)) = st.debt.front() {
                     if t.saturating_add(ttl) > now {
@@ -9424,6 +9588,25 @@ impl Inner {
         }
         a.acked = a.acked.max(upto);
         a.spent += amount;
+        if self.has(SeederFlaw::CreditSpillsToPeers) {
+            // The flaw: every other peer's account on the video is paid up to there too.
+            let mut spilt = Vec::new();
+            for (k, other) in st
+                .accounts
+                .iter_mut()
+                .filter(|(k, _)| k.1 == key.1 && k.0 != key.0)
+            {
+                while other.unpaid.front().is_some_and(|n| *n <= upto) {
+                    if let Some(n) = other.unpaid.pop_front() {
+                        spilt.push((*k, other.generation, n));
+                    }
+                }
+                other.acked = other.acked.max(upto);
+            }
+            for (k, generation, n) in spilt {
+                st.live.remove(&self.debt_key(k, generation, n));
+            }
+        }
         if self.has(SeederFlaw::CreditFreesPeerDebt) {
             st.live
                 .retain(|(k, _, n)| !(k.0 == key.0 && *k != key && *n <= upto));
@@ -9452,6 +9635,11 @@ impl Inner {
     fn settle(&self, st: &mut State, pay: &Settle, outcome: Swap) -> Result<Ack, Rej> {
         let key = pay.key;
         match outcome {
+            Swap::Claimed
+                if self.has(SeederFlaw::BannedClaimNotCredited) && self.peer_banned(st, key) =>
+            {
+                Err(rej(RejCode::Banned, "this peer is banned"))
+            }
             Swap::Claimed => Ok(self.ack(st, pay)),
             Swap::Spent => {
                 if !self.has(SeederFlaw::NoBanOnSpent) {
@@ -9928,6 +10116,13 @@ impl Inner {
         poll_fn(|cx| {
             // Waiting for the next second to ask for the listing again.
             let mut next_second = false;
+            // At or past its deadline it asks for nothing more, keys or listing: what came
+            // would not be used.
+            let no_keys = self.asks_no_more(pay, SeederFlaw::KeysAskedAtDeadline);
+            let no_listing = self.asks_no_more(pay, SeederFlaw::ListingAskedAtDeadline);
+            // The mint answered its key request 12001 in this poll
+            // ([`SeederFlaw::LateKeysRefusalUsed`] only).
+            let mut keys_refused = false;
             let found = loop {
                 let mut st = self.state();
                 let own = st.keys.get(mint);
@@ -9999,6 +10194,9 @@ impl Inner {
                     if !keys_seen.load(Ordering::SeqCst) {
                         break None; // the flaw: asked for, and not to be seen yet
                     }
+                    if !asked && no_keys {
+                        break None; // at its deadline: not asked for
+                    }
                     let ask = !std::mem::replace(&mut asked, true);
                     drop(st);
                     break match self
@@ -10015,6 +10213,11 @@ impl Inner {
                                     st.keys_refused.insert((mint.to_owned(), *k));
                                 }
                             }
+                            // The flaw: the mint's listing is dropped with the refusal.
+                            if self.has(SeederFlaw::ListingDroppedOnKeysRefusal) {
+                                self.state().listings.remove(key);
+                            }
+                            keys_refused = true;
                             Some(Err(rej(
                                 RejCode::BadToken,
                                 "a keyset the mint does not know",
@@ -10124,6 +10327,9 @@ impl Inner {
                     next_second = true;
                     break None;
                 }
+                if no_listing {
+                    break None; // at its deadline: not asked for
+                }
                 st.listings_asked += 1;
                 if self.has(SeederFlaw::ListingRateLimitedPerKeyset) {
                     st.listed_for.insert(mint.to_owned(), missing.clone());
@@ -10156,7 +10362,8 @@ impl Inner {
                 return Poll::Ready(Ok(keys.clone()));
             }
             if let Some(Err(r)) = &found
-                && self.has(SeederFlaw::LateListingUsed)
+                && (self.has(SeederFlaw::LateListingUsed)
+                    || (keys_refused && self.has(SeederFlaw::LateKeysRefusalUsed)))
             {
                 return Poll::Ready(Err(r.clone()));
             }
@@ -10232,6 +10439,8 @@ impl Inner {
                     self.early_waker(SeederFlaw::KeysetListingWokenEarly, cx, &seen)
                 }
             };
+            // At or past its deadline it asks for no listing: one that came would not be used.
+            let no_listing = self.asks_no_more(pay, SeederFlaw::ListingAskedAtDeadline);
             let found = loop {
                 let mut st = self.state();
                 let now = self.clock.now();
@@ -10307,6 +10516,9 @@ impl Inner {
                     && st.listings.values().any(|l| l.at == now)
                 {
                     break None;
+                }
+                if no_listing {
+                    break None; // at its deadline: not asked for
                 }
                 asked = true;
                 if !self.has(SeederFlaw::KeysetListingUncounted) {
@@ -10389,6 +10601,21 @@ impl Inner {
         if during > 0 {
             self.pass(Duration::from_secs(during));
         }
+        // The flaws: at a quoted mint other than the first, a spent or an invalid proof
+        // refused with no ban, and a claim that lands late not credited.
+        let elsewhere = self.token_at_other_mint(token);
+        let spared = match outcome {
+            Swap::Spent if elsewhere && self.has(SeederFlaw::OtherMintSpentNoBan) => {
+                Some(rej(RejCode::Spent, "a proof is already spent"))
+            }
+            Swap::Invalid if elsewhere && self.has(SeederFlaw::OtherMintInvalidNoBan) => {
+                Some(rej(RejCode::BadToken, "the mint refuses these proofs"))
+            }
+            _ => None,
+        };
+        let late_lost = outcome == Swap::Claimed
+            && elsewhere
+            && self.has(SeederFlaw::OtherMintLateClaimNotCredited);
         let wake = {
             let mut st = self.state();
             // A payment whose outcome was decided has no record left: its answer, lost or
@@ -10447,9 +10674,14 @@ impl Inner {
                 wake.clear();
             }
             if late {
-                self.settle_late(&mut st, pay, outcome);
+                if !late_lost {
+                    self.settle_late(&mut st, pay, outcome);
+                }
             } else {
-                let answer = self.settle(&mut st, pay, outcome);
+                let answer = match spared {
+                    Some(refusal) => Err(refusal),
+                    None => self.settle(&mut st, pay, outcome),
+                };
                 if let Some(r) = st.pays.get_mut(&id) {
                     r.answer = Some(answer);
                 }
@@ -10972,7 +11204,13 @@ impl MockEngine {
 
     /// Stop serving video `video`, keeping its accounts, as a seeder that drops a video does.
     pub fn drop_video(&self, video: usize) {
-        self.0.state().dropped.insert(video);
+        let mut st = self.0.state();
+        st.dropped.insert(video);
+        if self.0.has(SeederFlaw::DroppedVideoFreesDebt) {
+            // The flaw: its unpaid chunks leave the global count.
+            st.live.retain(|(k, _, _)| k.1 != video);
+            st.debt.retain(|((k, _, _), _)| k.1 != video);
+        }
     }
 }
 
@@ -11075,11 +11313,22 @@ impl MockEngine {
                 if !e.has(SeederFlaw::DroppedVideoBanNotAged) {
                     e.age(&mut st);
                 }
+                // A swap of the account's abandoned in flight: sent, unanswered, and at or
+                // past its payment's deadline. Its outcome is unknown as one whose answer
+                // was lost, from that deadline; before it, the payment holds its turn.
+                let now = e.clock.now();
+                let swap_abandoned_in_flight = |st: &State| {
+                    st.pays.values().any(|r| {
+                        r.key == key && r.sent && !r.landed && (r.abandoned || now >= r.deadline)
+                    })
+                };
                 let holds = st.accounts.contains_key(&key)
                     || (e.has(SeederFlaw::DroppedVideoAnyAccount)
                         && st.accounts.keys().any(|(p, _)| p == peer))
                     || (st.unknown.iter().any(|u| u.pay.key == key)
                         && !e.has(SeederFlaw::DroppedVideoIgnoresUnknownSwap))
+                    || (swap_abandoned_in_flight(&st)
+                        && !e.has(SeederFlaw::DroppedVideoIgnoresSwapInFlight))
                     || (st.paying.contains_key(&key)
                         && e.has(SeederFlaw::DroppedVideoCountsPaymentInProgress));
                 if !holds || e.has(SeederFlaw::DroppedVideoRefusesAccounts) {
@@ -11727,6 +11976,16 @@ impl MockSession {
         if e.runs_early(Early::StructureBeforeStale, came) {
             structure()?;
         }
+        // The flaws: the mint of a token step 1 passes checked before the watermark; or, of
+        // any token that can be read, before step 1. Nothing is fetched for it.
+        let foreign = || {
+            e.net
+                .read(&pay.token)
+                .is_some_and(|i| i.mints.first().is_some_and(|m| !e.config.mints.contains(m)))
+        };
+        if e.runs_early(Early::MintBeforeStale, came) && foreign() && structure().is_ok() {
+            return Err(rej(RejCode::BadMint, "not a quoted mint"));
+        }
         let read_before_stale = (took_over && e.has(SeederFlaw::TakeoverReadsBeforeStale))
             || e.reads_at(ReadAt::Stale, came);
         if read_before_stale {
@@ -11748,6 +12007,9 @@ impl MockSession {
             let proofs = e.net.read(&pay.token).map_or_else(Vec::new, |i| i.proofs);
             let deadline = e.state().pays.get(&id).map_or(0, |r| r.deadline);
             e.learn_here(self.key, proofs, deadline).await;
+        }
+        if e.runs_early(Early::MintBeforeStructure, came) && foreign() {
+            return Err(rej(RejCode::BadMint, "not a quoted mint"));
         }
         // 1. Structure.
         let info = structure()?;
@@ -12149,7 +12411,40 @@ impl MockSession {
         {
             let mut st = e.state();
             let now = e.clock.now();
-            if e.unknown_swap(&st, self.key, id) && !e.has(SeederFlaw::UnknownUnbounded) {
+            // The flaws: an unknown swap stops only the payments that overlap it; or only
+            // those at its own mint.
+            let beyond = e.has(SeederFlaw::UnknownBlocksOnlyOverlap)
+                && st.unknown.iter().any(|u| u.pay.key == self.key)
+                && st
+                    .unknown
+                    .iter()
+                    .filter(|u| u.pay.key == self.key)
+                    .all(|u| u.pay.upto < pay.upto_chunk)
+                && !st
+                    .pays
+                    .iter()
+                    .any(|(p, r)| *p != id && r.key == self.key && r.sent && !r.landed);
+            let other_mints_only = e.has(SeederFlaw::UnknownPerMint) && {
+                let at = |t: &str| e.net.read(t).and_then(|i| i.mints.first().cloned());
+                st.unknown
+                    .iter()
+                    .filter(|u| u.pay.key == self.key)
+                    .all(|u| at(u.token.as_str()).as_ref() != Some(&mint))
+                    && st
+                        .pays
+                        .iter()
+                        .filter(|(p, r)| **p != id && r.key == self.key && r.sent && !r.landed)
+                        .all(|(_, r)| {
+                            r.swap
+                                .as_ref()
+                                .is_none_or(|s| at(s.1.as_str()).as_ref() != Some(&mint))
+                        })
+            };
+            if e.unknown_swap(&st, self.key, id)
+                && !e.has(SeederFlaw::UnknownUnbounded)
+                && !beyond
+                && !other_mints_only
+            {
                 if e.has(SeederFlaw::PayDropsDebtLog) {
                     let key = self.key;
                     st.debt.retain(|(debt, _)| debt.0 != key);

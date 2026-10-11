@@ -2127,6 +2127,53 @@ pub async fn bad_tokens_are_refused<H: Harness>(h: &H) {
 
     one_bad_proof_spoils_the_token(h).await;
     one_bad_proof_spoils_the_token_on_every_path(h).await;
+    // Proofs a mint refuses as invalid ban their peer at a second quoted mint as at the first.
+    a_refused_proof_bans_at_a_second_mint(h, true).await;
+}
+
+/// Flaws `OtherMintSpentNoBan` and `OtherMintInvalidNoBan`. A swap's outcome is settled
+/// alike at whichever mint the seeder quotes: NFX-07 §3 step 5 sends all the token's proofs
+/// in one swap "at the quoted mint", and excepts none from its outcomes. At the second of
+/// two quoted mints ([`SECOND_MINT`]), a proof someone else spent is refused `spent`, and
+/// proofs the mint refuses as invalid (`forged`) `bad-token`: either bans the peer, whose
+/// next `hello` is refused `banned`.
+async fn a_refused_proof_bans_at_a_second_mint<H: Harness>(h: &H, forged: bool) {
+    let e = Quoted::Second.engine(h);
+    let mut s = open(h, &e, 1).await;
+    assert_eq!(serve(h, &mut s, 0, 2), 2, "an account, two chunks unpaid");
+    let (token, code, what) = if forged {
+        let token = h.bad_token_at(SECOND_MINT, BadToken::Forged, 2).await;
+        (
+            token,
+            RejCode::BadToken,
+            "proofs the mint refuses as invalid ban",
+        )
+    } else {
+        let token = h.token_at(SECOND_MINT, 2).await;
+        assert!(h.steal(&token).await, "someone else spent it");
+        (token, RejCode::Spent, "a proof already spent bans")
+    };
+    let r = s
+        .pay(&Pay {
+            upto_chunk: 2,
+            token,
+        })
+        .await;
+    assert!(
+        is_rej(&r, &code),
+        "refused {code:?} at the second quoted mint as at the first ({what} the peer): {r:?}"
+    );
+    assert!(
+        landed(h, || s.banned()).await,
+        "{what} the peer, at whichever quoted mint the swap was sent to"
+    );
+    let again = e.hello(&h.peer(1), &h.hello()).await.map(|_| ());
+    assert!(
+        is_rej(&again, &RejCode::Banned),
+        "{what} the peer at the second quoted mint too: its next hello is refused banned: \
+         {again:?}"
+    );
+    close(h, s).await;
 }
 
 async fn settles_pay<H: Harness>(s: &mut Session<H>, upto: u64, token: String, spent: u64) {
@@ -2429,6 +2476,8 @@ pub async fn a_double_spend_bans_the_peer<H: Harness>(h: &H) {
         landed(h, || s.banned()).await,
         "a peer whose only account is pre-paid (never served) is banned on a double spend"
     );
+    // A spent proof bans its peer at a second quoted mint as at the first.
+    a_refused_proof_bans_at_a_second_mint(h, false).await;
 }
 
 /// A banned peer gets nothing more: not a pre-paid chunk, not a new session on any
@@ -3329,6 +3378,9 @@ pub async fn a_seeder_answers_within_its_deadline<H: Harness>(h: &H) {
     keys_that_come_late_are_not_used(h, Quoted::Second).await;
     a_listing_that_comes_late_judges_nothing(h, Quoted::Second).await;
     the_keyset_rule_waits_for_its_listing(h, Quoted::Second).await;
+    for quoted in QUOTED {
+        a_payment_asks_for_nothing_at_its_deadline(h, quoted).await;
+    }
 }
 
 /// Flaws `OutcomeUnwoken`, `KeysUnwoken`, `ListingUnwoken`, `ReadUnwoken`, `PayReadUnwoken`,
@@ -5008,6 +5060,53 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
         "the late claim freed the four chunks it covers"
     );
 
+    // So is a claim that comes in time (flaw `BannedClaimNotCredited`): its peer's ban was
+    // checked as its turn came, and a ban earned since, on its other video while its swap
+    // was at the mint, refuses nothing of it. It is acknowledged, and credited.
+    let e = h.engine(1, 4, 4);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    let mut elsewhere = open_on(h, &e, 1, 1).await;
+    h.hold_next_swap();
+    let slow = Pay {
+        upto_chunk: 4,
+        token: h.token(4).await,
+    };
+    let spent = h.token(2).await;
+    assert!(h.steal(&spent).await, "someone else spent it");
+    let replay = Pay {
+        upto_chunk: 2,
+        token: h.reencode(&spent).await,
+    };
+    let (r, banned) = both(s.pay(&slow), async {
+        settle(h).await;
+        let r = elsewhere.pay(&replay).await;
+        let banned = is_rej(&r, &RejCode::Spent) && landed(h, || elsewhere.banned()).await;
+        release(h).await;
+        banned
+    })
+    .await;
+    assert!(
+        banned,
+        "the peer was banned on its other video while the first swap was at the mint"
+    );
+    assert!(
+        matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (4, 4)),
+        "a swap that claims within its payment's deadline is acknowledged and credited, \
+         whether or not its peer has been banned since its turn came: {r:?}"
+    );
+    assert!(
+        h.claimed_all(&slow.token).await,
+        "the seeder has the proofs"
+    );
+    let mut other = open(h, &e, 2).await;
+    assert_eq!(
+        serve(h, &mut other, 0, 4),
+        4,
+        "the claim, in time for a peer banned meanwhile, freed the four chunks it covers"
+    );
+    close(h, (s, elsewhere, other)).await;
+
     // A retry answered `spent` whose restore goes unanswered leaves the outcome unknown,
     // to be learnt; an honest watcher's next quote then settles the payment.
     let e = h.engine(1, 4, 1000);
@@ -6073,6 +6172,316 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
     // Every refusal on every path to the turn, and every wait on the clock.
     hellos_behind_every_refusal_read_after_it(h).await;
     entries_waiting_for_a_dead_turn_are_woken_after_a_move(h).await;
+    // A swap's outcomes at a second quoted mint, as at the first.
+    a_second_mints_swaps_are_settled_as_the_firsts(h).await;
+}
+
+/// Flaws `OtherMintLateClaimNotCredited`, `OtherMintReadClaimNotCredited` and
+/// `UnknownPerMint`. A swap is retried, settled late, kept while unknown and completed alike
+/// at whichever mint the seeder quotes: NFX-07 §3 states those rules of a swap and of its
+/// account, never of a mint. Each at the second of two quoted mints ([`SECOND_MINT`]):
+/// - a claim whose answer lands past its payment's deadline is credited, and bans nobody;
+/// - so is one whose answer is lost, learnt by its account's own read; and one abandoned
+///   in flight that a sweep learns while its answer is on its way, which then changes
+///   nothing;
+/// - a spent or an invalid outcome that lands late bans nobody, and the account pays again
+///   at once;
+/// - while a swap of the account's is unknown its next payment is answered
+///   `mint-unavailable` and not swapped, whichever quoted mint each is at: the unknown one
+///   at the first and the next at the second, and the other way round;
+/// - a mint that cannot be reached is no ban, and leaves nothing unknown: the same token is
+///   acknowledged once it is back;
+/// - a swap whose answer is lost is retried in time and settled by a restore, never banned
+///   on;
+/// - and one left unspent for `account_ttl` is completed by a sweep, and credited.
+async fn a_second_mints_swaps_are_settled_as_the_firsts<H: Harness>(h: &H) {
+    let minute = Duration::from_secs(60);
+    let unpaid = "an account, two chunks unpaid";
+    let e = Quoted::Second.engine(h);
+    let mut s = open(h, &e, 1).await;
+    assert_eq!(serve(h, &mut s, 0, 2), 2, "{unpaid}");
+    h.hold_next_swap();
+    let slow = Pay {
+        upto_chunk: 2,
+        token: h.token_at(SECOND_MINT, 2).await,
+    };
+    let (r, ()) = both(s.pay(&slow), async {
+        settle(h).await;
+        advance(h, minute).await;
+    })
+    .await;
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "no answer from the second quoted mint by the deadline: {r:?}"
+    );
+    release(h).await;
+    assert!(
+        h.claimed_all(&slow.token).await,
+        "the seeder has the proofs"
+    );
+    assert!(
+        !landed(h, || s.banned()).await,
+        "a claim that lands late bans nobody"
+    );
+    let q = open(h, &e, 1).await.quote().clone();
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (2, 2),
+        "a claim at the second quoted mint whose answer lands past its deadline is credited"
+    );
+    close(h, s).await;
+
+    // Its answer lost, and its retry never reaching the mint: its account's read learns it.
+    let e = Quoted::Second.engine(h);
+    let mut s = open(h, &e, 1).await;
+    assert_eq!(serve(h, &mut s, 0, 2), 2, "{unpaid}");
+    h.hold_swap_responses();
+    h.lose_next_swap_response();
+    let unseen = Pay {
+        upto_chunk: 2,
+        token: h.token_at(SECOND_MINT, 2).await,
+    };
+    let (r, ()) = both(s.pay(&unseen), async {
+        settle(h).await;
+        h.mint_outage(true);
+        release(h).await;
+    })
+    .await;
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "its answer lost, and its retry not reaching the second quoted mint: {r:?}"
+    );
+    h.mint_outage(false);
+    assert!(h.claimed_all(&unseen.token).await, "the mint has the claim");
+    let q = open(h, &e, 1).await.quote().clone();
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (2, 2),
+        "a claim at the second quoted mint whose answer was lost is learnt by its account's \
+         own read, and credited"
+    );
+    close(h, s).await;
+
+    // Abandoned in flight at its deadline, the mint's answer held: a sweep learns it, and
+    // the answer, when it comes, changes nothing.
+    let e = Quoted::Second.engine(h);
+    let mut s = open(h, &e, 1).await;
+    assert_eq!(serve(h, &mut s, 0, 2), 2, "{unpaid}");
+    h.hold_swap_responses();
+    let slow = Pay {
+        upto_chunk: 2,
+        token: h.token_at(SECOND_MINT, 2).await,
+    };
+    let (r, ()) = both(s.pay(&slow), async {
+        settle(h).await;
+        advance(h, minute).await;
+    })
+    .await;
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "the second quoted mint's answer held past the deadline: {r:?}"
+    );
+    e.sweep().await;
+    // The mint's reads down, the account's own hello can learn nothing itself.
+    h.state_check_outage(true);
+    h.restore_outage(true);
+    let q = open(h, &e, 1).await.quote().clone();
+    h.state_check_outage(false);
+    h.restore_outage(false);
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (2, 2),
+        "a claim at the second quoted mint, its swap abandoned in flight, is learnt by a \
+         sweep, and credited"
+    );
+    release(h).await;
+    let q = open(h, &e, 1).await.quote().clone();
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (2, 2),
+        "credited once, not again when the second quoted mint's answer comes"
+    );
+    close(h, s).await;
+
+    // A spent or an invalid outcome that lands late bans nobody, and is nothing: the
+    // account pays again at once.
+    for forged in [false, true] {
+        let what = if forged { "invalid" } else { "spent" };
+        let e = Quoted::Second.engine(h);
+        let mut s = open(h, &e, 1).await;
+        assert_eq!(serve(h, &mut s, 0, 2), 2, "{unpaid}");
+        h.hold_next_swap();
+        let p = Pay {
+            upto_chunk: 2,
+            token: if forged {
+                h.bad_token_at(SECOND_MINT, BadToken::Forged, 2).await
+            } else {
+                h.token_at(SECOND_MINT, 2).await
+            },
+        };
+        let (r, ()) = both(s.pay(&p), async {
+            settle(h).await;
+            advance(h, minute).await;
+        })
+        .await;
+        assert!(
+            is_rej(&r, &RejCode::MintUnavailable),
+            "no answer from the second quoted mint by the deadline: {r:?}"
+        );
+        if !forged {
+            assert!(h.steal(&p.token).await, "its payer takes the proofs back");
+        }
+        release(h).await;
+        assert!(
+            !landed(h, || s.banned()).await,
+            "a late outcome at the second quoted mint, {what}, bans nobody"
+        );
+        let r = s
+            .pay(&Pay {
+                upto_chunk: 2,
+                token: h.token_at(SECOND_MINT, 2).await,
+            })
+            .await;
+        assert!(
+            matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (2, 2)),
+            "a late outcome at the second quoted mint, {what}, is nothing: the account pays \
+             again at once: {r:?}"
+        );
+        close(h, s).await;
+    }
+
+    // An unknown swap stops its account's next payment, whichever quoted mint each is at.
+    for unknown_at_second in [false, true] {
+        let (unknown_at, next_at) = if unknown_at_second {
+            (SECOND_MINT.to_owned(), h.mint())
+        } else {
+            (h.mint(), SECOND_MINT.to_owned())
+        };
+        let e = Quoted::Second.engine(h);
+        let mut s = open(h, &e, 1).await;
+        assert_eq!(serve(h, &mut s, 0, 2), 2, "{unpaid}");
+        h.hold_next_swap_reserving(); // undecidable for now: every read of it proves nothing
+        h.time_out_next_swap();
+        let r = s
+            .pay(&Pay {
+                upto_chunk: 1,
+                token: h.token_at(&unknown_at, 1).await,
+            })
+            .await;
+        assert!(
+            is_rej(&r, &RejCode::MintUnavailable),
+            "a swap whose outcome is unknown (at the second quoted mint: \
+             {unknown_at_second}): {r:?}"
+        );
+        let next = Pay {
+            upto_chunk: 2,
+            token: h.token_at(&next_at, 2).await,
+        };
+        let r = s.pay(&next).await;
+        assert!(
+            is_rej(&r, &RejCode::MintUnavailable),
+            "while a swap of the account's is unknown, its next payment is answered \
+             mint-unavailable, whichever quoted mint each is at (the unknown one at the \
+             second: {unknown_at_second}): {r:?}"
+        );
+        assert!(
+            !h.claimed_any(&next.token).await,
+            "and it is not swapped: an account holds one unknown swap at most, not one for \
+             each quoted mint (the unknown one at the second: {unknown_at_second})"
+        );
+        release(h).await; // the mint finishes the first: a claim, learnt by a read
+        advance(h, SECOND).await;
+        let q = open(h, &e, 1).await.quote().clone();
+        assert_eq!(
+            (q.accepted_upto, q.spent_total),
+            (1, 1),
+            "the first swap, finished, is learnt and credited (at the second quoted mint: \
+             {unknown_at_second})"
+        );
+        close(h, s).await;
+    }
+
+    // A mint that cannot be reached: no ban, nothing credited, nothing unknown.
+    let e = Quoted::Second.engine(h);
+    let mut s = open(h, &e, 1).await;
+    assert_eq!(serve(h, &mut s, 0, 2), 2, "{unpaid}");
+    settles_pay::<H>(&mut s, 1, h.token_at(SECOND_MINT, 1).await, 1).await;
+    let p = Pay {
+        upto_chunk: 2,
+        token: h.token_at(SECOND_MINT, 1).await,
+    };
+    h.mint_outage(true);
+    let r = s.pay(&p).await;
+    h.mint_outage(false);
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "the second quoted mint cannot be reached: {r:?}"
+    );
+    assert!(
+        !landed(h, || s.banned()).await && !h.claimed_any(&p.token).await,
+        "a second quoted mint that cannot be reached is no ban, and nothing is claimed"
+    );
+    let r = s.pay(&p).await;
+    assert!(
+        matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (2, 2)),
+        "a request that never reached the second quoted mint left nothing unknown: the same \
+         token is acknowledged once the mint is back: {r:?}"
+    );
+    close(h, s).await;
+
+    // Its answer lost, the swap is retried in time: the retry is answered spent, a restore
+    // shows its own outputs signed, and the payment is acknowledged.
+    let e = Quoted::Second.engine(h);
+    let mut s = open(h, &e, 1).await;
+    assert_eq!(serve(h, &mut s, 0, 2), 2, "{unpaid}");
+    h.lose_next_swap_response();
+    let r = s
+        .pay(&Pay {
+            upto_chunk: 2,
+            token: h.token_at(SECOND_MINT, 2).await,
+        })
+        .await;
+    assert!(
+        matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (2, 2)),
+        "a swap at the second quoted mint whose answer is lost is retried in time, and a \
+         restore settles it: acknowledged: {r:?}"
+    );
+    assert!(
+        !landed(h, || s.banned()).await,
+        "a retry's spent at the second quoted mint is no double spend, and bans nobody"
+    );
+    close(h, s).await;
+
+    // Left unspent for account_ttl, a swap at the second quoted mint is completed.
+    let e = Quoted::Second.engine(h);
+    let mut s = open(h, &e, 1).await;
+    assert_eq!(serve(h, &mut s, 0, 2), 2, "{unpaid}");
+    let p = Pay {
+        upto_chunk: 2,
+        token: h.token_at(SECOND_MINT, 2).await,
+    };
+    h.time_out_next_swap();
+    h.mint_outage(true);
+    let r = s.pay(&p).await;
+    h.mint_outage(false);
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "a swap the second quoted mint never processed: {r:?}"
+    );
+    close(h, s).await;
+    advance(h, h.account_ttl()).await;
+    e.sweep().await;
+    assert!(
+        h.claimed_all(&p.token).await,
+        "a swap at the second quoted mint whose inputs read unspent for account_ttl is \
+         completed by a sweep"
+    );
+    let q = open(h, &e, 1).await.quote().clone();
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (2, 2),
+        "and its completion, a claim, is credited"
+    );
 }
 
 /// Outputs unsigned with an input spent are nothing, whatever the other inputs are: the
@@ -6940,6 +7349,79 @@ async fn a_dropped_video_still_quotes_its_accounts<H: Harness>(h: &H) {
     a_dropped_videos_sessions_admit_nothing_and_verify(h).await;
     a_dropped_videos_hello_is_judged_as_it_arrives(h).await;
     dropped_videos_hellos_on_every_path_recheck_as_they_answer(h).await;
+    a_sweep_reads_a_dropped_videos_swaps(h).await;
+}
+
+/// Flaw `SweepSkipsDroppedVideos`. A seeder that stops serving a video keeps its accounts
+/// there by the rules that hold for any (NFX-07 §3), and a sweep reads every account's
+/// unknown swaps: those of a video no longer served too. Here the seeder drops its other
+/// video, video 1. Peer 1 holds an account there, two chunks unpaid, and a payment the mint
+/// claimed whose answer was lost; peer 2 only a pre-payment the mint never processed, its
+/// inputs unspent. After the drop a sweep reads both. With the mint's reads down, so that
+/// its own `hello` can learn nothing, peer 1's quote shows the claim: the sweep learnt and
+/// credited it. And `account_ttl` on, a sweep completes peer 2's swap, whose quote then
+/// shows it.
+async fn a_sweep_reads_a_dropped_videos_swaps<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open_on(h, &e, 1, 1).await;
+    assert_eq!(serve_on(h, &mut s, 1, 0, 2), 2, "within the window");
+    let claimed = lost_claim(h, &mut s, 2, 2).await;
+    let mut t = open_on(h, &e, 2, 1).await;
+    let unspent = Pay {
+        upto_chunk: 1,
+        token: h.token(1).await,
+    };
+    h.time_out_next_swap();
+    h.mint_outage(true);
+    let r = t.pay(&unspent).await;
+    h.mint_outage(false);
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "a pre-payment whose swap's outcome is unknown: {r:?}"
+    );
+    close(h, (s, t)).await;
+    h.drop_video(&e, 1);
+    let reads = h.state_reads();
+    e.sweep().await;
+    assert!(
+        h.state_reads() > reads,
+        "a sweep reads every account's unknown swaps, those of a video the seeder no longer \
+         serves included"
+    );
+    assert!(
+        h.claimed_all(&claimed.token).await && !h.claimed_any(&unspent.token).await,
+        "the mint has the first payment, and never had the second"
+    );
+    h.state_check_outage(true);
+    h.restore_outage(true);
+    let q = open_on(h, &e, 1, 1).await.quote().clone();
+    assert_eq!(
+        (q.served, q.accepted_upto, q.spent_total),
+        (2, 2, 2),
+        "the sweep learnt the claim on the video no longer served, and credited it: the \
+         account's quote shows it, the mint's reads down for its own hello"
+    );
+    h.state_check_outage(false);
+    h.restore_outage(false);
+    advance(h, h.account_ttl()).await;
+    e.sweep().await;
+    assert!(
+        h.claimed_all(&unspent.token).await,
+        "a swap on a video no longer served whose inputs read unspent for account_ttl is \
+         completed by a sweep, as any other"
+    );
+    let r = e.hello(&h.peer(2), &h.hello_for(1)).await;
+    let quoted = r
+        .as_ref()
+        .map(|s| (s.quote().accepted_upto, s.quote().spent_total))
+        .map_err(|rej| rej.code.clone());
+    assert_eq!(
+        quoted,
+        Ok((1, 1)),
+        "its completion, a claim, is credited: the peer has an account on the video no longer \
+         served, and its quote shows the payment"
+    );
+    close(h, r).await;
 }
 
 /// What comes while a `hello` for a video the seeder no longer serves waits or reads, for
@@ -7274,7 +7756,11 @@ async fn a_dropped_videos_sessions_admit_nothing_and_verify<H: Harness>(h: &H) {
 /// then learns: learnt as nothing, its quote shows no account, its `hello` has created none,
 /// and its next is refused `unknown-video`. A peer with no account there whose first
 /// payment, on a session open when the video was dropped, is still in progress has no account
-/// yet: it is refused `unknown-video`, and answered once that payment has landed.
+/// yet, and no unknown swap: it is refused `unknown-video` while that payment holds its
+/// turn. From the payment's deadline its swap, still in flight, is a swap whose outcome is
+/// unknown, as one whose answer was lost: the peer's `hello` is answered, and quotes no
+/// account (flaw `DroppedVideoIgnoresSwapInFlight` refuses it until the swap lands). Once
+/// the swap has landed, a claim, the peer has an account, and its quote shows the payment.
 async fn a_dropped_videos_hello_is_judged_as_it_arrives<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 4).await;
@@ -7340,6 +7826,23 @@ async fn a_dropped_videos_hello_is_judged_as_it_arrives<H: Harness>(h: &H) {
          progress, has no account yet: its hello is refused unknown-video as it arrives: {r:?}"
     );
     close(h, arriving).await;
+    advance(h, Duration::from_secs(60)).await; // that payment's deadline, its swap in flight
+    let r = e.hello(&peer, &h.hello()).await;
+    let quoted = r
+        .as_ref()
+        .map(|s| {
+            let q = s.quote();
+            (q.served, q.accepted_upto, q.spent_total)
+        })
+        .map_err(|rej| rej.code.clone());
+    assert_eq!(
+        quoted,
+        Ok((0, 0, 0)),
+        "from its deadline, a first payment's swap abandoned in flight is a swap whose outcome \
+         is unknown, as one whose answer was lost: the hello of its peer for a video no longer \
+         served is answered, and its read learning nothing yet, quotes no account"
+    );
+    close(h, r).await;
     release(h).await;
     let r = e.hello(&peer, &h.hello()).await;
     let quoted = r
@@ -7674,6 +8177,49 @@ pub async fn a_global_cap_bounds_free_service<H: Harness>(h: &H) {
         served, 10,
         "a peer's videos do not share chunks in the count"
     );
+    a_dropped_videos_unpaid_chunks_count_until_they_age_out(h).await;
+}
+
+/// Flaws `DroppedVideoFreesDebt` and `DroppedVideoDebtNeverAges`. The unpaid chunks of a
+/// video the seeder stops serving count toward the global cap until they age out, as any
+/// others (NFX-07 §3: the cap counts the unpaid chunks admitted within the last `debt_ttl`
+/// across all peers and videos). Video 0's unpaid chunks fill a cap of 10, and the seeder
+/// drops video 0: video 1 admits nothing unpaid, then or a second before `debt_ttl` has
+/// passed since those admissions, and admits a chunk once it has.
+async fn a_dropped_videos_unpaid_chunks_count_until_they_age_out<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 10);
+    let mut debtors = Vec::new();
+    let mut served = 0;
+    for p in 1..=3u8 {
+        let mut s = open(h, &e, p).await;
+        served += serve(h, &mut s, 0, 4);
+        debtors.push(s);
+    }
+    assert_eq!(served, 10, "video 0's unpaid chunks fill the global cap");
+    let mut other = open_on(h, &e, 4, 1).await;
+    assert_eq!(serve_on(h, &mut other, 1, 0, 1), 0, "the cap is full");
+    h.drop_video(&e, 0);
+    assert_eq!(
+        landed(h, || serve_on(h, &mut other, 1, 0, 1)).await,
+        0,
+        "the unpaid chunks of a video the seeder stopped serving were admitted within the \
+         last debt_ttl: they still count toward the global cap, and its other video admits \
+         nothing unpaid"
+    );
+    advance(h, h.debt_ttl() - SECOND).await;
+    assert_eq!(
+        serve_on(h, &mut other, 1, 0, 1),
+        0,
+        "still counted a second before debt_ttl, the video no longer served"
+    );
+    advance(h, SECOND).await;
+    assert_eq!(
+        serve_on(h, &mut other, 1, 0, 1),
+        1,
+        "the unpaid chunks of a video the seeder stopped serving age out of the global cap \
+         after debt_ttl, as any others: its other video admits again"
+    );
+    close(h, (debtors, other)).await;
 }
 
 /// The global cap holds whatever payments do: a spent token replayed by 50 banned
@@ -8905,13 +9451,21 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
     h.mint_outage(false);
     advance(h, SECOND).await;
     close(h, open_on(h, &e, 1, 0).await).await; // video 0's first read this second
-    let r = zero
-        .pay(&Pay {
-            upto_chunk: 2,
-            token: h.token(2).await,
-        })
-        .await; // and its second, for other proofs
-    assert!(is_rej(&r, &RejCode::MintUnavailable), "{r:?}");
+    let beyond = Pay {
+        upto_chunk: 2,
+        token: h.token(2).await,
+    };
+    let r = zero.pay(&beyond).await; // and its second, for other proofs
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "while a swap of the account's is unknown, its next payment is answered \
+         mint-unavailable without a swap, whatever its upto_chunk: one for chunks beyond the \
+         unknown swap's (flaw `UnknownBlocksOnlyOverlap`) as one that overlaps it: {r:?}"
+    );
+    assert!(
+        !h.claimed_any(&beyond.token).await,
+        "a payment beyond an unknown swap of its account's is not swapped"
+    );
     let (peer, hello) = (h.peer(1), h.hello_for(1));
     let mut other_video = Box::pin(e.hello(&peer, &hello));
     let q = answer_of(h, other_video.as_mut())
@@ -9371,6 +9925,35 @@ pub async fn bad_configurations_are_refused<H: Harness>(h: &H) {
     ];
     for p in bad {
         assert!(h.engine_checked(p).is_err(), "refused: {p:?}");
+    }
+    // The ceilings on the three ttls are durations, not whole seconds (flaw
+    // `TtlsComparedInSeconds`): half a second past one is outside.
+    let half = Duration::from_millis(500);
+    let (day, month) = (
+        Duration::from_secs(24 * 3600),
+        Duration::from_secs(30 * 24 * 3600),
+    );
+    let just_over = [
+        EngineParams {
+            debt_ttl: day + half,
+            account_ttl: month,
+            ban_ttl: month,
+            ..good
+        },
+        EngineParams {
+            account_ttl: month + half,
+            ..good
+        },
+        EngineParams {
+            ban_ttl: month + half,
+            ..good
+        },
+    ];
+    for p in just_over {
+        assert!(
+            h.engine_checked(p).is_err(),
+            "refused, a ttl half a second past its ceiling: {p:?}"
+        );
     }
     let long_debt = EngineParams {
         debt_ttl: Duration::from_secs(24 * 3600 + 1),
@@ -10614,7 +11197,11 @@ pub async fn prepayment_extends_service_exactly<H: Harness>(h: &H) {
         .await
         .expect("a pre-payment");
     assert_eq!(ack.accepted_upto, 6);
-    assert_eq!(serve(h, &mut s, 0, 100), 10);
+    assert_eq!(
+        serve(h, &mut s, 0, 100),
+        10,
+        "paid to 6, it is served the six chunks paid and a window of 4 beyond them, and no more"
+    );
 }
 
 /// One peer's payment credits no other.
@@ -23637,6 +24224,149 @@ async fn keys_that_come_late_are_not_used<H: Harness>(h: &H, quoted: Quoted) {
         close(h, paying).await;
         close(h, s).await;
     }
+    // Flaw `LateKeysRefusalUsed`. So with the mint's refusal of the keys (12001, a keyset
+    // its listing names: [`Harness::refuse_keys`]): it is the key request's answer, and the
+    // `bad-token` it gives is a refusal of step 3, which needs that answer. P, an exact
+    // payment, asks for its keys, the mint's answer held. It comes 65 s or 60 s after P's
+    // arrival: it is not used, and P is `mint-unavailable`. A second before, it is, and P is
+    // `bad-token`.
+    for refused_at in [65, 60, 59] {
+        let e = quoted.engine(h);
+        let mut s = open(h, &e, 1).await;
+        serve(h, &mut s, 0, 4);
+        settles_pay::<H>(&mut s, 4, h.token_at(&mint, 4).await, 4).await;
+        serve(h, &mut s, 4, 4);
+        hold_refetch(h, &e);
+        h.refuse_keys(&mint, true);
+        let p = Pay {
+            upto_chunk: 8,
+            token: h.token_at(&mint, 4).await,
+        };
+        let mut paying = Box::pin(s.pay(&p));
+        assert!(
+            waits_for_keys(h, paying.as_mut()).await,
+            "P holds the turn, waiting for the keys it asked for"
+        );
+        advance(h, Duration::from_secs(refused_at)).await;
+        release(h).await; // the mint answers: it serves no keys of that keyset
+        let r = answer_of(h, paying.as_mut()).await.expect("P answered");
+        if refused_at >= 60 {
+            assert!(
+                is_rej(&r, &RejCode::MintUnavailable),
+                "the mint's 12001 for P's keys came {refused_at} s after its arrival, at or \
+                 past its deadline (whole seconds): it is not used, and P had no outcome by \
+                 then{at}: {r:?}"
+            );
+        } else {
+            assert!(
+                is_rej(&r, &RejCode::BadToken),
+                "the mint's 12001 for P's keys came a second before its deadline: it is used, \
+                 and the refusal it gives is the answer{at}: {r:?}"
+            );
+        }
+        assert!(!h.claimed_any(&p.token).await, "not swapped");
+        close(h, paying).await;
+        assert!(
+            !landed(h, || s.banned()).await,
+            "keys the mint refuses ban nobody, whenever its answer comes{at}"
+        );
+        h.refuse_keys(&mint, false);
+        close(h, s).await;
+    }
+}
+
+/// Flaws `ListingAskedAtDeadline` and `KeysAskedAtDeadline`. No payment asks its mint for
+/// a keyset listing or for keys at or past its deadline, judged at every look (NFX-07 §3,
+/// the deadline): what came would not be used, and nothing that needs it is judged. So at
+/// whichever mint the seeder quotes (`quoted`).
+/// - P names a keyset the mint never had, the mint's listing asked for in P's second just
+///   before it came: it waits for the next second's listing. The clock's next move takes it
+///   to its deadline: it is answered `mint-unavailable`, and the mint was asked for nothing
+///   from that move on.
+/// - P is of a keyset the mint started since the seeder's last listing, and asks for the
+///   listing, its answer held. The answer comes in P's deadline's second, and names P's
+///   keyset: P is answered `mint-unavailable`, and the mint was not asked for that keyset's
+///   keys.
+async fn a_payment_asks_for_nothing_at_its_deadline<H: Harness>(h: &H, quoted: Quoted) {
+    let (at, mint) = (quoted.at(), quoted.mint(h));
+    let e = quoted.engine(h);
+    let (mut s, mut t) = (open(h, &e, 1).await, open(h, &e, 2).await);
+    serve(h, &mut s, 0, 4);
+    serve(h, &mut t, 0, 4);
+    advance(h, SECOND).await; // the listing last asked for in an earlier second, if at all
+    let r = s
+        .pay(&Pay {
+            upto_chunk: 4,
+            token: h.bad_token_at(&mint, BadToken::UnknownKeyset, 4).await,
+        })
+        .await;
+    assert!(
+        is_rej(&r, &RejCode::BadToken),
+        "a token naming a keyset the mint does not list is refused bad-token{at}: {r:?}"
+    );
+    let p = Pay {
+        upto_chunk: 4,
+        token: h.bad_token_at(&mint, BadToken::UnknownKeyset, 4).await,
+    };
+    let mut paying = Box::pin(t.pay(&p));
+    assert!(
+        waits(h, paying.as_mut()).await,
+        "P holds the turn, waiting for the next second's keyset listing{at}"
+    );
+    let (keys, listings) = (keys_asked(h), h.listing_requests());
+    advance(h, Duration::from_secs(60)).await;
+    let r = answer_of(h, paying.as_mut()).await.expect("P answered");
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "P waited for the next second's listing into its deadline: no check of it is judged \
+         then, and it is mint-unavailable{at}: {r:?}"
+    );
+    assert_eq!(
+        (h.listing_requests() - listings, keys_asked(h) - keys),
+        (0, 0),
+        "a payment asks its mint for no keyset listing, and for no keys, at or past its \
+         deadline, one that waited for the next second's listing into it included{at}: \
+         (listing requests, key requests) since"
+    );
+    close(h, paying).await;
+    close(h, (s, t)).await;
+
+    let e = quoted.engine(h);
+    let mut s = open(h, &e, 1).await;
+    serve(h, &mut s, 0, 4);
+    settles_pay::<H>(&mut s, 4, h.token_at(&mint, 4).await, 4).await;
+    serve(h, &mut s, 4, 4);
+    quoted.start_keyset(h);
+    advance(h, SECOND).await; // the mint's listing names its new keyset the next second
+    h.hold_key_fetches();
+    let p = Pay {
+        upto_chunk: 8,
+        token: h.token_at(&mint, 4).await, // of the keyset the mint started
+    };
+    let mut paying = Box::pin(s.pay(&p));
+    assert!(
+        waits_for_keys(h, paying.as_mut()).await,
+        "P holds the turn, waiting for the mint's keyset listing{at}"
+    );
+    let (keys, listings) = (keys_asked(h), h.listing_requests());
+    advance(h, Duration::from_secs(60)).await;
+    release(h).await; // the listing comes, in P's deadline's second: it names P's keyset
+    let r = answer_of(h, paying.as_mut()).await.expect("P answered");
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "the listing that names P's keyset came in its deadline's second: it is not used, \
+         and P is mint-unavailable{at}: {r:?}"
+    );
+    assert_eq!(
+        (keys_asked(h) - keys, h.listing_requests() - listings),
+        (0, 0),
+        "a payment asks its mint for no keys, and for no keyset listing, at or past its \
+         deadline, though a listing that names its keyset comes then{at}: (key requests, \
+         listing requests) since"
+    );
+    assert!(!h.claimed_any(&p.token).await, "not swapped");
+    close(h, paying).await;
+    close(h, s).await;
 }
 
 /// Flaws `TurnAtDeadlineSecond` and `TurnAtDeadlineSecondStructure`. A payment is answered
@@ -28114,6 +28844,7 @@ async fn keys_the_mint_refuses_are_bad_token<H: Harness>(h: &H, quoted: Quoted) 
     let (at, mint) = (quoted.at(), quoted.mint(h));
     let e = quoted.engine(h);
     let mut s = open(h, &e, 1).await;
+    let mut t = open(h, &e, 2).await;
     serve(h, &mut s, 0, 4);
     settles_pay::<H>(&mut s, 4, h.token_at(&mint, 4).await, 4).await;
     serve(h, &mut s, 4, 4);
@@ -28150,6 +28881,20 @@ async fn keys_the_mint_refuses_are_bad_token<H: Harness>(h: &H, quoted: Quoted) 
         keys_asked(h) - keys,
         h.listing_requests() - listings
     );
+    // In the same second, another peer's payment of the refused keyset: refused alike, the
+    // keys asked for again.
+    let r = t
+        .pay(&Pay {
+            upto_chunk: 4,
+            token: h.token_at(&mint, 4).await,
+        })
+        .await;
+    assert!(
+        is_rej(&r, &RejCode::BadToken) && keys_asked(h) - keys == 2,
+        "another payment of the keyset whose keys the mint refuses is refused bad-token, the \
+         keys asked for again{at}: {r:?}, {} key requests",
+        keys_asked(h) - keys
+    );
     let asked = keys_asked(h);
     let r = s.pay(&held).await;
     assert!(
@@ -28157,6 +28902,14 @@ async fn keys_the_mint_refuses_are_bad_token<H: Harness>(h: &H, quoted: Quoted) 
             && keys_asked(h) == asked,
         "a payment of the keyset whose keys the seeder holds is acknowledged, the mint asked \
          for no keys: its 12001 for another keyset dropped none{at}: {r:?}"
+    );
+    assert_eq!(
+        h.listing_requests() - listings,
+        1,
+        "a mint is asked for its keyset listing at most once a second, whatever it answered \
+         a request for keys in that second (flaw `ListingDroppedOnKeysRefusal`): the two \
+         payments it refused 12001 and the one acknowledged, which the keyset rule judged, \
+         were served by the one listing{at}"
     );
     h.refuse_keys(&mint, false);
     serve(h, &mut s, 8, 4);
@@ -28172,7 +28925,7 @@ async fn keys_the_mint_refuses_are_bad_token<H: Harness>(h: &H, quoted: Quoted) 
         "the mint serves its keys again: the seeder kept nothing of the 12001, asks for them \
          again for the token it refused, and acknowledges it{at}: {r:?}"
     );
-    close(h, s).await;
+    close(h, (s, t)).await;
 }
 
 /// Flaws `KeysOfEndProofsOnly` and `KeysOfLastProofOnly`. A token of two keysets the mint
@@ -29045,6 +29798,12 @@ enum Refusal {
     FirstProof(BadToken),
     /// A token of 64 proofs whose thirty-second is of this shape, the others good.
     MiddleProof(BadToken),
+    /// A good token of a foreign mint ([`FOREIGN_MINT`]), for chunks already paid: `stale`,
+    /// which is checked before the mint.
+    StaleAtForeignMint,
+    /// A foreign mint's token of this shape, which step 1 refuses
+    /// ([`Harness::bad_token_at`]): `bad-token`, step 1 running before the mint's check.
+    ForeignToken(BadToken),
 }
 
 /// The price of the matrix's row at an account's `spent_total` bound: 8 chunks at it come
@@ -29099,6 +29858,25 @@ fn refusals() -> Vec<Refusal> {
     all
 }
 
+/// Four rows more of the matrix of payments, which fix the mint's place among the checks
+/// (NFX-07 §3: the ban, `stale`, step 1, then the mint): tokens of a foreign mint that an
+/// earlier check refuses. A good one for chunks already paid is `stale`, and one of each
+/// shape step 1 refuses that a single mint's token can have (the wrong unit, more than 64
+/// proofs, a locked proof, a proof lacking its DLEQ proof) is `bad-token`: neither is
+/// `bad-mint`, and nothing is fetched from the foreign mint for either.
+fn refused_before_the_mint() -> Vec<Refusal> {
+    let mut all = vec![Refusal::StaleAtForeignMint];
+    for kind in [
+        BadToken::WrongUnit,
+        BadToken::TooManyProofs,
+        BadToken::Locked,
+        BadToken::NoDleq,
+    ] {
+        all.push(Refusal::ForeignToken(kind));
+    }
+    all
+}
+
 /// The shapes one proof of a token can have that refuse the whole token: locked, lacking a
 /// DLEQ proof, naming a keyset the mint does not list, or with an invalid DLEQ proof.
 const ONE_PROOF: [BadToken; 4] = [
@@ -29112,8 +29890,11 @@ impl Refusal {
     fn code(self) -> RejCode {
         match self {
             Refusal::Banned => RejCode::Banned,
-            Refusal::Stale | Refusal::StaleOnRecheck => RejCode::Stale,
+            Refusal::Stale | Refusal::StaleOnRecheck | Refusal::StaleAtForeignMint => {
+                RejCode::Stale
+            }
             Refusal::Token(_)
+            | Refusal::ForeignToken(_)
             | Refusal::LastProof(_)
             | Refusal::FirstProof(_)
             | Refusal::MiddleProof(_)
@@ -29158,6 +29939,10 @@ impl Refusal {
                 "overpaid, its read learning a claim that covers half of it".into()
             }
             Refusal::Unsent => "mint-unavailable, its swap not sent by its deadline".into(),
+            Refusal::StaleAtForeignMint => "stale, its token a foreign mint's".into(),
+            Refusal::ForeignToken(kind) => {
+                format!("bad-token ({kind:?}), its token a foreign mint's")
+            }
         }
     }
 
@@ -29183,6 +29968,8 @@ impl Refusal {
                 | Refusal::FirstProof(BadToken::Locked | BadToken::NoDleq)
                 | Refusal::MiddleProof(BadToken::Locked | BadToken::NoDleq)
                 | Refusal::Unsent
+                | Refusal::StaleAtForeignMint
+                | Refusal::ForeignToken(_)
         )
     }
 
@@ -29263,7 +30050,8 @@ impl Refusal {
                 let bad = h.bad_token(kind, 2).await;
                 h.combine(&[a.as_str(), b.as_str(), bad.as_str()]).await
             }
-            Refusal::ForeignMint => h.token_at(FOREIGN_MINT, 3).await,
+            Refusal::ForeignMint | Refusal::StaleAtForeignMint => h.token_at(FOREIGN_MINT, 3).await,
+            Refusal::ForeignToken(kind) => h.bad_token_at(FOREIGN_MINT, kind, 4).await,
             Refusal::NoKeys | Refusal::Underpaid => h.token(3).await,
             Refusal::Overpaid => h.token(5).await,
             _ => h.token(4).await,
@@ -29490,7 +30278,8 @@ async fn a_payment_on_its_path<H: Harness>(
     };
     let p2 = Pay {
         // No chunk, none paid yet: `stale`, after the ban.
-        upto_chunk: if is(Refusal::Stale) || is(Refusal::Banned) {
+        upto_chunk: if is(Refusal::Stale) || is(Refusal::Banned) || is(Refusal::StaleAtForeignMint)
+        {
             0
         } else if bound {
             paid + 5
@@ -29907,10 +30696,15 @@ async fn a_payment_on_its_path<H: Harness>(
 /// `ShapePayAsksListing` and the like), and any other for one at most. And a ban a payment
 /// is refused under lapses `ban_ttl` after it was earned (`WaitedBannedRenewsBan` and the
 /// like). And a payment whose keys the mint refuses bans nobody where an earlier swap of
-/// its account's is still at the mint (`KeysRefusedBansWithSwapOut`).
+/// its account's is still at the mint (`KeysRefusedBansWithSwapOut`). And the mint is
+/// checked after `stale` and after step 1 (`UnwaitedMintBeforeStale`,
+/// `LateTakeoverMintBeforeStructure` and the like, one for each path): a foreign mint's
+/// token that either refuses is refused by it, not `bad-mint`
+/// ([`refused_before_the_mint`]).
 async fn payments_on_these_paths_keep_nothing<H: Harness>(h: &H, paths: &[Path]) {
     for path in paths.iter().copied() {
-        for end in ends(path) {
+        let before_the_mint = refused_before_the_mint().into_iter().map(End::Refused);
+        for end in ends(path).into_iter().chain(before_the_mint) {
             let without = a_payment_on_its_path(h, path, end, Look::Without).await;
             let with = a_payment_on_its_path(h, path, end, Look::With).await;
             if let Some(with) = with {
