@@ -11,6 +11,12 @@ is described in the present tense: it is **still being built** as the Pear-runti
 demo. The wire token is `nfx`, not `nutflix` (NFX-01 re-freeze). The text below is
 otherwise the 2026-09-16 record.
 
+Amended 2026-10-11 by the [ADR 0008](0008-multi-network-master-plan.md) amendment of
+that date: the v0 prototype is no longer mirrored in this repository. Where the text
+below names `packages/`, `core/src/payment`, `docs/status.md`, the demo's threat model
+in `SECURITY.md` or its MDWE results, read them in the demo's repository (`nutflix-demo`)
+or here at the tag `demo-base`. They are still referenced, not deleted.
+
 ## Context
 
 Two designs for nutflix existed in parallel:

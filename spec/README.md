@@ -8,11 +8,12 @@ wire identifier carries that name (the wire token is `nfx`, NFX-01 §2), so a pr
 rename never touches the protocol.
 
 The suite is normative for the architecture described in ADR 0006, and ADR 0008 sets
-the multi-network build plan. The TypeScript monorepo in `packages/` is a different
+the multi-network build plan. The TypeScript monorepo of the demo is a different
 design: a Pear-runtime-only desktop demo that is **still being built** under its own
-plan (its web-shell lane is out of scope there). It is not an NFX implementation and is
-not evolved toward one piecemeal; the specs cite it only where its operational lessons
-are normative.
+plan (its web-shell lane is out of scope there), in its own repository (`nutflix-demo`;
+the snapshot once mirrored here is at the tag `demo-base`). It is not an NFX
+implementation and is not evolved toward one piecemeal; the specs cite it only where
+its operational lessons are normative.
 
 **Scope:** NFX is a multi-platform protocol. Implementations include native clients
 (iroh), browsers (WebRTC mesh), origin HTTPS servers, scoped relays, mints and an
@@ -76,3 +77,6 @@ the repository license. Rationale and full context: `docs/decisions/0006-*` (f).
 - 2026-09-23 — decisions after the A1 spikes (ADR 0008 addendum): per-rendition web
   swarms, paid iroh delivery per member, mint state keyed by manifest address, voucher
   presenter binding, no "any mint", fees off the top, seeder blank outputs.
+- 2026-10-11 — the mirror of the demo is removed from this repository (ADR 0008
+  amendment). No NFX document changes; the paragraph above that named `packages/` now
+  names the demo's own repository.

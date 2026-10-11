@@ -8,6 +8,10 @@ Accepted (decisions by sovtech, 2026-09-23). The number 0008 is reserved for thi
 record in both repositories; the demo's own ADRs are 0001–0005, 0007 and 0009 onward.
 The demo's ADR 0007 (contracts v4 and the per-PAY split) is a different record.
 
+Amended 2026-10-11: the mirror of the demo is removed from this repository, and the
+harvest becomes an import instead of a merge. See the Amendment at the end. The text
+above it is otherwise the 2026-09-23 record and its addendum.
+
 ## Context
 
 ADR 0006 made the NFX suite (`spec/`) normative for the redesign: iroh, content-
@@ -162,3 +166,52 @@ name by XChaCha20-Poly1305 associated data, `aad = video + "/" + name`, and file
 are unique within a hash list (NFX-08 §2, NFX-05 §2). A libsodium-generated vector
 (`licensed.json`) is reproduced byte for byte by RustCrypto. **No open spec issues
 remain.**
+
+## Amendment (2026-10-11): the mirror of the demo is removed
+
+sovtech decided on 2026-10-11 to remove the mirrored demo from this repository.
+
+§3 kept the demo's paths mirrored and unedited for one reason: so that a later
+`git merge demo/<tag>` stayed conflict-free. That reason is given up. The demo lives
+in its own repository, `nutflix-demo`, and the mirror was inactive code: nothing here
+built, tested or ran it. The snapshot that was mirrored stays reachable here under the
+tag `demo-base` (`6cd8765`), byte for byte.
+
+What this changes in the record above:
+
+- **§1, "Two tracks".** There are still two tracks, and track 1 is still untouched by
+  this plan. They no longer share a tree: track 1 is the demo in its own repository,
+  and track 2 is this repository, which now holds only master-plan work. The demo's
+  history here still ends at `demo-base`. The sentence about later demo commits
+  ("scrubbed like the rest before they are merged") no longer applies, because none
+  are merged.
+- **§3, "Add-only until the harvest gate".** The add-only rule is void: there are no
+  mirrored paths left to keep unedited. `spec/`, `crates/`, `web/` and `docs/nfx/`
+  remain where the work is, as a description and not as a rule. The invariant
+  `git diff demo/main...HEAD -- <those paths>` has nothing left to check, so the CI's
+  add-only step is removed with it: the step in `crates/ci/check.sh`, the `demo-base`
+  tag check and the `demo/main` ref in `.github/workflows/ci.yml`, and the fetch of the
+  demo in the dormant `crates/ci/gitlab-ci.yml`.
+- **§3, the harvest gate.** The gate stays, with the same trigger and the same list of
+  what is harvested. It becomes an **import from the demo's repository** at the demo's
+  release tag, not a `git merge`: the harvested parts are copied into the master-plan
+  layout, and the commit that brings them says which demo commit they came from. "Only
+  then are mirrored paths edited" falls away with the mirror.
+- **Consequences.** "Demo progress can be merged in at any time without conflicts" no
+  longer holds and is no longer needed. The demo is still never blocked by, merged into
+  or reshaped for this plan. The number 0008 stays reserved in the demo.
+
+What else left with the mirror, and what stayed:
+
+- The demo's records 0002, 0005 and 0007 stay in `docs/decisions/`, unchanged, because
+  ADR 0006, this record and NFX-09 cite them. They are the demo's records, and the
+  paths they name (`packages/`, `docs/plan/`, `docs/status.md` and the like) are the
+  demo's: read them in the demo's repository or at `demo-base`. The demo's 0001, 0003
+  and 0004, which nothing here cites, went with the mirror.
+- `SECURITY.md` held the demo's threat table and its locked directories. They are in
+  the demo's repository and at `demo-base`. Money code here is still locked as §4 says,
+  by `crates/ci/check-locked.sh` and its pins.
+- Spike S4 (`web/spikes/s4-cmaf`) imported the demo's L8 planning functions from
+  `packages/`. It now carries a copy of the ones it uses, unchanged.
+
+§2, §4, §5, §6 and the 2026-09-23 addendum are not changed by this amendment.

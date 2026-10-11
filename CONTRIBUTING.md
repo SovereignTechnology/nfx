@@ -1,8 +1,8 @@
-# Contributing to nutflix
+# Contributing to nfx
 
-Thanks for taking an interest. This project is early — the stack is not chosen yet — so
-the most valuable contributions right now are issues that sharpen the scope rather than
-code.
+Thanks for taking an interest. Where the work stands is in
+[`docs/nfx/status.md`](docs/nfx/status.md), and what the protocol is, in
+[`spec/`](spec/README.md).
 
 ## Ground rules
 
@@ -22,7 +22,12 @@ code.
    your branch.
 4. Open a merge request against `main`. Explain *why*, not just *what* — the diff already
    shows what changed.
-5. CI must pass. Review must approve. Then it merges.
+5. CI must pass. Review must approve. Then it merges. CI is `crates/ci/check.sh`, which
+   you can run yourself before you push.
+
+The money code is locked: a change under `crates/nfx-pay`, `crates/nfx-pay-wire` or any
+other path that `crates/ci/check-locked.sh` lists fails CI until it has been reviewed and
+re-pinned. See [`docs/nfx/m2-plan.md`](docs/nfx/m2-plan.md) before you touch it.
 
 ## Commit messages
 
