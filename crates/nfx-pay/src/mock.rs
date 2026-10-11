@@ -6961,6 +6961,10 @@ pub enum ViewerFlaw {
     /// A `hello` refused `banned` starts the 180 s of the payment in flight on that ledger's
     /// live session again.
     BannedHelloRestartsLiveWait,
+    /// A request sent ends a refusal's licence to pay ahead.
+    RequestEndsLicence,
+    /// An ack ends a refusal's licence to pay ahead.
+    AckEndsLicence,
     /// Once stopped, takes a matching ack without settling its payment into the ledger.
     StoppedAckNotSettled,
     /// On a ledger made for another video, a request sent while its payment is in flight
@@ -6975,6 +6979,15 @@ pub enum ViewerFlaw {
     /// A `hello` refused, with a code but `banned`, on a ledger whose payment is in flight
     /// on its live session frees the standing's one place.
     OwnHelloRefusedFreesLiveSlot,
+    /// A second quote on the open session ends a refusal's licence to pay ahead.
+    SecondQuoteEndsLicence,
+    /// A timeout with no payment on the session ends a refusal's licence to pay ahead.
+    IdleTimeoutEndsLicence,
+    /// A refused `hello` ends a refusal's licence to pay ahead.
+    HelloRefusedEndsLicence,
+    /// A `mint-unavailable` answer to the payment in flight ends a refusal's licence to pay
+    /// ahead.
+    UnavailableEndsLicence,
     /// Takes a matching ack without settling its payment into the ledger where a `hello`
     /// refused `banned` on that ledger stopped it while the payment was in flight.
     OwnStopAckNotSettled,
@@ -14046,6 +14059,9 @@ impl Viewer for MockViewer {
                 self.restart_live_wait();
             }
             self.clears_stop_in_flight(ViewerFlaw::SecondQuoteInFlightClearsStop);
+            if self.has(ViewerFlaw::SecondQuoteEndsLicence) {
+                self.pay_ahead = false;
+            }
             let (adopts_window, adopts_price) = (
                 self.has(ViewerFlaw::SecondQuoteAdoptsWindow),
                 self.has(ViewerFlaw::SecondQuoteAdoptsPrice)
@@ -14351,6 +14367,9 @@ impl Viewer for MockViewer {
         if self.has(ViewerFlaw::OwnHelloRefusedFreesLiveSlot) && rej.code != RejCode::Banned {
             self.frees_live_slot(ViewerFlaw::OwnHelloRefusedFreesLiveSlot);
         }
+        if rej.code != RejCode::Banned && self.has(ViewerFlaw::HelloRefusedEndsLicence) {
+            self.pay_ahead = false;
+        }
         if rej.code != RejCode::Banned {
             self.clears_stop_beside_live(ViewerFlaw::OtherHelloRefusedWhileLiveClearsStop);
             self.note(self.id, Past::RefusedHello);
@@ -14429,6 +14448,9 @@ impl Viewer for MockViewer {
             || (self.has(ViewerFlaw::RequestWhileReclaimingClearsStop) && self.reclaim_incomplete())
         {
             self.standing().stopped = false;
+        }
+        if self.has(ViewerFlaw::RequestEndsLicence) {
+            self.pay_ahead = false;
         }
         self.requested += 1;
         {
@@ -14558,6 +14580,9 @@ impl Viewer for MockViewer {
 
     fn ack(&mut self, ack: &Ack) -> Result<(), String> {
         self.taken_by_another();
+        if self.has(ViewerFlaw::AckEndsLicence) {
+            self.pay_ahead = false;
+        }
         if (self.has(ViewerFlaw::StoppedAckNotSettled)
             || (self.banned_in_flight && self.has(ViewerFlaw::OwnStopAckNotSettled)))
             && self.halted()
@@ -14780,6 +14805,9 @@ impl Viewer for MockViewer {
         {
             self.standing().units_next = true;
         }
+        if rej.code == RejCode::MintUnavailable && self.has(ViewerFlaw::UnavailableEndsLicence) {
+            self.pay_ahead = false;
+        }
         // Every such answer to a payment uses a try (flaws count none for some).
         let uncounted = (was_last && self.has(ViewerFlaw::LastPayUnavailableUncounted))
             || (outcome == Some(Reclaim::Expired)
@@ -14816,6 +14844,9 @@ impl Viewer for MockViewer {
             // No payment on this session: nothing is this call's.
             self.note(self.id, Past::IdleTimeout);
             self.clears_stop_beside_live(ViewerFlaw::OtherIdleTimeoutWhileLiveClearsStop);
+            if self.has(ViewerFlaw::IdleTimeoutEndsLicence) {
+                self.pay_ahead = false;
+            }
             self.lets_go(
                 self.has(ViewerFlaw::TimeoutForgivesLost),
                 self.has(ViewerFlaw::TimeoutDropsReclaim),

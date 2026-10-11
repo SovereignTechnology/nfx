@@ -12203,10 +12203,32 @@ const LICENCE_ENDS: [&str; 10] = [
     "the session's end",
 ];
 
+/// What can come between a refusal and the `due` that follows it without ending the
+/// refusal's licence, for [`a_refusal_licenses_the_due_that_follows_it`]: none is a decision
+/// of what to pay. A `last_pay`, paying or not, and another video's `due` are tried there
+/// too.
+const LICENCE_STAYS: [&str; 12] = [
+    "a new request",
+    "the ack of the payment in flight",
+    "mint-unavailable to the payment in flight",
+    "a second quote on the open session",
+    "a timeout with no payment on the session",
+    "a ledger made for another video",
+    "a refused hello",
+    "a request on another video's session",
+    "a refused request on another video's session",
+    "a timeout with no payment on another video's session",
+    "another video's session ending",
+    "another video's honest quote, taken",
+];
+
 /// A refusal licenses the `due` that follows it on its ledger, and no other (NFX-07 §3a):
 /// that call pays ahead if it can, and the licence ends there, whether or not it paid, or at
 /// the session's end ([`LICENCE_ENDS`]). Once whatever kept that `due` from paying is gone,
-/// the watcher pays for the chunks it requested, at their due point, and nothing ahead. A
+/// the watcher pays for the chunks it requested, at their due point, and nothing ahead.
+/// Nothing else that comes between the refusal and the `due` ends the licence
+/// ([`LICENCE_STAYS`]): a request sent, the answer to a payment in flight, or anything on
+/// another video. A
 /// `last_pay` between the refusal and the `due` pays nothing ahead, and leaves the licence
 /// to the `due`. A refusal on one video licenses nothing on another.
 async fn a_refusal_licenses_the_due_that_follows_it<H: Harness>(h: &H) {
@@ -12409,6 +12431,101 @@ async fn a_refusal_licenses_the_due_that_follows_it<H: Harness>(h: &H) {
                  ahead"
             );
         }
+        close(h, (s0, s1)).await;
+    }
+    // Nothing else that comes between the refusal and the due is a decision of what to pay:
+    // each leaves the licence to that due.
+    for between in LICENCE_STAYS {
+        let e = h.engine(1, 4, 1000);
+        let mut s0 = open_on(h, &e, 1, 0).await;
+        let mut v0 = h.viewer(1);
+        let mut v1 = v0.sibling();
+        v0.quote(s0.quote())
+            .expect("video 0's honest quote is accepted");
+        // Video 1's session, where the event comes on one.
+        let mut s1 = None;
+        if between.ends_with("on another video's session")
+            || between == "another video's session ending"
+        {
+            let s = open_on(h, &e, 1, 1).await;
+            v1.quote(s.quote())
+                .expect("video 1's honest quote is accepted");
+            s1 = Some(s);
+        }
+        // A payment in flight when the request is refused, where the event is its answer.
+        let mut in_flight = None;
+        if between.ends_with("the payment in flight") {
+            for i in 0..2 {
+                assert!(s0.admit(&h.chunk_of(0, i)), "within the window");
+                v0.requested();
+            }
+            in_flight = v0
+                .due()
+                .await
+                .expect("video 0's due answers at half the window");
+            assert!(in_flight.is_some(), "due at half the window");
+        }
+        v0.requested();
+        v0.refused();
+        // What the due that follows pays up to: half the window ahead, beyond what is owed.
+        let mut upto = 2;
+        match between {
+            "a new request" => {
+                v0.requested();
+                upto = 3;
+            }
+            "the ack of the payment in flight" => {
+                let pay = in_flight.take().expect("video 0's payment in flight");
+                v0.ack(&s0.pay(&pay).await.expect("the seeder takes it"))
+                    .expect("its honest ack is taken");
+                upto = 4;
+            }
+            "mint-unavailable to the payment in flight" => {
+                v0.rej(&unavailable).await;
+                upto = 4;
+            }
+            "a second quote on the open session" => {
+                assert!(v0.quote(s0.quote()).is_err(), "one quote per session");
+            }
+            "a timeout with no payment on the session" => v0.timeout().await,
+            "a ledger made for another video" => {
+                let _third = v0.sibling();
+            }
+            "a refused hello" => {
+                // With each code but `banned`, which stops the watcher.
+                for code in hello_refusal_codes() {
+                    v0.hello_refused(&Rej { code, detail: None });
+                }
+            }
+            "a request on another video's session" => v1.requested(),
+            "a refused request on another video's session" => {
+                v1.requested();
+                v1.refused();
+            }
+            "a timeout with no payment on another video's session" => v1.timeout().await,
+            "another video's session ending" => {
+                close(h, s1.take()).await;
+                v1.end();
+            }
+            _ => {
+                assert_eq!(between, "another video's honest quote, taken", "an event");
+                let s = open_on(h, &e, 1, 1).await;
+                v1.quote(s.quote())
+                    .expect("video 1's honest quote is accepted");
+                s1 = Some(s);
+            }
+        }
+        let ahead = v0
+            .due()
+            .await
+            .expect("video 0's due answers after a refusal");
+        assert_eq!(
+            ahead.map(|pay| pay.upto_chunk),
+            Some(upto),
+            "{between}, between a refusal and the due that follows it, is no decision of what \
+             to pay: it leaves the licence to that due, which pays for what it owes and half \
+             the window ahead"
+        );
         close(h, (s0, s1)).await;
     }
     // A last_pay between the refusal and the due pays nothing ahead, and leaves the licence.

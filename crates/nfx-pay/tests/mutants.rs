@@ -2367,6 +2367,13 @@ catches!(
     viewer_banned_hello_restarts_live_wait: v(V::BannedHelloRestartsLiveWait) => every_payment_due_on_its_first_ledger_waits_from_its_sending,
     viewer_own_hello_refused_restarts_live_wait: v(V::OwnHelloRefusedRestartsLiveWait) => a_viewer_reclaims_an_unanswered_payment,
     viewer_own_hello_refused_frees_live_slot: v(V::OwnHelloRefusedFreesLiveSlot) => a_watchers_standing_spans_its_videos,
+    // Nothing between a refusal and its due but the session's end ends the licence.
+    viewer_request_ends_licence: v(V::RequestEndsLicence) => a_viewer_pays_ahead_only_after_a_refusal,
+    viewer_ack_ends_licence: v(V::AckEndsLicence) => a_viewer_pays_ahead_only_after_a_refusal,
+    viewer_second_quote_ends_licence: v(V::SecondQuoteEndsLicence) => a_viewer_pays_ahead_only_after_a_refusal,
+    viewer_idle_timeout_ends_licence: v(V::IdleTimeoutEndsLicence) => a_viewer_pays_ahead_only_after_a_refusal,
+    viewer_hello_refused_ends_licence: v(V::HelloRefusedEndsLicence) => a_viewer_pays_ahead_only_after_a_refusal,
+    viewer_unavailable_ends_licence: v(V::UnavailableEndsLicence) => a_viewer_pays_ahead_only_after_a_refusal,
     viewer_stopped_ack_not_settled: v(V::StoppedAckNotSettled) => a_stopped_viewer_pays_nothing,
     viewer_own_stop_ack_not_settled: v(V::OwnStopAckNotSettled) => a_stopped_viewer_pays_nothing,
     // The defects of keys, keyset listings and the keyset rule, against a seeder that asks for
