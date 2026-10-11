@@ -10498,6 +10498,9 @@ impl Inner {
                 }
             };
             // At or past its deadline it asks for no listing: one that came would not be used.
+            // No payment of an honest seeder comes here then, so no case shows this guard: it
+            // first looks in the poll its keys came in, before its deadline, nothing awaited
+            // between, and asks then, or waits for a listing held and takes its answer.
             let no_listing = self.asks_no_more(pay, SeederFlaw::ListingAskedAtDeadline);
             let found = loop {
                 let mut st = self.state();
