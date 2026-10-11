@@ -6965,6 +6965,9 @@ pub enum ViewerFlaw {
     RequestEndsLicence,
     /// An ack ends a refusal's licence to pay ahead.
     AckEndsLicence,
+    /// Does not stop where the reclaim at 180 s is one the mint cannot serve yet, down or
+    /// holding the proofs reserved.
+    TimeoutBlockedNoStop,
     /// Once stopped, takes a matching ack without settling its payment into the ledger.
     StoppedAckNotSettled,
     /// On a ledger made for another video, a request sent while its payment is in flight
@@ -6988,6 +6991,11 @@ pub enum ViewerFlaw {
     /// A `mint-unavailable` answer to the payment in flight ends a refusal's licence to pay
     /// ahead.
     UnavailableEndsLicence,
+    /// Does not stop where the reclaim at 180 s finds the proofs lost to their keyset's
+    /// expiry.
+    TimeoutExpiredNoStop,
+    /// Does not stop where the reclaim at 180 s is refused as pending.
+    TimeoutPendingNoStop,
     /// Takes a matching ack without settling its payment into the ledger where a `hello`
     /// refused `banned` on that ledger stopped it while the payment was in flight.
     OwnStopAckNotSettled,
@@ -12626,6 +12634,9 @@ struct Standing {
     /// The price of the quote taken last, on whichever ledger
     /// ([`ViewerFlaw::PriceOfLastQuoteTaken`] only: the price is the session's quote's).
     last_price: Option<u64>,
+    /// A reclaim was refused as pending since the last timeout began
+    /// ([`ViewerFlaw::TimeoutPendingNoStop`] only: an incomplete reclaim is one, whyever).
+    refused_pending: bool,
 }
 
 /// An honest viewer's ledger with one seeder for one video, holding tokens from one mint
@@ -13439,7 +13450,10 @@ impl MockViewer {
                 }
                 decided
             }
-            Reclaim::Pending => Reclaim::Blocked,
+            Reclaim::Pending => {
+                self.standing().refused_pending = true;
+                Reclaim::Blocked
+            }
             outcome => outcome,
         }
     }
@@ -14902,13 +14916,22 @@ impl Viewer for MockViewer {
             && !(was_halted && self.has(ViewerFlaw::TimeoutNoReclaimWhenStopped))
         {
             let token = p.token.clone();
+            self.standing().refused_pending = false;
             let outcome = self.reclaim(self.id, p, false);
+            let pending = self.standing().refused_pending;
             if matches!(outcome, Reclaim::Blocked | Reclaim::Pending)
                 && self.has(ViewerFlaw::TimeoutDropsBlockedReclaim)
             {
                 self.standing().reclaiming.retain(|(_, q)| q.token != token);
             }
             if outcome == Reclaim::SomeSpent && self.has(ViewerFlaw::TimeoutSpentAwaitsQuote) {
+                return;
+            }
+            if (matches!(outcome, Reclaim::Blocked | Reclaim::Pending)
+                && self.has(ViewerFlaw::TimeoutBlockedNoStop))
+                || (outcome == Reclaim::Expired && self.has(ViewerFlaw::TimeoutExpiredNoStop))
+                || (pending && self.has(ViewerFlaw::TimeoutPendingNoStop))
+            {
                 return;
             }
         }

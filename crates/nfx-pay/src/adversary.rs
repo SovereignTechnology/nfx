@@ -12998,7 +12998,11 @@ pub async fn a_viewer_refuses_quotes_it_cannot_honour<H: Harness>(h: &H) {
             v.quote(&q).is_err(),
             "a quote that disagrees with the ledger"
         );
-        assert!(v.stopped());
+        assert!(
+            v.stopped(),
+            "a quote that disagrees with the ledger, in served, accepted_upto or spent_total \
+             alone, stops the watcher"
+        );
     }
 
     let lower: [fn(&mut Quote); 2] = [
@@ -13012,7 +13016,10 @@ pub async fn a_viewer_refuses_quotes_it_cannot_honour<H: Harness>(h: &H) {
             v.quote(&q).is_err(),
             "a quote below the ledger is never resynced"
         );
-        assert!(v.stopped());
+        assert!(
+            v.stopped(),
+            "a quote below the ledger, in accepted_upto or spent_total alone, stops the watcher"
+        );
     }
     let (mut v, mut q) = resumed_viewer(h).await;
     q.price_per_chunk = 3;
@@ -14389,10 +14396,20 @@ async fn a_reclaim_with_no_session_ends_as_in_one<H: Harness>(h: &H) {
     }
 }
 
+/// How the reclaim of a live session's payment, unanswered at 180 s, ends where no proof is
+/// found spent and not every proof comes back at once, for
+/// [`a_viewer_reclaims_an_unanswered_payment`].
+const LIVE_TIMEOUT_ENDS: [&str; 3] = [
+    "the mint down",
+    "its proofs lost to their keyset's expiry",
+    "its proofs reserved by a request the mint has not finished",
+];
+
 /// A viewer waits exactly 180 s from sending for an answer on a live connection, whatever
 /// comes meanwhile, then reclaims its payment and stops. If the seeder had swapped it and
 /// the answer was lost, the viewer stops without paying those chunks again, and nobody is
-/// banned; a quote showing the payment then settles it into the ledger only. A reclaim the
+/// banned; a quote showing the payment then settles it into the ledger only. Whatever its
+/// reclaim at 180 s finds, the viewer stops ([`LIVE_TIMEOUT_ENDS`]): a reclaim the
 /// mint cannot serve then is finished once it can.
 pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
     let s = open(h, &h.engine(3, 2, 1000), 1).await;
@@ -14409,7 +14426,10 @@ pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
     );
     advance(h, Duration::from_secs(1)).await;
     v.timeout().await;
-    assert!(v.stopped());
+    assert!(
+        v.stopped(),
+        "unanswered 180 s after sending, the watcher stops"
+    );
     assert!(
         h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
         "the unanswered proofs were taken back at 180 s"
@@ -14424,7 +14444,11 @@ pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
     let _lost = s.pay(&pay).await.expect("swapped and acknowledged");
     advance(h, Duration::from_secs(180)).await;
     v.timeout().await;
-    assert!(v.stopped() && !landed(h, || s.banned()).await);
+    assert!(
+        v.stopped() && !landed(h, || s.banned()).await,
+        "unanswered at 180 s, the seeder having swapped it: the watcher stops, and nobody is \
+         banned"
+    );
     assert!(
         v.last_pay()
             .await
@@ -14436,28 +14460,49 @@ pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
     // The 180 s are counted from sending, whatever comes on the session meanwhile.
     the_live_wait_counts_from_sending(h).await;
 
-    // A reclaim at 180 s the mint cannot serve yet stays incomplete, though the watcher has
-    // stopped, and is finished once the mint is back.
-    let s = open(h, &h.engine(1, 4, 1000), 1).await;
-    let mut v = h.viewer(1);
-    v.quote(s.quote()).expect("an honest quote is accepted");
-    v.requested();
-    v.requested();
-    let pay = v.due().await.expect("due answers").expect("due");
-    advance(h, Duration::from_secs(180)).await;
-    h.mint_outage(true);
-    v.timeout().await;
-    h.mint_outage(false);
-    assert!(
-        v.due()
-            .await
-            .expect("due answers once stopped, the mint back")
-            .is_none()
-            && h.claimed_all(&pay.token).await
-            && !h.steal(&pay.token).await,
-        "unanswered at 180 s, the mint down: its reclaim is incomplete, not dropped, and is \
-         finished once the mint is back: the seeder cannot claim the proofs"
-    );
+    // Whatever the reclaim at 180 s finds, the watcher stops. One the mint cannot serve yet
+    // stays incomplete, though the watcher has stopped, and is finished once the mint is
+    // back, or has rolled back the request that held the proofs reserved.
+    for ends in LIVE_TIMEOUT_ENDS {
+        let s = open(h, &h.engine(1, 4, 1000), 1).await;
+        let mut v = h.viewer(1);
+        v.quote(s.quote()).expect("an honest quote is accepted");
+        v.requested();
+        v.requested();
+        let pay = v.due().await.expect("due answers").expect("due");
+        advance(h, Duration::from_secs(180)).await;
+        match ends {
+            "the mint down" => h.mint_outage(true),
+            "its proofs lost to their keyset's expiry" => {
+                h.expire_keyset_of(&pay.token, usize::MAX);
+            }
+            _ => assert!(
+                h.reserve_rest(&pay.token).await,
+                "a request of its proofs, held reserved"
+            ),
+        }
+        v.timeout().await;
+        assert!(
+            v.stopped(),
+            "unanswered at 180 s, {ends}: the watcher stops, whatever its reclaim finds"
+        );
+        h.mint_outage(false);
+        if ends == LIVE_TIMEOUT_ENDS[2] {
+            roll_back(h).await;
+        }
+        assert!(
+            v.due().await.expect("due answers once stopped").is_none(),
+            "unanswered at 180 s, {ends}: stopped, the watcher pays nothing afterwards"
+        );
+        let back =
+            ends == "its proofs lost to their keyset's expiry" || h.claimed_all(&pay.token).await;
+        assert!(
+            back && !h.steal(&pay.token).await,
+            "unanswered at 180 s, {ends}: a reclaim the mint could not serve is incomplete, \
+             not dropped, and is finished once it can: the seeder cannot claim the proofs"
+        );
+        close(h, s).await;
+    }
 
     // Found spent, the payment is settled into the ledger by a quote showing it, and no more.
     a_live_timeout_found_spent_leaves_the_stop(h).await;

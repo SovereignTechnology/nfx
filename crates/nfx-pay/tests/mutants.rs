@@ -2374,6 +2374,11 @@ catches!(
     viewer_idle_timeout_ends_licence: v(V::IdleTimeoutEndsLicence) => a_viewer_pays_ahead_only_after_a_refusal,
     viewer_hello_refused_ends_licence: v(V::HelloRefusedEndsLicence) => a_viewer_pays_ahead_only_after_a_refusal,
     viewer_unavailable_ends_licence: v(V::UnavailableEndsLicence) => a_viewer_pays_ahead_only_after_a_refusal,
+    // Whatever the reclaim at 180 s finds, the watcher stops; and a stopped watcher's matching
+    // ack still settles its payment.
+    viewer_timeout_blocked_no_stop: v(V::TimeoutBlockedNoStop) => a_viewer_reclaims_an_unanswered_payment,
+    viewer_timeout_expired_no_stop: v(V::TimeoutExpiredNoStop) => a_viewer_reclaims_an_unanswered_payment,
+    viewer_timeout_pending_no_stop: v(V::TimeoutPendingNoStop) => a_viewer_reclaims_an_unanswered_payment,
     viewer_stopped_ack_not_settled: v(V::StoppedAckNotSettled) => a_stopped_viewer_pays_nothing,
     viewer_own_stop_ack_not_settled: v(V::OwnStopAckNotSettled) => a_stopped_viewer_pays_nothing,
     // The defects of keys, keyset listings and the keyset rule, against a seeder that asks for
