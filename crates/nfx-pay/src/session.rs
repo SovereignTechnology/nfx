@@ -514,7 +514,13 @@ pub struct EngineParams {
 /// there, a check having failed, it polls no more, and drops.
 ///
 /// It waits 5 s in real time at most for an engine to settle, far above any honest answer,
-/// and a scenario that hangs is timed out by its runner. A release that races the clock runs
+/// and a scenario that hangs is timed out by its runner. That limit
+/// ([`crate::adversary::SCENARIO_SECS`]) also ends a scenario whose mint is slow: the
+/// longest awaits about 1,400 answers one after another, and with an honest engine whose
+/// every answer took 250 ms it was ended there, at no check. So the harness's mint must
+/// answer within about ten milliseconds, and a harness whose in-process mint is slower than
+/// that in an unoptimised build must build the mint optimised.
+/// A release that races the clock runs
 /// on threads of the harness's own ([`Harness::race_release_with_clock`]) while the suite
 /// polls the racing entry on its task. The mint answers from threads of the harness's own,
 /// never from tasks on the suite's runtime. A panic raised on such a thread (in the

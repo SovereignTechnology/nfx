@@ -208,17 +208,27 @@ type Session<H> = <<H as Harness>::Engine as SeederEngine>::Session;
 
 /// How long a scenario may take, in real time, wherever it runs: against an honest engine
 /// ([`adversary_suite!`](crate::adversary_suite)) or a planted defect (`tests/mutants.rs`).
-/// It is there to end a run that hangs, not to time one that is slow, so it is sized for a
-/// machine far busier than any the suite is expected to run on. Measured on four cores, in
-/// an unoptimised build: the slowest scenario against an honest engine (in the runs
-/// measured, `a_late_outcome_is_credited_never_banned` or one of the six parts of the table
-/// of waits whose names end `beside_the_others_history_waits_from_its_sending`) takes about
-/// 10 s with a test binary's tests run four at once, and the slowest planted defect about
-/// 7 s; with forty busy loops beside them and 32 tests at once (eighteen runnable threads
-/// to a core), 136 to 181 s and 108 s, about three fifths of the limit at most. What the
-/// suite waits for in real time besides (5 s, for an engine to settle) ended there on the
-/// engine settling, never on that limit: the suite counts an engine's turns and its polls,
-/// not the time they take.
+/// It is there to end a run that hangs, and it is sized for two things: a machine far busier
+/// than any the suite is expected to run on, and a mint that answers in milliseconds
+/// ([`Harness`]: how the suite waits). Measured on four cores, in an unoptimised build, with
+/// the mock's answers of 2 to 5 ms: the slowest scenario against an honest engine (in the
+/// runs measured, `a_late_outcome_is_credited_never_banned` or one of the six parts of the
+/// table of waits whose names end `beside_the_others_history_waits_from_its_sending`) takes
+/// about 10 s with a test binary's tests run four at once, and the slowest planted defect
+/// about 7 s; with forty busy loops beside them and 32 tests at once (eighteen runnable
+/// threads to a core), 136 to 181 s and 108 s, about three fifths of the limit at most. What
+/// the suite waits for in real time besides (5 s, for an engine to settle) ended there on
+/// the engine settling, never on that limit: the suite counts an engine's turns and its
+/// polls, not the time they take.
+///
+/// A slower mint it does time. The longest scenario,
+/// `a_late_outcome_is_credited_never_banned`, awaits about 1,400 answers one after another,
+/// so its time grows by about 1.4 s for each millisecond an answer takes. Measured against
+/// the honest mock without load, at `opt-level` 1 (runs 38158676212 and 38163728332): 29.8 s
+/// with every answer 20 ms late, 142.9 s at 100 ms, and at 250 ms the run was ended by this
+/// limit, at 300 s: reported as hung, having failed no check. So a harness's mint answers
+/// within about ten milliseconds ([`Harness`]), and `tests/honest_timings.rs` runs that
+/// scenario with every answer 10 ms late.
 pub const SCENARIO_SECS: u64 = 300;
 
 /// The stack a scenario's thread is given ([`run_on_a_thread`]). A scenario's frames hold

@@ -557,7 +557,9 @@ pub struct Timing {
     /// The mint answers every call from another thread ([`MockHarness::with_woken_answers`]);
     /// otherwise each in the poll that sends it.
     pub woken: bool,
-    /// How long such an answer takes to come back; `WOKEN_AFTER` if `None`.
+    /// How long such an answer takes to come back; `WOKEN_AFTER` if `None`. The suite must
+    /// pass with one of about ten milliseconds at most, the bound [`Harness`] puts on a
+    /// mint's answer: a longer one is outside the limits it gives.
     pub answer_after: Option<Duration>,
     /// Each answer takes a different time, from none to twice that, so that answers
     /// overtake one another.

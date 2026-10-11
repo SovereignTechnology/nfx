@@ -272,8 +272,13 @@ def test_counts() -> dict[str, int]:
         "round_trip": scenarios,  # the same suite, the mint answering reads on a later poll
         "woken_answers": scenarios,  # the same suite, every mint call answered from another thread
         "listings_at_start": scenarios,  # the same suite, keyset listings asked at the start too
-        # the same suite against each honest engine and mint that take their time differently
-        "honest_timings": scenarios * len(re.findall(r"^\s+nfx_pay::adversary_suite!\(", timings, re.M)),
+        # the same suite against each honest engine and mint that take their time
+        # differently, and the scenarios the file names one by one under a timing of their
+        # own (`@each <harness>;`, a name to a line)
+        "honest_timings": (
+            scenarios * len(re.findall(r"^\s+nfx_pay::adversary_suite!\((?!@)", timings, re.M))
+            + sum(len(re.findall(r"^\s+[a-z_0-9]+,$", names, re.M)) for names in
+                  re.findall(r"^\s+nfx_pay::adversary_suite!\(@each [^;]*;\n(.*?)\n\s*\);", timings, re.M | re.S))),
         "mutants": len(re.findall(r"^\s+[a-z_0-9]+: [svrwlt]\(", mutants, re.M)),
         "runner": len(re.findall(r"^#\[test\]$", runner, re.M)),
         "pay1": len(re.findall(r"^#\[test\]$", pay1, re.M)),

@@ -6,7 +6,8 @@
 //! answers and wakes coming back through them; a closed connection or the clock taken on
 //! such a task; and its keys and keyset listings held from its start. The suite judges
 //! progress by answers and settling, so every scenario must pass against each as against
-//! the synchronous mock (`adversary.rs`).
+//! the synchronous mock (`adversary.rs`). One timing more runs a single scenario: the
+//! longest, with every answer as late as a harness's mint may be (`answers_at_the_bound`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -65,6 +66,21 @@ mod slow_answers {
         answer_after: Some(Duration::from_millis(5)),
         ..woken()
     }));
+}
+
+/// Every answer comes back 10 ms after it reaches the mint, about the longest a harness's
+/// mint may take (`Harness`: how the suite waits). One scenario only, the longest: it
+/// awaits about 1,400 answers one after another, so it is the one the runner's limit
+/// (`SCENARIO_SECS`) would end first, and the whole suite at this pace would add minutes
+/// to every run for nothing more.
+mod answers_at_the_bound {
+    use super::*;
+    nfx_pay::adversary_suite!(@each MockHarness::with_timing(Timing {
+        answer_after: Some(Duration::from_millis(10)),
+        ..woken()
+    });
+        a_late_outcome_is_credited_never_banned,
+    );
 }
 
 /// Each answer takes from none to 4 ms, so answers overtake one another.
