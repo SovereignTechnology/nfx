@@ -546,7 +546,8 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   watcher's own, each with its DLEQ proof, come to about 18 KiB as `cashuB` and to more
   than 32 KiB as `cashuA`.
   CDK 0.18.1 sends an exact selection as it is, whatever its count, unless
-  `SendOptions::max_proofs` is set, so a watcher built on it sets it to 64. Every payment
+  `SendOptions::max_proofs` is set and the send kind is `SendKind::OnlineExact` (the
+  default), so a watcher built on it sets it to 64 and keeps that kind. Every payment
   meets it, however it is made (due, ahead after a refusal, or at a session's end), on
   whichever of the seeder's ledgers, and whatever came before it, on that ledger or on
   another of the seeder's: an `ack`, a `mint-unavailable` answer, a reclaim (of a refused
@@ -1433,7 +1434,8 @@ paths on one host are two origins.
     check: of one quoted mint by its exact URL, in `sat`, of at most 64 proofs, none locked
     (open mode: a licensed video's are P2PK-locked, NFX-08 §4), each with its DLEQ proof. A
     selection that would hold more than 64 proofs is swapped to fewer first (with CDK
-    0.18.1, `SendOptions::max_proofs` set to 64). Every payment meets it, however it is made
+    0.18.1, `SendOptions::max_proofs` set to 64, the send kind `SendKind::OnlineExact`, its
+    default). Every payment meets it, however it is made
     (due, ahead, at a session's end), on whichever of the seeder's ledgers, whatever came
     before it (an `ack`, `mint-unavailable`, a reclaim, a settling quote, a resumed session,
     credit held). What step 1 implied, now said.
@@ -1503,3 +1505,9 @@ paths on one host are two origins.
     ledgers, each place and end of a reclaim, a refused quote or `hello`, tries used and
     restored, and another video's payment ahead of it; the 180 s are counted alike by a
     ledger made since the payment, and at a session's end.
+- Draft 2026-10-11 (M2.0 thirtieth audit, `docs/nfx/reviews/2026-09-24-m2.0-thirtieth-audit.md`).
+  The watcher's side:
+  - §3a: CDK 0.18.1's `SendOptions::max_proofs` forces the swap to fewer proofs only under
+    `SendKind::OnlineExact`, its default: a watcher built on it sets it to 64 and keeps that
+    kind (read at tag v0.18.1; was: "unless `SendOptions::max_proofs` is set", which holds
+    for that send kind only). The twenty-ninth entry's line above says so too.
