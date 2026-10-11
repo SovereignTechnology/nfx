@@ -42,10 +42,10 @@ The facts, one per line:
 Every path package must be a workspace member: a crate outside the workspace, wired in
 by path, would escape every check here. And every workspace member must be one the
 workspace manifest's `members` key names (the derived pin holds that key), read at the
-path it names: cargo also takes for a member a path dependency under crates/ and a
-package in the workspace's own manifest, which the key does not name. `sources` refuses
-those by name, from Cargo.lock; `facts` by name and manifest, from cargo metadata. The
-money crates are locked whole
+path it names: cargo also takes for a member a path dependency that lies under crates/
+or names this workspace as its own, and a package in the workspace's own manifest, none
+of which the key names. `sources` refuses those by name, from Cargo.lock; `facts` by name
+and manifest, from cargo metadata. The money crates are locked whole
 (check-locked.sh), and the only workspace crates in their closure are each other: within
 one crate, an unpinned module could change how a pinned one compiles.
 

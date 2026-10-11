@@ -94,8 +94,8 @@ fi
 #   - `nfx_pay` named in any Rust file outside nfx-pay and nfx-node's locked paths;
 #   - a path package that is not a workspace member, or a workspace member that the
 #     workspace manifest's pinned `members` key does not name, at the path it names (cargo
-#     makes a member of a path dependency under crates/, and of a package in the
-#     workspace's own manifest);
+#     makes a member of a path dependency that lies under crates/ or names this workspace
+#     as its own, and of a package in the workspace's own manifest);
 #   - a test target of a money crate added, removed or renamed without a re-pin (read from
 #     cargo metadata, before any build); a test binary that did not run, that the build did
 #     not make, or that reported another number of tests than the one pinned for it (or, for
