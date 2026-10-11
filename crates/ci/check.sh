@@ -1,7 +1,13 @@
 #!/bin/bash -p
 # Every master-plan check (ADR 0008), in the order CI runs them. Run from anywhere:
 #   crates/ci/check.sh
-# Env: PYTHON (needs coincurve; default python3), NFX_SKIP_WASM=1 to skip the wasm run.
+# Env: PYTHON (needs coincurve; default python3), NFX_SKIP_WASM=1 to skip the wasm run,
+# NFX_FFMPEG and NFX_FFPROBE (the ffmpeg and ffprobe nfx-media's packaging test runs;
+# default: the ones on PATH; with no ffmpeg that test is skipped). The lock's steps are
+# handed PYTHON and, if set, PATH, HOME, CARGO_HOME, RUSTUP_HOME, CI (which puts the lock
+# in its CI mode) and LOCKED_DIRS_UNLOCKED (1 unlocks: the lock then compares nothing with
+# its pins and builds nothing; refused in CI), and no other variable
+# (crates/ci/check-locked.sh).
 set -euo pipefail
 
 repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
