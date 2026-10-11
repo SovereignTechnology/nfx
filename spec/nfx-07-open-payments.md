@@ -70,8 +70,9 @@ payment-enforced after release, so no mechanism pretends otherwise.
   the video refuses it with `unknown-video`, unless the peer is banned: a banned peer's
   `hello` is refused `banned`, whatever video it names (§3). One that has stopped serving
   the video still answers the `hello` of a peer it keeps an account for there, or a swap
-  of one whose outcome is unknown, judged as the `hello` arrives, verifies that session's
-  payments, and admits nothing of the video (§3).
+  of one whose outcome is unknown, an answer lost or a swap abandoned in flight alike,
+  judged as the `hello` arrives, verifies that session's payments, and admits nothing of
+  the video (§3).
 - **`quote`** (seeder→watcher) replies with the *binding* price; the beacon's
   `price_hint` was advisory. It also carries the account's position, so a watcher can
   resume after a reconnect. A watcher takes one quote per session and refuses a second.
@@ -171,9 +172,11 @@ payment-enforced after release, so no mechanism pretends otherwise.
   are lost, within the bounds below.
 - An account with payments is kept. Forgetting it would contradict the watcher's ledger
   (§3a), which would then stop paying.
-- A seeder that stops serving a video keeps its accounts there, by the rules above. It
-  answers a `hello` for that video from a peer it keeps an account for there, or a swap of
-  one whose outcome is unknown, as it would before: its wait for a payment in progress,
+- A seeder that stops serving a video keeps its accounts there, by the rules above, and
+  their unpaid chunks count toward the global cap until they age out, as any others
+  (service limit, below). It answers a `hello` for that video from a peer it keeps an
+  account for there, or a swap of one whose outcome is unknown, an answer lost or a swap
+  abandoned in flight alike (below), as it would before: its wait for a payment in progress,
   taking a dead turn over included, its reads after that wait, its ban and session-id
   checks as it arrives and again as it answers, the ban as it then stands, and the per-peer
   cap, waiting `hello`s counted. It verifies that session's payments as any others, and
@@ -186,7 +189,10 @@ payment-enforced after release, so no mechanism pretends otherwise.
   account, and its next `hello` is refused `unknown-video`. One it refuses is refused as
   it arrives, and creates nothing. A peer with no account there whose first payment there
   is still in progress (sent on a session open when the video was dropped) has no account
-  yet: its `hello` is refused `unknown-video` until that payment lands and creates one.
+  yet, and no unknown swap: its `hello` is refused `unknown-video` while that payment holds
+  its turn. From the payment's deadline, its swap still in flight is a swap whose outcome
+  is unknown (below), and its `hello` is answered as above; once the swap lands as a claim
+  it has an account.
   So a payment there awaiting a quote (§3a) is still settled, and its watcher pays on the
   seeder's other videos. A stated concession: a watcher that asks for the video's files
   there is refused, and may pay ahead after that refusal (§3a). The seeder credits it as
@@ -317,7 +323,8 @@ whatever it offers. The checks run in this order:
      however late that task looks (the deadline, below).
    - **Outcomes:**
      - on success, `ack`: `accepted_upto` becomes `upto_chunk`, and `spent_total`
-       grows by the face value;
+       grows by the face value, whether or not the peer has been banned since the
+       payment's turn came;
      - if any proof is **spent**, `rej` `spent` and ban the peer. Nothing is claimed,
        and spend detection is by proof, not by token string;
      - if the mint refuses the proofs as invalid, `rej` `bad-token` and ban the peer;
@@ -373,8 +380,11 @@ whatever it offers. The checks run in this order:
      seconds, and a deadline is as its second began: what comes in the deadline's second
      came after it. So a payment whose turn comes then or later, or has not come by then,
      another payment holding it, runs none of its checks, the ban's included: it asks the
-     mint for nothing, keys and keyset listing alike, and sends no read (below); keys or a
-     keyset listing that come then or later are not used,
+     mint for nothing, keys and keyset listing alike, and sends no read (below); no payment
+     asks the mint for keys or a keyset listing at or past its deadline, judged at every
+     look (one that waited for the next second's listing into its deadline included); keys
+     or a keyset listing that come then or later, or the mint's refusal of the keys (12001),
+     are not used,
      and nothing that needs them (DLEQ, amount, the outputs' keyset) is judged; a swap's
      outcome the seeder settles then is late (below); and a payment whose swap is not
      sent by then is not rechecked against the watermark (step 5). Each is answered
@@ -1541,3 +1551,23 @@ paths on one host are two origins.
     `ack` taken once stopped settles its payment into the ledger and nothing more. What
     "nothing undoes a stop" and "an `ack` settles only the payment sent on its session"
     implied, now said.
+  The seeder's side:
+  - §2, §3 bounded state: the swap "whose outcome is unknown" that has a seeder answer a
+    `hello` for a video it no longer serves is either kind, an answer lost or a swap
+    abandoned in flight; so a peer with no account there whose first payment is still in
+    progress is refused `unknown-video` while that payment holds its turn, and answered
+    from the payment's deadline, its swap still in flight (was: "until that payment lands
+    and creates one", which left the time between the deadline and the landing to the
+    seeder's sweep, against the definition of an unknown swap in the same list; the mock
+    refused).
+  - §3 bounded state: the unpaid chunks of a video the seeder stops serving count toward
+    the global cap until they age out, as any others. What "across all peers and videos"
+    said, now said of a dropped video.
+  - §3 step 5: a swap that claims in time is acknowledged whether or not its peer has been
+    banned since the payment's turn came. What the ban's one check at the turn and "every
+    refusal leaves the proofs unclaimed" implied, now said beside the late claim's rule.
+  - §3, the deadline: no payment asks the mint for keys or a keyset listing at or past its
+    deadline, judged at every look, as no read and no swap request is sent there; and the
+    mint's refusal of the keys (12001) that comes then is not used, as keys and a listing
+    are not (was: silent for a payment whose turn came in time, and the mock asked once in
+    its deadline's second).

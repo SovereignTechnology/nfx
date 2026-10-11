@@ -56,8 +56,9 @@ pub trait SeederEngine {
     ///   again as it answers, after its wait and its reads;
     /// - `unknown-video` for a video this seeder does not serve. A video it no longer serves
     ///   is answered as before for a peer it keeps an account for there, or a swap of one
-    ///   whose outcome is unknown: its wait for a payment in progress (a dead turn taken
-    ///   over included), its reads after it, its ban and session id checked as it arrives
+    ///   whose outcome is unknown, an answer lost or a swap abandoned in flight alike: its
+    ///   wait for a payment in progress (a dead turn taken over included), its reads after it,
+    ///   its ban and session id checked as it arrives
     ///   and again as it answers (the ban as it then stands), and the cap, waiting hellos
     ///   counted, as ever; its session's payments verified as any others, and nothing of the
     ///   video admitted, pre-paid chunks included. So a payment there awaiting a quote is
@@ -66,7 +67,10 @@ pub trait SeederEngine {
     ///   whatever its reads learn (a peer whose only record there was an unknown swap, learnt
     ///   as nothing, is quoted zeros, and its next `hello` is refused), and one it refuses
     ///   creates nothing. A peer with no account there whose first payment there is still in
-    ///   progress has no account yet, and is refused `unknown-video` until it lands;
+    ///   progress has no account yet, and no unknown swap: it is refused `unknown-video`
+    ///   while that payment holds its turn. From the payment's deadline its swap, still in
+    ///   flight, is a swap whose outcome is unknown, and its `hello` is answered as above;
+    ///   once the swap lands as a claim it has an account;
     /// - `bad-session` for a session id that is open, on any video, or beyond the per-peer
     ///   cap on open and waiting sessions, counted across all videos.
     ///
@@ -113,8 +117,9 @@ pub trait SeederSession {
     /// The checks run in this order: structure (`bad-token`), quoted mint (`bad-mint`),
     /// DLEQ (`bad-token`), exact face value (`underpaid`/`overpaid`), then the swap. An
     /// exact payment that would take the account's `spent_total` above 2^53-1 is
-    /// `overpaid`: no `ack` or quote could carry it. A completed swap gives the `ack`. The
-    /// swap can also end as:
+    /// `overpaid`: no `ack` or quote could carry it. A completed swap gives the `ack`,
+    /// whether or not the peer has been banned since the payment's turn came. The swap can
+    /// also end as:
     /// - `spent` or invalid proofs: refused, and the peer is banned;
     /// - an unreachable mint: `mint-unavailable`, which is not a ban.
     ///
@@ -135,9 +140,11 @@ pub trait SeederSession {
     /// released. Deadlines count whole seconds, and what comes in the deadline's second
     /// came after it: a payment whose turn comes then or later, or has not come by then,
     /// another payment holding it, runs none of its checks, the ban's included, asks the
-    /// mint for nothing (keys and keyset listing alike) and sends no read; keys that come
-    /// then or later are not used, a swap's outcome settled then is late, and a payment
-    /// whose swap is not sent by then is not rechecked. Its turn is freed at the deadline,
+    /// mint for nothing (keys and keyset listing alike) and sends no read; no payment asks
+    /// the mint for keys or a keyset listing at or past its deadline, judged at every look;
+    /// keys or a keyset listing that come then or later, or the mint's refusal of the keys,
+    /// are not used, a swap's outcome settled then is late, and a payment whose swap is not
+    /// sent by then is not rechecked. Its turn is freed at the deadline,
     /// however late this answer goes out, the swap's outcome comes, or another entry takes
     /// the turn over. A payment that takes a turn over reads the abandoned swap, as above.
     ///
