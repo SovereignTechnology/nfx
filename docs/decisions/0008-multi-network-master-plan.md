@@ -9,7 +9,8 @@ record in both repositories; the demo's own ADRs are 0001–0005, 0007 and 0009 
 The demo's ADR 0007 (contracts v4 and the per-PAY split) is a different record.
 
 Amended 2026-10-11: the mirror of the demo is removed from this repository, and the
-harvest becomes an import instead of a merge. See the Amendment at the end. The text
+harvest becomes an import instead of a merge. See the Amendment at the end, and the
+correction of the same day that follows it. The text
 above it is otherwise the 2026-09-23 record and its addendum.
 
 ## Context
@@ -207,7 +208,8 @@ What else left with the mirror, and what stayed:
   ADR 0006, this record and NFX-09 cite them. They are the demo's records, and the
   paths they name (`packages/`, `docs/plan/`, `docs/status.md` and the like) are the
   demo's: read them in the demo's repository or at `demo-base`. The demo's 0001, 0003
-  and 0004, which nothing here cites, went with the mirror.
+  and 0004, which nothing here cites [not so: see the correction below], went with the
+  mirror.
 - `SECURITY.md` held the demo's threat table and its locked directories. They are in
   the demo's repository and at `demo-base`. Money code here is still locked as §4 says,
   by `crates/ci/check-locked.sh` and its pins.
@@ -215,3 +217,27 @@ What else left with the mirror, and what stayed:
   `packages/`. It now carries a copy of the ones it uses, unchanged.
 
 §2, §4, §5, §6 and the 2026-09-23 addendum are not changed by this amendment.
+
+### Correction (2026-10-11, later the same day)
+
+The thirtieth audit of M2.0 read the amendment against the tree and its history and found
+it wrong in one sentence and short of one file. The amendment stands as it was written,
+but for the mark at that sentence; this note says what is so.
+
+- **What the removal took.** It was four commits (`3795078`, `9ebc41a`, `3d87b4d`,
+  `b894d58`) and 487 files. 483 were the mirror itself (`3795078`), each byte for byte
+  as it is at `demo-base`. The other four went in `9ebc41a`: the demo's records 0001,
+  0003 and 0004, unchanged since `demo-base` as well, and the demo's review
+  `docs/reviews/2026-09-23-pre-push-l5-v4.md`, which the list above does not name. That
+  review is the one removed file that was not as the demo left it. One line of it
+  differed from `demo-base`: the commit its scope line names, `1fa4c59` there and
+  `289f481` here since `6a5a0ab`, when the public history's commits were cited. The
+  demo's own text of it is at `demo-base`.
+- **Who cites the demo's 0001, 0003 and 0004.** "Which nothing here cites" was not so.
+  Two of the demo's records that stay cite two of them: 0002 names ADR 0001, and 0005
+  names ADR 0004. Read the clause as "which only the demo's own records cite". Nothing
+  of this repository's own cites any of the three, and nothing at all cites 0003. The
+  two citations are read as the paths those records name are: in the demo's repository
+  or at `demo-base`.
+
+Nothing the amendment decides is changed by this note.
