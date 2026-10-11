@@ -15263,13 +15263,21 @@ pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
             v.due().await.expect("due answers once stopped").is_none(),
             "unanswered at 180 s, {ends}: stopped, the watcher pays nothing afterwards"
         );
-        let back =
-            ends == "its proofs lost to their keyset's expiry" || h.claimed_all(&pay.token).await;
-        assert!(
-            back && !h.steal(&pay.token).await,
-            "unanswered at 180 s, {ends}: a reclaim the mint could not serve is incomplete, \
-             not dropped, and is finished once it can: the seeder cannot claim the proofs"
-        );
+        if ends == "its proofs lost to their keyset's expiry" {
+            assert!(
+                !h.claimed_any(&pay.token).await && !h.steal(&pay.token).await,
+                "unanswered at 180 s, {ends}: its reclaim found every proof unspent and lost \
+                 to the expiry, so none was claimed, by the watcher or by anyone, and none \
+                 can be: the seeder cannot claim the proofs"
+            );
+        } else {
+            assert!(
+                h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
+                "unanswered at 180 s, {ends}: a reclaim the mint could not serve is \
+                 incomplete, not dropped, and is finished once it can: the seeder cannot \
+                 claim the proofs"
+            );
+        }
         close(h, s).await;
     }
 
