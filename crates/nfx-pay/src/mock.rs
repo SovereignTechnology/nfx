@@ -6903,6 +6903,49 @@ pub enum ViewerFlaw {
     /// Ends a refusal's licence to pay ahead when `last_pay` makes a payment: the `due` that
     /// follows the refusal pays nothing ahead.
     LastPaymentEndsLicence,
+    /// A timeout before 180 s from sending, its payment in flight on the session, undoes a
+    /// stop.
+    EarlyTimeoutClearsStop,
+    /// A request sent while the ledger's payment is in flight on its session undoes a stop.
+    RequestInFlightClearsStop,
+    /// A request refused while the ledger's payment is in flight on its session undoes a
+    /// stop.
+    RefusalInFlightClearsStop,
+    /// A second quote on a session whose payment is in flight undoes a stop.
+    SecondQuoteInFlightClearsStop,
+    /// A ledger made for another video while a live session's payment is in flight undoes a
+    /// stop.
+    SiblingWhileLiveClearsStop,
+    /// A session's end, while another video's payment is in flight on its live session,
+    /// undoes a stop.
+    OtherEndWhileLiveClearsStop,
+    /// A `hello` refused, with a code but `banned`, while another video's payment is in
+    /// flight on its live session, undoes a stop.
+    OtherHelloRefusedWhileLiveClearsStop,
+    /// A request sent while another video's payment is in flight on its live session undoes
+    /// a stop.
+    OtherRequestWhileLiveClearsStop,
+    /// A quote refused for its price while another video's payment is in flight on its live
+    /// session undoes a stop.
+    OtherPriceRefusalWhileLiveClearsStop,
+    /// A quote taken while another video's payment is in flight on its live session undoes
+    /// a stop.
+    OtherQuoteWhileLiveClearsStop,
+    /// A timeout with no payment on the session, while another video's payment is in flight
+    /// on its live session, undoes a stop.
+    OtherIdleTimeoutWhileLiveClearsStop,
+    /// A request sent while a payment awaits a quote undoes a stop.
+    RequestWhileAwaitingClearsStop,
+    /// A request sent while a reclaim is incomplete undoes a stop.
+    RequestWhileReclaimingClearsStop,
+    /// Once stopped, takes a matching ack without settling its payment into the ledger.
+    StoppedAckNotSettled,
+    /// On a ledger made for another video, a request sent while its payment is in flight
+    /// on its session undoes a stop.
+    SiblingRequestInFlightClearsStop,
+    /// Takes a matching ack without settling its payment into the ledger where a `hello`
+    /// refused `banned` on that ledger stopped it while the payment was in flight.
+    OwnStopAckNotSettled,
 }
 
 /// Whose history a defect planted on one history keys on: the paying ledger's own, or that
@@ -12596,6 +12639,9 @@ pub struct MockViewer {
     first_request_window: Option<u64>,
     made_with_unsettled: bool,
     tries_here: u32,
+    /// A `hello` refused `banned` came on this ledger while its payment was in flight
+    /// ([`ViewerFlaw::OwnStopAckNotSettled`] only).
+    banned_in_flight: bool,
 }
 
 impl MockViewer {
@@ -12659,11 +12705,37 @@ impl MockViewer {
             first_request_window: None,
             made_with_unsettled: false,
             tries_here: 0,
+            banned_in_flight: false,
         }
     }
 
     fn has(&self, f: ViewerFlaw) -> bool {
         self.flaw == Some(f)
+    }
+
+    /// Whether a payment is in flight on a live session, this ledger's or another's (read by
+    /// [`ViewerFlaw::SiblingWhileLiveClearsStop`] and the like only).
+    fn live_in_flight(&self) -> bool {
+        let st = self.standing();
+        st.in_flight
+            .is_some_and(|l| !st.unsettled.iter().any(|(x, _)| *x == l))
+    }
+
+    /// Undo the standing's stop, for `flaw`, while another video's payment is in flight on
+    /// its live session ([`ViewerFlaw::OtherEndWhileLiveClearsStop`] and the like only:
+    /// nothing undoes a stop).
+    fn clears_stop_beside_live(&self, flaw: ViewerFlaw) {
+        if self.has(flaw) && self.pending.is_none() && self.live_in_flight() {
+            self.standing().stopped = false;
+        }
+    }
+
+    /// Undo the standing's stop, for `flaw`, while this ledger's payment is in flight on its
+    /// session ([`ViewerFlaw::RequestInFlightClearsStop`] and the like only).
+    fn clears_stop_in_flight(&self, flaw: ViewerFlaw) {
+        if self.has(flaw) && self.pending.is_some() {
+            self.standing().stopped = false;
+        }
     }
 
     fn standing(&self) -> MutexGuard<'_, Standing> {
@@ -13874,6 +13946,9 @@ impl MockViewer {
 impl Viewer for MockViewer {
     fn sibling(&self) -> Self {
         self.frees_live_slot(ViewerFlaw::SiblingFreesLiveSlot);
+        if self.has(ViewerFlaw::SiblingWhileLiveClearsStop) && self.live_in_flight() {
+            self.standing().stopped = false;
+        }
         self.lets_go(
             self.has(ViewerFlaw::SiblingForgivesLost),
             self.has(ViewerFlaw::SiblingDropsReclaim),
@@ -13918,6 +13993,7 @@ impl Viewer for MockViewer {
             if self.has(ViewerFlaw::SecondQuoteRestartsLiveWait) {
                 self.restart_live_wait();
             }
+            self.clears_stop_in_flight(ViewerFlaw::SecondQuoteInFlightClearsStop);
             let (adopts_window, adopts_price) = (
                 self.has(ViewerFlaw::SecondQuoteAdoptsWindow),
                 self.has(ViewerFlaw::SecondQuoteAdoptsPrice)
@@ -13942,6 +14018,7 @@ impl Viewer for MockViewer {
             {
                 self.halt();
             }
+            self.clears_stop_beside_live(ViewerFlaw::OtherPriceRefusalWhileLiveClearsStop);
             self.on_refused_quote(Refusal::Price, quote);
             return Err("price above this viewer's cap".into());
         }
@@ -14168,6 +14245,7 @@ impl Viewer for MockViewer {
             self.standing().stopped = false;
             self.halted = false;
         }
+        self.clears_stop_beside_live(ViewerFlaw::OtherQuoteWhileLiveClearsStop);
         self.resumed = resumed;
         if resumed && self.has(ViewerFlaw::ResumedPayInUnitProofs) {
             self.standing().units_next = true;
@@ -14199,7 +14277,11 @@ impl Viewer for MockViewer {
         if rej.code != RejCode::Banned && self.has(ViewerFlaw::OtherHelloRefusedReclaimsLiveNow) {
             self.reclaims_other_live();
         }
+        if rej.code == RejCode::Banned && self.pending.is_some() {
+            self.banned_in_flight = true;
+        }
         if rej.code != RejCode::Banned {
+            self.clears_stop_beside_live(ViewerFlaw::OtherHelloRefusedWhileLiveClearsStop);
             self.note(self.id, Past::RefusedHello);
             if self.has(ViewerFlaw::HelloRefusalRestartsWait) {
                 self.restart_wait(false);
@@ -14267,6 +14349,16 @@ impl Viewer for MockViewer {
             self.restart_live_wait();
         }
         self.frees_live_slot(ViewerFlaw::RequestedFreesLiveSlot);
+        self.clears_stop_in_flight(ViewerFlaw::RequestInFlightClearsStop);
+        if self.id != 0 {
+            self.clears_stop_in_flight(ViewerFlaw::SiblingRequestInFlightClearsStop);
+        }
+        self.clears_stop_beside_live(ViewerFlaw::OtherRequestWhileLiveClearsStop);
+        if (self.has(ViewerFlaw::RequestWhileAwaitingClearsStop) && self.awaiting(false))
+            || (self.has(ViewerFlaw::RequestWhileReclaimingClearsStop) && self.reclaim_incomplete())
+        {
+            self.standing().stopped = false;
+        }
         self.requested += 1;
         {
             let id = self.id;
@@ -14294,6 +14386,7 @@ impl Viewer for MockViewer {
         if self.has(ViewerFlaw::PaysForRefused) {
             return;
         }
+        self.clears_stop_in_flight(ViewerFlaw::RefusalInFlightClearsStop);
         if self.requested > 0 && self.requested <= self.acked {
             self.paid_refused += 1;
         }
@@ -14394,6 +14487,16 @@ impl Viewer for MockViewer {
 
     fn ack(&mut self, ack: &Ack) -> Result<(), String> {
         self.taken_by_another();
+        if (self.has(ViewerFlaw::StoppedAckNotSettled)
+            || (self.banned_in_flight && self.has(ViewerFlaw::OwnStopAckNotSettled)))
+            && self.halted()
+            && self.pending.as_ref().is_some_and(|p| {
+                ack.accepted_upto == p.upto && ack.spent_total == self.spent + p.amount
+            })
+        {
+            self.take_pending();
+            return Ok(());
+        }
         if self.has(ViewerFlaw::AckSettlesUnsettled) && self.pending.is_none() {
             let (id, spent) = (self.id, self.spent);
             let found = self.standing().unsettled.iter().position(|(l, p)| {
@@ -14633,6 +14736,7 @@ impl Viewer for MockViewer {
         let Some(p) = &self.pending else {
             // No payment on this session: nothing is this call's.
             self.note(self.id, Past::IdleTimeout);
+            self.clears_stop_beside_live(ViewerFlaw::OtherIdleTimeoutWhileLiveClearsStop);
             self.lets_go(
                 self.has(ViewerFlaw::TimeoutForgivesLost),
                 self.has(ViewerFlaw::TimeoutDropsReclaim),
@@ -14674,6 +14778,7 @@ impl Viewer for MockViewer {
         );
         if !waited && !early {
             // Before 180 s from sending, nothing is this call's (but for flaws).
+            self.clears_stop_in_flight(ViewerFlaw::EarlyTimeoutClearsStop);
             self.frees_live_slot(ViewerFlaw::TimeoutFreesLiveSlot);
             if self.has(ViewerFlaw::TimeoutBeforeWaitRestoresTries) {
                 self.standing().unavailable = 0;
@@ -14704,6 +14809,7 @@ impl Viewer for MockViewer {
 
     fn end(&mut self) {
         self.taken_by_another();
+        self.clears_stop_beside_live(ViewerFlaw::OtherEndWhileLiveClearsStop);
         self.quote = None;
         // The session's end ends a refusal's licence to pay ahead (the flaws that take a
         // quote they refuse for a refused request keep theirs for the next session).

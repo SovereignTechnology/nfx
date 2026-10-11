@@ -2333,6 +2333,24 @@ catches!(
     viewer_wrong_ack_by_spent_no_reclaim: v(V::WrongAckBySpentNoReclaim) => a_viewer_stops_on_a_wrong_or_unsolicited_ack,
     viewer_wrong_ack_by_upto_no_reclaim: v(V::WrongAckByUptoNoReclaim) => a_viewer_stops_on_a_wrong_or_unsolicited_ack,
     viewer_last_payment_ends_licence: v(V::LastPaymentEndsLicence) => a_viewer_pays_ahead_only_after_a_refusal,
+    // Nothing undoes a stop while a payment is in flight on its live session, nor a request
+    // while a payment the stop came with waits.
+    viewer_early_timeout_clears_stop: v(V::EarlyTimeoutClearsStop) => a_stopped_viewer_pays_nothing,
+    viewer_request_in_flight_clears_stop: v(V::RequestInFlightClearsStop) => a_stopped_viewer_pays_nothing,
+    viewer_refusal_in_flight_clears_stop: v(V::RefusalInFlightClearsStop) => a_stopped_viewer_pays_nothing,
+    viewer_second_quote_in_flight_clears_stop: v(V::SecondQuoteInFlightClearsStop) => a_stopped_viewer_pays_nothing,
+    viewer_sibling_while_live_clears_stop: v(V::SiblingWhileLiveClearsStop) => a_stopped_viewer_pays_nothing,
+    viewer_other_end_while_live_clears_stop: v(V::OtherEndWhileLiveClearsStop) => a_stopped_viewer_pays_nothing,
+    viewer_other_hello_refused_while_live_clears_stop: v(V::OtherHelloRefusedWhileLiveClearsStop) => a_stopped_viewer_pays_nothing,
+    viewer_other_request_while_live_clears_stop: v(V::OtherRequestWhileLiveClearsStop) => a_stopped_viewer_pays_nothing,
+    viewer_other_price_refusal_while_live_clears_stop: v(V::OtherPriceRefusalWhileLiveClearsStop) => a_stopped_viewer_pays_nothing,
+    viewer_other_quote_while_live_clears_stop: v(V::OtherQuoteWhileLiveClearsStop) => a_stopped_viewer_pays_nothing,
+    viewer_other_idle_timeout_while_live_clears_stop: v(V::OtherIdleTimeoutWhileLiveClearsStop) => a_stopped_viewer_pays_nothing,
+    viewer_request_while_awaiting_clears_stop: v(V::RequestWhileAwaitingClearsStop) => a_stopped_viewer_pays_nothing,
+    viewer_request_while_reclaiming_clears_stop: v(V::RequestWhileReclaimingClearsStop) => a_stopped_viewer_pays_nothing,
+    viewer_sibling_request_in_flight_clears_stop: v(V::SiblingRequestInFlightClearsStop) => a_stopped_viewer_pays_nothing,
+    viewer_stopped_ack_not_settled: v(V::StoppedAckNotSettled) => a_stopped_viewer_pays_nothing,
+    viewer_own_stop_ack_not_settled: v(V::OwnStopAckNotSettled) => a_stopped_viewer_pays_nothing,
     // The defects of keys, keyset listings and the keyset rule, against a seeder that asks for
     // its mints' listings at its start too.
     ignores_keyset_expiry_at_start: l(S::IgnoresKeysetExpiry) => a_mint_outage_is_not_a_ban,
