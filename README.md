@@ -36,11 +36,17 @@ crates/ci/check.sh
 
 `crates/ci/check.sh` runs every check, in the order CI runs them: the lock, the spec's
 vectors and schemas, `cargo fmt`, `cargo clippy`, `cargo test`, `cargo deny`, and the
-wasm32 tests under Node. It needs a Rust toolchain (the `rust-version` in
-[`crates/Cargo.toml`](crates/Cargo.toml)) with clippy, rustfmt and the
-`wasm32-unknown-unknown` target, `cargo-deny`, `wasm-pack`, Node, and a Python with the
-packages the `check` job installs; `.github/workflows/ci.yml` pins each version. The
-script's header lists the variables it reads.
+wasm32 tests under Node. It needs the Rust toolchain CI's image holds, rustc 1.98.0, and
+no other: the lock pins the toolchain's release and commit, so a toolchain that only
+meets the `rust-version` in [`crates/Cargo.toml`](crates/Cargo.toml) fails the lock at the
+script's last step. It also needs clippy, rustfmt and the `wasm32-unknown-unknown`
+target, `cargo-deny`, `wasm-pack`, Node, and a Python with the packages the `check` job
+installs; `.github/workflows/ci.yml` pins each version.
+
+The script's header lists the variables it reads: `PYTHON`, the Python to run;
+`NFX_FFMPEG` and `NFX_FFPROBE`, the ffmpeg and ffprobe that `nfx-media`'s packaging test
+runs (the ones on `PATH` by default; with no ffmpeg that test is skipped); and
+`NFX_SKIP_WASM=1`, which skips the wasm32 tests.
 
 ## CI and the lock
 
