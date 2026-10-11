@@ -6946,6 +6946,18 @@ pub enum ViewerFlaw {
     SiblingPaysAtCap,
     /// Pays its own cap a chunk, not the quoted price, on a resumed session.
     ResumedPaysAtCap,
+    /// Counts no try for a `mint-unavailable` answer to a payment made at a session's end.
+    LastPayUnavailableUncounted,
+    /// Counts no try for a `mint-unavailable` answer whose payment's proofs were lost to
+    /// their keyset's expiry.
+    UnavailableExpiredUncounted,
+    /// A new session's accepted quote that settles a payment restores no tries.
+    SettlingQuoteKeepsTries,
+    /// An ack resets the count of `mint-unavailable` answers only if every one of them
+    /// answered a payment of the ack's own ledger.
+    OtherVideosAckKeepsTries,
+    /// A new session's accepted quote restores the tries only once all three were used.
+    QuoteKeepsPartialTries,
     /// Once stopped, takes a matching ack without settling its payment into the ledger.
     StoppedAckNotSettled,
     /// On a ledger made for another video, a request sent while its payment is in flight
@@ -14294,8 +14306,14 @@ impl Viewer for MockViewer {
         if self.standing().unavailable >= UNAVAILABLE_BUDGET {
             self.note(self.id, Past::TriesRestored);
         }
-        // A new session: `mint-unavailable` answers are counted afresh.
-        self.standing().unavailable = 0;
+        // A new session: `mint-unavailable` answers are counted afresh (flaws keep the
+        // count: where the quote settled a payment, or short of the three).
+        let keeps = (settled && self.has(ViewerFlaw::SettlingQuoteKeepsTries))
+            || (self.has(ViewerFlaw::QuoteKeepsPartialTries)
+                && self.standing().unavailable < UNAVAILABLE_BUDGET);
+        if !keeps {
+            self.standing().unavailable = 0;
+        }
         if self.first_price.is_none() {
             self.first_price = Some(quote.price_per_chunk);
         }
@@ -14632,7 +14650,10 @@ impl Viewer for MockViewer {
             } else if let Some(p) = expected {
                 self.spent += p.amount;
             }
-            if !self.has(ViewerFlaw::AckKeepsUnavailable) {
+            let others = self.tries_here < self.standing().unavailable;
+            if !self.has(ViewerFlaw::AckKeepsUnavailable)
+                && !(others && self.has(ViewerFlaw::OtherVideosAckKeepsTries))
+            {
                 self.standing().unavailable = 0;
                 self.unavailable_here = 0;
                 self.tries_here = 0;
@@ -14702,6 +14723,7 @@ impl Viewer for MockViewer {
             return;
         };
         self.rej_at = Some(self.clock.now());
+        let was_last = p.last;
         let outcome = if was_halted && self.has(ViewerFlaw::RejNoReclaimWhenStopped) {
             None
         } else {
@@ -14740,11 +14762,15 @@ impl Viewer for MockViewer {
         {
             self.standing().units_next = true;
         }
+        // Every such answer to a payment uses a try (flaws count none for some).
+        let uncounted = (was_last && self.has(ViewerFlaw::LastPayUnavailableUncounted))
+            || (outcome == Some(Reclaim::Expired)
+                && self.has(ViewerFlaw::UnavailableExpiredUncounted));
         if rej.code != RejCode::MintUnavailable || self.has(ViewerFlaw::StopsOnOutage) {
             self.halt();
         } else if self.has(ViewerFlaw::UnavailablePerLedger) {
             self.unavailable_here += 1;
-        } else {
+        } else if !uncounted {
             self.standing().unavailable += 1;
             self.tries_here += 1;
             self.note(self.id, Past::Unavailable);

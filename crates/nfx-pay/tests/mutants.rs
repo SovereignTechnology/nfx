@@ -2355,6 +2355,13 @@ catches!(
     viewer_pay_ahead_at_cap: v(V::PayAheadAtCap) => every_payment_on_its_first_ledger_holds_at_most_64_proofs,
     viewer_sibling_pays_at_cap: v(V::SiblingPaysAtCap) => every_payment_on_another_videos_ledger_holds_at_most_64_proofs,
     viewer_resumed_pays_at_cap: v(V::ResumedPaysAtCap) => every_payment_on_its_first_ledger_holds_at_most_64_proofs,
+    // Every mint-unavailable answer to a payment uses a try, and every ack and every new
+    // session's accepted quote restores them all.
+    viewer_last_pay_unavailable_uncounted: v(V::LastPayUnavailableUncounted) => an_unavailable_seeder_gets_three_tries_a_session,
+    viewer_unavailable_expired_uncounted: v(V::UnavailableExpiredUncounted) => an_unavailable_seeder_gets_three_tries_a_session,
+    viewer_settling_quote_keeps_tries: v(V::SettlingQuoteKeepsTries) => an_unavailable_seeder_gets_three_tries_a_session,
+    viewer_other_videos_ack_keeps_tries: v(V::OtherVideosAckKeepsTries) => an_unavailable_seeder_gets_three_tries_a_session,
+    viewer_quote_keeps_partial_tries: v(V::QuoteKeepsPartialTries) => an_unavailable_seeder_gets_three_tries_a_session,
     viewer_stopped_ack_not_settled: v(V::StoppedAckNotSettled) => a_stopped_viewer_pays_nothing,
     viewer_own_stop_ack_not_settled: v(V::OwnStopAckNotSettled) => a_stopped_viewer_pays_nothing,
     // The defects of keys, keyset listings and the keyset rule, against a seeder that asks for

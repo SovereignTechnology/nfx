@@ -15527,6 +15527,9 @@ pub async fn a_refusing_seeder_takes_at_most_half_a_window<H: Harness>(h: &H) {
 /// and an ack resets it; nothing else does, a ledger made for another video or a quote
 /// refused on one included. Only a `mint-unavailable` answer to a payment uses a try: a
 /// `hello` refused so uses none. Out of tries, the watcher still finishes its reclaims.
+/// Every such answer uses one, however its payment was made, on whichever ledger and
+/// however its reclaim ends; and every ack and every new session's accepted quote, on
+/// whichever of the seeder's videos, restores them all.
 pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
@@ -15657,6 +15660,7 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     let mut tries = 0;
     while v1.due().await.expect("due answers on video 1").is_some() {
         tries += 1;
+        assert!(tries <= 3, "more than three tries on video 1");
         v1.rej(&mu).await;
     }
     close(h, s0).await;
@@ -15835,6 +15839,209 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     a_retried_reclaim_is_no_try(h).await;
     // Nor does anything else use a try, or restore one, while tries are left.
     only_an_unavailable_answer_uses_a_try(h).await;
+    // Every such answer uses one, however its payment was made and however its reclaim
+    // ends; and every ack and every new session's accepted quote restores them all.
+    every_unavailable_answer_uses_a_try(h).await;
+    every_ack_and_accepted_quote_restores_the_tries(h).await;
+}
+
+/// How the reclaim of a payment answered `mint-unavailable` ends, where the watcher may pay
+/// again, for [`every_unavailable_answer_uses_a_try`].
+const RECLAIM_ENDS: [&str; 3] = [
+    "every proof back at once",
+    "every proof back once the mint is back",
+    "its proofs lost to their keyset's expiry",
+];
+
+/// Every `mint-unavailable` answer to a payment uses a try (NFX-07 §3a): however the payment
+/// was made ([`MADE`]), on whichever ledger ([`LEDGERS`]), and however its reclaim ends
+/// ([`RECLAIM_ENDS`]). Three such payments are made, and no more.
+async fn every_unavailable_answer_uses_a_try<H: Harness>(h: &H) {
+    let mu = Rej {
+        code: RejCode::MintUnavailable,
+        detail: None,
+    };
+    for on in LEDGERS {
+        for how in MADE {
+            for ends in RECLAIM_ENDS {
+                let what = format!("payments {how}, {on}, each answered mint-unavailable, {ends}");
+                let e = h.engine(1, 4, 1000);
+                let first = h.viewer(1);
+                let (mut v, video) = if on == LEDGERS[1] {
+                    (first.sibling(), 1)
+                } else {
+                    (first, 0)
+                };
+                let s = open_on(h, &e, 1, video).await;
+                v.quote(s.quote()).expect("an honest quote is accepted");
+                // Owed: half the window for a payment due, one chunk for one at the end.
+                let owed = match how {
+                    "due at half the window" => 2,
+                    "at the session's end" => 1,
+                    _ => 0,
+                };
+                for _ in 0..owed {
+                    v.requested();
+                }
+                let mut tries = 0;
+                loop {
+                    if how == "ahead after a refusal" {
+                        v.requested();
+                        v.refused();
+                    }
+                    let pay = if how == "at the session's end" {
+                        v.last_pay()
+                            .await
+                            .expect("last_pay answers, tries left or not")
+                    } else {
+                        v.due().await.expect("due answers, tries left or not")
+                    };
+                    let Some(pay) = pay else {
+                        break;
+                    };
+                    tries += 1;
+                    assert!(
+                        tries <= 3,
+                        "{what}: more than three tries, so an answer used none"
+                    );
+                    if ends == RECLAIM_ENDS[1] {
+                        h.mint_outage(true);
+                    } else if ends == RECLAIM_ENDS[2] {
+                        h.expire_keyset_of(&pay.token, usize::MAX);
+                    }
+                    v.rej(&mu).await;
+                    h.mint_outage(false);
+                }
+                assert_eq!(
+                    tries, 3,
+                    "{what}: each answer uses a try, so three payments are made and no more"
+                );
+                close(h, s).await;
+            }
+        }
+    }
+}
+
+/// What restores the three tries, for [`every_ack_and_accepted_quote_restores_the_tries`]:
+/// an ack, on whichever of the seeder's videos, and a new session's accepted quote, on
+/// whichever, whether or not it settles a payment.
+const RESTORES: [&str; 5] = [
+    "an ack on its own video",
+    "an ack on another video",
+    "a new session's accepted quote that settles nothing",
+    "a new session's accepted quote that settles a payment",
+    "another video's new session's accepted quote",
+];
+
+/// An ack resets the count of `mint-unavailable` answers in a row, as a new session's
+/// accepted quote does (NFX-07 §3a): each of [`RESTORES`], with one try or two used on video
+/// 0 before it, leaves video 0 three tries. The count is the standing's, so an ack or a
+/// quote on video 1 restores them too; and a quote restores them whether or not it settles
+/// a payment (one the seeder swapped and credited, its ack lost with the connection).
+async fn every_ack_and_accepted_quote_restores_the_tries<H: Harness>(h: &H) {
+    let mu = Rej {
+        code: RejCode::MintUnavailable,
+        detail: None,
+    };
+    for used in [1, 2] {
+        for by in RESTORES {
+            let e = h.engine(1, 4, 1000);
+            let mut s0 = open_on(h, &e, 1, 0).await;
+            let mut v0 = h.viewer(1);
+            let mut v1 = v0.sibling();
+            v0.quote(s0.quote())
+                .expect("video 0's honest quote is accepted");
+            // Video 1's session, held since before the tries where its ack restores them.
+            let mut s1 = None;
+            if by == "an ack on another video" {
+                let s = open_on(h, &e, 1, 1).await;
+                v1.quote(s.quote())
+                    .expect("video 1's honest quote is accepted");
+                s1 = Some(s);
+            }
+            for i in 0..2 {
+                assert!(s0.admit(&h.chunk_of(0, i)), "within the window");
+                v0.requested();
+            }
+            for _ in 0..used {
+                v0.due()
+                    .await
+                    .expect("video 0's due answers")
+                    .expect("a try");
+                v0.rej(&mu).await;
+            }
+            match by {
+                "an ack on its own video"
+                | "a new session's accepted quote that settles a payment" => {
+                    let pay = v0
+                        .due()
+                        .await
+                        .expect("video 0's due answers")
+                        .expect("a try more");
+                    let ack = s0.pay(&pay).await.expect("this one the seeder takes");
+                    if by == "an ack on its own video" {
+                        v0.ack(&ack).expect("its honest ack is taken");
+                    } else {
+                        // Its ack never reaches the watcher: the connection drops.
+                        close(h, s0).await;
+                        v0.end();
+                        s0 = open_on(h, &e, 1, 0).await;
+                        v0.quote(s0.quote()).expect(
+                            "the new session's quote shows the payment: settled, and taken",
+                        );
+                    }
+                    for i in 2..4 {
+                        assert!(s0.admit(&h.chunk_of(0, i)), "within the window");
+                        v0.requested();
+                    }
+                }
+                "an ack on another video" => {
+                    let s = s1.as_mut().expect("video 1's session, held since before");
+                    for i in 0..2 {
+                        assert!(s.admit(&h.chunk_of(1, i)), "within the window");
+                        v1.requested();
+                    }
+                    let pay = v1
+                        .due()
+                        .await
+                        .expect("video 1's due answers")
+                        .expect("due on video 1");
+                    v1.ack(&s.pay(&pay).await.expect("the seeder takes it"))
+                        .expect("its honest ack is taken");
+                }
+                "a new session's accepted quote that settles nothing" => {
+                    close(h, s0).await;
+                    v0.end();
+                    s0 = open_on(h, &e, 1, 0).await;
+                    v0.quote(s0.quote())
+                        .expect("a new session's honest quote is accepted");
+                }
+                _ => {
+                    let s = open_on(h, &e, 1, 1).await;
+                    v1.quote(s.quote())
+                        .expect("video 1's new session's honest quote is accepted");
+                    s1 = Some(s);
+                }
+            }
+            let mut tries = 0;
+            while v0
+                .due()
+                .await
+                .expect("video 0's due answers, tries left or not")
+                .is_some()
+            {
+                tries += 1;
+                assert!(tries <= 3, "more than three tries");
+                v0.rej(&mu).await;
+            }
+            assert_eq!(
+                tries, 3,
+                "{used} of video 0's three tries used, then {by}: it restores them all, so \
+                 video 0 has three tries again"
+            );
+            close(h, (s0, s1)).await;
+        }
+    }
 }
 
 /// Only a `mint-unavailable` answer to a payment uses a try, and only an ack or a new
