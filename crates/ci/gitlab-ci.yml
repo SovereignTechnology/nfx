@@ -1,11 +1,9 @@
 # DORMANT. This repository's CI runs on GitHub Actions (.github/workflows/ci.yml, the same
-# two jobs); this file runs nothing, and the fetch below names no real host. The lock still
+# two jobs); this file runs nothing. The lock still
 # pins it (crates/ci/check-locked.sh), so reviving it is a change to the pins.
 #
-# NFX master-plan CI (ADR 0008). It runs only master-plan checks, never the demo's
-# `npm run ci`. The project's CI config path is set to this file; the root
-# .gitlab-ci.yml path is left to the demo mirror, so `git merge demo/<tag>` stays
-# conflict-free. Runs on the instance's shared runner, so it is kept light:
+# NFX master-plan CI (ADR 0008). The project's CI config path is set to this file.
+# Runs on the instance's shared runner, so it is kept light:
 # tools are downloaded prebuilt and sha256-pinned, never compiled on the runner.
 
 stages: [check]
@@ -18,7 +16,7 @@ default:
     when: [runner_system_failure, stuck_or_timeout_failure]
 
 variables:
-  GIT_DEPTH: "0"            # the add-only check needs the merge base with demo/main
+  GIT_DEPTH: "0"
   CARGO_HOME: $CI_PROJECT_DIR/.cargo-home
   CARGO_TERM_COLOR: always
   # Keep the shared runner light. With debug info each iroh/nostr test binary is ~450 MB
@@ -89,8 +87,6 @@ check:
     - curl -sSfLo /tmp/wasm-pack.tgz "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${WASM_PACK_VERSION}/wasm-pack-v${WASM_PACK_VERSION}-x86_64-unknown-linux-musl.tar.gz"
     - echo "${WASM_PACK_SHA256}  /tmp/wasm-pack.tgz" | sha256sum -c -
     - tar -xzf /tmp/wasm-pack.tgz -C /tmp && install -m 0755 "/tmp/wasm-pack-v${WASM_PACK_VERSION}-x86_64-unknown-linux-musl/wasm-pack" /usr/local/bin/
-    # Read-only fetch of the public demo repository for the add-only check.
-    - git fetch --no-tags https://example.invalid/sovtech/nutflix.git +main:refs/remotes/demo/main
   script:
     # CI=true and an empty LOCKED_DIRS_UNLOCKED are set here, in the pinned file, so no
     # pipeline or project variable can switch the lock off (crates/ci/check-locked.sh).

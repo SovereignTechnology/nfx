@@ -28,19 +28,6 @@ step "spec: test vectors regenerate byte for byte"
 step "spec: JSON schemas agree with the vectors"
 "$py" spec/schemas/check.py
 
-step "add-only: mirrored demo paths unchanged on this side since the last demo merge"
-if git rev-parse -q --verify refs/remotes/demo/main >/dev/null; then
-  changed=$(git diff --name-only demo/main...HEAD -- \
-    packages docs/plan docs/lanes docs/handoff docs/status.md scripts)
-  if [ -n "$changed" ]; then
-    printf 'mirrored demo paths were edited here:\n%s\n' "$changed" >&2
-    exit 1
-  fi
-  echo "ok"
-else
-  echo "skipped: no demo/main ref (no demo-base tag)"
-fi
-
 step "locked paths: cached crates match Cargo.lock, then fetch"
 locked --sources
 (cd crates && cargo fetch --locked)

@@ -8,7 +8,7 @@ name: ci
 
 on:
   push:
-    # Branches only: a tag push (demo-base) runs nothing. A probe branch (probe/<tag>,
+    # Branches only: a tag push runs nothing. A probe branch (probe/<tag>,
     # probe.yml) runs nothing either: its commit is thrown away, and has no lock verdict.
     branches: ['**', '!probe/**']
   pull_request:
@@ -160,7 +160,4 @@ jobs:
           # The CI's own CARGO_HOME, inside the checkout: the lock refuses sources extracted
           # anywhere else (crates/ci/check-locked.sh --sources).
           export CARGO_HOME="$(pwd -P)/.cargo-home"
-          # The add-only check's base: the demo's last merged commit, tagged demo-base.
-          git rev-parse -q --verify refs/tags/demo-base >/dev/null || { echo "the demo-base tag is missing: push it"; exit 1; }
-          git update-ref refs/remotes/demo/main refs/tags/demo-base
           crates/ci/check.sh
