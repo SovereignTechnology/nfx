@@ -7128,6 +7128,9 @@ pub enum ViewerFlaw {
     /// Takes a matching ack without settling its payment into the ledger where a `hello`
     /// refused `banned` on that ledger stopped it while the payment was in flight.
     OwnStopAckNotSettled,
+    /// A timeout before a payment's 180 s, that payment in flight on the session, ends a
+    /// refusal's licence to pay ahead.
+    EarlyTimeoutEndsLicence,
 }
 
 /// Whose history a defect planted on one history keys on: the paying ledger's own, or that
@@ -15292,6 +15295,9 @@ impl Viewer for MockViewer {
             }
             if self.has(ViewerFlaw::TimeoutBeforeWaitCountsATry) {
                 self.standing().unavailable += 1;
+            }
+            if self.has(ViewerFlaw::EarlyTimeoutEndsLicence) {
+                self.pay_ahead = false;
             }
             return;
         }

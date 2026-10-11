@@ -12958,8 +12958,10 @@ const LICENCE_ENDS: [&str; 10] = [
 /// What can come between a refusal and the `due` that follows it without ending the
 /// refusal's licence, for [`a_refusal_licenses_the_due_that_follows_it`]: none is a decision
 /// of what to pay. A `last_pay`, paying or not, and another video's `due` are tried there
-/// too.
-const LICENCE_STAYS: [&str; 12] = [
+/// too. The last is a timeout a second before the 180 s of the payment in flight on the
+/// session (flaw `EarlyTimeoutEndsLicence`): that payment is then acknowledged, so that the
+/// `due` that follows may pay.
+const LICENCE_STAYS: [&str; 13] = [
     "a new request",
     "the ack of the payment in flight",
     "mint-unavailable to the payment in flight",
@@ -12972,6 +12974,7 @@ const LICENCE_STAYS: [&str; 12] = [
     "a timeout with no payment on another video's session",
     "another video's session ending",
     "another video's honest quote, taken",
+    "a timeout before its 180 s on the payment in flight",
 ];
 
 /// A refusal licenses the `due` that follows it on its ledger, and no other (NFX-07 §3a):
@@ -12979,8 +12982,8 @@ const LICENCE_STAYS: [&str; 12] = [
 /// the session's end ([`LICENCE_ENDS`]). Once whatever kept that `due` from paying is gone,
 /// the watcher pays for the chunks it requested, at their due point, and nothing ahead.
 /// Nothing else that comes between the refusal and the `due` ends the licence
-/// ([`LICENCE_STAYS`]): a request sent, the answer to a payment in flight, or anything on
-/// another video. A
+/// ([`LICENCE_STAYS`]): a request sent, the answer to a payment in flight, a timeout before
+/// that payment's 180 s or with no payment on the session, or anything on another video. A
 /// `last_pay` between the refusal and the `due` pays nothing ahead, and leaves the licence
 /// to the `due`. A refusal on one video licenses nothing on another.
 async fn a_refusal_licenses_the_due_that_follows_it<H: Harness>(h: &H) {
@@ -13240,6 +13243,20 @@ async fn a_refusal_licenses_the_due_that_follows_it<H: Harness>(h: &H) {
                 assert!(v0.quote(s0.quote()).is_err(), "one quote per session");
             }
             "a timeout with no payment on the session" => v0.timeout().await,
+            "a timeout before its 180 s on the payment in flight" => {
+                // A second before the 180 s from its sending are up, the payment
+                // unanswered: nothing is that call's. The payment is acknowledged after it.
+                advance(h, Duration::from_secs(179)).await;
+                v0.timeout().await;
+                assert!(
+                    !v0.stopped(),
+                    "a timeout before its payment's 180 s stops nothing"
+                );
+                let pay = in_flight.take().expect("video 0's payment in flight");
+                v0.ack(&s0.pay(&pay).await.expect("the seeder takes it"))
+                    .expect("its honest ack is taken");
+                upto = 4;
+            }
             "a ledger made for another video" => {
                 let _third = v0.sibling();
             }

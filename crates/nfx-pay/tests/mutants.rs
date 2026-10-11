@@ -3261,4 +3261,5 @@ catches!(
     late_keys_refusal_cached_woken: w(S::LateKeysRefusalCached) => a_seeder_answers_within_its_deadline,
     late_keys_refusal_cached_at_start: l(S::LateKeysRefusalCached) => a_seeder_answers_within_its_deadline,
     late_keys_refusal_cached_on_tasks: t(S::LateKeysRefusalCached) => a_seeder_answers_within_its_deadline,
+    viewer_early_timeout_ends_licence: v(V::EarlyTimeoutEndsLicence) => a_viewer_pays_ahead_only_after_a_refusal,
 );

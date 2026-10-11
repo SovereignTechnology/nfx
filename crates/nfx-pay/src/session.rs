@@ -232,7 +232,8 @@ pub trait Viewer {
     /// it, whether or not it pays, and so does [`Viewer::end`]; [`Viewer::last_pay`] neither
     /// uses nor ends it, nor does anything else that comes before that `due` (a request
     /// sent, the answer to a payment in flight, a second quote, a refused `hello`, a timeout
-    /// with no payment on the session, or anything on another video's ledger), and it
+    /// before a payment's 180 s or with no payment on the session, or anything on another
+    /// video's ledger), and it
     /// licenses nothing on a ledger for another video. It settles nothing: the payment in flight, a
     /// payment awaiting a quote, an incomplete reclaim and a stop stay as they were.
     fn refused(&mut self);
@@ -342,7 +343,8 @@ pub trait Viewer {
     /// quote that shows it, which settles it into the ledger only: the viewer stays stopped,
     /// and awaits no quote. With no payment on the session it changes nothing. A
     /// payment an earlier session left unsettled is not this call's. Nor does it undo a
-    /// stop, before the 180 s or with no payment on the session.
+    /// stop, or end a refusal's licence to pay ahead ([`Viewer::refused`]), before the 180 s
+    /// or with no payment on the session.
     async fn timeout(&mut self);
 
     /// The session ended (its connection closed). A refusal's licence to pay ahead ends

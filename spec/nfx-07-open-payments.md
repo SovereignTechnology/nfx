@@ -582,8 +582,8 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     whatever came before, which the seeder serves whatever its cap. Nothing that comes
     between the refusal and that decision is such a decision, or ends the licence, but the
     session's end: not a request sent, the answer to a payment in flight, a second quote, a
-    refused `hello`, a timeout with no payment on the session, nor anything on another
-    video's ledger. The licence ends there, whether or not that decision
+    refused `hello`, a timeout before a payment's 180 s or with no payment on the session,
+    nor anything on another video's ledger. The licence ends there, whether or not that decision
     paid: one that paid nothing because a payment was in flight toward the seeder or left
     unsettled, a reclaim was incomplete, a payment awaited a quote, the tries were used,
     the wallet held no proof the mint takes, the ledger already held half a window of
@@ -1544,7 +1544,10 @@ paths on one host are two origins.
     with no payment on the session, nor anything on another video's ledger (was: not said);
     so "a refusal that came while a payment was in flight pays nothing ahead once that
     payment is answered" now says where: the watcher having decided what to pay while it
-    was in flight.
+    was in flight. The list names a timeout before a payment's 180 s beside the one with no
+    payment on the session, as the list of what undoes no stop does: the sentence already
+    left the licence nothing but the session's end to end it, and its list stopped short
+    of that timeout.
   - §3a: the list of what undoes no stop names a request sent, a timeout before a
     payment's 180 s or with no payment on the session, and a payment in flight on its live
     session when the stop comes, on its own ledger or another video's; and a matching
