@@ -8189,18 +8189,16 @@ impl Inner {
 
     /// Whether payment `pay` asks its mint for nothing more: at or past its deadline, or
     /// abandoned (NFX-07 §3, the deadline: no key request and no listing request is sent
-    /// then, judged at every look). The defects that ask there, or that use what comes
-    /// there, ask as before.
+    /// then, judged at every look). The defect `ask` asks there, and so does the seeder
+    /// with no deadline at all; no other defect does.
     fn asks_no_more(&self, pay: u64, ask: SeederFlaw) -> bool {
-        let asks = [
-            ask,
-            SeederFlaw::NoDeadline,
-            SeederFlaw::LateKeysUsed,
-            SeederFlaw::LateListingUsed,
-            SeederFlaw::KeysInDeadlineSecondUsed,
-            SeederFlaw::KeysetListingWaitPastDeadline,
-        ];
-        if asks.iter().any(|f| self.has(*f)) {
+        // `NoDeadline` keeps asking: this rule is a clause of the deadline it lacks, and a
+        // payment of it that had asked for nothing by then would wait for ever on no
+        // request, where its defect is to wait for the mint. The defects that use what comes
+        // at or past the deadline (`LateKeysUsed`, `LateListingUsed`,
+        // `KeysInDeadlineSecondUsed`, `KeysetListingWaitPastDeadline`) act on the answer to
+        // a request sent in time, or on a wait: they ask no more than an honest seeder.
+        if self.has(ask) || self.has(SeederFlaw::NoDeadline) {
             return false;
         }
         let st = self.state();
@@ -10417,8 +10415,9 @@ impl Inner {
             {
                 return Poll::Ready(Ok(keys.clone()));
             }
+            // Each of the two uses its own kind of refusal found late, and not the other's.
             if let Some(Err(r)) = &found
-                && (self.has(SeederFlaw::LateListingUsed)
+                && ((!keys_refused && self.has(SeederFlaw::LateListingUsed))
                     || (keys_refused && self.has(SeederFlaw::LateKeysRefusalUsed)))
             {
                 return Poll::Ready(Err(r.clone()));
