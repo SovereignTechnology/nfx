@@ -1,7 +1,8 @@
 //! NFX-05 packaging for the NFX master plan (ADR 0008, A2).
 //!
 //! - [`probe`], [`ladder`], [`argv`] and [`storyboard`] are behaviour-faithful ports of the
-//!   demo's L8 planning code (`packages/core/src/media/{ffprobe,ladder,argv,storyboard}.ts`),
+//!   demo's L8 planning code (`packages/core/src/media/{ffprobe,ladder,argv,storyboard}.ts`
+//!   in the demo's snapshot at the tag `demo-base`),
 //!   with L8's own test expectations ported alongside. Spike S4 showed that L8's GOP pinning
 //!   already yields CMAF-ready, switch-aligned segments; only the container tail changes.
 //! - [`mp4`] reads CODECS strings from an init segment's `avcC`/`esds` boxes (ffprobe
