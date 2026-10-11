@@ -6958,6 +6958,9 @@ pub enum ViewerFlaw {
     OtherVideosAckKeepsTries,
     /// A new session's accepted quote restores the tries only once all three were used.
     QuoteKeepsPartialTries,
+    /// A `hello` refused `banned` starts the 180 s of the payment in flight on that ledger's
+    /// live session again.
+    BannedHelloRestartsLiveWait,
     /// Once stopped, takes a matching ack without settling its payment into the ledger.
     StoppedAckNotSettled,
     /// On a ledger made for another video, a request sent while its payment is in flight
@@ -6966,6 +6969,12 @@ pub enum ViewerFlaw {
     /// Pays every ledger's payments at the price of the quote the standing took last, on
     /// whichever of the seeder's videos.
     PriceOfLastQuoteTaken,
+    /// A `hello` refused, with a code but `banned`, on a ledger whose payment is in flight
+    /// on its live session starts that payment's 180 s again.
+    OwnHelloRefusedRestartsLiveWait,
+    /// A `hello` refused, with a code but `banned`, on a ledger whose payment is in flight
+    /// on its live session frees the standing's one place.
+    OwnHelloRefusedFreesLiveSlot,
     /// Takes a matching ack without settling its payment into the ledger where a `hello`
     /// refused `banned` on that ledger stopped it while the payment was in flight.
     OwnStopAckNotSettled,
@@ -14330,8 +14339,17 @@ impl Viewer for MockViewer {
         if rej.code != RejCode::Banned && self.has(ViewerFlaw::OtherHelloRefusedReclaimsLiveNow) {
             self.reclaims_other_live();
         }
+        if rej.code == RejCode::Banned && self.has(ViewerFlaw::BannedHelloRestartsLiveWait) {
+            self.restart_live_wait();
+        }
         if rej.code == RejCode::Banned && self.pending.is_some() {
             self.banned_in_flight = true;
+        }
+        if rej.code != RejCode::Banned && self.has(ViewerFlaw::OwnHelloRefusedRestartsLiveWait) {
+            self.restart_live_wait();
+        }
+        if self.has(ViewerFlaw::OwnHelloRefusedFreesLiveSlot) && rej.code != RejCode::Banned {
+            self.frees_live_slot(ViewerFlaw::OwnHelloRefusedFreesLiveSlot);
         }
         if rej.code != RejCode::Banned {
             self.clears_stop_beside_live(ViewerFlaw::OtherHelloRefusedWhileLiveClearsStop);

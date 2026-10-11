@@ -2362,6 +2362,11 @@ catches!(
     viewer_settling_quote_keeps_tries: v(V::SettlingQuoteKeepsTries) => an_unavailable_seeder_gets_three_tries_a_session,
     viewer_other_videos_ack_keeps_tries: v(V::OtherVideosAckKeepsTries) => an_unavailable_seeder_gets_three_tries_a_session,
     viewer_quote_keeps_partial_tries: v(V::QuoteKeepsPartialTries) => an_unavailable_seeder_gets_three_tries_a_session,
+    // A stop on the payment's own ledger starts no live wait again, nor does a hello refused
+    // there otherwise, which frees no place either.
+    viewer_banned_hello_restarts_live_wait: v(V::BannedHelloRestartsLiveWait) => every_payment_due_on_its_first_ledger_waits_from_its_sending,
+    viewer_own_hello_refused_restarts_live_wait: v(V::OwnHelloRefusedRestartsLiveWait) => a_viewer_reclaims_an_unanswered_payment,
+    viewer_own_hello_refused_frees_live_slot: v(V::OwnHelloRefusedFreesLiveSlot) => a_watchers_standing_spans_its_videos,
     viewer_stopped_ack_not_settled: v(V::StoppedAckNotSettled) => a_stopped_viewer_pays_nothing,
     viewer_own_stop_ack_not_settled: v(V::OwnStopAckNotSettled) => a_stopped_viewer_pays_nothing,
     // The defects of keys, keyset listings and the keyset rule, against a seeder that asks for

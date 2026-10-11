@@ -14427,7 +14427,8 @@ async fn a_payment_behind_an_answer_waits_from_its_sending<H: Harness>(h: &H) {
 
 /// The 180 s of a live session's payment are counted from sending too, and nothing that
 /// comes before they are up starts them again: on the session, a second quote, a new or a
-/// refused request, or a timeout; a ledger made for another video, or anything in
+/// refused request, or a timeout; a ledger made for another video, a `hello` refused on the
+/// payment's own ledger (with each code but `banned`), or anything in
 /// [`ON_ANOTHER_VIDEO`] or [`ON_ANOTHER_SESSION`]. The seeder never answers the payment,
 /// and the event comes at 179 s: nothing is reclaimed then, and at 180 s the watcher
 /// reclaims it and stops. Nor do they start before sending: a payment sent 100 s after the
@@ -14439,6 +14440,7 @@ async fn the_live_wait_counts_from_sending<H: Harness>(h: &H) {
         "a refused request",
         "a timeout before 180 s",
         "a ledger made for another video",
+        "a hello refused on its own ledger",
     ];
     for &event in on_the_session
         .iter()
@@ -14460,6 +14462,13 @@ async fn the_live_wait_counts_from_sending<H: Harness>(h: &H) {
             }
             "a timeout before 180 s" => {
                 v.timeout().await;
+                s
+            }
+            "a hello refused on its own ledger" => {
+                // With each code but `banned`, which stops the watcher.
+                for code in hello_refusal_codes() {
+                    v.hello_refused(&Rej { code, detail: None });
+                }
                 s
             }
             _ => bring_about(h, &e, s, &mut v, event, true).await,
@@ -16657,7 +16666,8 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
 /// A payment in flight on a live session holds the standing's one slot until it is answered
 /// or its 180 s are up, whatever comes meanwhile: on its session, a second quote, a new or a
 /// refused request, or a timeout before 180 s; a ledger made for another video; video 1's
-/// first quote, taken; or anything in [`ON_ANOTHER_VIDEO`] or [`ON_ANOTHER_SESSION`]. Video
+/// first quote, taken; a `hello` refused on the payment's own ledger (with each code but
+/// `banned`); or anything in [`ON_ANOTHER_VIDEO`] or [`ON_ANOTHER_SESSION`]. Video
 /// 1, holding a session with chunks owed, pays nothing over it, by `due` or by `last_pay`.
 async fn a_live_payment_holds_the_slot<H: Harness>(h: &H) {
     let on_video_0 = [
@@ -16667,6 +16677,7 @@ async fn a_live_payment_holds_the_slot<H: Harness>(h: &H) {
         "a timeout before 180 s",
         "a ledger made for another video",
         "video 1's first quote, taken",
+        "a hello refused on its own ledger",
     ];
     for &event in on_video_0
         .iter()
@@ -16702,6 +16713,13 @@ async fn a_live_payment_holds_the_slot<H: Harness>(h: &H) {
             "video 1's first quote, taken" => {
                 v1.quote(s1.quote())
                     .expect("video 1's first quote is taken");
+                s0
+            }
+            "a hello refused on its own ledger" => {
+                // With each code but `banned`, which stops the watcher.
+                for code in hello_refusal_codes() {
+                    v0.hello_refused(&Rej { code, detail: None });
+                }
                 s0
             }
             _ => bring_about(h, &e, s0, &mut v0, event, true).await,
@@ -19651,7 +19669,9 @@ waits_from_its_sending!(
 );
 
 /// Where a payment's 180 s are counted, for [`every_payment_waits_from_its_sending`]: on
-/// its live session, stopped from the other video or not, or once its session has closed,
+/// its live session, stopped or not, from the other video or on its own ledger (by a `hello`
+/// refused `banned`, the one stop that can come there while it is in flight: the last
+/// row), or once its session has closed,
 /// by its own ledger or the other video's: in a new session, or with none; the other
 /// video's also in a session it has held since before the payment was sent, or with none,
 /// its last closed before that; or by the ledger a stop came on ([`STOPS`]), on a new
@@ -19659,7 +19679,7 @@ waits_from_its_sending!(
 /// ledger with no session, its last closed before the payment was sent; or by a ledger made
 /// for a third video since the payment's session closed, in a new session, with none, or
 /// stopped there.
-const COUNTED: [&str; 15] = [
+const COUNTED: [&str; 16] = [
     "on its live session",
     "on its live session, stopped from the other video",
     "by its own ledger in a new session",
@@ -19675,6 +19695,7 @@ const COUNTED: [&str; 15] = [
     "by a ledger made since in a new session",
     "by a ledger made since with no session",
     "by a ledger made since, stopped there",
+    "on its live session, stopped on its own ledger",
 ];
 
 /// The calls that catch a closed session's payment up, for the same table: each finishes the
@@ -19707,7 +19728,9 @@ async fn every_payment_waits_from_its_sending<H: Harness>(
             }
             // On a session held since before, a stop comes as an unsolicited answer; with
             // no session left, as a dishonest quote or a hello refused banned.
-            let stops: &[&str] = if at.contains("stopped on") {
+            let stops: &[&str] = if at.ends_with("stopped on its own ledger") {
+                &STOPS[3..]
+            } else if at.contains("stopped on") {
                 &STOPS[..2]
             } else if at.contains("stopped with no session") {
                 &STOPS[2..]
@@ -19783,8 +19806,13 @@ async fn a_payment_waits_from_its_sending<H: Harness>(
             advance(h, Duration::from_secs(179)).await;
         } else {
             advance(h, Duration::from_secs(60)).await;
-            let _s = stop_by(h, &e, &mut other, 1 - video, by).await;
-            assert!(v.stopped(), "{by} on the other video stops the standing");
+            if at.ends_with("stopped on its own ledger") {
+                stop_on_its_own(h, &e, &mut v, by).await;
+                assert!(v.stopped(), "{by} on its own ledger stops the standing");
+            } else {
+                let _s = stop_by(h, &e, &mut other, 1 - video, by).await;
+                assert!(v.stopped(), "{by} on the other video stops the standing");
+            }
             advance(h, Duration::from_secs(119)).await;
         }
         v.timeout().await;
