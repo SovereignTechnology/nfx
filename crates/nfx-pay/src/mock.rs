@@ -10101,7 +10101,8 @@ impl Inner {
     /// keyset asks again. `mint-unavailable` once its deadline passes first, or it has
     /// been abandoned: keys it finds at or past its deadline (whole seconds: in the
     /// deadline's second too) came after it, and are not used, since the checks they serve
-    /// would be reached late.
+    /// would be reached late; nor is the mint's refusal of them. And from its deadline it
+    /// asks for nothing more, keys or listing: no request is sent that could not be used.
     async fn fetch_keys(
         &self,
         mint: &str,
@@ -10463,9 +10464,9 @@ impl Inner {
     /// or after. If the one the seeder holds is older, it asks for the listing now, in a
     /// later second than that one; one whose answer is held it waits for.
     /// `mint-unavailable` once its deadline passes first, or it has been abandoned: a
-    /// listing that comes at or past the deadline is not used. `stale_held`: one held asked
-    /// for before `since` is waited for too ([`SeederFlaw::UnwaitedStaleHeldListingAwaited`]
-    /// and the like only).
+    /// listing that comes at or past the deadline is not used, nor is one asked for then.
+    /// `stale_held`: one held asked for before `since` is waited for too
+    /// ([`SeederFlaw::UnwaitedStaleHeldListingAwaited`] and the like only).
     async fn keyset_listing(
         &self,
         mint: &str,

@@ -39,13 +39,12 @@ macro_rules! catches {
     };
 }
 
-/// A flawed seeder whose mint answers every call in the poll that sends it. Two hundred of
-/// the older seeder defects are registered here alone: each was planted, and its scenario
-/// written, before the suite ran on round trips or on woken answers, and none of them is
-/// about how an answer comes back. Measured at the thirtieth audit, every one of them fails
-/// the same check of the same scenario on round trips and on woken answers as it does here,
-/// so a second and a third entry for each would add time and no teeth. A defect that could
-/// behave otherwise where an answer spans polls is registered on those harnesses too.
+/// A flawed seeder whose mint answers every call in the poll that sends it. Some two hundred
+/// seeder defects, all older than the twenty-ninth audit, are registered here alone. The
+/// thirtieth audit ran each of them once on round trips and once on woken answers: every
+/// one fails a check of the suite there too, the same check on both. So a second and a third
+/// entry for each would add time and no teeth; a defect that could behave otherwise where
+/// an answer spans polls is registered on those harnesses too.
 fn s(flaw: S) -> MockHarness {
     MockHarness::with_seeder_flaw(flaw)
 }

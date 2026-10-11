@@ -11352,7 +11352,7 @@ pub async fn prepayment_extends_service_exactly<H: Harness>(h: &H) {
     );
 }
 
-/// One peer's payment credits no other.
+/// One peer's payment credits no other (flaw `CreditSpillsToPeers`).
 pub async fn peers_are_isolated<H: Harness>(h: &H) {
     let e = h.engine(1, 2, 1000);
     let mut a = open(h, &e, 1).await;
@@ -24329,7 +24329,8 @@ async fn checks_after_the_deadline_answer_nothing<H: Harness>(h: &H) {
 
 /// The first part of [`checks_after_the_deadline_answer_nothing`], at whichever mint the
 /// seeder quotes (`quoted`): keys that come at P's deadline or later are not used, and keys
-/// that come a second before are.
+/// that come a second before are. Nor is the mint's refusal of the keys that comes then
+/// (12001), of which the seeder keeps nothing, as of one that comes in time.
 async fn keys_that_come_late_are_not_used<H: Harness>(h: &H, quoted: Quoted) {
     let (at, mint) = (quoted.at(), quoted.mint(h));
     for keys_at in [65, 60, 59] {
@@ -28996,7 +28997,9 @@ async fn a_listing_is_asked_only_as_a_check_needs_one<H: Harness>(h: &H, quoted:
 /// and for the keys once. A payment of the keyset whose keys the seeder holds is
 /// acknowledged, the mint asked for none: the 12001 dropped none. The mint serves its
 /// keys again: the refused token, offered again, makes the seeder ask for them again, and
-/// is acknowledged.
+/// is acknowledged. And the mint is asked for its listing once in that second, whatever it
+/// answered the requests for keys (`ListingDroppedOnKeysRefusal`): another peer's payment
+/// of the refused keyset, refused alike, and the one acknowledged ask for none.
 async fn keys_the_mint_refuses_are_bad_token<H: Harness>(h: &H, quoted: Quoted) {
     let (at, mint) = (quoted.at(), quoted.mint(h));
     let e = quoted.engine(h);
