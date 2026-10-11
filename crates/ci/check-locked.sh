@@ -79,7 +79,9 @@ fi
 #     manifest not tracked at its path; any tracked Cargo.toml or Cargo.lock that is a link
 #     or of another mode;
 #   - a Cargo config or toolchain file, tracked or not, anywhere cargo or rustup would
-#     read one (crates/ and every directory above it, and CARGO_HOME);
+#     read one (crates/ and every directory above it, and CARGO_HOME); a tracked path
+#     named .cargo or .cargo-home anywhere, or below one, whatever it is (a link too: CI's
+#     CARGO_HOME is .cargo-home in the checkout, which the tree never supplies);
 #   - a CARGO_*, RUST* or RUSTC* variable outside the allow-list below (a target runner in
 #     the environment can make `cargo test` run nothing and still pass), and any variable
 #     whose name is not a plain identifier (an exported bash function, say); in CI, any
@@ -90,7 +92,10 @@ fi
 #     include! and every spelling of them in the money crates, on the host build CI tests;
 #   - a money crate depending on a workspace crate other than the money crates;
 #   - `nfx_pay` named in any Rust file outside nfx-pay and nfx-node's locked paths;
-#   - a path package that is not a workspace member;
+#   - a path package that is not a workspace member, or a workspace member that the
+#     workspace manifest's pinned `members` key does not name, at the path it names (cargo
+#     makes a member of a path dependency under crates/, and of a package in the
+#     workspace's own manifest);
 #   - a test target of a money crate added, removed or renamed without a re-pin (read from
 #     cargo metadata, before any build); a test binary that did not run, that the build did
 #     not make, or that reported another number of tests than the one pinned for it (or, for
@@ -277,15 +282,18 @@ done
 # and grep's count, never its silence: a here-string bash cannot set up leaves grep unrun
 # with status 1, and a substitution bash cannot make a pipe for is empty with status 0.
 # Either reads as a grep that found nothing, and neither prints a count.
+# A tracked path named .cargo or .cargo-home fails whatever it is, not only a file below
+# one: a link of that name (git lists it with no slash after it) would hand cargo a
+# directory of the tree for its configuration, or for the CARGO_HOME CI gives it.
 tracked=$(git ls-files -z | tr '\0' '\n')
 [ -n "$tracked" ] || fail "git listed no tracked file"
-config_re='(^|/)\.cargo(-home)?/|(^|/)rust-toolchain(\.toml)?$'
+config_re='(^|/)\.cargo(-home)?(/|$)|(^|/)rust-toolchain(\.toml)?$'
 rc=0
 found=$(grep -cE "$config_re" <<<"$tracked") || rc=$?
 [ "$rc" -le 1 ] && [ -n "$found" ] \
   || fail "grep for tracked Cargo configuration or toolchain files failed or did not run ($rc)"
 [ "$found" = 0 ] \
-  || fail "tracked Cargo configuration or toolchain files: $(grep -E "$config_re" <<<"$tracked" || true)"
+  || fail "tracked Cargo configuration, Cargo home or toolchain files: $(grep -E "$config_re" <<<"$tracked" || true)"
 home=${CARGO_HOME:-$HOME/.cargo}
 for f in "$home"/config "$home"/config.toml; do
   [ ! -e "$f" ] && [ ! -L "$f" ] || fail "a Cargo config in CARGO_HOME: $f"

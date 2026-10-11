@@ -40,7 +40,12 @@ The facts, one per line:
   re-pinned, and then shows in the pins' diff.
 
 Every path package must be a workspace member: a crate outside the workspace, wired in
-by path, would escape every check here. The money crates are locked whole
+by path, would escape every check here. And every workspace member must be one the
+workspace manifest's `members` key names (the derived pin holds that key), read at the
+path it names: cargo also takes for a member a path dependency under crates/ and a
+package in the workspace's own manifest, which the key does not name. `sources` refuses
+those by name, from Cargo.lock; `facts` by name and manifest, from cargo metadata. The
+money crates are locked whole
 (check-locked.sh), and the only workspace crates in their closure are each other: within
 one crate, an unpinned module could change how a pinned one compiles.
 
@@ -134,6 +139,19 @@ def member_names() -> set[str]:
         with open(CRATES / m / "Cargo.toml", "rb") as f:
             names.add(tomllib.load(f)["package"]["name"])
     return names
+
+
+def spelled_members() -> list[tuple[str, str]]:
+    """The workspace's members as its manifest's `members` key spells them: each one's
+    package name, and its manifest as cargo names the one it reads."""
+    with open(CRATES / "Cargo.toml", "rb") as f:
+        members = tomllib.load(f)["workspace"]["members"]
+    out = []
+    for m in members:
+        path = os.path.normpath(CRATES / m / "Cargo.toml")
+        with open(path, "rb") as f:
+            out.append((tomllib.load(f)["package"]["name"], path))
+    return sorted(out)
 
 
 def sources() -> None:
@@ -319,6 +337,20 @@ def facts_now() -> tuple[list[str], dict, list[dict]]:
     with open(CRATES / "Cargo.lock", "rb") as f:
         lock = tomllib.load(f)
     members = [p for p in meta["packages"] if p["id"] in meta["workspace_members"]]
+    # The members cargo builds are the ones the pinned `members` key spells, each read at
+    # the path it spells: no more, no fewer and no other. Cargo also takes for a member a
+    # path dependency that lies under crates/ (through a link too) or names this workspace
+    # as its own, and a package in the workspace's own manifest. `sources` refuses those by
+    # name from Cargo.lock; this refuses them here as well, by name and by manifest, so the
+    # facts do not lean on `sources` having run first.
+    cargos = sorted((p["name"], os.path.normpath(p["manifest_path"])) for p in members)
+    if cargos != spelled_members() or len(members) != len(meta["workspace_members"]):
+        spelled = spelled_members()
+        diff = ([f"- {n} {m}" for n, m in spelled if (n, m) not in cargos]
+                + [f"+ {n} {m}" for n, m in cargos if (n, m) not in spelled])
+        fail("cargo's workspace members are not the ones crates/Cargo.toml's members key "
+             "names (a path dependency or a root package cargo takes for a member?):\n"
+             + "\n".join(diff))
     strangers = [p["name"] for p in meta["packages"]
                  if p["source"] is None and p["id"] not in meta["workspace_members"]]
     if strangers:
