@@ -4792,6 +4792,18 @@ pub enum SeederFlaw {
     /// The ceilings on `debt_ttl`, `account_ttl` and `ban_ttl` are compared in whole
     /// seconds: a ttl less than a second past its ceiling is accepted.
     TtlsComparedInSeconds,
+    /// A late claim at a quoted mint other than the first is credited, and its chunks stay
+    /// in the global count: a cap they filled stays full until they age out.
+    OtherMintLateClaimKeepsDebt,
+    /// The unpaid chunks of a video count for `debt_ttl` from the time the seeder stops
+    /// serving it, not from their admission: they hold the cap longer than `debt_ttl`.
+    DroppedVideoDebtAgesFromDrop,
+    /// A payment on a video the seeder no longer serves is credited, and the chunks it
+    /// covers stay in the global count.
+    DroppedVideoPayKeepsDebt,
+    /// A sweep skips the swaps abandoned in flight on a video the seeder no longer serves,
+    /// and reads those there whose answers were lost: one left unspent is never completed.
+    SweepSkipsDroppedVideosInFlight,
 }
 
 /// How a payment came to its account's turn: the paths of the suite's matrix of payments,
@@ -7617,6 +7629,9 @@ struct State {
     /// ([`SeederFlaw::ReadWaitUnwokenByAbandon`] and
     /// [`SeederFlaw::PayReadWaitUnwokenByReturn`] only).
     read_waiters_on: Vec<(ReadState, Waker)>,
+    /// The late claim being settled is of a quoted mint other than the first
+    /// ([`SeederFlaw::OtherMintLateClaimKeepsDebt`] only).
+    claim_elsewhere: bool,
     /// The videos it no longer serves ([`Harness::drop_video`]): it keeps their accounts.
     dropped: HashSet<usize>,
     /// Keysets whose keys a mint answered 12001, by mint ([`SeederFlaw::KeysRefusalCached`]
@@ -8384,6 +8399,7 @@ impl Inner {
                     None => continue,
                 }
                 if read == Read::Claimed {
+                    st.claim_elsewhere = self.claim_kept_counted(&u.token);
                     if !self.read_claim_lost(&u.token) {
                         self.settle_late(&mut st, &u.pay, Swap::Claimed);
                     }
@@ -8410,6 +8426,7 @@ impl Inner {
                         continue;
                     }
                     if read == Read::Claimed {
+                        st.claim_elsewhere = self.claim_kept_counted(&f.2);
                         if !self.read_claim_lost(&f.2) {
                             self.settle_late(&mut st, pay, Swap::Claimed);
                         }
@@ -8442,6 +8459,12 @@ impl Inner {
     /// credited.
     fn read_claim_lost(&self, token: &str) -> bool {
         self.has(SeederFlaw::OtherMintReadClaimNotCredited) && self.token_at_other_mint(token)
+    }
+
+    /// The flaw: a late claim at a quoted mint other than the first leaves its chunks in the
+    /// global count.
+    fn claim_kept_counted(&self, token: &str) -> bool {
+        self.has(SeederFlaw::OtherMintLateClaimKeepsDebt) && self.token_at_other_mint(token)
     }
 
     /// Whether a swap learnt as nothing by `by` frees its account's chunks from the global
@@ -8509,6 +8532,11 @@ impl Inner {
                 .iter()
                 .filter(|(_, r)| {
                     mine(r.key) && r.sent && !r.landed && (r.abandoned || now >= r.deadline)
+                })
+                .filter(|(_, r)| {
+                    !(scope.is_none()
+                        && st.dropped.contains(&r.key.1)
+                        && self.has(SeederFlaw::SweepSkipsDroppedVideosInFlight))
                 })
                 .filter_map(|(id, r)| r.swap.clone().map(|(p, t, o)| (*id, p, t, o, r.deadline)))
                 .collect()
@@ -9563,7 +9591,9 @@ impl Inner {
     fn credit(&self, st: &mut State, key: Key, pay: (u64, u64), snapshot: &[u64], late: bool) {
         let (upto, amount) = pay;
         let paid_stays = self.has(SeederFlaw::PaidDebtStaysCounted)
-            || (late && self.has(SeederFlaw::LateClaimKeepsDebt));
+            || (late && self.has(SeederFlaw::LateClaimKeepsDebt))
+            || (late && st.claim_elsewhere && self.has(SeederFlaw::OtherMintLateClaimKeepsDebt))
+            || (st.dropped.contains(&key.1) && self.has(SeederFlaw::DroppedVideoPayKeepsDebt));
         let all = self.has(SeederFlaw::CreditFreesAllDebt)
             || (late && self.has(SeederFlaw::LateCreditFreesAll));
         let from_snapshot = self.has(SeederFlaw::CreditFromSnapshot)
@@ -10603,7 +10633,15 @@ impl Inner {
         }
         // The flaws: at a quoted mint other than the first, a spent or an invalid proof
         // refused with no ban, and a claim that lands late not credited.
-        let elsewhere = self.token_at_other_mint(token);
+        let elsewhere = [
+            SeederFlaw::OtherMintSpentNoBan,
+            SeederFlaw::OtherMintInvalidNoBan,
+            SeederFlaw::OtherMintLateClaimNotCredited,
+            SeederFlaw::OtherMintLateClaimKeepsDebt,
+        ]
+        .iter()
+        .any(|f| self.has(*f))
+            && self.token_at_other_mint(token);
         let spared = match outcome {
             Swap::Spent if elsewhere && self.has(SeederFlaw::OtherMintSpentNoBan) => {
                 Some(rej(RejCode::Spent, "a proof is already spent"))
@@ -10674,6 +10712,7 @@ impl Inner {
                 wake.clear();
             }
             if late {
+                st.claim_elsewhere = elsewhere;
                 if !late_lost {
                     self.settle_late(&mut st, pay, outcome);
                 }
@@ -11206,6 +11245,15 @@ impl MockEngine {
     pub fn drop_video(&self, video: usize) {
         let mut st = self.0.state();
         st.dropped.insert(video);
+        if self.0.has(SeederFlaw::DroppedVideoDebtAgesFromDrop) {
+            // The flaw: its unpaid chunks count from now.
+            let now = self.0.clock.now();
+            for (debt, at) in &mut st.debt {
+                if debt.0.1 == video {
+                    *at = now;
+                }
+            }
+        }
         if self.0.has(SeederFlaw::DroppedVideoFreesDebt) {
             // The flaw: its unpaid chunks leave the global count.
             st.live.retain(|(k, _, _)| k.1 != video);

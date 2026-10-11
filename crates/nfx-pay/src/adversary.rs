@@ -6183,7 +6183,8 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
 /// - a claim whose answer lands past its payment's deadline is credited, and bans nobody;
 /// - so is one whose answer is lost, learnt by its account's own read; and one abandoned
 ///   in flight that a sweep learns while its answer is on its way, which then changes
-///   nothing;
+///   nothing; each frees the chunks it covers from a global cap they filled
+///   (`OtherMintLateClaimKeepsDebt`);
 /// - a spent or an invalid outcome that lands late bans nobody, and the account pays again
 ///   at once;
 /// - while a swap of the account's is unknown its next payment is answered
@@ -6197,9 +6198,29 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
 async fn a_second_mints_swaps_are_settled_as_the_firsts<H: Harness>(h: &H) {
     let minute = Duration::from_secs(60);
     let unpaid = "an account, two chunks unpaid";
-    let e = Quoted::Second.engine(h);
+    // A seeder quoting two mints whose global cap two unpaid chunks fill: a late claim
+    // frees the chunks it covers there (flaw `OtherMintLateClaimKeepsDebt`).
+    let capped = || {
+        h.engine_checked(EngineParams {
+            price: 1,
+            window: 4,
+            global_cap: 2,
+            debt_ttl: h.debt_ttl(),
+            account_ttl: h.account_ttl(),
+            ban_ttl: h.ban_ttl(),
+            mints: 1,
+            extra_mint: Some(SECOND_MINT),
+        })
+        .expect("a seeder quoting two mints, its global cap 2")
+    };
+    let full = "the global cap is full";
+    let freed = "a late claim at the second quoted mint frees the two chunks it covers from \
+                 the global count";
+    let e = capped();
     let mut s = open(h, &e, 1).await;
     assert_eq!(serve(h, &mut s, 0, 2), 2, "{unpaid}");
+    let mut other = open(h, &e, 2).await;
+    assert_eq!(serve(h, &mut other, 0, 1), 0, "{full}");
     h.hold_next_swap();
     let slow = Pay {
         upto_chunk: 2,
@@ -6229,12 +6250,15 @@ async fn a_second_mints_swaps_are_settled_as_the_firsts<H: Harness>(h: &H) {
         (2, 2),
         "a claim at the second quoted mint whose answer lands past its deadline is credited"
     );
-    close(h, s).await;
+    assert_eq!(serve(h, &mut other, 0, 2), 2, "{freed}");
+    close(h, (s, other)).await;
 
     // Its answer lost, and its retry never reaching the mint: its account's read learns it.
-    let e = Quoted::Second.engine(h);
+    let e = capped();
     let mut s = open(h, &e, 1).await;
     assert_eq!(serve(h, &mut s, 0, 2), 2, "{unpaid}");
+    let mut other = open(h, &e, 2).await;
+    assert_eq!(serve(h, &mut other, 0, 1), 0, "{full}");
     h.hold_swap_responses();
     h.lose_next_swap_response();
     let unseen = Pay {
@@ -6260,13 +6284,16 @@ async fn a_second_mints_swaps_are_settled_as_the_firsts<H: Harness>(h: &H) {
         "a claim at the second quoted mint whose answer was lost is learnt by its account's \
          own read, and credited"
     );
-    close(h, s).await;
+    assert_eq!(serve(h, &mut other, 0, 2), 2, "{freed}");
+    close(h, (s, other)).await;
 
     // Abandoned in flight at its deadline, the mint's answer held: a sweep learns it, and
     // the answer, when it comes, changes nothing.
-    let e = Quoted::Second.engine(h);
+    let e = capped();
     let mut s = open(h, &e, 1).await;
     assert_eq!(serve(h, &mut s, 0, 2), 2, "{unpaid}");
+    let mut other = open(h, &e, 2).await;
+    assert_eq!(serve(h, &mut other, 0, 1), 0, "{full}");
     h.hold_swap_responses();
     let slow = Pay {
         upto_chunk: 2,
@@ -6294,6 +6321,7 @@ async fn a_second_mints_swaps_are_settled_as_the_firsts<H: Harness>(h: &H) {
         "a claim at the second quoted mint, its swap abandoned in flight, is learnt by a \
          sweep, and credited"
     );
+    assert_eq!(serve(h, &mut other, 0, 2), 2, "{freed}");
     release(h).await;
     let q = open(h, &e, 1).await.quote().clone();
     assert_eq!(
@@ -6301,7 +6329,7 @@ async fn a_second_mints_swaps_are_settled_as_the_firsts<H: Harness>(h: &H) {
         (2, 2),
         "credited once, not again when the second quoted mint's answer comes"
     );
-    close(h, s).await;
+    close(h, (s, other)).await;
 
     // A spent or an invalid outcome that lands late bans nobody, and is nothing: the
     // account pays again at once.
@@ -7147,6 +7175,16 @@ async fn pay_one<H: Harness>(h: &H, s: &mut Session<H>, upto: u64) -> Result<Ack
     .await
 }
 
+/// A payment to `upto` on `s` with a fresh token worth `upto` chunks at a price of 1: exact
+/// for an account that has paid nothing.
+async fn pay_to<H: Harness>(h: &H, s: &mut Session<H>, upto: u64) -> Result<Ack, Rej> {
+    s.pay(&Pay {
+        upto_chunk: upto,
+        token: h.token(upto).await,
+    })
+    .await
+}
+
 /// The same with a token someone else has spent.
 async fn pay_spent<H: Harness>(h: &H, s: &mut Session<H>, upto: u64) -> Result<Ack, Rej> {
     let spent = h.token(1).await;
@@ -7352,20 +7390,36 @@ async fn a_dropped_video_still_quotes_its_accounts<H: Harness>(h: &H) {
     a_sweep_reads_a_dropped_videos_swaps(h).await;
 }
 
-/// Flaw `SweepSkipsDroppedVideos`. A seeder that stops serving a video keeps its accounts
-/// there by the rules that hold for any (NFX-07 §3), and a sweep reads every account's
-/// unknown swaps: those of a video no longer served too. Here the seeder drops its other
-/// video, video 1. Peer 1 holds an account there, two chunks unpaid, and a payment the mint
-/// claimed whose answer was lost; peer 2 only a pre-payment the mint never processed, its
-/// inputs unspent. After the drop a sweep reads both. With the mint's reads down, so that
-/// its own `hello` can learn nothing, peer 1's quote shows the claim: the sweep learnt and
-/// credited it. And `account_ttl` on, a sweep completes peer 2's swap, whose quote then
-/// shows it.
+/// Flaws `SweepSkipsDroppedVideos` and `SweepSkipsDroppedVideosInFlight`. A seeder that
+/// stops serving a video keeps its accounts there by the rules that hold for any (NFX-07
+/// §3), and a sweep reads every account's unknown swaps: those of a video no longer served
+/// too. Here the seeder drops its other video, video 1. Peer 1 holds an account there, two
+/// chunks unpaid, and a payment the mint claimed whose answer was lost; peer 2 only a
+/// pre-payment the mint never processed, its inputs unspent; and peer 3 only a pre-payment
+/// abandoned in flight at its deadline, which never reached the mint. After the drop a
+/// sweep reads them. With the mint's reads down, so that its own `hello` can learn nothing,
+/// peer 1's quote shows the claim: the sweep learnt and credited it. And `account_ttl` on,
+/// a sweep completes peer 2's swap and peer 3's, whose quotes then show them.
 async fn a_sweep_reads_a_dropped_videos_swaps<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open_on(h, &e, 1, 1).await;
     assert_eq!(serve_on(h, &mut s, 1, 0, 2), 2, "within the window");
     let claimed = lost_claim(h, &mut s, 2, 2).await;
+    let mut u = open_on(h, &e, 3, 1).await;
+    let in_flight = Pay {
+        upto_chunk: 1,
+        token: h.token(1).await,
+    };
+    h.hold_next_swap();
+    let (r, ()) = both(u.pay(&in_flight), async {
+        settle(h).await;
+        advance(h, Duration::from_secs(60)).await;
+    })
+    .await;
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "a pre-payment whose swap is abandoned in flight at its deadline: {r:?}"
+    );
     let mut t = open_on(h, &e, 2, 1).await;
     let unspent = Pay {
         upto_chunk: 1,
@@ -7379,7 +7433,7 @@ async fn a_sweep_reads_a_dropped_videos_swaps<H: Harness>(h: &H) {
         is_rej(&r, &RejCode::MintUnavailable),
         "a pre-payment whose swap's outcome is unknown: {r:?}"
     );
-    close(h, (s, t)).await;
+    close(h, (s, t, u)).await;
     h.drop_video(&e, 1);
     let reads = h.state_reads();
     e.sweep().await;
@@ -7389,8 +7443,10 @@ async fn a_sweep_reads_a_dropped_videos_swaps<H: Harness>(h: &H) {
          serves included"
     );
     assert!(
-        h.claimed_all(&claimed.token).await && !h.claimed_any(&unspent.token).await,
-        "the mint has the first payment, and never had the second"
+        h.claimed_all(&claimed.token).await
+            && !h.claimed_any(&unspent.token).await
+            && !h.claimed_any(&in_flight.token).await,
+        "the mint has the first payment, and never had the others"
     );
     h.state_check_outage(true);
     h.restore_outage(true);
@@ -7405,23 +7461,28 @@ async fn a_sweep_reads_a_dropped_videos_swaps<H: Harness>(h: &H) {
     h.restore_outage(false);
     advance(h, h.account_ttl()).await;
     e.sweep().await;
-    assert!(
-        h.claimed_all(&unspent.token).await,
-        "a swap on a video no longer served whose inputs read unspent for account_ttl is \
-         completed by a sweep, as any other"
-    );
-    let r = e.hello(&h.peer(2), &h.hello_for(1)).await;
-    let quoted = r
-        .as_ref()
-        .map(|s| (s.quote().accepted_upto, s.quote().spent_total))
-        .map_err(|rej| rej.code.clone());
-    assert_eq!(
-        quoted,
-        Ok((1, 1)),
-        "its completion, a claim, is credited: the peer has an account on the video no longer \
-         served, and its quote shows the payment"
-    );
-    close(h, r).await;
+    for (peer, pay, how) in [
+        (2, &unspent, "its answer lost"),
+        (3, &in_flight, "abandoned in flight"),
+    ] {
+        assert!(
+            h.claimed_all(&pay.token).await,
+            "a swap on a video no longer served ({how}) whose inputs read unspent for \
+             account_ttl is completed by a sweep, as any other"
+        );
+        let r = e.hello(&h.peer(peer), &h.hello_for(1)).await;
+        let quoted = r
+            .as_ref()
+            .map(|s| (s.quote().accepted_upto, s.quote().spent_total))
+            .map_err(|rej| rej.code.clone());
+        assert_eq!(
+            quoted,
+            Ok((1, 1)),
+            "its completion ({how}), a claim, is credited: the peer has an account on the \
+             video no longer served, and its quote shows the payment"
+        );
+        close(h, r).await;
+    }
 }
 
 /// What comes while a `hello` for a video the seeder no longer serves waits or reads, for
@@ -8180,12 +8241,14 @@ pub async fn a_global_cap_bounds_free_service<H: Harness>(h: &H) {
     a_dropped_videos_unpaid_chunks_count_until_they_age_out(h).await;
 }
 
-/// Flaws `DroppedVideoFreesDebt` and `DroppedVideoDebtNeverAges`. The unpaid chunks of a
-/// video the seeder stops serving count toward the global cap until they age out, as any
-/// others (NFX-07 §3: the cap counts the unpaid chunks admitted within the last `debt_ttl`
-/// across all peers and videos). Video 0's unpaid chunks fill a cap of 10, and the seeder
-/// drops video 0: video 1 admits nothing unpaid, then or a second before `debt_ttl` has
-/// passed since those admissions, and admits a chunk once it has.
+/// Flaws `DroppedVideoFreesDebt`, `DroppedVideoDebtNeverAges`, `DroppedVideoPayKeepsDebt`
+/// and `DroppedVideoDebtAgesFromDrop`. The unpaid chunks of a video the seeder stops
+/// serving count toward the global cap until they are paid or age out, as any others
+/// (NFX-07 §3: the cap counts the unpaid chunks admitted within the last `debt_ttl` across
+/// all peers and videos). Video 0's unpaid chunks fill a cap of 10, and ten seconds on the
+/// seeder drops video 0: video 1 admits nothing unpaid. A debtor pays for its two chunks, on
+/// its session open at the drop: video 1 admits two, and no more, then or a second before
+/// `debt_ttl` has passed since video 0's admissions; and admits again once it has.
 async fn a_dropped_videos_unpaid_chunks_count_until_they_age_out<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 10);
     let mut debtors = Vec::new();
@@ -8198,6 +8261,7 @@ async fn a_dropped_videos_unpaid_chunks_count_until_they_age_out<H: Harness>(h: 
     assert_eq!(served, 10, "video 0's unpaid chunks fill the global cap");
     let mut other = open_on(h, &e, 4, 1).await;
     assert_eq!(serve_on(h, &mut other, 1, 0, 1), 0, "the cap is full");
+    advance(h, 10 * SECOND).await;
     h.drop_video(&e, 0);
     assert_eq!(
         landed(h, || serve_on(h, &mut other, 1, 0, 1)).await,
@@ -8206,18 +8270,35 @@ async fn a_dropped_videos_unpaid_chunks_count_until_they_age_out<H: Harness>(h: 
          last debt_ttl: they still count toward the global cap, and its other video admits \
          nothing unpaid"
     );
-    advance(h, h.debt_ttl() - SECOND).await;
+    let r = match debtors.last_mut() {
+        Some(s) => pay_to(h, s, 2).await,
+        None => panic!("three debtors"),
+    };
+    assert!(
+        matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (2, 2)),
+        "a payment on a session open when its video was dropped is verified as any other: \
+         {r:?}"
+    );
     assert_eq!(
-        serve_on(h, &mut other, 1, 0, 1),
+        serve_on(h, &mut other, 1, 0, 4),
+        2,
+        "a payment on a video no longer served frees from the global count exactly the \
+         chunks it covers: its other video admits two, and no more"
+    );
+    advance(h, h.debt_ttl() - 11 * SECOND).await;
+    assert_eq!(
+        serve_on(h, &mut other, 1, 4, 1),
         0,
-        "still counted a second before debt_ttl, the video no longer served"
+        "still counted a second before debt_ttl has passed since they were admitted, the \
+         video no longer served"
     );
     advance(h, SECOND).await;
     assert_eq!(
-        serve_on(h, &mut other, 1, 0, 1),
+        serve_on(h, &mut other, 1, 4, 1),
         1,
         "the unpaid chunks of a video the seeder stopped serving age out of the global cap \
-         after debt_ttl, as any others: its other video admits again"
+         debt_ttl after they were admitted, not after the drop, as any others: its other \
+         video admits again"
     );
     close(h, (debtors, other)).await;
 }
