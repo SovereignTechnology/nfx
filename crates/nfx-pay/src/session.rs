@@ -209,23 +209,31 @@ pub trait Viewer {
 
     /// The seeder refused this ledger's `hello`, so no session opened. `banned` stops the
     /// viewer; any other code, known or not, `mint-unavailable` included, changes nothing:
-    /// it uses no `mint-unavailable` try. It never touches a payment.
+    /// it uses no `mint-unavailable` try. It never touches a payment: one in flight on this
+    /// ledger's live session keeps its place and its 180 s from sending, `banned` or not.
     fn hello_refused(&mut self, rej: &Rej);
 
     /// A request was sent. It is owed unless the seeder refuses it. It leaves the payment in
-    /// flight as it was, its place and its 180 s from sending included.
+    /// flight as it was, its place and its 180 s from sending included, and a stop and a
+    /// refusal's licence to pay ahead as they were: it is no decision of what to pay.
     fn requested(&mut self);
 
     /// The seeder answered a request with `refuse`. It is not owed, and if it was already
     /// paid for, that payment becomes credit. It licenses the next [`Viewer::due`] on this
-    /// ledger, and no other call, to pay ahead, up to half a window less the credit already
-    /// held: that `due` uses the licence and ends it, whether or not it pays, and so does
-    /// [`Viewer::end`]; [`Viewer::last_pay`] neither uses nor ends it, and it licenses
-    /// nothing on a ledger for another video. It settles nothing: the payment in flight, a
+    /// ledger, and no other call, to pay ahead half a window, rounded down, less the credit
+    /// already held, that much and not merely at most: that `due` uses the licence and ends
+    /// it, whether or not it pays, and so does [`Viewer::end`]; [`Viewer::last_pay`] neither
+    /// uses nor ends it, nor does anything else that comes before that `due` (a request
+    /// sent, the answer to a payment in flight, a second quote, a refused `hello`, a timeout
+    /// with no payment on the session, or anything on another video's ledger), and it
+    /// licenses nothing on a ledger for another video. It settles nothing: the payment in flight, a
     /// payment awaiting a quote, an incomplete reclaim and a stop stay as they were.
     fn refused(&mut self);
 
-    /// The payment due now, if any. It covers requested chunks at the quoted price, made
+    /// The payment due now, if any. It covers requested chunks at the quoted price (the open
+    /// session's quote's, whatever an earlier session's or another video's was and whatever
+    /// the viewer's own cap: so for every payment, ahead after a refusal and at a session's
+    /// end included, on whichever ledger and whatever came before), made
     /// once the unpaid count reaches half the session's quoted window, rounded up, so a
     /// payment in flight never stalls the seeder, or pays ahead after a refusal half the
     /// window, rounded down, less the credit the ledger holds: what another video's ledger
@@ -249,10 +257,14 @@ pub trait Viewer {
     /// - once the viewer has stopped, ahead after a refusal included;
     /// - while a reclaim is incomplete or a payment awaits a quote;
     /// - after three `mint-unavailable` answers to its payments in a row, until a new
-    ///   session's accepted quote. Nothing else uses a try: not a reclaim, retried while the
+    ///   session's accepted quote. Each such answer uses a try, however its payment was
+    ///   made (due, ahead, or at a session's end) and however its reclaim ends (every proof
+    ///   back, at once or late, or lost to the expiry). Nothing else uses a try: not a reclaim, retried while the
     ///   mint is down or not, a closed session's payment reclaimed with every proof back or
     ///   lost to the expiry, a refused `hello` or quote, a session's end, nor a timeout. Only
-    ///   an ack or a new session's accepted quote restores them.
+    ///   an ack or a new session's accepted quote restores them, and each restores them
+    ///   all: on whichever of the seeder's videos it comes, however many were used, and
+    ///   whether or not the quote settles a payment.
     ///
     /// It first finishes incomplete reclaims, and reclaims a payment a closed session left
     /// unsettled once it is 180 s old, whichever of the seeder's videos it was for. It
@@ -280,7 +292,9 @@ pub trait Viewer {
     /// (`accepted_upto`, `spent_total`), one at or below the ledger included; the viewer
     /// stops paying this seeder. An ack settles only the payment sent on its session: an
     /// unsolicited one settles nothing, even one showing another video's payment in both
-    /// fields. An ack that matches does not undo a stop.
+    /// fields. An ack that matches does not undo a stop: it settles its payment into the
+    /// ledger, stopped or not, and nothing more. Nor does it end a refusal's licence
+    /// ([`Viewer::refused`]).
     ///
     /// A payment answered by an ack that does not match is a refused payment (NFX-07 §3a):
     /// the viewer reclaims its proofs as any refused payment's, with no 180 s wait. This
@@ -320,7 +334,8 @@ pub trait Viewer {
     /// incomplete, and finished later. Proofs the reclaim finds spent leave the payment to a
     /// quote that shows it, which settles it into the ledger only: the viewer stays stopped,
     /// and awaits no quote. With no payment on the session it changes nothing. A
-    /// payment an earlier session left unsettled is not this call's.
+    /// payment an earlier session left unsettled is not this call's. Nor does it undo a
+    /// stop, before the 180 s or with no payment on the session.
     async fn timeout(&mut self);
 
     /// The session ended (its connection closed). A refusal's licence to pay ahead ends

@@ -535,8 +535,10 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   request is always un-owed; if it was already paid for, that payment becomes credit. A
   request the watcher abandons stays owed; if the seeder never saw it, the payment
   becomes pre-payment.
-- **Pay exactly the quoted price** for requested chunks, with a token that passes the
-  seeder's structure check (§3 step 1): of one quoted mint, by its exact URL (§2), in unit
+- **Pay exactly the quoted price** for every chunk a payment covers, requested or paid
+  ahead (below): the price of the open session's quote (§2), whatever an earlier session's
+  or another video's was, and never the watcher's own cap. Pay with a token that passes
+  the seeder's structure check (§3 step 1): of one quoted mint, by its exact URL (§2), in unit
   `sat`, of at most 64 proofs, none locked to a spending condition (in open mode: a
   licensed video's are P2PK-locked as NFX-08 §4 requires), each carrying its DLEQ
   proof (NUT-12). A wallet whose selection would hold more than 64 proofs, or whose
@@ -564,17 +566,22 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     another on a later session.
   - Never pay ahead of need, except right after a refusal. A refusal licenses the next
     time the watcher decides what to pay on that video's ledger, and no other: then, if
-    nothing else stops a payment, pay ahead up to half of `window`, rounded down, less any
+    nothing else stops a payment, pay ahead half of `window`, rounded down, less any
     credit that video's ledger already holds (what another video's ledger holds or owes
-    counts for nothing), so too on whichever ledger and whatever came before, which the
-    seeder serves whatever its cap. The licence ends there, whether or not that decision
+    counts for nothing): that much, not merely at most, so too on whichever ledger and
+    whatever came before, which the seeder serves whatever its cap. Nothing that comes
+    between the refusal and that decision is such a decision, or ends the licence, but the
+    session's end: not a request sent, the answer to a payment in flight, a second quote, a
+    refused `hello`, a timeout with no payment on the session, nor anything on another
+    video's ledger. The licence ends there, whether or not that decision
     paid: one that paid nothing because a payment was in flight toward the seeder or left
     unsettled, a reclaim was incomplete, a payment awaited a quote, the tries were used,
     the wallet held no proof the mint takes, the ledger already held half a window of
     credit, or the watcher had stopped, licenses nothing later. Nor does a licence outlive
     its session, or pass to another video's ledger. So a refusal that came while a payment
-    was in flight pays nothing ahead once that payment is answered: the watcher asks
-    again, and a new refusal licenses anew. What the watcher pays at a session's end is
+    was in flight, the watcher deciding then what to pay, pays nothing ahead once that
+    payment is answered: the watcher asks again, and a new refusal licenses anew. What the
+    watcher pays at a session's end is
     not such a decision: it covers what is owed and nothing ahead, and, whether or not
     anything is paid then, it neither uses the licence nor ends it, so the licence stays
     for the decision that follows on that session, if one does. Credit on a video never
@@ -750,12 +757,16 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     connection can reach the seeder after the watcher's next `hello`, and be credited after
     that session's quote.
 - **Pay nothing after stopping,** at the end of a session included, nor ahead after a
-  refusal. Nothing undoes a stop: not a later `ack` that matches its payment, a refused
-  request or `hello`, a `mint-unavailable` answer with every proof taken back, the
+  refusal. Nothing undoes a stop: not a later `ack` that matches its payment (it settles
+  that payment into the ledger, and nothing more), a request sent or refused, a refused
+  `hello`, a timeout before a payment's 180 s or with no payment on the session, a
+  `mint-unavailable` answer with every proof taken back, the
   session's end, a second quote on an open session, a new session's quote on any of the
   seeder's videos (a new video's first included), taken or refused (for its price, its
   `window` or its mints), one that settles a payment included, nor a ledger made for
-  another video. A stop holds whatever the watcher waits on when it comes: a payment
+  another video; on the payment's own ledger or another video's, while a payment is in
+  flight on its live session as at any other time. A stop holds whatever the watcher waits
+  on when it comes: a payment in flight or
   awaiting a quote, an incomplete reclaim, a closed session's payment, or its tries used.
   A watcher that has stopped awaits no quote: a quote that shows a payment, whose proofs
   were found spent before it stopped, as it stopped or since, or which a closed session
@@ -1507,7 +1518,26 @@ paths on one host are two origins.
     ledger made since the payment, and at a session's end.
 - Draft 2026-10-11 (M2.0 thirtieth audit, `docs/nfx/reviews/2026-09-24-m2.0-thirtieth-audit.md`).
   The watcher's side:
+  - §3a: the price paid is the open session's quote's for every chunk a payment covers,
+    requested or paid ahead, whatever an earlier session's or another video's was, and
+    never the watcher's own cap (was: "for requested chunks", which did not reach a
+    pay-ahead, and said nothing of a later session's price).
   - §3a: CDK 0.18.1's `SendOptions::max_proofs` forces the swap to fewer proofs only under
     `SendKind::OnlineExact`, its default: a watcher built on it sets it to 64 and keeps that
     kind (read at tag v0.18.1; was: "unless `SendOptions::max_proofs` is set", which holds
     for that send kind only). The twenty-ninth entry's line above says so too.
+  - §3a: after a refusal the watcher pays ahead half of `window`, rounded down, less any
+    credit the ledger holds: that much, not merely at most (was: "up to half", which could
+    be read as letting it pay less, or nothing). Nothing that comes between the refusal
+    and the decision it licenses ends the licence but the session's end: not a request
+    sent, the answer to a payment in flight, a second quote, a refused `hello`, a timeout
+    with no payment on the session, nor anything on another video's ledger (was: not said);
+    so "a refusal that came while a payment was in flight pays nothing ahead once that
+    payment is answered" now says where: the watcher having decided what to pay while it
+    was in flight.
+  - §3a: the list of what undoes no stop names a request sent, a timeout before a
+    payment's 180 s or with no payment on the session, and a payment in flight on its live
+    session when the stop comes, on its own ledger or another video's; and a matching
+    `ack` taken once stopped settles its payment into the ledger and nothing more. What
+    "nothing undoes a stop" and "an `ack` settles only the payment sent on its session"
+    implied, now said.
