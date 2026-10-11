@@ -45,7 +45,9 @@ workspace manifest's `members` key names (the derived pin holds that key), read 
 path it names: cargo also takes for a member a path dependency that lies under crates/
 or names this workspace as its own, and a package in the workspace's own manifest, none
 of which the key names. `sources` refuses those by name, from Cargo.lock; `facts` by name
-and manifest, from cargo metadata. The money crates are locked whole
+and manifest, from cargo metadata. So a package cargo takes for a member under the name of
+one the key spells passes `sources`, and is refused by `facts`, which compares the manifest
+too. The money crates are locked whole
 (check-locked.sh), and the only workspace crates in their closure are each other: within
 one crate, an unpinned module could change how a pinned one compiles.
 
