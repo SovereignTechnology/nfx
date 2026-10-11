@@ -109,4 +109,16 @@ money-dep windows-sys 0.61.2 registry+https://github.com/rust-lang/crates.io-ind
 money-dep zeroize 1.9.0 registry+https://github.com/rust-lang/crates.io-index e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e alloc,default,derive,std,zeroize_derive
 money-dep zeroize_derive 1.5.0 registry+https://github.com/rust-lang/crates.io-index 3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328 -
 money-dep zmij 1.0.23 registry+https://github.com/rust-lang/crates.io-index 29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b -
+money-test nfx-pay doc nfx_pay 0
+money-test nfx-pay lib nfx_pay 5
+money-test nfx-pay test adversary 101
+money-test nfx-pay test honest_timings 2222
+money-test nfx-pay test listings_at_start 101
+money-test nfx-pay test mutants 2906
+money-test nfx-pay test round_trip 101
+money-test nfx-pay test runner 13
+money-test nfx-pay test woken_answers 101
+money-test nfx-pay-wire doc nfx_pay_wire 0
+money-test nfx-pay-wire lib nfx_pay_wire 0
+money-test nfx-pay-wire test pay1 2
 toolchain rustc 1.98.0 88d9e12ae178fab0fb5cc050a94da85685d449ea
