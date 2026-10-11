@@ -54,15 +54,18 @@ is zero findings, confirmed after the sixth:
   - The seeder swaps before it acks.
   - Bans and the global cap are seeder-wide, and windows are per account. The global cap
     is a rate (`debt_ttl`) that refuses unpaid service, never paid service: a refused
-    watcher pays ahead.
+    watcher pays ahead, the next time it decides what to pay on that video's ledger and
+    at no later one.
   - Credit covers only its own video.
   - `quote` carries the account's position. Unsettled payments survive a dropped
     connection (a 180 s wait, then the next quote or a reclaim settles them).
   - A reclaim that finds a proof spent leaves that payment awaiting a quote, and the
     watcher pays that seeder nothing until one shows it, so a lying seeder gets at most
-    one payment per seeder identity the watcher pays.
+    one payment per seeder identity the watcher pays. A payment answered by an ack that
+    does not match is a refused payment, and is reclaimed.
   - Configuration minimums and bounded per-identity state.
-  - At most 64 proofs per payment; `detail` is printable ASCII; `window` is 2 to 64.
+  - At most 64 proofs per payment, in a token of at most 32 KiB as written; `detail` is
+    printable ASCII; `window` is 2 to 64.
   - HTTPS origins take one payment per request, and a lying origin at most one payment
     per name (base URL) the client pays, at a price within the client's price cap.
 - **Vectors:** `pay1.json` holds 22 valid lines, 3 loopback-only and 74 invalid, each
@@ -73,10 +76,12 @@ is zero findings, confirmed after the sixth:
   `nfx-pay-wire`, with the modules it rests on, so that no unpinned module shares its
   crate.
 - **Contracts:** `nfx_pay::session`:
-  - `SeederEngine` (one seeder), with sessions that are `Send`;
+  - `SeederEngine` (one seeder), with sessions that are `Send` and own what they need,
+    and `hello`, `pay` and `sweep` futures that are `Send`;
   - `SeederSession`, whose `pay` is cancel-safe;
   - `Viewer` (one watcher's ledger with one seeder, on a clock);
-  - `Harness`.
+  - `Harness`, whose engine is a handle that can be cloned and moved, whose seeder
+    serves three videos, and which says how the suite waits.
 - **Mock:** `nfx_pay::mock` has:
   - a proof-based mock mint: multi-proof tokens, atomic swaps, held swaps or held
     responses, lost responses, requests the swapper gave up on, requests held after
@@ -88,34 +93,73 @@ is zero findings, confirmed after the sixth:
     before the next swap (given-up requests processed or starting, the mint or its
     restores going down, a rotation after the outputs were derived, an expiry), reads
     answered on the reader's next poll, or every call an entry or a sweep awaits
-    answered by a wake from another thread (held ones at their release), dial records;
+    answered by a wake from another thread (held ones at their release), a mint that
+    refuses the keys of a keyset it lists, dial records;
   - honest seeder and viewer engines, with a validated configuration, and honest timings
-    of theirs (`mock::Timing`): answers late, out of order or woken for nothing, outcomes
-    and sweeps settled on tasks of the engine's own, more polls at every step.
-- **Suite:** `nfx_pay::adversary` has 66 scenarios, each on its own thread under a
-  real-time timeout, three of them threaded. They run on four harnesses: the mint
-  answering at once; its reads as round trips; every call an entry or a sweep awaits
-  answered by a wake from another thread; and keyset listings asked for at the engine's
-  start. They also run under eleven honest timings. The suite judges progress by answers
-  and settling, never by how many polls an answer or a step takes, and never blocks its
-  runtime's thread. **Each of 2,092 planted defects fails a named check in its scenario**
-  (a hang, a panic raised outside the suite, a runtime panic of Rust's own, or a bare
-  unwrap, is not a catch). Every surviving mutant from all twenty-nine audits is among
-  them.
+    of theirs (`mock::Timing`): answers late, out of order or woken for nothing; outcomes
+    and sweeps settled on tasks of the engine's own; more polls at every step; entries,
+    their answers and their wakes through tasks of the seeder's runtime; a closed
+    connection or the clock taken on such a task; keys and listings held from the start.
+- **Suite:** `nfx_pay::adversary` has 101 scenarios, each on its own thread under a
+  real-time limit (300 s, which ends a hang and times nothing), three of them threaded.
+  They run on four harnesses: the mint answering at once; its reads as round trips; every
+  call an entry or a sweep awaits answered by a wake from another thread; and keyset
+  listings asked for at the engine's start. They also run under 22 honest timings. The
+  suite judges progress by answers and settling, never by one poll or one turn: an engine
+  has settled after 100 turns of the runtime with no answer under way, and an entry on a
+  thread of its own waits once it has stood idle through 100 such turns or been polled 100
+  times more. An entry on a task of its own is a task of the scenario's runtime, polled
+  only when it is woken. The suite never blocks its runtime's thread. **1,343 planted
+  defects (882 of the seeder, 461 of the watcher) are registered in 2,906 entries, each
+  entry one defect on one harness against one scenario, and each to fail a named check in
+  its scenario** (a hang, a panic raised outside the suite, a runtime panic of Rust's own,
+  or a bare unwrap, is not a catch). Every surviving mutant from all twenty-nine audits
+  that was judged a defect of a seeder or a watcher is among the defects, but one: the
+  twenty-ninth's completeness review left an engine that keeps an entry's first waker
+  unplanted. The slips of its hunts that pass for another reason (equivalent to the honest
+  mock, honest behaviour, a freedom of the mint or the harness, or a slip of the harness
+  that no honest run shows) are in its record. On the final code tree, `9cb71e1`, each of
+  the 2,906 entries fails a named check of its scenario, and the honest mock passes all
+  101 scenarios on every harness and under every timing; the runs, the lock's re-pin over
+  that tree and CI's run are in that record.
 - **Since the twenty-ninth audit:**
-  - the seeder's key cache, keyset listings and the keyset rule pinned per mint; one bad
-    proof spoils a token; the matrix of payments covers every path to the turn against
-    every check and drop (NFX-07 §3);
-  - a dropped video's accounts still quoted; the watcher's token shape, the anchor of its
-    wait, the due point on every window, and its identity toward a seeder all stated
-    and pinned (NFX-07 §2, §3, §3a);
-  - §4 names an origin by its base URL, gives its headers a grammar, and the browser
-    client of NFX-10 §3.1 pays as a page can; the lock pins every workflow, its guard
-    fails closed, and probe branches run no CI;
+  - the seeder's key cache, keyset listings and the keyset rule pinned per mint, at a
+    first quoted mint and at a second; one bad proof spoils a token, at every place of
+    64; the matrix of payments covers every path to the turn against every check and
+    drop; a turn that comes at its deadline or later, or never, runs no check (NFX-07 §3);
+  - a dropped video's accounts still quoted, its hello judged as it arrives; the
+    watcher's token shape, the anchor of its wait, the fate of a payment a wrong ack
+    answers and the life of a refusal's licence stated and pinned; the due point pinned
+    on windows 2 to 9, 63 and 64, and on 3, 5, 7 and 9 whatever came before; its identity
+    toward a seeder stated, text only (NFX-07 §2, §3, §3a);
+  - §4 names an origin by its base URL, as NFX-05 §6 now does, gives its headers a
+    grammar, and the browser client of NFX-10 §3.1 pays as a page can; the lock pins
+    every workflow, its guard decides by history and by what cargo reads, it takes the
+    money crates' test targets from cargo metadata and pins each one's count, and probe
+    branches run no CI;
   - the suite waits on answers and settling everywhere, never blocks its runtime, and runs
-    on a harness that answers every awaited call by a wake and under eleven honest
-    timings; every lost wake planted is caught at a check; the planted defects get the
-    suite's 30 s.
+    on a harness that answers every awaited call by a wake and under 22 honest timings; 35
+    wrong waits are planted, each registered with a scenario that holds a named check of
+    its own behaviour, though not each on every harness where it can arise (one that
+    leaves an entry the suite awaits directly waiting for good still only hangs); the
+    planted defects get the suite's limit and runner;
+  - an independent review of group d and a completeness review of every class table
+    followed the audit's resolutions: 9 issues and 47 gaps. The seeder's and the watcher's
+    32 gaps were closed by enlarging their tables (one in text only); eight issues and
+    three gaps of how the suite waits by changing how it waits and runs, with eleven more
+    honest timings and 29 more wrong waits, ten of them added as the groups were brought
+    together; the ninth issue and the other 12 gaps, of origins, the browser client, the
+    lock and CI, in spec text, a locked stub's doc and the lock's and CI's files, with no
+    scenario and no planted defect. A review of the tree the groups were brought together
+    on, which ran nothing, then confirmed 31 issues more, corrected on it by reading: four
+    settlings removed from the suite, six entries added for four of the ten new wrong
+    waits, and the contract, the mock's docs and NFX-07 §3a brought to say what the suite
+    does and requires. A security-focused review before the push confirmed four findings
+    more, none above Low; for the three that concern the tree, the lock's listings fail
+    closed, a run under a replaced panic hook is never finished, and a panic that an
+    entry's thread kept reaches the scenario's thread where the suite looks. In all, 66
+    scenarios became 101, and 2,092 planted entries 2,906 (1,084 planted defects became
+    1,343). What stays open is in the record.
 - **Since the twenty-eighth audit:**
   - the honest mock caches keys per mint and per keyset, and NFX-07 §3 step 3 checks each
     proof against the keys of the keyset it names; a turn in the deadline's second runs no

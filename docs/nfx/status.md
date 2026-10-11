@@ -1,7 +1,13 @@
 # nfx status — the resume point for this repository
 
 **This file, not the demo's `docs/status.md` or the session handoffs (not published), is where work here
-resumes.** Those describe the Pear demo, a read-only mirror in this repository.
+resumes.** Those describe the Pear demo, which lives in its own repository.
+
+The demo was mirrored here, read-only, until 2026-10-11, when the mirror was removed (ADR 0008,
+amendment of that date); its last snapshot stays under the tag `demo-base`. The sections below
+that are dated before then (A0, its verification table, the 2026-09-24 CI run) speak of the mirror,
+of the `demo` remote and of the add-only check as they stood: none of the three exists now, and
+`crates/ci/check.sh` no longer has an add-only step.
 
 Updated 2026-09-24 · `main` = `81a692e` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
 
@@ -410,16 +416,25 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
          cap is a rate (`debt_ttl`).
        - `quote` carries the account's position, so a watcher can resume.
        - HTTPS origins take one payment per request.
-     - The suite has 66 scenarios, run on four harnesses (the mint answering at once; its
-       reads as round trips; every call an entry or a sweep awaits answered by a wake
-       from another thread; every quoted mint's keyset listing asked for at the engine's
-       start) and under eleven honest timings (answers late, out of order or woken for
-       nothing, outcomes and sweeps settled on tasks of the engine's own, more polls at
-       every step). Each runs on its own thread under a real-time timeout. The suite
-       judges progress by the answers an engine awaits and by its settling, never by how
-       many polls an answer or a step takes, and never blocks its runtime's thread. Each
-       of 2,092 planted defects fails an assertion of the suite (a hang, a panic raised
-       elsewhere, or a runtime panic of Rust's own, is not a catch).
+     - The suite has 101 scenarios, run on four harnesses (the mint answering at once;
+       its reads as round trips; every call an entry or a sweep awaits answered by a
+       wake from another thread; every quoted mint's keyset listing asked for at the
+       engine's start) and under 22 honest timings (answers late, out of order or woken
+       for nothing; outcomes and sweeps settled on tasks of the engine's own; more polls
+       at every step; entries, their answers and their wakes through tasks of the
+       engine's runtime; a closed connection or the clock taken on such a task; keys and
+       listings held from the start). Each runs on its own thread under a real-time
+       limit of 300 s, which ends a hang and times nothing. The suite judges progress by
+       the answers an engine awaits and by its settling, never by one poll or one turn:
+       an engine has settled after 100 turns of the runtime with no answer under way,
+       and an entry on a thread of its own waits once it has stood idle through 100 such
+       turns or been polled 100 times more. It never blocks its runtime's thread. 1,343
+       planted defects (882 of the seeder, 461 of the watcher) are registered in 2,906
+       entries, each entry one defect on one harness against one scenario, and each to
+       fail an assertion of the suite (a hang, a panic raised elsewhere, or a runtime
+       panic of Rust's own, is not a catch). On the final code tree, `9cb71e1`, each of
+       the 2,906 does, and the honest mock passes all 101 scenarios on every harness and
+       under every timing (the runs are in the twenty-ninth audit's record).
      - A swap with no answer is decided by reading its inputs (NUT-07), then its outputs
        (NUT-09), outside the engine's lock: unsigned outputs are nothing only once an
        input is spent (a `PENDING` input is not), so a request the mint holds before
@@ -433,16 +448,39 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
      - The lock pins both money crates whole, nfx-pay and nfx-pay-wire, and their
        dependency closure, and refuses build-environment tricks. After the build it
        verifies what every target of theirs compiled (failing closed on a target without
-       dep-info), and that the money tests all ran, building in a directory made for the
-       run; the CI job refuses a checkout holding untracked or ignored paths, so a
-       restored cache cannot stand in for the build. Code in other crates is out of its
+       dep-info), and that the money tests all ran (every test target cargo lists for the
+       two crates, each reporting the number of tests pinned for it), building in a
+       directory made for the run; the CI job refuses a checkout holding untracked or
+       ignored paths, so a restored cache cannot stand in for the build. Its guard skips
+       the lock only on a branch that holds no money code and never held any, judged by
+       its history and by the names cargo reads. Code in other crates is out of its
        scope, as the check itself states.
    - **Next:**
      - the twenty-ninth independent audit (2026-09-29) reported 26 findings, each
-       resolved by pinning its whole class with a table of cases, not the one instance
-       found. All are resolved on `m2/audit-loop`, where group d (how the suite waits,
-       20 to 22) was finished on the merge of groups a, b and c. See the audit's
-       [record](reviews/2026-09-24-m2.0-twenty-ninth-audit.md);
+       resolved for its whole class, not the one instance found: as tables of cases
+       where the suite runs the class, and in spec and CI text for the rest. All are
+       resolved on `m2/audit-loop`, where group d (how the suite waits, 20 to 22) was
+       finished on the merge of groups a, b and c. An independent review of group d and
+       a completeness review of every class table then found 9 issues (2 Medium, of the
+       suite and not of a money bound) and 47 gaps (Low or Info). They are resolved in
+       four groups, brought together on one tree: the seeder's class tables and the
+       watcher's, enlarged (32 gaps, one of them closed in spec text alone); origins,
+       the lock and CI, in the specs, the CI workflow, one locked stub's doc and the
+       lock's scripts, with no defect planted (12 gaps and one issue); and how the suite
+       waits, by changing the suite, its contract and its runner (the other 8 issues,
+       both Medium ones among them, and 3 gaps). A review of that tree, which ran
+       nothing, then confirmed 31 issues more, of the suite's code, the registry and
+       what the tree's docs, the specs and these documents said; they are corrected on
+       it, by reading, and were run afterwards. A security-focused review before the
+       push then confirmed four findings, none above Low. For the three that concern the
+       tree, the lock's listings fail closed, a run under a replaced panic hook is never
+       finished, and a panic that an entry's thread kept reaches the scenario's thread
+       where the suite looks. 66 scenarios became 101, 11 honest timings 22, and 2,092
+       planted entries 2,906 (1,084 planted defects became 1,343). On the final code
+       tree, `9cb71e1`, fmt, clippy and `cargo doc` are clean, every test binary of
+       nfx-pay passes, and each planted entry fails a check of the suite. The lock's
+       re-pin over that tree and CI's run on the re-pinned commit are in the audit's
+       [record](reviews/2026-09-24-m2.0-twenty-ninth-audit.md), with what stays open;
      - then a thirtieth independent audit, until one reports nothing;
      - sovtech's OK to push M2.0 (given, once the audits are clean);
      - the testnet mint: sovtech approved its deployment once its runbook's checks
