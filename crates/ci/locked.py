@@ -353,6 +353,13 @@ def test_counts() -> dict[str, int]:
     pay1 = (CRATES / "nfx-pay-wire" / "tests" / "pay1.rs").read_text()
     scenarios = len(re.findall(r"^\s+[a-z_0-9]+,$", listed.group(1), re.M))
     suite_users()
+    # The suite's own file names the macro in its code twice: where it defines it, and where
+    # its first arm hands the list to the second. A third would be another way in (a macro
+    # beside it that passes some scenarios on, say), which no file's count would follow.
+    own = names_suite(adversary)
+    if len(own) != 2:
+        fail(f"{SUITE_SOURCE} names {SUITE_MACRO} on {len(own)} lines of its code, where it "
+             "defines the macro and hands its list on (2): " + " | ".join(x.strip()[:80] for x in own[:5]))
     if set(WHOLE_SUITE) & set(SUITE_BY_PARTS):
         fail(f"crates/ci/locked.py names {sorted(set(WHOLE_SUITE) & set(SUITE_BY_PARTS))} both "
              "as running the whole suite once and as counted use by use")
