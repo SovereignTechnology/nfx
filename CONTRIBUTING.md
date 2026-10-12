@@ -24,8 +24,8 @@ Thanks for taking an interest. Where the work stands is in
    shows what changed.
 5. CI must pass. Review must approve. Then it merges. CI is two jobs: the lock job and
    the check job, which runs `crates/ci/check.sh`. You can run that script yourself
-   before you push: it runs the lock's checks too, though the verdict on the money code
-   is the lock job's.
+   before you push: it runs `crates/ci/check-locked.sh`'s checks too, though the verdict
+   on the money code is the lock job's.
 
 The money code is locked: a change under `crates/nfx-pay`, `crates/nfx-pay-wire` or any
 other path that `crates/ci/check-locked.sh` lists fails CI until it has been reviewed and

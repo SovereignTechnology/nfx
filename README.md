@@ -43,7 +43,7 @@ script's last step. It also needs clippy, rustfmt and the `wasm32-unknown-unknow
 target, `cargo-deny`, `wasm-pack`, Node, and a Python with the packages the `check` job
 installs; `.github/workflows/ci.yml` pins each version.
 
-The script's header lists the variables it reads: `PYTHON`, the Python to run;
+The script's header lists the variables it reads, among them `PYTHON`, the Python to run;
 `NFX_FFMPEG` and `NFX_FFPROBE`, the ffmpeg and ffprobe that `nfx-media`'s packaging test
 runs (the ones on `PATH` by default; with no ffmpeg that test is skipped); and
 `NFX_SKIP_WASM=1`, which skips the wasm32 tests.

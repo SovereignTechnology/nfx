@@ -9,7 +9,12 @@ that are dated before then (A0, its verification table, the 2026-09-24 CI run) s
 of the `demo` remote and of the add-only check as they stood: none of the three exists now, and
 `crates/ci/check.sh` no longer has an add-only step.
 
-Updated 2026-09-24 · `main` = `81a692e` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
+This repository is public, and since `c07be45` (2026-09-28) its CI runs on GitHub Actions from
+`.github/workflows/ci.yml`, as two jobs, `lock` and `check`. `crates/ci/gitlab-ci.yml` holds the same
+two jobs for GitLab and is a dormant twin: it runs nothing. What the sections below say of the private
+GitLab project, of GitLab CI and of its shared runner is as it stood before that.
+
+Updated 2026-10-11 · `main` = `c07be45` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
 
 ## Where things stand
 
@@ -234,7 +239,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
   - `npm run typecheck` is strict and clean. Neither runs in CI: they need Chromium,
     ffmpeg and a cargo build.
 
-- **Repository:** the private GitLab project. Every push
+- **Repository:** the public repository (its clone line is in `README.md`); it was a private GitLab
+  project when this was written. Every push
   was a fast-forward of `main` with sovtech's OK. The demo history, the spec commit
   `2e25df1` and a merge of demo `main` `6cd8765` are all in `main`.
 - **ADR numbering** is coordinated with the demo session. 0006 and 0008 are this
@@ -255,9 +261,11 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
   - the S4 preview server is stopped;
   - the merged branches `a0/setup`, `a1/s1-iroh` and `spec/decisions-2026-09-23` are
     deleted;
-  - GitLab CI is enabled with config path `crates/ci/gitlab-ci.yml`. It runs on the
-    instance's shared runner, with prebuilt, sha256-pinned `cargo-deny`
-    and `wasm-pack` so nothing is compiled on the runner (sovtech's choice).
+  - GitLab CI was enabled then, with config path `crates/ci/gitlab-ci.yml`, on that instance's shared
+    runner, with prebuilt, sha256-pinned `cargo-deny` and `wasm-pack` so that nothing was compiled on
+    the runner (sovtech's choice). It runs nothing now: CI is GitHub Actions
+    (`.github/workflows/ci.yml`, since `c07be45`), which pins the same two tools by sha256, and
+    `crates/ci/gitlab-ci.yml` is its dormant twin.
 
 ## Done in A0
 
@@ -270,7 +278,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 3. **CI.**
    - `crates/ci/check.sh` runs every check: vectors, add-only, fmt, clippy
      `-D warnings`, test, deny, and wasm.
-   - `crates/ci/gitlab-ci.yml` is dormant; see "Not verified".
+   - `crates/ci/gitlab-ci.yml` is dormant: CI runs on GitHub Actions from `.github/workflows/ci.yml`,
+     and the file's own header says so.
 4. **ADR 0008** (`docs/decisions/0008-multi-network-master-plan.md`).
    - ADR 0006 is amended: the demo is described in the present tense, plus a token note.
 5. **Spec amendments 1–9** from the plan, plus the implementation-driven fixes listed
@@ -367,12 +376,12 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    wallet. It gets the locked-directory rule and its own security stage (ADR 0008 §4).
    Plan and decisions: [`m2-plan.md`](m2-plan.md). sovtech chose the demo's staging, and a
    persistent testnet mint.
-   - **M2.0 is built and reworked twenty-nine times** on branch `m2/contracts`, not yet
+   - **M2.0 is built and reworked thirty times** on branch `m2/contracts`, not yet
      pushed. It holds the pay/1 wire and vectors, the session contracts, the mock, and
-     the adversary suite. Twenty-nine independent audits found 19, 30, 28, 20, 19, 22,
-     23, 8, 12, 17, 9, 7, 8, 8, 9, 7, 10, 8, 8, 7, 7, 9, 23, 22, 22, 20, 15, 23 and 26
-     gaps; the resolutions are recorded in each audit's file, and the next audit checks
-     them
+     the adversary suite. Thirty independent audits found 19, 30, 28, 20, 19, 22,
+     23, 8, 12, 17, 9, 7, 8, 8, 9, 7, 10, 8, 8, 7, 7, 9, 23, 22, 22, 20, 15, 23, 26 and
+     26 gaps (the thirtieth's are its confirmed findings: two more were refuted); the
+     resolutions are recorded in each audit's file, and the next audit checks them
      ([first](reviews/2026-09-24-m2.0-independent-audit.md),
      [second](reviews/2026-09-24-m2.0-second-audit.md),
      [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -402,7 +411,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
      [twenty-sixth](reviews/2026-09-24-m2.0-twenty-sixth-audit.md),
      [twenty-seventh](reviews/2026-09-24-m2.0-twenty-seventh-audit.md),
      [twenty-eighth](reviews/2026-09-24-m2.0-twenty-eighth-audit.md),
-     [twenty-ninth](reviews/2026-09-24-m2.0-twenty-ninth-audit.md)). **sovtech's bar for the push
+     [twenty-ninth](reviews/2026-09-24-m2.0-twenty-ninth-audit.md),
+     [thirtieth](reviews/2026-09-24-m2.0-thirtieth-audit.md)). **sovtech's bar for the push
      is zero findings** (re-confirmed after the sixth). The lock's guarantee is now
      stated in `crates/ci/check-locked.sh`: the money crates' files and build inputs, and
      every target of theirs, failing closed; other crates are out of scope. With sovtech's OK, the minimum role for GitLab pipeline variables on
@@ -423,18 +433,28 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        for nothing; outcomes and sweeps settled on tasks of the engine's own; more polls
        at every step; entries, their answers and their wakes through tasks of the
        engine's runtime; a closed connection or the clock taken on such a task; keys and
-       listings held from the start). Each runs on its own thread under a real-time
-       limit of 300 s, which ends a hang and times nothing. The suite judges progress by
+       listings held from the start), and the longest scenario once more with every
+       answer 10 ms late. Each runs on its own thread under a real-time limit of 300 s,
+       which ends a hang. The limit is sized for a machine under load and for a mint that
+       answers in milliseconds: a slower mint it does time, so the contract has a
+       harness's mint answer within about ten milliseconds (the thirtieth audit; until
+       then this said the limit times nothing). The suite judges progress by
        the answers an engine awaits and by its settling, never by one poll or one turn:
        an engine has settled after 100 turns of the runtime with no answer under way,
        and an entry on a thread of its own waits once it has stood idle through 100 such
-       turns or been polled 100 times more. It never blocks its runtime's thread. 1,343
-       planted defects (882 of the seeder, 461 of the watcher) are registered in 2,906
+       turns or been polled 100 times more. It never blocks its runtime's thread. 1,415
+       planted defects (915 of the seeder, 500 of the watcher) are registered in 3,122
        entries, each entry one defect on one harness against one scenario, and each to
        fail an assertion of the suite (a hang, a panic raised elsewhere, or a runtime
-       panic of Rust's own, is not a catch). On the final code tree, `9cb71e1`, each of
-       the 2,906 does, and the honest mock passes all 101 scenarios on every harness and
-       under every timing (the runs are in the twenty-ninth audit's record).
+       panic of Rust's own, is not a catch). On `a2e0ecc`, the tree with the thirtieth
+       audit's resolutions and those of the review before the push, each of the 3,122
+       does, and the honest mock passes all 101 scenarios on the four harnesses and all
+       2,223 tests under the timings. On that tree one of the 2,223 tests failed once, at `opt-level` 1, and passed
+       when its part was run again: the suite could take an engine to have settled with
+       tasks of the runtime still unrun, and `a22fdf5`, the final code tree, ends a turn
+       of the suite's waiting only once every task ready as it began has run. On
+       `a22fdf5` every binary passed twice without optimisation, the second time in the
+       lock's re-pin (the runs are in the thirtieth audit's record).
      - A swap with no answer is decided by reading its inputs (NUT-07), then its outputs
        (NUT-09), outside the engine's lock: unsigned outputs are nothing only once an
        input is spent (a `PENDING` input is not), so a request the mint holds before
@@ -481,7 +501,31 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        nfx-pay passes, and each planted entry fails a check of the suite. The lock's
        re-pin over that tree and CI's run on the re-pinned commit are in the audit's
        [record](reviews/2026-09-24-m2.0-twenty-ninth-audit.md), with what stays open;
-     - then a thirtieth independent audit, until one reports nothing;
+     - the thirtieth independent audit (2026-10-11, of `a444cd2`) reported 28 findings.
+       26 were confirmed (1 Medium, 15 Low and 10 Info; one of them another's again), and
+       two, of the lock, were refuted and taken as hardenings all the same. No money bound
+       is broken in the honest mock. The Medium was a gap of the suite: no scenario drove
+       a swap's outcome at a quoted mint other than the first, so an engine that kept a
+       late payment's proofs there and credited nothing passed. All but one are resolved
+       on `m2/audit-loop`, in three groups (the lock, CI and the documents; the watcher;
+       the seeder), with no scenario added: every case extends one of the 101, and 2,906
+       planted entries became 3,122 (1,343 planted defects became 1,415). The honest mock
+       changed in two places, both now NFX-07's text: no payment asks a mint for keys or
+       a keyset listing at or past its deadline; and a seeder answers the `hello`, for a
+       video it no longer serves, of a peer whose only record there is a swap abandoned
+       in flight, from that payment's deadline. The second was decided in resolving the
+       round, and sovtech may reverse it. **One confirmed finding is not fixed:** NFX-07
+       §3a's half-window credit bound does not hold once a watcher has two requests
+       unanswered at a time (the true bound is half the window plus the requests
+       unanswered at once, less one). The decision is sovtech's, between three courses,
+       and none is taken yet. A review before the push found nothing private and no check
+       weakened; what it found in the tree, none above Low, is resolved on `a2e0ecc`. One
+       test of `honest_timings` failed once on that tree and passed when run again: the
+       fault was in how the suite waits a turn, and `a22fdf5` resolves it.
+       The audit's [record](reviews/2026-09-24-m2.0-thirtieth-audit.md) has the runs and
+       what stays open;
+     - sovtech's decision on the half-window credit bound;
+     - then a thirty-first independent audit, until one reports nothing;
      - sovtech's OK to push M2.0 (given, once the audits are clean);
      - the testnet mint: sovtech approved its deployment once its runbook's checks
        are clean (a private record);
@@ -497,9 +541,10 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
   crashed Node: Debian bookworm's `nodejs` 18.20.4 aborts in V8 on the wasm32 test
   binary. This was reproduced locally with official Node 18.20.4, while 22.22.0 passes.
   The fix pins the official Node 22.22.0 build (sha256 from nodejs.org `SHASUMS256.txt`).
-  **Pipeline then passed every step in 95 s.** CI is green on the shared runner.
-  The job also does a read-only fetch of the private demo repository `main` for the
-  add-only check. `wasm-pack test` downloads its matching `wasm-bindgen` runner at run
+  **The pipeline then passed every step in 95 s** on the shared runner. That was GitLab CI, on
+  2026-09-24; CI now runs on GitHub Actions (`.github/workflows/ci.yml`), whose `check` job pins the
+  same Node build. The job also did a read-only fetch of the demo's `main` for the add-only check,
+  which went with the mirror. `wasm-pack test` downloads its matching `wasm-bindgen` runner at run
   time, unpinned.
 - **Not tested on this host:** mpv (not installed), Safari (needs macOS/iOS; WebKit
   passed as the closest proxy), macOS WKWebView and Windows WebView2 (S2 covered

@@ -19,7 +19,7 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
-**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of twenty-nine
+**M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of thirty
 independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),
 [third](reviews/2026-09-24-m2.0-third-audit.md),
@@ -48,7 +48,8 @@ independent audits** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [twenty-sixth](reviews/2026-09-24-m2.0-twenty-sixth-audit.md),
 [twenty-seventh](reviews/2026-09-24-m2.0-twenty-seventh-audit.md),
 [twenty-eighth](reviews/2026-09-24-m2.0-twenty-eighth-audit.md),
-[twenty-ninth](reviews/2026-09-24-m2.0-twenty-ninth-audit.md)). sovtech's bar for the push
+[twenty-ninth](reviews/2026-09-24-m2.0-twenty-ninth-audit.md),
+[thirtieth](reviews/2026-09-24-m2.0-thirtieth-audit.md)). sovtech's bar for the push
 is zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -101,27 +102,66 @@ is zero findings, confirmed after the sixth:
     their answers and their wakes through tasks of the seeder's runtime; a closed
     connection or the clock taken on such a task; keys and listings held from the start.
 - **Suite:** `nfx_pay::adversary` has 101 scenarios, each on its own thread under a
-  real-time limit (300 s, which ends a hang and times nothing), three of them threaded.
+  real-time limit (300 s, which ends a hang, and is sized for a machine under load and a
+  mint that answers within about ten milliseconds, as the `Harness` contract now requires
+  of a harness's mint), three of them threaded.
   They run on four harnesses: the mint answering at once; its reads as round trips; every
   call an entry or a sweep awaits answered by a wake from another thread; and keyset
-  listings asked for at the engine's start. They also run under 22 honest timings. The
+  listings asked for at the engine's start. They also run under 22 honest timings, and the
+  longest scenario once more with every answer 10 ms late. The
   suite judges progress by answers and settling, never by one poll or one turn: an engine
   has settled after 100 turns of the runtime with no answer under way, and an entry on a
   thread of its own waits once it has stood idle through 100 such turns or been polled 100
   times more. An entry on a task of its own is a task of the scenario's runtime, polled
-  only when it is woken. The suite never blocks its runtime's thread. **1,343 planted
-  defects (882 of the seeder, 461 of the watcher) are registered in 2,906 entries, each
+  only when it is woken. The suite never blocks its runtime's thread. **1,415 planted
+  defects (915 of the seeder, 500 of the watcher) are registered in 3,122 entries, each
   entry one defect on one harness against one scenario, and each to fail a named check in
   its scenario** (a hang, a panic raised outside the suite, a runtime panic of Rust's own,
-  or a bare unwrap, is not a catch). Every surviving mutant from all twenty-nine audits
+  or a bare unwrap, is not a catch). Every surviving mutant from all thirty audits
   that was judged a defect of a seeder or a watcher is among the defects, but one: the
   twenty-ninth's completeness review left an engine that keeps an entry's first waker
   unplanted. The slips of its hunts that pass for another reason (equivalent to the honest
   mock, honest behaviour, a freedom of the mint or the harness, or a slip of the harness
-  that no honest run shows) are in its record. On the final code tree, `9cb71e1`, each of
-  the 2,906 entries fails a named check of its scenario, and the honest mock passes all
-  101 scenarios on every harness and under every timing; the runs, the lock's re-pin over
-  that tree and CI's run are in that record.
+  that no honest run shows) are in its record. The thirtieth's hunts registered every
+  survivor of theirs; the 40 planted defects of those hunts that the suite caught are not
+  registered. On `a2e0ecc`, the tree with the thirtieth audit's resolutions and those of
+  the review before the push, each of the 3,122 entries fails a check of the suite, and
+  the honest mock passes all 101 scenarios on the four harnesses and all 2,223 tests of
+  the timings; on that tree one of the 2,223 failed once, at `opt-level` 1, and passed when its
+  part was run again: the fault was in how the suite waits a turn, and `a22fdf5`, the
+  final code tree, resolves it. On `a22fdf5` every binary passed twice without
+  optimisation, the second time in the lock's re-pin. The runs are in the thirtieth
+  audit's record.
+- **Since the thirtieth audit:**
+  - a swap's every outcome pinned at a second quoted mint as at the first (a ban for a
+    spent or invalid proof, a late claim credited however it is learnt, an unknown swap
+    stopping the account at whichever mint); a claim in time credited to a peer banned
+    since its turn; a mint's late refusal of keys not used, and nothing asked of a mint
+    at or past a payment's deadline; the once-a-second bound on listings across a refusal
+    of keys; the mint's place after `stale` and structure, on every path (NFX-07 §3);
+  - a dropped video's swaps still swept and completed, its unpaid chunks counting toward
+    the global cap until they age out, and its `hello` answered, from the payment's
+    deadline, for a peer whose only record is a swap abandoned in flight (decided in
+    resolving the round; sovtech may reverse it);
+  - nothing undoes a stop while a payment is in flight on its live session; every payment
+    at its own session's quoted price, whatever the watcher's cap; every `mint-unavailable`
+    answer to a payment using a try and every `ack` and accepted quote restoring them
+    all; the live wait counted when the stop comes on the payment's own ledger; nothing
+    between a refusal and its due ending the licence but the session's end, the pay-ahead
+    being half the window and not merely at most; a stopped watcher's matching `ack`
+    settled into the ledger (NFX-07 §3a);
+  - the limit's bound on a harness's mint stated, and one scenario run at it; the lock's
+    facts refusing a workspace member the pinned members key does not name, and a tracked
+    `.cargo` or `.cargo-home` of any type; the dormant GitLab file at `ci.yml`'s limits;
+    the check job's checkout shallow; the documents on the repository, CI and running the
+    checks corrected;
+  - **not fixed:** NFX-07 §3a's half-window credit bound, which does not hold once a
+    watcher has two requests unanswered at a time. It is sovtech's decision, between three
+    courses, and none is taken yet;
+  - no scenario was added: 2,906 planted entries became 3,122 (1,343 planted defects
+    became 1,415), and `honest_timings` holds 2,223 tests where it held 2,222. A review
+    before the push found nothing private and no check weakened; its findings in the
+    tree, none above Low, are resolved. What stays open is in the record.
 - **Since the twenty-ninth audit:**
   - the seeder's key cache, keyset listings and the keyset rule pinned per mint, at a
     first quoted mint and at a second; one bad proof spoils a token, at every place of
@@ -138,7 +178,9 @@ is zero findings, confirmed after the sixth:
     money crates' test targets from cargo metadata and pins each one's count, and probe
     branches run no CI;
   - the suite waits on answers and settling everywhere, never blocks its runtime, and runs
-    on a harness that answers every awaited call by a wake and under 22 honest timings; 35
+    on a harness that answers every awaited call by a wake and under 22 honest timings
+    (since the thirtieth audit, the longest scenario also once more with every answer 10 ms
+    late); 35
     wrong waits are planted, each registered with a scenario that holds a named check of
     its own behaviour, though not each on every harness where it can arise (one that
     leaves an entry the suite awaits directly waiting for good still only hangs); the
