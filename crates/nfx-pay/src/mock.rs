@@ -15440,7 +15440,7 @@ impl Viewer for MockViewer {
         self.clears_stop_keeping(Upon::TakenQuote);
         self.standing().last_window = Some(quote.window);
         self.settled_price = (settled && self.acked > acked_before)
-            .then(|| (self.spent - spent_before) / (self.acked - acked_before));
+            .then(|| self.spent.saturating_sub(spent_before) / (self.acked - acked_before));
         self.refusals = 0;
         self.resumed = resumed;
         if resumed && self.has(ViewerFlaw::ResumedPayInUnitProofs) {
