@@ -262,10 +262,7 @@ pub trait Viewer {
     /// refused, its tries used and restored, or another video's payment in flight ahead of
     /// it. A payment's 180 s count from its own sending (NFX-07 §3a), whatever it is and
     /// wherever they are counted. One is in flight toward the seeder at a time, across its
-    /// videos and on its own ledger too, however long ago it was sent: this call pays
-    /// nothing over a payment in flight on a live session, which is its `ack`'s or its
-    /// `rej`'s to answer and, unanswered from 180 s, [`Viewer::timeout`]'s to reclaim. And
-    /// none is made:
+    /// videos, and none is made:
     /// - once the viewer has stopped, ahead after a refusal included;
     /// - while a reclaim is incomplete or a payment awaits a quote;
     /// - after three `mint-unavailable` answers to its payments in a row, until a new
