@@ -7140,7 +7140,7 @@ pub enum ViewerFlaw {
     PaysOverOwnPaymentAt180,
     /// A `hello` refused, with a code but `banned`, undoes a stop while a payment awaits a
     /// quote (and the like below: an input that undoes a stop only while the stopped
-    /// standing keeps something, [`Keeps`], [`Upon`]).
+    /// standing keeps something, `Keeps`, `Upon`).
     HelloRefusedWhileAwaitingClearsStop,
     IdleTimeoutWhileAwaitingClearsStop,
     SecondQuoteWhileAwaitingClearsStop,
