@@ -15338,10 +15338,14 @@ async fn a_reclaim_with_no_session_ends_as_in_one<H: Harness>(h: &H) {
 /// How the reclaim of a live session's payment, unanswered at 180 s, ends where no proof is
 /// found spent and not every proof comes back at once, for
 /// [`a_viewer_reclaims_an_unanswered_payment`].
-const LIVE_TIMEOUT_ENDS: [&str; 3] = [
+const LIVE_TIMEOUT_ENDS: [&str; 6] = [
     "the mint down",
     "its proofs lost to their keyset's expiry",
     "its proofs reserved by a request the mint has not finished",
+    "one proof lost to its keyset's expiry and the rest taken back",
+    "one proof lost to its keyset's expiry and the rest reserved by a request the mint has not \
+     finished",
+    "one proof lost to its keyset's expiry and the mint down",
 ];
 
 /// A viewer waits exactly 180 s from sending for an answer on a live connection, whatever
@@ -15403,22 +15407,38 @@ pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
     // stays incomplete, though the watcher has stopped, and is finished once the mint is
     // back, or has rolled back the request that held the proofs reserved.
     for ends in LIVE_TIMEOUT_ENDS {
+        // The mixed ends: the payment holds one proof of an older keyset, which expires
+        // while it is in flight, and one of the mint's own.
+        let mixed = ends.starts_with("one proof lost");
         let s = open(h, &h.engine(1, 4, 1000), 1).await;
         let mut v = h.viewer(1);
         v.quote(s.quote()).expect("an honest quote is accepted");
         v.requested();
         v.requested();
+        h.fund_older_keyset(u64::from(mixed));
         let pay = v.due().await.expect("due answers").expect("due");
+        h.fund_older_keyset(0);
         advance(h, Duration::from_secs(180)).await;
         match ends {
             "the mint down" => h.mint_outage(true),
             "its proofs lost to their keyset's expiry" => {
                 h.expire_keyset_of(&pay.token, usize::MAX);
             }
-            _ => assert!(
-                h.reserve_rest(&pay.token).await,
-                "a request of its proofs, held reserved"
-            ),
+            _ => {
+                // A mint reserves no proof it lists expired: the request comes first.
+                if ends.contains("reserved") {
+                    assert!(
+                        h.reserve_rest(&pay.token).await,
+                        "a request of its proofs, held reserved"
+                    );
+                }
+                if mixed {
+                    h.expire_keyset_of(&pay.token, 1);
+                }
+                if ends.ends_with("the mint down") {
+                    h.mint_outage(true);
+                }
+            }
         }
         v.timeout().await;
         assert!(
@@ -15426,14 +15446,20 @@ pub async fn a_viewer_reclaims_an_unanswered_payment<H: Harness>(h: &H) {
             "unanswered at 180 s, {ends}: the watcher stops, whatever its reclaim finds"
         );
         h.mint_outage(false);
-        if ends == LIVE_TIMEOUT_ENDS[2] {
+        if ends.contains("reserved") {
             roll_back(h).await;
         }
         assert!(
             v.due().await.expect("due answers once stopped").is_none(),
             "unanswered at 180 s, {ends}: stopped, the watcher pays nothing afterwards"
         );
-        if ends == "its proofs lost to their keyset's expiry" {
+        if mixed {
+            assert!(
+                !h.steal(&pay.token).await,
+                "unanswered at 180 s, {ends}: its reclaim is finished once it can be, the rest \
+                 taken back, and the seeder can claim none of the proofs"
+            );
+        } else if ends == "its proofs lost to their keyset's expiry" {
             assert!(
                 !h.claimed_any(&pay.token).await && !h.steal(&pay.token).await,
                 "unanswered at 180 s, {ends}: its reclaim found every proof unspent and lost \

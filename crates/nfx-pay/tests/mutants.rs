@@ -3316,4 +3316,5 @@ catches!(
     viewer_decision_restarts_live_wait: v(V::DecisionRestartsLiveWait) => a_payment_waits_180_s_and_holds_its_place_whatever_comes,
     viewer_other_decision_restarts_live_wait: v(V::OtherDecisionRestartsLiveWait) => a_payment_waits_180_s_and_holds_its_place_whatever_comes,
     viewer_unsettled_lapses: v(V::UnsettledLapses) => a_payment_holds_its_place_as_time_passes,
+    viewer_timeout_part_expired_no_stop: v(V::TimeoutPartExpiredNoStop) => a_viewer_reclaims_an_unanswered_payment,
 );
