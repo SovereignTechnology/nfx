@@ -182,3 +182,28 @@ fn a_side_dropped_unjoined_ends_its_thread() {
         );
     }
 }
+
+/// The list of a watcher's inputs is the `Viewer` trait's: [`VIEWER_METHODS`] names every
+/// method the trait declares, in the trait's order, so a method added to the trait fails
+/// here until the tables' list of inputs has it.
+#[test]
+fn the_list_of_a_watchers_inputs_is_the_viewer_traits() {
+    let session = include_str!("../session.rs");
+    let from = session
+        .find("pub trait Viewer {")
+        .expect("the Viewer trait is in session.rs");
+    let body = &session[from..];
+    let body = &body[..body.find("\n}\n").expect("the trait ends")];
+    let declared: Vec<&str> = body
+        .lines()
+        .filter_map(|line| {
+            let line = line.strip_prefix("    ")?;
+            let line = line.strip_prefix("async ").map_or(line, |rest| rest);
+            line.strip_prefix("fn ")?.split('(').next()
+        })
+        .collect();
+    assert_eq!(
+        declared, VIEWER_METHODS,
+        "the methods the Viewer trait declares are the ones the tables' inputs are listed from"
+    );
+}

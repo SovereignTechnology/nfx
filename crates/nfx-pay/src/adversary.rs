@@ -168,6 +168,13 @@ macro_rules! adversary_suite {
             an_honest_pair_survives_a_refused_hello,
             an_honest_pair_survives_a_late_mint,
             a_paying_watcher_gets_through_a_full_cap,
+            a_payment_holds_its_place_as_time_passes,
+            nothing_undoes_a_stop_on_its_first_ledger_whatever_comes,
+            nothing_undoes_a_stop_on_another_videos_ledger_whatever_comes,
+            a_payment_waits_180_s_and_holds_its_place_whatever_comes,
+            a_refusals_licence_lasts_to_its_due_whatever_comes,
+            the_tries_on_its_first_ledger_are_used_and_restored_by_nothing_else,
+            the_tries_on_another_videos_ledger_are_used_and_restored_by_nothing_else,
         );
     };
     (@each $h:expr; $($name:ident),* $(,)?) => {
@@ -19887,6 +19894,1968 @@ async fn an_unavailable_answer_leaves_the_standing_stopped<H: Harness>(h: &H) {
         v0.due().await.expect("due answers").is_none(),
         "and it pays nothing more"
     );
+}
+
+/// The methods of the [`Viewer`] trait, in its order: what a watcher can be given. The
+/// library's unit tests read them from the trait's own text (`session.rs`), so a method
+/// added there fails them until it is listed here; and [`inputs`] fails every table until
+/// each one that takes an input is some input's of the list.
+pub const VIEWER_METHODS: [&str; 13] = [
+    "sibling",
+    "quote",
+    "hello_refused",
+    "requested",
+    "refused",
+    "due",
+    "last_pay",
+    "ack",
+    "rej",
+    "timeout",
+    "end",
+    "stopped",
+    "awaiting_quote",
+];
+
+/// The two of [`VIEWER_METHODS`] that only read the watcher: every table reads them
+/// ([`World::flags`]), and neither is an input.
+const VIEWER_READS: [&str; 2] = ["stopped", "awaiting_quote"];
+
+/// A table's check that fails: the cell ends there, with what it requires.
+macro_rules! ensure {
+    ($held:expr, $($why:tt)+) => {
+        if !$held {
+            return Err(format!($($why)+));
+        }
+    };
+}
+
+/// The ledgers of a table's watcher: the one its cell is about (the payment's, the
+/// refusal's), one of another of the seeder's videos, which the cell's input may come on,
+/// and one of a third video, which a stop may come on and which asks what the standing lets
+/// another video pay.
+const OWN: usize = 0;
+const OTHER: usize = 1;
+const THIRD: usize = 2;
+
+/// Why a watcher refuses a quote without stopping: its price over the cap, its `window`
+/// over the ceiling, or no mint it holds tokens from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Why {
+    Price,
+    Window,
+    Mint,
+}
+
+/// How the reclaim of a payment answered `mint-unavailable` ends: every proof back at
+/// once; or once the mint, down then, is back; every proof lost to its keyset's expiry; or
+/// one lost so and the rest taken back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Back {
+    AtOnce,
+    Late,
+    Expired,
+    PartExpired,
+}
+
+/// What an input to a watcher does: one call of a method of [`Viewer`] (two for a refused
+/// request, which is sent first), or the clock alone moving by so many seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Does {
+    /// `sibling`: a ledger made for another video.
+    Sibling,
+    /// `quote`: a new session's honest quote, equal to the ledger, which is taken.
+    QuoteTaken,
+    /// `quote`: a new session's quote the watcher refuses without stopping.
+    QuoteRefused(Why),
+    /// `quote`: a second quote on the open session.
+    SecondQuote,
+    /// `hello_refused`, with each code but `banned` in turn.
+    HelloRefused,
+    /// `requested`.
+    Request,
+    /// `requested`, then `refused`.
+    RefusedRequest,
+    /// `due`.
+    Due,
+    /// `last_pay`.
+    LastPay,
+    /// `ack`: the seeder's honest ack of the payment in flight on the session.
+    Ack,
+    /// `rej`: `mint-unavailable` to the payment in flight on the session.
+    Unavailable(Back),
+    /// `timeout`.
+    Timeout,
+    /// `end`.
+    End,
+    /// No call: the clock alone.
+    Clock(u64),
+}
+
+impl Does {
+    /// The method of [`Viewer`] the input calls ([`VIEWER_METHODS`]), if it calls one.
+    fn method(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Sibling => "sibling",
+            Self::QuoteTaken | Self::QuoteRefused(_) | Self::SecondQuote => "quote",
+            Self::HelloRefused => "hello_refused",
+            Self::Request => "requested",
+            Self::RefusedRequest => "refused",
+            Self::Due => "due",
+            Self::LastPay => "last_pay",
+            Self::Ack => "ack",
+            Self::Unavailable(_) => "rej",
+            Self::Timeout => "timeout",
+            Self::End => "end",
+            Self::Clock(_) => return None,
+        })
+    }
+
+    /// Whether it comes on an open session (`Some(true)`), on a ledger that holds none
+    /// (`Some(false)`), or on either.
+    fn needs(self) -> Option<bool> {
+        match self {
+            Self::Request
+            | Self::RefusedRequest
+            | Self::SecondQuote
+            | Self::Ack
+            | Self::Unavailable(_)
+            | Self::Timeout
+            | Self::End => Some(true),
+            Self::QuoteTaken | Self::QuoteRefused(_) => Some(false),
+            Self::Sibling | Self::HelloRefused | Self::Due | Self::LastPay | Self::Clock(_) => None,
+        }
+    }
+}
+
+/// Whether the ledger an input comes on holds a session: one open, none since its last
+/// ended, or none ever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sess {
+    Open,
+    Ended,
+    Never,
+}
+
+/// One input to a watcher: what it does, on which ledger ([`OWN`] or [`OTHER`]), and
+/// whether that ledger holds a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Input {
+    does: Does,
+    on: usize,
+    sess: Sess,
+}
+
+impl Input {
+    /// Whether the input can come at all: `Err` says why not.
+    fn fits(self) -> Result<(), &'static str> {
+        if self.does.method().is_none() {
+            return Ok(());
+        }
+        if self.on == OWN && self.sess == Sess::Never {
+            return Err("its own ledger has held a session: the state came about on one");
+        }
+        match (self.does.needs(), self.sess) {
+            (Some(true), Sess::Ended | Sess::Never) => {
+                Err("it comes on an open session, and the ledger holds none")
+            }
+            (Some(false), Sess::Open) => {
+                Err("a quote on an open session is a second quote, which has its own input")
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+impl std::fmt::Display for Input {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let does = match self.does {
+            Does::Clock(secs) => return write!(f, "{secs} s with no input"),
+            Does::Sibling => "a ledger made for another video, from",
+            Does::QuoteTaken => "a new session's honest quote, taken,",
+            Does::QuoteRefused(Why::Price) => "a new session's quote over its price cap",
+            Does::QuoteRefused(Why::Window) => {
+                "a new session's quote with a window over its ceiling"
+            }
+            Does::QuoteRefused(Why::Mint) => "a new session's quote naming no mint it holds",
+            Does::SecondQuote => "a second quote on the open session",
+            Does::HelloRefused => "a hello refused, with each code but banned,",
+            Does::Request => "a new request",
+            Does::RefusedRequest => "a refused request",
+            Does::Due => "a due",
+            Does::LastPay => "a last_pay",
+            Does::Ack => "the seeder's honest ack of the payment in flight",
+            Does::Unavailable(Back::AtOnce) => {
+                "mint-unavailable to the payment in flight, every proof back at once,"
+            }
+            Does::Unavailable(Back::Late) => {
+                "mint-unavailable to the payment in flight, the mint down for its reclaim,"
+            }
+            Does::Unavailable(Back::Expired) => {
+                "mint-unavailable to the payment in flight, its proofs lost to their keyset's expiry,"
+            }
+            Does::Unavailable(Back::PartExpired) => {
+                "mint-unavailable to the payment in flight, one proof lost to its keyset's expiry \
+                 and the rest taken back,"
+            }
+            Does::Timeout => "a timeout",
+            Does::End => "the session's end",
+        };
+        let on = if self.on == OWN {
+            "its own ledger"
+        } else {
+            "another video's ledger"
+        };
+        let sess = match self.sess {
+            Sess::Open => "a session open",
+            Sess::Ended => "its session ended",
+            Sess::Never => "no session yet",
+        };
+        write!(f, "{does} on {on} ({sess})")
+    }
+}
+
+/// How long the clock alone moves, as an input: under a minute; a payment's 180 s; ten
+/// minutes; and a second past the longest period a seeder keeps anything for (its ban, a
+/// never-paid account, a debt).
+fn clock_spans<H: Harness>(h: &H) -> [u64; 4] {
+    let long = h.ban_ttl().max(h.account_ttl()).max(h.debt_ttl());
+    [59, 180, 600, long.as_secs() + 1]
+}
+
+/// Every input to a watcher, for every table that asks what may come meanwhile: each
+/// method of the [`Viewer`] trait that takes one ([`VIEWER_METHODS`]), in each of its
+/// kinds ([`Does`]), on the cell's own ledger and on another video's, with a session open,
+/// ended or never held; then the clock alone, for each span of [`clock_spans`]. A table
+/// runs them all: an input that cannot come ([`Input::fits`], [`World::bring`]) is skipped
+/// with its reason, and counted.
+fn inputs<H: Harness>(h: &H) -> Vec<Input> {
+    let mut does = vec![
+        Does::Sibling,
+        Does::QuoteTaken,
+        Does::QuoteRefused(Why::Price),
+        Does::QuoteRefused(Why::Window),
+        Does::QuoteRefused(Why::Mint),
+        Does::SecondQuote,
+        Does::HelloRefused,
+        Does::Request,
+        Does::RefusedRequest,
+        Does::Due,
+        Does::LastPay,
+        Does::Ack,
+        Does::Unavailable(Back::AtOnce),
+        Does::Unavailable(Back::Late),
+        Does::Unavailable(Back::Expired),
+        Does::Unavailable(Back::PartExpired),
+        Does::Timeout,
+        Does::End,
+    ];
+    does.extend(clock_spans(h).map(Does::Clock));
+    let methods: Vec<&str> = does.iter().filter_map(|d| d.method()).collect();
+    assert!(
+        VIEWER_METHODS
+            .iter()
+            .all(|m| methods.contains(m) != VIEWER_READS.contains(m))
+            && methods.iter().all(|m| VIEWER_METHODS.contains(m)),
+        "every method of the Viewer trait is an input of the list, but the two that only read \
+         the watcher, and each input calls a method of the trait"
+    );
+    let mut all = Vec::new();
+    for does in does {
+        if does.method().is_none() {
+            all.push(Input {
+                does,
+                on: OWN,
+                sess: Sess::Open,
+            });
+            continue;
+        }
+        for on in [OWN, OTHER] {
+            for sess in [Sess::Open, Sess::Ended, Sess::Never] {
+                all.push(Input { does, on, sess });
+            }
+        }
+    }
+    all
+}
+
+/// How a payment is made ([`MADE`]): due at half the window, ahead after a refusal, or at
+/// a session's end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Made {
+    Due,
+    Ahead,
+    Last,
+}
+
+/// What a standing holds of a payment of its own ledger's: nothing; one in flight on its
+/// live session; one whose proofs were found spent, awaiting a quote; one whose reclaim is
+/// incomplete, the mint down; or one a closed session left unsettled. The seeder has
+/// claimed the last two's proofs, or (`false`) has not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Holds {
+    Nothing,
+    InFlight(Made),
+    Awaiting,
+    Reclaiming(bool),
+    Unsettled(bool),
+}
+
+/// What the cell's own ledger has been through before: nothing but its session's quote;
+/// a payment acked on the session; a payment acked on an earlier session, the open one
+/// resuming the account; or credit held, a payment made ahead acked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Past {
+    Fresh,
+    Acked,
+    Resumed,
+    Credit,
+}
+
+/// What stopped the watcher: an unsolicited ack or `rej`, a dishonest quote or a `hello`
+/// refused `banned`, on the ledger named ([`OWN`] or [`THIRD`]); or, with its payment's
+/// answer, a `rej` with a code but `mint-unavailable`, its live session's 180 s with no
+/// answer, or an ack that does not match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    Ack(usize),
+    Rej(usize),
+    Quote(usize),
+    Banned(usize),
+    Refused,
+    Unanswered,
+    WrongAck,
+}
+
+/// A state a watcher's standing can hold: its own ledger the first the watcher made or one
+/// made for another video ([`LEDGERS`]), what that ledger has been through, the
+/// `mint-unavailable` tries used, what the standing holds of a payment, whether its own
+/// ledger holds a session, how many refusals license its next `due`, and what stopped it,
+/// if anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct State {
+    first: bool,
+    past: Past,
+    tries: u8,
+    holds: Holds,
+    open: bool,
+    licence: u8,
+    stop: Option<Stop>,
+}
+
+impl State {
+    /// Whether the stop came with the answer to the standing's payment.
+    fn stopped_by_its_answer(self) -> bool {
+        matches!(
+            self.stop,
+            Some(Stop::Refused | Stop::Unanswered | Stop::WrongAck)
+        )
+    }
+
+    /// Whether the state can come about: `Err` says why not.
+    fn fits(self) -> Result<(), &'static str> {
+        let by_answer = self.stopped_by_its_answer();
+        match self.holds {
+            Holds::InFlight(_) => {
+                if !self.open {
+                    return Err("a payment in flight is on a live session: its ledger holds one");
+                }
+                if self.tries == 3 {
+                    return Err("out of tries, the watcher makes no payment");
+                }
+                if by_answer {
+                    return Err("a stop that answers the payment leaves none in flight");
+                }
+                if matches!(self.stop, Some(Stop::Ack(OWN) | Stop::Rej(OWN))) {
+                    return Err("an ack or a rej on its session answers the payment in flight");
+                }
+            }
+            Holds::Unsettled(_) => {
+                if self.tries == 3 {
+                    return Err("out of tries, the watcher makes no payment");
+                }
+                if self.open && self.tries > 0 {
+                    return Err(
+                        "the new session's quote restores the tries, and nothing is paid over \
+                         the unsettled payment to use one",
+                    );
+                }
+                if by_answer {
+                    return Err("a stop that answers the payment comes on its live session");
+                }
+            }
+            Holds::Awaiting | Holds::Reclaiming(_) => {
+                if by_answer && self.tries == 3 {
+                    return Err("out of tries, the watcher makes no payment");
+                }
+            }
+            Holds::Nothing => {
+                if self.stop == Some(Stop::WrongAck) {
+                    return Err(
+                        "a payment a wrong ack refused is still to reclaim: an incomplete reclaim",
+                    );
+                }
+                if by_answer && self.tries == 3 {
+                    return Err("out of tries, the watcher makes no payment");
+                }
+            }
+        }
+        if self.licence > 0 && !self.open {
+            return Err("a request is refused on an open session");
+        }
+        match self.stop {
+            Some(Stop::Ack(OWN) | Stop::Rej(OWN)) if !self.open => {
+                Err("an unsolicited answer comes on an open session")
+            }
+            Some(Stop::Quote(OWN)) if self.open => {
+                Err("a quote on an open session is refused unread, dishonest or not")
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+impl std::fmt::Display for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ledger = if self.first { LEDGERS[0] } else { LEDGERS[1] };
+        let past = match self.past {
+            Past::Fresh => "",
+            Past::Acked => ", a payment acked on its session before",
+            Past::Resumed => ", on a resumed session",
+            Past::Credit => ", having held credit",
+        };
+        let holds = match self.holds {
+            Holds::Nothing => "no payment waiting on anything".to_owned(),
+            Holds::InFlight(made) => format!(
+                "a payment {} in flight on its live session",
+                match made {
+                    Made::Due => MADE[0],
+                    Made::Ahead => MADE[1],
+                    Made::Last => MADE[2],
+                }
+            ),
+            Holds::Awaiting => "a payment awaiting a quote, its proofs found spent".to_owned(),
+            Holds::Reclaiming(taken) => format!(
+                "a reclaim incomplete, the mint down{}",
+                if taken {
+                    " and its proofs claimed by the seeder"
+                } else {
+                    ""
+                }
+            ),
+            Holds::Unsettled(taken) => format!(
+                "a payment left unsettled by a closed session{}",
+                if taken {
+                    ", its proofs claimed by the seeder"
+                } else {
+                    ""
+                }
+            ),
+        };
+        let session = if self.open { "" } else { ", its session ended" };
+        let stop = match self.stop {
+            None => "not stopped".to_owned(),
+            Some(stop) => {
+                let on = |l: usize| {
+                    if l == OWN {
+                        "on its own ledger"
+                    } else {
+                        "on a third video's ledger"
+                    }
+                };
+                match stop {
+                    Stop::Ack(l) => format!("stopped by an unsolicited ack {}", on(l)),
+                    Stop::Rej(l) => format!("stopped by an unsolicited rej {}", on(l)),
+                    Stop::Quote(l) => format!("stopped by a dishonest quote {}", on(l)),
+                    Stop::Banned(l) => format!("stopped by a hello refused banned {}", on(l)),
+                    Stop::Refused => "stopped by its payment's refusal, underpaid".to_owned(),
+                    Stop::Unanswered => "stopped at its payment's 180 s with no answer".to_owned(),
+                    Stop::WrongAck => "stopped by an ack that does not match".to_owned(),
+                }
+            }
+        };
+        write!(
+            f,
+            "the standing {stop}, holding {holds}, {} of its tries used and {} refusals \
+             licensing its next due, {ledger}{past}{session}",
+            self.tries, self.licence
+        )
+    }
+}
+
+/// Every state a standing can hold, for every table: each ledger ([`LEDGERS`]), each past,
+/// zero to three tries used, each thing held of a payment (every way it is made,
+/// [`MADE`]), a session or none, zero to three refusals licensing, and each stop or none.
+/// A table takes the states its rule speaks of, and runs every input over each; a state
+/// that cannot come about ([`State::fits`]) is skipped with its reason, and counted.
+fn states() -> Vec<State> {
+    let holds = [
+        Holds::Nothing,
+        Holds::InFlight(Made::Due),
+        Holds::InFlight(Made::Ahead),
+        Holds::InFlight(Made::Last),
+        Holds::Awaiting,
+        Holds::Reclaiming(false),
+        Holds::Reclaiming(true),
+        Holds::Unsettled(false),
+        Holds::Unsettled(true),
+    ];
+    let stops = [
+        None,
+        Some(Stop::Ack(THIRD)),
+        Some(Stop::Rej(THIRD)),
+        Some(Stop::Quote(THIRD)),
+        Some(Stop::Banned(THIRD)),
+        Some(Stop::Ack(OWN)),
+        Some(Stop::Rej(OWN)),
+        Some(Stop::Quote(OWN)),
+        Some(Stop::Banned(OWN)),
+        Some(Stop::Refused),
+        Some(Stop::Unanswered),
+        Some(Stop::WrongAck),
+    ];
+    let mut all = Vec::new();
+    for first in [true, false] {
+        for past in [Past::Fresh, Past::Acked, Past::Resumed, Past::Credit] {
+            for tries in 0..=3 {
+                for holds in holds {
+                    for open in [true, false] {
+                        for licence in 0..=3 {
+                            for stop in stops {
+                                all.push(State {
+                                    first,
+                                    past,
+                                    tries,
+                                    holds,
+                                    open,
+                                    licence,
+                                    stop,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    all
+}
+
+/// One ledger of a table's watcher, and its video's account as the seeder keeps it: the
+/// suite plays the seeder there, and builds its quotes and acks from this.
+struct Led<V> {
+    v: V,
+    /// It holds a session.
+    open: bool,
+    /// Requests sent and not refused: what the seeder has served.
+    requested: u64,
+    acked: u64,
+    spent: u64,
+    /// A refusal licenses its next `due`.
+    licence: bool,
+    /// Its session's quoted window.
+    window: u64,
+}
+
+/// Where the standing's payment stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Live,
+    Unsettled,
+    Awaiting,
+    Reclaiming,
+}
+
+/// The standing's payment that is not settled or taken back yet.
+struct Hold {
+    by: usize,
+    pay: Pay,
+    amount: u64,
+    /// When it was sent, on the cell's clock.
+    sent: u64,
+    kind: Kind,
+    /// The seeder has claimed its proofs.
+    taken: bool,
+}
+
+/// How the seeder answers a payment in flight when a table brings it to an end: its honest
+/// ack, `mint-unavailable` with every proof taken back, or nothing for 180 s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    Acked,
+    Unavailable,
+    Unanswered,
+}
+
+/// What a cell needs beside its state: the session of the other video's ledger, whether the
+/// third video's holds one from the start, and whether the wallet pays with a proof of an
+/// older keyset in each payment.
+#[derive(Debug, Clone, Copy)]
+struct Need {
+    other: Sess,
+    third: bool,
+    older: bool,
+}
+
+/// A watcher in a state of [`states`], and what NFX-07 §3a says an honest one does from
+/// there: the tables' common ground. The suite plays the seeder, on three of its videos: it
+/// builds each quote from the account it keeps ([`Led`]), at 1 sat a chunk and windows of 4,
+/// 8 and 6, claims a payment's proofs where its seeder does ([`Harness::steal`]), and
+/// answers by hand. So a cell awaits nothing but the watcher's own calls, and the tables
+/// can run every input over every state. Every decision the watcher takes on the way is
+/// checked against what the rules require ([`World::decide`]), and what it reports of
+/// itself too ([`World::flags`]).
+struct World<'a, H: Harness> {
+    h: &'a H,
+    led: [Led<H::Viewer>; 3],
+    /// Seconds since the cell began.
+    now: u64,
+    stopped: bool,
+    /// `mint-unavailable` answers in a row.
+    used: u8,
+    held: Option<Hold>,
+    /// The mint is down.
+    down: bool,
+    older: bool,
+}
+
+/// The prices, and each ledger's quoted window, of a table's seeder ([`World`]): the three
+/// windows differ, so a watcher that takes one video's for another's pays at the wrong
+/// point.
+const TABLE_PRICE: u64 = 1;
+const TABLE_WINDOWS: [u64; 3] = [4, 8, 6];
+
+impl<'a, H: Harness> World<'a, H> {
+    fn new(h: &'a H, first: bool, older: bool) -> Self {
+        let made = h.viewer(TABLE_PRICE);
+        let (own, other) = if first {
+            let other = made.sibling();
+            (made, other)
+        } else {
+            (made.sibling(), made)
+        };
+        let third = own.sibling();
+        let led = |v, window| Led {
+            v,
+            open: false,
+            requested: 0,
+            acked: 0,
+            spent: 0,
+            licence: false,
+            window,
+        };
+        Self {
+            h,
+            led: [
+                led(own, TABLE_WINDOWS[OWN]),
+                led(other, TABLE_WINDOWS[OTHER]),
+                led(third, TABLE_WINDOWS[THIRD]),
+            ],
+            now: 0,
+            stopped: false,
+            used: 0,
+            held: None,
+            down: false,
+            older,
+        }
+    }
+
+    /// The seeder's honest quote for ledger `l`: its account as it stands.
+    fn quote(&self, l: usize) -> Quote {
+        let led = &self.led[l];
+        Quote {
+            price_per_chunk: TABLE_PRICE,
+            mints: vec![self.h.mint()],
+            window: led.window,
+            served: led.requested,
+            accepted_upto: led.acked,
+            spent_total: led.spent,
+        }
+    }
+
+    /// A new session on ledger `l`: its honest quote, equal to the ledger, is taken, and
+    /// restores the tries.
+    fn open(&mut self, l: usize) -> Result<(), String> {
+        let quote = self.quote(l);
+        let taken = self.led[l].v.quote(&quote);
+        ensure!(
+            taken.is_ok(),
+            "a new session's honest quote, equal to the ledger, is taken, stopped or not, \
+             whatever the standing holds: {taken:?}"
+        );
+        self.led[l].open = true;
+        self.used = 0;
+        Ok(())
+    }
+
+    /// A new session on the held payment's ledger whose quote shows the payment, which the
+    /// seeder has: it settles it into the ledger, and restores the tries.
+    fn show(&mut self) -> Result<(), String> {
+        let Some(hold) = self.held.take() else {
+            return Ok(());
+        };
+        let l = hold.by;
+        if self.led[l].open {
+            self.end(l);
+        }
+        let mut quote = self.quote(l);
+        quote.accepted_upto = hold.pay.upto_chunk;
+        quote.spent_total += hold.amount;
+        let taken = self.led[l].v.quote(&quote);
+        ensure!(
+            taken.is_ok(),
+            "a new session's quote that shows the payment the seeder has, in both fields, \
+             settles it into the ledger and is taken: {taken:?}"
+        );
+        let led = &mut self.led[l];
+        (led.acked, led.spent, led.open) = (quote.accepted_upto, quote.spent_total, true);
+        self.used = 0;
+        Ok(())
+    }
+
+    fn request(&mut self, l: usize, n: u64) {
+        for _ in 0..n {
+            self.led[l].v.requested();
+            self.led[l].requested += 1;
+        }
+    }
+
+    /// Requests on ledger `l` until it owes `n` chunks.
+    fn owe(&mut self, l: usize, n: u64) {
+        let led = &self.led[l];
+        let short = (led.acked + n).saturating_sub(led.requested);
+        self.request(l, short);
+    }
+
+    fn refuse(&mut self, l: usize) {
+        self.led[l].v.requested();
+        self.led[l].v.refused();
+        self.led[l].licence = true;
+    }
+
+    fn end(&mut self, l: usize) {
+        self.led[l].v.end();
+        self.led[l].open = false;
+        self.led[l].licence = false;
+        if let Some(hold) = &mut self.held
+            && hold.by == l
+            && hold.kind == Kind::Live
+        {
+            hold.kind = Kind::Unsettled;
+        }
+    }
+
+    fn tick(&mut self, secs: u64) {
+        self.h.advance(Duration::from_secs(secs));
+        self.now += secs;
+    }
+
+    /// Move the clock to `at` seconds from the cell's start, if it is not there yet.
+    fn tick_to(&mut self, at: u64) {
+        if at > self.now {
+            self.tick(at - self.now);
+        }
+    }
+
+    fn mint(&mut self, down: bool) {
+        self.h.mint_outage(down);
+        self.down = down;
+    }
+
+    /// What the watcher reports of itself, on every ledger, is what the rules make it:
+    /// stopped, or a payment awaiting a quote, it pays the seeder nothing; and it awaits a
+    /// quote, unless it has stopped, on the ledger whose payment was found spent, and on
+    /// every ledger once the three tries are used.
+    fn flags(&self, what: &str) -> Result<(), String> {
+        let awaiting = self
+            .held
+            .as_ref()
+            .filter(|hold| hold.kind == Kind::Awaiting);
+        for (l, led) in self.led.iter().enumerate() {
+            let stopped = self.stopped || awaiting.is_some();
+            ensure!(
+                led.v.stopped() == stopped,
+                "{what}: nothing undoes a stop, and nothing but a stop or a payment found \
+                 spent makes one: the watcher pays this seeder nothing is {stopped}, and \
+                 ledger {l} says {}",
+                led.v.stopped()
+            );
+            let waits =
+                !self.stopped && (awaiting.is_some_and(|hold| hold.by == l) || self.used >= 3);
+            ensure!(
+                led.v.awaiting_quote() == waits,
+                "{what}: a watcher awaits a quote with its three tries used or its own \
+                 payment found spent, and none once it has stopped: that is {waits}, and \
+                 ledger {l} says {}",
+                led.v.awaiting_quote()
+            );
+        }
+        Ok(())
+    }
+
+    /// The seeder cannot claim `token`'s proofs: the watcher took them back.
+    async fn back(&self, token: &str, what: &str) -> Result<(), String> {
+        ensure!(
+            self.h.claimed_all(token).await && !self.h.steal(token).await,
+            "{what}: the watcher took the payment's proofs back, and the seeder cannot claim \
+             them"
+        );
+        Ok(())
+    }
+
+    /// The standing's payment, in flight or left unsettled and not claimed by the seeder,
+    /// is reclaimed by nothing before its 180 s.
+    async fn intact(&self, what: &str) -> Result<(), String> {
+        if let Some(hold) = &self.held
+            && matches!(hold.kind, Kind::Live | Kind::Unsettled)
+            && !hold.taken
+        {
+            ensure!(
+                !self.h.claimed_any(&hold.pay.token).await,
+                "{what}: a payment's 180 s count from its own sending, and nothing but its \
+                 answer ends them: unanswered {} s after it was sent, it is not reclaimed",
+                self.now - hold.sent
+            );
+        }
+        Ok(())
+    }
+
+    /// What a `due` or a `last_pay` first catches up on: an incomplete reclaim is finished
+    /// once the mint can serve it, and a closed session's payment is reclaimed once it is
+    /// 180 s old. The payment whose proofs come back, if one does.
+    fn caught_up(&mut self) -> Option<Hold> {
+        let hold = self.held.as_mut()?;
+        let comes = match hold.kind {
+            Kind::Reclaiming => true,
+            Kind::Unsettled => self.now >= hold.sent + 180,
+            Kind::Live | Kind::Awaiting => false,
+        };
+        if !comes {
+            return None;
+        }
+        if self.down {
+            hold.kind = Kind::Reclaiming;
+            None
+        } else if hold.taken {
+            hold.kind = Kind::Awaiting;
+            None
+        } else {
+            self.held.take()
+        }
+    }
+
+    /// What NFX-07 §3a has ledger `l` pay now, by `due` or (`last`) by `last_pay`: the
+    /// chunk it pays up to, if it pays, and the rule that says so.
+    fn owes(&mut self, l: usize, last: bool) -> (Option<u64>, &'static str) {
+        if !self.led[l].open {
+            return (None, "with no session's quote a ledger pays nothing");
+        }
+        let licensed = !last && std::mem::take(&mut self.led[l].licence);
+        if self.stopped {
+            return (
+                None,
+                "nothing undoes a stop, and a stopped watcher pays nothing, at a session's end \
+                 and ahead after a refusal included",
+            );
+        }
+        if let Some(hold) = &self.held {
+            return (
+                None,
+                match hold.kind {
+                    Kind::Live | Kind::Unsettled => {
+                        "one payment is in flight toward a seeder at a time, across its videos, \
+                         until it is answered or its 180 s are up"
+                    }
+                    Kind::Awaiting => {
+                        "a payment awaits a quote: nothing is paid until a quote shows it"
+                    }
+                    Kind::Reclaiming => {
+                        "a reclaim is incomplete: nothing is paid until it completes"
+                    }
+                },
+            );
+        }
+        if self.used >= 3 {
+            return (
+                None,
+                "after three mint-unavailable answers in a row nothing is paid until an ack or \
+                 a new session's accepted quote, and nothing else restores a try",
+            );
+        }
+        let led = &self.led[l];
+        let owed = led.requested.saturating_sub(led.acked);
+        let credit = led.acked.saturating_sub(led.requested);
+        let ahead = if licensed {
+            (led.window / 2).saturating_sub(credit)
+        } else {
+            0
+        };
+        let point = if last { 1 } else { led.window.div_ceil(2) };
+        if ahead == 0 && owed < point {
+            let why = if licensed {
+                "a refusal licenses half its session's window ahead less the credit held, and \
+                 that is nothing here"
+            } else if last {
+                "at a session's end it pays for the chunks owed, and none is"
+            } else {
+                "it pays once the unpaid count reaches half its own session's window, and \
+                 nothing ahead but as the first due after a refusal on its ledger"
+            };
+            return (None, why);
+        }
+        let why = if ahead > 0 {
+            "a refusal licenses the due that follows it on its ledger, whatever came between \
+             but the session's end: it pays for what it owes and half its own session's \
+             window ahead, less the credit held"
+        } else if last {
+            "at a session's end it pays for every chunk owed, and nothing ahead"
+        } else {
+            "it pays at half its own session's window for the chunks requested, and nothing \
+             ahead"
+        };
+        (Some(led.requested.max(led.acked) + ahead), why)
+    }
+
+    /// Ledger `l` decides what to pay, by `due` or (`last`) by `last_pay`: it catches up
+    /// first, and pays what the rules have it pay ([`World::owes`]), no more and no less.
+    async fn decide(&mut self, l: usize, last: bool, what: &str) -> Result<Option<Pay>, String> {
+        let call = if last { "last_pay" } else { "due" };
+        let back = self.caught_up();
+        let (upto, why) = self.owes(l, last);
+        if self.older && upto.is_some() {
+            self.h.fund_older_keyset(1);
+        }
+        let paid = if last {
+            self.led[l].v.last_pay().await
+        } else {
+            self.led[l].v.due().await
+        };
+        if self.older {
+            self.h.fund_older_keyset(0);
+        }
+        let paid = match paid {
+            Ok(paid) => paid,
+            Err(e) => return Err(format!("{what}: {call} on ledger {l} answers: {e}")),
+        };
+        let got = paid.as_ref().map(|pay| pay.upto_chunk);
+        ensure!(
+            got == upto,
+            "{what}: {call} on ledger {l}: {why}: it pays up to {upto:?}, and the watcher paid \
+             up to {got:?}"
+        );
+        if let Some(hold) = back {
+            self.back(&hold.pay.token, what).await?;
+        }
+        if let Some(pay) = &paid {
+            let led = &self.led[l];
+            self.held = Some(Hold {
+                by: l,
+                pay: pay.clone(),
+                amount: (pay.upto_chunk - led.acked) * TABLE_PRICE,
+                sent: self.now,
+                kind: Kind::Live,
+                taken: false,
+            });
+        }
+        self.intact(what).await?;
+        Ok(paid)
+    }
+
+    /// A payment by ledger `l`, which the cell's state needs it to make.
+    async fn pay(&mut self, l: usize, last: bool, what: &str) -> Result<(), String> {
+        let paid = self.decide(l, last, what).await?;
+        ensure!(paid.is_some(), "{what}: ledger {l} makes a payment");
+        Ok(())
+    }
+
+    /// The seeder claims the proofs of the standing's payment.
+    async fn claim(&mut self, what: &str) -> Result<(), String> {
+        if let Some(hold) = &mut self.held
+            && !hold.taken
+        {
+            ensure!(
+                self.h.steal(&hold.pay.token).await,
+                "{what}: the seeder claims the payment's proofs"
+            );
+            hold.taken = true;
+        }
+        Ok(())
+    }
+
+    /// The seeder takes the payment in flight and acks it honestly: the ack is taken,
+    /// stopped or not, settles the payment into the ledger, and restores the tries.
+    async fn ack(&mut self, what: &str) -> Result<(), String> {
+        self.claim(what).await?;
+        let Some(hold) = self.held.take() else {
+            return Ok(());
+        };
+        let led = &mut self.led[hold.by];
+        let ack = Ack {
+            accepted_upto: hold.pay.upto_chunk,
+            spent_total: led.spent + hold.amount,
+        };
+        let taken = led.v.ack(&ack);
+        ensure!(
+            taken.is_ok(),
+            "{what}: the payment in flight is still the one its session's ack answers: the \
+             seeder's honest ack is taken, stopped or not: {taken:?}"
+        );
+        (led.acked, led.spent) = (ack.accepted_upto, ack.spent_total);
+        self.used = 0;
+        Ok(())
+    }
+
+    /// The seeder answers the payment in flight `mint-unavailable`, and its reclaim ends
+    /// as `back` says. Each such answer uses a try, however its reclaim ends.
+    async fn unavailable(&mut self, back: Back, what: &str) -> Result<(), String> {
+        let Some(hold) = self.held.take() else {
+            return Ok(());
+        };
+        match back {
+            Back::AtOnce => {}
+            Back::Late => self.mint(true),
+            Back::Expired => self.h.expire_keyset_of(&hold.pay.token, usize::MAX),
+            Back::PartExpired => self.h.expire_keyset_of(&hold.pay.token, 1),
+        }
+        let rej = Rej {
+            code: RejCode::MintUnavailable,
+            detail: None,
+        };
+        self.led[hold.by].v.rej(&rej).await;
+        self.used += 1;
+        let token = hold.pay.token.clone();
+        match back {
+            Back::AtOnce if hold.taken => {
+                self.held = Some(Hold {
+                    kind: Kind::Awaiting,
+                    ..hold
+                });
+            }
+            Back::AtOnce => self.back(&token, what).await?,
+            Back::Late => {
+                self.held = Some(Hold {
+                    kind: Kind::Reclaiming,
+                    ..hold
+                });
+            }
+            Back::Expired | Back::PartExpired => ensure!(
+                !self.h.steal(&token).await,
+                "{what}: of a payment refused mint-unavailable, its proofs lost to their \
+                 keyset's expiry in whole or in part, the seeder can claim nothing"
+            ),
+        }
+        Ok(())
+    }
+
+    /// A timeout on ledger `l`'s session: before 180 s from sending its payment, or with
+    /// none on the session, nothing is that call's; from then the watcher reclaims the
+    /// payment and stops, whatever its reclaim finds.
+    async fn timeout(&mut self, l: usize, what: &str) -> Result<(), String> {
+        self.led[l].v.timeout().await;
+        let comes = self.held.as_ref().is_some_and(|hold| {
+            hold.by == l && hold.kind == Kind::Live && self.now >= hold.sent + 180
+        });
+        if !comes {
+            return self.intact(what).await;
+        }
+        self.stopped = true;
+        if self.down {
+            if let Some(hold) = &mut self.held {
+                hold.kind = Kind::Reclaiming;
+            }
+        } else if let Some(hold) = self.held.take() {
+            if hold.taken {
+                self.held = Some(Hold {
+                    kind: Kind::Awaiting,
+                    ..hold
+                });
+            } else {
+                ensure!(
+                    self.h.claimed_all(&hold.pay.token).await
+                        && !self.h.steal(&hold.pay.token).await,
+                    "{what}: a live session's payment, unanswered, is reclaimed 180 s after it \
+                     was sent, whatever came since: at a timeout {} s after sending the \
+                     watcher has its proofs back",
+                    self.now - hold.sent
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Stop the watcher by `stop`, on a ledger with no payment in flight.
+    async fn stop(&mut self, stop: Stop, what: &str) -> Result<(), String> {
+        match stop {
+            Stop::Ack(l) => {
+                let led = &mut self.led[l];
+                let ack = Ack {
+                    accepted_upto: led.acked,
+                    spent_total: led.spent,
+                };
+                ensure!(
+                    led.v.ack(&ack).is_err(),
+                    "{what}: an unsolicited ack is refused"
+                );
+            }
+            Stop::Rej(l) => {
+                let rej = Rej {
+                    code: RejCode::BadSession,
+                    detail: None,
+                };
+                self.led[l].v.rej(&rej).await;
+            }
+            Stop::Quote(l) => {
+                let mut lie = self.quote(l);
+                lie.spent_total += 1000;
+                ensure!(
+                    self.led[l].v.quote(&lie).is_err(),
+                    "{what}: a quote that claims more spent than the ledger holds is refused"
+                );
+            }
+            Stop::Banned(l) => self.led[l].v.hello_refused(&Rej {
+                code: RejCode::Banned,
+                detail: None,
+            }),
+            Stop::Refused | Stop::Unanswered | Stop::WrongAck => {}
+        }
+        self.stopped = true;
+        Ok(())
+    }
+
+    /// Bring `input` about. `Ok(Err(why))`: it cannot come in the state the watcher is in.
+    async fn bring(
+        &mut self,
+        input: Input,
+        what: &str,
+    ) -> Result<Result<(), &'static str>, String> {
+        if let Err(why) = input.fits() {
+            return Ok(Err(why));
+        }
+        let l = input.on;
+        if input.does.method().is_some() && self.led[l].open != (input.sess == Sess::Open) {
+            return Ok(Err(if self.led[l].open {
+                "its own ledger holds a session in this state"
+            } else {
+                "its own ledger holds no session in this state"
+            }));
+        }
+        let live = |hold: &Option<Hold>| {
+            hold.as_ref()
+                .is_some_and(|h| h.by == l && h.kind == Kind::Live)
+        };
+        match input.does {
+            Does::Sibling => {
+                let _made = self.led[l].v.sibling();
+            }
+            Does::QuoteTaken => self.open(l)?,
+            Does::QuoteRefused(why) => {
+                let mut quote = self.quote(l);
+                match why {
+                    Why::Price => quote.price_per_chunk = TABLE_PRICE + 1,
+                    Why::Window => quote.window = self.h.window_ceiling() + 1,
+                    Why::Mint => quote.mints = vec![format!("{}/", self.h.mint())],
+                }
+                ensure!(
+                    self.led[l].v.quote(&quote).is_err(),
+                    "{what}: the quote is refused"
+                );
+            }
+            Does::SecondQuote => {
+                let quote = self.quote(l);
+                ensure!(
+                    self.led[l].v.quote(&quote).is_err(),
+                    "{what}: one quote per session, so a second is refused"
+                );
+            }
+            Does::HelloRefused => {
+                for code in hello_refusal_codes() {
+                    self.led[l].v.hello_refused(&Rej { code, detail: None });
+                }
+            }
+            Does::Request => self.request(l, 1),
+            Does::RefusedRequest => self.refuse(l),
+            Does::Due => {
+                self.decide(l, false, what).await?;
+            }
+            Does::LastPay => {
+                self.decide(l, true, what).await?;
+            }
+            Does::Ack => {
+                if !live(&self.held) {
+                    return Ok(Err(
+                        "no payment of the ledger's is in flight on its session",
+                    ));
+                }
+                self.ack(what).await?;
+            }
+            Does::Unavailable(back) => {
+                if !live(&self.held) {
+                    return Ok(Err(
+                        "no payment of the ledger's is in flight on its session",
+                    ));
+                }
+                if back == Back::PartExpired && !self.older {
+                    return Ok(Err("the payment holds no proof of an older keyset"));
+                }
+                self.unavailable(back, what).await?;
+            }
+            Does::Timeout => self.timeout(l, what).await?,
+            Does::End => self.end(l),
+            Does::Clock(secs) => self.tick(secs),
+        }
+        self.intact(what).await?;
+        Ok(Ok(()))
+    }
+
+    /// Bring what the standing holds to its end, so that what the watcher does after it
+    /// shows: a payment in flight is answered as `ending` says; one the seeder has is
+    /// shown by a new session's quote; a reclaim is finished once the mint is back; and a
+    /// closed session's payment is reclaimed 180 s after it was sent. Whether a payment in
+    /// flight was answered.
+    async fn resolve(&mut self, ending: Ending, what: &str) -> Result<bool, String> {
+        let mut answered = false;
+        for _ in 0..4 {
+            let Some(hold) = &self.held else {
+                break;
+            };
+            let (by, sent, taken, kind) = (hold.by, hold.sent, hold.taken, hold.kind);
+            match kind {
+                Kind::Live => {
+                    answered = true;
+                    match ending {
+                        Ending::Acked => self.ack(what).await?,
+                        Ending::Unavailable => self.unavailable(Back::AtOnce, what).await?,
+                        Ending::Unanswered => {
+                            self.tick_to(sent + 180);
+                            self.timeout(by, what).await?;
+                        }
+                    }
+                }
+                Kind::Awaiting => self.show()?,
+                Kind::Unsettled if taken => self.show()?,
+                // A `last_pay` catches up as a `due` does, and neither uses nor ends a
+                // refusal's licence.
+                Kind::Unsettled => {
+                    self.tick_to(sent + 180);
+                    self.decide(by, true, what).await?;
+                }
+                // A quote that shows a payment being reclaimed, which the seeder has, settles
+                // it and cancels the reclaim; or the reclaim runs first, the mint back, and
+                // finds its proofs spent.
+                Kind::Reclaiming if taken && ending == Ending::Acked => {
+                    answered = true;
+                    self.show()?;
+                    self.mint(false);
+                }
+                Kind::Reclaiming => {
+                    answered |= taken;
+                    self.mint(false);
+                    self.decide(by, true, what).await?;
+                }
+            }
+        }
+        ensure!(
+            self.held.is_none(),
+            "{what}: what the standing held is settled or taken back"
+        );
+        Ok(answered)
+    }
+
+    /// The watcher in `state`.
+    async fn build(h: &'a H, state: State, need: Need) -> Result<Self, String> {
+        let what = "bringing the state about";
+        let mut w = Self::new(h, state.first, need.older);
+        // The other video's ledger owes half its window on its open session, so that a
+        // decision there pays unless the rules keep it from paying; or one chunk on a
+        // session that has ended, which its next one resumes.
+        if need.other != Sess::Never {
+            w.open(OTHER)?;
+            if need.other == Sess::Ended {
+                w.request(OTHER, 1);
+                w.end(OTHER);
+            } else {
+                w.owe(OTHER, TABLE_WINDOWS[OTHER] / 2);
+            }
+        }
+        if need.third {
+            w.open(THIRD)?;
+        }
+        w.open(OWN)?;
+        match state.past {
+            Past::Fresh => {}
+            Past::Acked | Past::Resumed => {
+                w.owe(OWN, 2);
+                w.pay(OWN, false, what).await?;
+                w.ack(what).await?;
+                if state.past == Past::Resumed {
+                    w.end(OWN);
+                    w.open(OWN)?;
+                }
+            }
+            Past::Credit => {
+                w.refuse(OWN);
+                w.pay(OWN, false, what).await?;
+                w.ack(what).await?;
+                // The credit is used up: the ledger has held it, and holds none now.
+                w.owe(OWN, 0);
+            }
+        }
+        // The tries used before the payment the state holds: where that payment's own
+        // mint-unavailable answer is to leave it found spent or its reclaim incomplete, it
+        // uses the last of them.
+        let by_answer = state.stopped_by_its_answer();
+        let waits = matches!(state.holds, Holds::Awaiting | Holds::Reclaiming(_));
+        let last_try = waits && !by_answer && state.tries > 0;
+        for _ in 0..state.tries - u8::from(last_try) {
+            w.owe(OWN, 2);
+            w.pay(OWN, false, what).await?;
+            w.unavailable(Back::AtOnce, what).await?;
+        }
+        let underpaid = Rej {
+            code: RejCode::Underpaid,
+            detail: None,
+        };
+        match state.holds {
+            Holds::Nothing => match state.stop {
+                Some(Stop::Refused) => {
+                    w.owe(OWN, 2);
+                    w.pay(OWN, false, what).await?;
+                    w.led[OWN].v.rej(&underpaid).await;
+                    if let Some(hold) = w.held.take() {
+                        w.back(&hold.pay.token, what).await?;
+                    }
+                    w.stopped = true;
+                }
+                Some(Stop::Unanswered) => {
+                    w.owe(OWN, 2);
+                    w.pay(OWN, false, what).await?;
+                    w.tick(180);
+                    w.timeout(OWN, what).await?;
+                }
+                _ => {}
+            },
+            Holds::InFlight(made) => match made {
+                Made::Due => {
+                    w.owe(OWN, 2);
+                    w.pay(OWN, false, what).await?;
+                }
+                Made::Ahead => {
+                    w.refuse(OWN);
+                    w.pay(OWN, false, what).await?;
+                }
+                Made::Last => {
+                    w.owe(OWN, 1);
+                    w.pay(OWN, true, what).await?;
+                }
+            },
+            Holds::Unsettled(taken) => {
+                w.owe(OWN, 2);
+                w.pay(OWN, false, what).await?;
+                if taken {
+                    w.claim(what).await?;
+                }
+                w.end(OWN);
+            }
+            Holds::Awaiting | Holds::Reclaiming(_) => {
+                w.owe(OWN, 2);
+                w.pay(OWN, false, what).await?;
+                if matches!(state.holds, Holds::Awaiting | Holds::Reclaiming(true)) {
+                    w.claim(what).await?;
+                }
+                if state.holds != Holds::Awaiting {
+                    w.mint(true);
+                }
+                let kind = if state.holds == Holds::Awaiting {
+                    Kind::Awaiting
+                } else {
+                    Kind::Reclaiming
+                };
+                match state.stop {
+                    Some(Stop::Refused) => {
+                        w.led[OWN].v.rej(&underpaid).await;
+                        if let Some(hold) = &mut w.held {
+                            hold.kind = kind;
+                        }
+                        w.stopped = true;
+                    }
+                    Some(Stop::Unanswered) => {
+                        w.tick(180);
+                        w.timeout(OWN, what).await?;
+                    }
+                    Some(Stop::WrongAck) => {
+                        let wrong = Ack {
+                            accepted_upto: w.led[OWN].acked + 1000,
+                            spent_total: 0,
+                        };
+                        ensure!(
+                            w.led[OWN].v.ack(&wrong).is_err(),
+                            "{what}: an ack that does not match is refused"
+                        );
+                        if let Some(hold) = &mut w.held {
+                            hold.kind = Kind::Reclaiming;
+                        }
+                        w.stopped = true;
+                        // The payment it refused is reclaimed by the next catch-up.
+                        w.decide(OWN, false, what).await?;
+                    }
+                    _ if state.tries > 0 => {
+                        let rej = Rej {
+                            code: RejCode::MintUnavailable,
+                            detail: None,
+                        };
+                        w.led[OWN].v.rej(&rej).await;
+                        w.used += 1;
+                        if let Some(hold) = &mut w.held {
+                            hold.kind = kind;
+                        }
+                    }
+                    _ => {
+                        // Its connection drops, and its reclaim at 180 s finds it so.
+                        w.end(OWN);
+                        w.tick(180);
+                        w.decide(OWN, false, what).await?;
+                    }
+                }
+                ensure!(
+                    w.held.as_ref().is_some_and(|hold| hold.kind == kind),
+                    "{what}: the payment is found spent, or its reclaim incomplete"
+                );
+            }
+        }
+        if state.open && !w.led[OWN].open {
+            w.open(OWN)?;
+        } else if !state.open && w.led[OWN].open {
+            w.end(OWN);
+        }
+        for _ in 0..state.licence {
+            w.refuse(OWN);
+        }
+        if let Some(stop) = state.stop {
+            w.stop(stop, what).await?;
+        }
+        ensure!(
+            w.used == state.tries && w.stopped == state.stop.is_some(),
+            "{what}: {} tries used and stopped {}",
+            w.used,
+            w.stopped
+        );
+        w.flags(what)?;
+        Ok(w)
+    }
+}
+
+/// What a table ran: its cells, and those skipped, by the reason each could not come
+/// about.
+#[derive(Default)]
+struct Tally {
+    ran: usize,
+    skipped: Vec<(&'static str, usize)>,
+}
+
+impl Tally {
+    fn skip(&mut self, why: &'static str) {
+        match self.skipped.iter_mut().find(|(w, _)| *w == why) {
+            Some(n) => n.1 += 1,
+            None => self.skipped.push((why, 1)),
+        }
+    }
+
+    /// Take one cell's end: it ran, or was skipped for a reason. A cell that failed a check
+    /// fails its table there: `rule` is the table's, `at` says the cell's input and state,
+    /// and the cell what it required.
+    fn take<T>(
+        &mut self,
+        rule: &str,
+        cell: Result<Result<T, &'static str>, String>,
+        at: impl FnOnce() -> String,
+    ) {
+        match cell {
+            Ok(Ok(_)) => self.ran += 1,
+            Ok(Err(why)) => self.skip(why),
+            Err(what) => panic!("{rule}: {}: {what}", at()),
+        }
+    }
+
+    /// The table's end: it ran as many cells as `cells` says, and skipped as many, each
+    /// for a reason it names, so a cell that stops running is seen here.
+    fn ends(&self, rule: &str, cells: (usize, usize)) {
+        let skipped: usize = self.skipped.iter().map(|(_, n)| n).sum();
+        assert_eq!(
+            (self.ran, skipped),
+            cells,
+            "{rule}: the table runs every input over every state its rule speaks of, and \
+             skips only what cannot come about, each for its reason: {:?}",
+            self.skipped
+        );
+    }
+}
+
+/// What a cell needs for `input` in `state` ([`Need`]): the other video's session as the
+/// input has it, and the third video's where the state's stop comes on one or `third`.
+fn need_for(state: State, input: Input, third: bool) -> Need {
+    Need {
+        other: if input.on == OTHER && input.does.method().is_some() {
+            input.sess
+        } else {
+            Sess::Never
+        },
+        third: third || matches!(state.stop, Some(Stop::Ack(THIRD) | Stop::Rej(THIRD))),
+        older: input.does == Does::Unavailable(Back::PartExpired),
+    }
+}
+
+/// Whether `input` can come in `state`, by what the state says of its own ledger, before
+/// the state is brought about: `Err` says why not ([`Input::fits`]; and [`World::bring`]
+/// refuses the same once it is).
+fn comes_in(state: State, input: Input) -> Result<(), &'static str> {
+    input.fits()?;
+    if input.does.method().is_none() {
+        return Ok(());
+    }
+    if input.on == OWN && (input.sess == Sess::Open) != state.open {
+        return Err(if state.open {
+            "its own ledger holds a session in this state"
+        } else {
+            "its own ledger holds no session in this state"
+        });
+    }
+    let in_flight = input.on == OWN && matches!(state.holds, Holds::InFlight(_));
+    if matches!(input.does, Does::Ack | Does::Unavailable(_)) && !in_flight {
+        return Err("no payment of the ledger's is in flight on its session");
+    }
+    Ok(())
+}
+
+/// Run `cell` over every input of [`inputs`] in every state of [`states`] the table
+/// `takes`, with each [`Ending`] of `endings` where a payment in flight is answered, and
+/// tally what ran.
+macro_rules! table {
+    ($h:expr, $tally:expr, $rule:expr, $takes:expr, $endings:expr, $cell:ident) => {{
+        let every = inputs($h);
+        for state in states() {
+            if !$takes(&state) {
+                continue;
+            }
+            if let Err(why) = state.fits() {
+                $tally.skip(why);
+                continue;
+            }
+            for &input in &every {
+                if let Err(why) = comes_in(state, input) {
+                    $tally.skip(why);
+                    continue;
+                }
+                for ending in $endings {
+                    let cell = $cell($h, state, input, ending).await;
+                    // What a cell may leave: the mint down, the wallets holding older proofs.
+                    $h.mint_outage(false);
+                    $h.fund_older_keyset(0);
+                    let answered = matches!(cell, Ok(Ok(true)));
+                    $tally.take($rule, cell, || format!("{input}, with {state}"));
+                    if !answered {
+                        break;
+                    }
+                }
+            }
+        }
+    }};
+}
+
+/// Nothing undoes a stop (NFX-07 §3a), whatever the standing holds when it comes and
+/// whatever comes after it: every input of [`inputs`], in every stopped state of
+/// [`states`]. The stop is by each cause, on the cell's own ledger or a third video's; the
+/// standing holds nothing, a payment in flight on its live session (made each way, on a
+/// first or a resumed session), one awaiting a quote, an incomplete reclaim or a closed
+/// session's payment; none, some or all of its tries are used, and a refusal may license
+/// its next `due`. The input comes 60 s later. After it the watcher has stopped, on every
+/// ledger, and awaits no quote; it pays nothing before what it holds comes to its end
+/// ([`World::resolve`], a payment in flight answered each way of [`Ending`]), nothing after
+/// it on a session with chunks owed, by `due` or by `last_pay`, and nothing on the session
+/// after that, whose honest quote, equal to its ledger as the seeder's account stands, it
+/// takes.
+///
+/// The table is run in two parts, by the ledger the cell is about ([`LEDGERS`]): this one is
+/// the first the watcher made.
+pub async fn nothing_undoes_a_stop_on_its_first_ledger_whatever_comes<H: Harness>(h: &H) {
+    nothing_undoes_a_stop(h, true, (34_215, 37_166)).await;
+}
+
+/// [`nothing_undoes_a_stop_on_its_first_ledger_whatever_comes`], on a ledger the watcher
+/// made for another video.
+pub async fn nothing_undoes_a_stop_on_another_videos_ledger_whatever_comes<H: Harness>(h: &H) {
+    nothing_undoes_a_stop(h, false, (34_215, 37_166)).await;
+}
+
+async fn nothing_undoes_a_stop<H: Harness>(h: &H, first: bool, cells: (usize, usize)) {
+    let rule = "nothing undoes a stop";
+    let mut tally = Tally::default();
+    let takes = |s: &State| {
+        s.first == first
+            && s.stop.is_some()
+            && (s.past == Past::Fresh
+                || (s.past == Past::Resumed && matches!(s.holds, Holds::InFlight(_))))
+            && (s.licence == 0 || (s.licence == 1 && s.tries == 0))
+    };
+    let endings = [Ending::Acked, Ending::Unavailable, Ending::Unanswered];
+    table!(h, tally, rule, takes, endings, a_stop_holds);
+    tally.ends(rule, cells);
+}
+
+/// One cell of [`nothing_undoes_a_stop`]. Whether a payment in flight was answered
+/// `ending`'s way.
+async fn a_stop_holds<H: Harness>(
+    h: &H,
+    state: State,
+    input: Input,
+    ending: Ending,
+) -> Result<Result<bool, &'static str>, String> {
+    let mut w = World::build(h, state, need_for(state, input, false)).await?;
+    w.tick(60);
+    if let Err(why) = w.bring(input, "as it comes").await? {
+        return Ok(Err(why));
+    }
+    w.flags("after it")?;
+    let before = "after it, before what the standing holds is settled or taken back";
+    w.decide(OWN, false, before).await?;
+    w.decide(OWN, true, before).await?;
+    let answered = w
+        .resolve(ending, "as what the standing holds comes to its end")
+        .await?;
+    let after = "once what the standing held is settled or taken back";
+    w.flags(after)?;
+    if !w.led[OWN].open {
+        w.open(OWN)?;
+    }
+    w.owe(OWN, 2);
+    w.decide(OWN, false, after).await?;
+    w.decide(OWN, true, after).await?;
+    let next = "on the next session, whose honest quote equals the ledger";
+    w.end(OWN);
+    w.open(OWN)?;
+    w.decide(OWN, false, next).await?;
+    w.decide(OWN, true, next).await?;
+    w.flags(next)?;
+    Ok(Ok(answered))
+}
+
+/// A payment's 180 s count from its own sending, and until they are up or it is answered
+/// it holds the standing's one place (NFX-07 §3a), whatever comes meanwhile: every input
+/// of [`inputs`], over every state of [`states`] with a payment in flight on its live
+/// session or left unsettled by a closed one, stopped by each cause or not. The input
+/// comes 100 s after the payment was sent. Unless it answered the payment, a third video
+/// with half its window owed then pays nothing over it, by `due` or by `last_pay`; nothing
+/// is reclaimed at 179 s from sending, by the session's timeout or, for a closed session's
+/// payment, by a `due`; and at 180 s it is reclaimed, the watcher stopping where it was
+/// unanswered on its live session.
+pub async fn a_payment_waits_180_s_and_holds_its_place_whatever_comes<H: Harness>(h: &H) {
+    let rule = "a payment's 180 s count from its sending, and until then it holds its place";
+    let mut tally = Tally::default();
+    let takes = |s: &State| {
+        matches!(s.holds, Holds::InFlight(_) | Holds::Unsettled(false))
+            && s.licence <= 1
+            && s.tries <= 1
+            && matches!(s.past, Past::Fresh | Past::Resumed)
+    };
+    table!(h, tally, rule, takes, [Ending::Unanswered], a_payment_waits);
+    tally.ends(rule, (16_888, 29_936));
+}
+
+/// One cell of [`a_payment_waits_180_s_and_holds_its_place_whatever_comes`].
+async fn a_payment_waits<H: Harness>(
+    h: &H,
+    state: State,
+    input: Input,
+    _ending: Ending,
+) -> Result<Result<bool, &'static str>, String> {
+    let mut w = World::build(h, state, need_for(state, input, false)).await?;
+    w.tick(100);
+    if let Err(why) = w
+        .bring(input, "as it comes, 100 s after the payment was sent")
+        .await?
+    {
+        return Ok(Err(why));
+    }
+    w.flags("after it")?;
+    let waits = |hold: &Option<Hold>| {
+        hold.as_ref()
+            .filter(|hold| matches!(hold.kind, Kind::Live | Kind::Unsettled))
+            .map(|hold| (hold.by, hold.sent, hold.kind))
+    };
+    if waits(&w.held).is_some() {
+        let place = "after it, a third video owing half its window";
+        if !w.led[THIRD].open {
+            w.open(THIRD)?;
+        }
+        w.owe(THIRD, TABLE_WINDOWS[THIRD] / 2);
+        w.decide(THIRD, false, place).await?;
+        w.decide(THIRD, true, place).await?;
+    }
+    if let Some((by, sent, kind)) = waits(&w.held) {
+        let early = "after it, at 179 s from the payment's sending";
+        let late = "after it, at 180 s from the payment's sending";
+        w.tick_to(sent + 179);
+        if kind == Kind::Live {
+            w.timeout(by, early).await?;
+            w.tick_to(sent + 180);
+            w.timeout(by, late).await?;
+        } else {
+            w.decide(by, false, early).await?;
+            w.tick_to(sent + 180);
+            w.decide(by, false, late).await?;
+        }
+        ensure!(
+            waits(&w.held).is_none_or(|(_, again, _)| again != sent),
+            "{late}: the payment is reclaimed 180 s after it was sent"
+        );
+    }
+    w.flags("at the end")?;
+    Ok(Ok(false))
+}
+
+/// How long after a payment was sent the watcher decides again, for
+/// [`a_payment_holds_its_place_as_time_passes`]: at once, around the seeder's own deadline
+/// of 60 s, up to the 180 s, and past them with no timeout fired; then [`clock_spans`]'
+/// longest.
+const DECIDES_AFTER: [u64; 11] = [0, 1, 40, 59, 60, 61, 120, 179, 180, 181, 240];
+
+/// One payment is in flight toward a seeder at a time, on its own ledger too, until it is
+/// answered or its 180 s are up (NFX-07 §3a): time alone frees no place. A payment in
+/// flight on its live session (made each way, [`MADE`]) or left unsettled by a closed one,
+/// then nothing but the clock ([`DECIDES_AFTER`]), no new request or half a window more
+/// requested, and a decision: each `due` and `last_pay` of [`inputs`], on its own ledger
+/// and another video's, with a session or none. A payment in flight keeps every one from
+/// paying, at 60 s as at 0, and past 180 s for as long as no timeout has come; it is still
+/// the one its session's ack answers, and that ack is taken; unanswered at a timeout from
+/// 180 s, the watcher reclaims it, stops and pays nothing. A closed session's payment is
+/// reclaimed by the first decision from 180 s after it was sent, however long after, and by
+/// none before.
+pub async fn a_payment_holds_its_place_as_time_passes<H: Harness>(h: &H) {
+    let rule = "one payment is in flight at a time until it is answered or its 180 s are up";
+    let mut tally = Tally::default();
+    let decisions: Vec<Input> = inputs(h)
+        .into_iter()
+        .filter(|i| matches!(i.does, Does::Due | Does::LastPay))
+        .collect();
+    let long = clock_spans(h)[3];
+    for state in states() {
+        let takes = matches!(state.holds, Holds::InFlight(_) | Holds::Unsettled(_))
+            && state.stop.is_none()
+            && state.licence == 0
+            && state.tries <= 2
+            && matches!(state.past, Past::Fresh | Past::Resumed | Past::Credit);
+        if !takes {
+            continue;
+        }
+        if let Err(why) = state.fits() {
+            tally.skip(why);
+            continue;
+        }
+        for after in DECIDES_AFTER.into_iter().chain([long]) {
+            for more in [false, true] {
+                for &input in &decisions {
+                    if let Err(why) = comes_in(state, input) {
+                        tally.skip(why);
+                        continue;
+                    }
+                    for ending in [Ending::Acked, Ending::Unanswered] {
+                        let cell = as_time_passes(h, state, (after, more), input, ending).await;
+                        h.mint_outage(false);
+                        h.fund_older_keyset(0);
+                        let answered = matches!(cell, Ok(Ok(true)));
+                        tally.take(rule, cell, || {
+                            format!(
+                                "{input}, {after} s after the payment was sent (half a window \
+                                 more requested: {more}), with {state}"
+                            )
+                        });
+                        if !answered {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    tally.ends(rule, (31_200, 9_870));
+}
+
+/// One cell of [`a_payment_holds_its_place_as_time_passes`].
+async fn as_time_passes<H: Harness>(
+    h: &H,
+    state: State,
+    (after, more): (u64, bool),
+    input: Input,
+    ending: Ending,
+) -> Result<Result<bool, &'static str>, String> {
+    let mut w = World::build(h, state, need_for(state, input, false)).await?;
+    w.tick(after);
+    if more && w.led[OWN].open {
+        w.request(OWN, TABLE_WINDOWS[OWN] / 2);
+    }
+    if let Err(why) = w.bring(input, "as it decides").await? {
+        return Ok(Err(why));
+    }
+    w.flags("after it decided")?;
+    let answered = w.resolve(ending, "as the payment comes to its end").await?;
+    let after = "once the payment is settled or taken back";
+    w.flags(after)?;
+    if !w.led[OWN].open {
+        w.open(OWN)?;
+    }
+    w.owe(OWN, 2);
+    if w.decide(OWN, false, after).await?.is_some() {
+        w.ack(after).await?;
+    }
+    w.decide(OWN, true, after).await?;
+    w.flags(after)?;
+    Ok(Ok(answered))
+}
+
+/// A refusal licenses the next time the watcher decides what to pay on its ledger, and no
+/// other (NFX-07 §3a): nothing that comes between ends the licence but the session's end,
+/// and however many refusals came, the licence is one. Every input of [`inputs`], over
+/// every state of [`states`] with one, two or three refusals licensing and no stop,
+/// whatever the standing holds and however many tries are used; the input comes 30 s after
+/// the last refusal. The `due` that follows it on the ledger pays ahead half its own
+/// session's window, less the credit held, unless the input was that decision or the
+/// session's end, or something keeps it from paying: and then the licence has ended there.
+/// From then on, what the standing held settled or taken back (a payment in flight
+/// answered each way, [`Ending`]) and its tries restored by another video's quote, the
+/// ledger pays for the chunks it requests at half its window, and never ahead again.
+pub async fn a_refusals_licence_lasts_to_its_due_whatever_comes<H: Harness>(h: &H) {
+    let rule = "a refusal licenses the due that follows it on its ledger, and no other";
+    let mut tally = Tally::default();
+    let takes = |s: &State| {
+        s.stop.is_none() && s.licence > 0 && matches!(s.past, Past::Fresh | Past::Credit)
+    };
+    let endings = [Ending::Acked, Ending::Unavailable];
+    table!(h, tally, rule, takes, endings, a_licence_lasts);
+    tally.ends(rule, (20_664, 23_976));
+}
+
+/// One cell of [`a_refusals_licence_lasts_to_its_due_whatever_comes`].
+async fn a_licence_lasts<H: Harness>(
+    h: &H,
+    state: State,
+    input: Input,
+    ending: Ending,
+) -> Result<Result<bool, &'static str>, String> {
+    let mut w = World::build(h, state, need_for(state, input, false)).await?;
+    w.tick(30);
+    if let Err(why) = w.bring(input, "as it comes").await? {
+        return Ok(Err(why));
+    }
+    w.flags("after it")?;
+    // What keeps the due that follows from paying goes first, where it can without that
+    // ledger deciding what to pay: a payment in flight is answered, a reclaim finished, a
+    // closed session's payment taken back; and another video's new session's quote
+    // restores the tries.
+    let answered = w
+        .resolve(ending, "as what the standing holds comes to its end")
+        .await?;
+    if w.used >= 3 {
+        if w.led[THIRD].open {
+            w.end(THIRD);
+        }
+        w.open(THIRD)?;
+    }
+    w.decide(OWN, false, "after it, the due that follows the refusal")
+        .await?;
+    if w.held.is_some() {
+        w.resolve(ending, "as the payment that due made is answered")
+            .await?;
+    }
+    let later = "after it and the due that followed the refusal, as it requests chunk by chunk";
+    if !w.led[OWN].open {
+        w.open(OWN)?;
+    }
+    for _ in 0..2 * TABLE_WINDOWS[OWN] {
+        w.request(OWN, 1);
+        if w.decide(OWN, false, later).await?.is_some() {
+            w.ack(later).await?;
+        }
+    }
+    w.flags(later)?;
+    Ok(Ok(answered))
+}
+
+/// After three `mint-unavailable` answers to its payments in a row the watcher pays the
+/// seeder nothing more until a new session's accepted quote; an ack resets the count, as
+/// such a quote does, and nothing else does; and only those answers count (NFX-07 §3a).
+/// Every input of [`inputs`], over every state of [`states`] that is not stopped, with
+/// none to three tries used, whatever the standing holds and whatever its ledger has been
+/// through; the input comes 30 s on. Each `mint-unavailable` answer to a payment uses a
+/// try, however the payment was made and however its reclaim ends ([`Back`]); an ack, and
+/// a new session's accepted quote on whichever video, settling a payment or not, restores
+/// them all; nothing else uses or restores one. So once what the standing holds is settled
+/// or taken back, a third video, on a session it held from the start, makes exactly as
+/// many payments, each answered `mint-unavailable`, as tries are left, and then awaits a
+/// quote.
+///
+/// The table is run in two parts, by the ledger the cell is about ([`LEDGERS`]): this one is
+/// the first the watcher made.
+pub async fn the_tries_on_its_first_ledger_are_used_and_restored_by_nothing_else<H: Harness>(
+    h: &H,
+) {
+    the_tries_are_used_and_restored_by_nothing_else(h, true, (19_200, 22_496)).await;
+}
+
+/// [`the_tries_on_its_first_ledger_are_used_and_restored_by_nothing_else`], on a ledger the
+/// watcher made for another video.
+pub async fn the_tries_on_another_videos_ledger_are_used_and_restored_by_nothing_else<
+    H: Harness,
+>(
+    h: &H,
+) {
+    the_tries_are_used_and_restored_by_nothing_else(h, false, (19_200, 22_496)).await;
+}
+
+async fn the_tries_are_used_and_restored_by_nothing_else<H: Harness>(
+    h: &H,
+    first: bool,
+    cells: (usize, usize),
+) {
+    let rule = "only a mint-unavailable answer to a payment uses a try, and only an ack or a \
+                new session's accepted quote restores them";
+    let mut tally = Tally::default();
+    let takes = |s: &State| s.first == first && s.stop.is_none() && s.licence <= 1;
+    let endings = [Ending::Acked, Ending::Unavailable];
+    table!(h, tally, rule, takes, endings, the_tries_stand);
+    tally.ends(rule, cells);
+}
+
+/// One cell of [`the_tries_are_used_and_restored_by_nothing_else`].
+async fn the_tries_stand<H: Harness>(
+    h: &H,
+    state: State,
+    input: Input,
+    ending: Ending,
+) -> Result<Result<bool, &'static str>, String> {
+    let mut w = World::build(h, state, need_for(state, input, true)).await?;
+    w.tick(30);
+    if let Err(why) = w.bring(input, "as it comes").await? {
+        return Ok(Err(why));
+    }
+    w.flags("after it")?;
+    // Before what the standing holds comes to its end, the input has settled nothing and
+    // freed nothing: the third video, half its window owed, pays only if nothing is held.
+    let before = "after it, before what the standing holds is settled or taken back";
+    w.owe(THIRD, TABLE_WINDOWS[THIRD] / 2);
+    w.decide(THIRD, false, before).await?;
+    let answered = w
+        .resolve(ending, "as what the standing holds comes to its end")
+        .await?;
+    let left = "after it, a third video paying on a session held from the start, each payment \
+                answered mint-unavailable";
+    w.flags(left)?;
+    for _ in 0..4 {
+        w.owe(THIRD, TABLE_WINDOWS[THIRD] / 2);
+        if w.decide(THIRD, false, left).await?.is_none() {
+            break;
+        }
+        w.unavailable(Back::AtOnce, left).await?;
+    }
+    w.flags(left)?;
+    Ok(Ok(answered))
 }
 
 /// Stream `n` chunks of `video` from file `from` with an honest pair, paying as due. Each
