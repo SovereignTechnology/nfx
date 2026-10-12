@@ -27912,98 +27912,169 @@ async fn keys_that_come_late_are_not_used<H: Harness>(h: &H, quoted: Quoted) {
     }
 }
 
-/// Flaws `ListingAskedAtDeadline` and `KeysAskedAtDeadline`. No payment asks its mint for
-/// a keyset listing or for keys at or past its deadline, judged at every look (NFX-07 §3,
-/// the deadline): what came would not be used, and nothing that needs it is judged. So at
-/// whichever mint the seeder quotes (`quoted`).
-/// - P names a keyset the mint never had, the mint's listing asked for in P's second just
-///   before it came: it waits for the next second's listing. The clock's next move takes it
-///   to its deadline: it is answered `mint-unavailable`, and the mint was asked for nothing
-///   from that move on.
-/// - P is of a keyset the mint started since the seeder's last listing, and asks for the
-///   listing, its answer held. The answer comes in P's deadline's second, and names P's
-///   keyset: P is answered `mint-unavailable`, and the mint was not asked for that keyset's
-///   keys.
+/// Flaws `ListingAskedAtDeadline`, `KeysAskedAtDeadline`, `AsksPastDeadlineSecond`,
+/// `ListingAskedAtDeadlineAfterHeldListing`, `KeysAskedAtDeadlineAfterOthersHeldListing` and
+/// `KeysAskedAtDeadlineOnOthersListing`. No payment asks its mint for a keyset listing or
+/// for keys at or past its deadline, judged at every look (NFX-07 §3, the deadline): what
+/// came would not be used, and nothing that needs it is judged. So at whichever mint the
+/// seeder quotes (`quoted`), for a payment P first looked at again 60 s from its arrival,
+/// its deadline, and 65 s from it ([`LATE_LOOKS`]), having come to that look by each route
+/// on which a seeder with no such rule would ask ([`ROUTES_TO_A_LATE_LOOK`]). In every cell
+/// P is answered `mint-unavailable`, the mint has had no request for a keyset listing and
+/// none for keys since, and nothing of P is swapped.
 async fn a_payment_asks_for_nothing_at_its_deadline<H: Harness>(h: &H, quoted: Quoted) {
-    let (at, mint) = (quoted.at(), quoted.mint(h));
+    for late in LATE_LOOKS {
+        for route in ROUTES_TO_A_LATE_LOOK {
+            a_payment_asks_for_nothing_at_a_late_look(h, quoted, late, route).await;
+        }
+    }
+}
+
+/// How long after its arrival a payment is first looked at again, in seconds, for
+/// [`a_payment_asks_for_nothing_at_its_deadline`]: at its deadline, and past it.
+const LATE_LOOKS: [u64; 2] = [60, 65];
+
+/// How a payment comes to a look at or past its deadline, for
+/// [`a_payment_asks_for_nothing_at_its_deadline`]: what it waited for, and so what a seeder
+/// with no rule against it would ask its mint for at that look.
+/// - The next second's keyset listing, the mint's asked for in its second before it came:
+///   the one the seeder holds is of an earlier second by the look, and a listing would be
+///   asked for.
+/// - The listing it asked for itself, the answer held: it comes at the look and names the
+///   payment's keyset, whose keys would be asked for.
+/// - A listing another payment asked for, the answer held: it comes at the look, asked for
+///   before this payment arrived, and names its keyset not, so a listing would be asked
+///   for.
+/// - The same, the listing naming its keyset: its keys would be asked for.
+/// - The next second's listing, and another payment asks for the mint's listing in the
+///   second of the look: it names the payment's keyset, whose keys would be asked for.
+/// - The same, the listing naming its keyset not: no rule would have anything asked for,
+///   and the listing, which came at its deadline or later, judges nothing of it either.
+const ROUTES_TO_A_LATE_LOOK: [&str; 6] = [
+    "the next second's listing",
+    "its own held listing, which names its keyset",
+    "another payment's held listing, which names its keyset not",
+    "another payment's held listing, which names its keyset",
+    "the next second's listing, another payment's listing of the look's second naming its \
+     keyset",
+    "the next second's listing, another payment's listing of the look's second naming its \
+     keyset not",
+];
+
+/// One cell of [`a_payment_asks_for_nothing_at_its_deadline`]: P's first look `late`
+/// seconds from its arrival, come to by `route`.
+async fn a_payment_asks_for_nothing_at_a_late_look<H: Harness>(
+    h: &H,
+    quoted: Quoted,
+    late: u64,
+    route: &str,
+) {
+    let [next, own_held, _, others_held, others_then, others_then_not] = ROUTES_TO_A_LATE_LOOK;
+    let mint = quoted.mint(h);
+    let cell = format!(
+        "{late} s from its arrival, having waited for {route}{}",
+        quoted.at()
+    );
+    let unlisted = || h.bad_token_at(&mint, BadToken::UnknownKeyset, 4);
     let e = quoted.engine(h);
     let (mut s, mut t) = (open(h, &e, 1).await, open(h, &e, 2).await);
     serve(h, &mut s, 0, 4);
     serve(h, &mut t, 0, 4);
+    // Where P's keyset is one the mint lists by the look, the seeder holds the keys of the
+    // keyset the mint issued from before it, and not P's: the mint starts that one below.
+    let listed = route == own_held || route == others_held || route == others_then;
+    if listed {
+        settles_pay::<H>(&mut s, 4, h.token_at(&mint, 4).await, 4).await;
+        serve(h, &mut s, 4, 4);
+    }
     advance(h, SECOND).await; // the listing last asked for in an earlier second, if at all
-    let r = s
-        .pay(&Pay {
-            upto_chunk: 4,
-            token: h.bad_token_at(&mint, BadToken::UnknownKeyset, 4).await,
-        })
-        .await;
-    assert!(
-        is_rej(&r, &RejCode::BadToken),
-        "a token naming a keyset the mint does not list is refused bad-token{at}: {r:?}"
-    );
+    // The payment before P, of a keyset the mint never had. It is refused in this second,
+    // the mint's listing asked for in it; or it asks for the listing, whose answer is held.
+    let q = Pay {
+        upto_chunk: if listed { 8 } else { 4 },
+        token: unlisted().await,
+    };
+    let mut asking = None;
+    if route == next || route == others_then || route == others_then_not {
+        let r = s.pay(&q).await;
+        assert!(
+            is_rej(&r, &RejCode::BadToken),
+            "a token naming a keyset the mint does not list is refused bad-token, the mint's \
+             listing asked for in this second ({cell}): {r:?}"
+        );
+        if listed {
+            quoted.start_keyset(h); // listed from the mint's next answer on
+        }
+    } else {
+        if listed {
+            quoted.start_keyset(h);
+            advance(h, SECOND).await; // the mint's listing names its new keyset from now
+        }
+        h.hold_key_fetches();
+        if route != own_held {
+            let mut first = Box::pin(s.pay(&q));
+            assert!(
+                waits(h, first.as_mut()).await,
+                "the payment before P asked for the mint's keyset listing, whose answer is \
+                 held ({cell})"
+            );
+            asking = Some(first);
+        }
+    }
     let p = Pay {
         upto_chunk: 4,
-        token: h.bad_token_at(&mint, BadToken::UnknownKeyset, 4).await,
+        token: if listed {
+            h.token_at(&mint, 4).await // of the keyset the mint started
+        } else {
+            unlisted().await
+        },
     };
     let mut paying = Box::pin(t.pay(&p));
     assert!(
         waits(h, paying.as_mut()).await,
-        "P holds the turn, waiting for the next second's keyset listing{at}"
+        "P holds its turn, and waits ({cell})"
     );
-    let (keys, listings) = (keys_asked(h), h.listing_requests());
-    advance(h, Duration::from_secs(60)).await;
-    let r = answer_of(h, paying.as_mut()).await.expect("P answered");
+    let (mut keys, mut listings) = (keys_asked(h), h.listing_requests());
+    advance(h, Duration::from_secs(late)).await;
+    if route == others_then || route == others_then_not {
+        let mut other = open(h, &e, 3).await;
+        let r = other
+            .pay(&Pay {
+                upto_chunk: 4,
+                token: unlisted().await,
+            })
+            .await;
+        assert!(
+            is_rej(&r, &RejCode::BadToken),
+            "another payment, of a keyset the mint does not list, is refused bad-token in \
+             the second of P's look, the mint's listing asked for in it ({cell}): {r:?}"
+        );
+        close(h, other).await;
+        (keys, listings) = (keys_asked(h), h.listing_requests());
+    } else if route != next {
+        release(h).await; // the held listing comes, in the second of P's look
+    }
+    let r = answer_of(h, paying.as_mut()).await.expect("P is answered");
     assert!(
         is_rej(&r, &RejCode::MintUnavailable),
-        "P waited for the next second's listing into its deadline: no check of it is judged \
-         then, and it is mint-unavailable{at}: {r:?}"
+        "a payment first looked at at or past its deadline is answered mint-unavailable: no \
+         check of it is judged then, by a listing that came then either ({cell}): {r:?}"
     );
     assert_eq!(
         (h.listing_requests() - listings, keys_asked(h) - keys),
         (0, 0),
         "a payment asks its mint for no keyset listing, and for no keys, at or past its \
-         deadline, one that waited for the next second's listing into it included{at}: \
-         (listing requests, key requests) since"
+         deadline, judged at every look ({cell}): (listing requests, key requests) since"
+    );
+    assert!(
+        !h.claimed_any(&p.token).await,
+        "and nothing of it is swapped ({cell})"
     );
     close(h, paying).await;
+    close(h, asking).await;
     close(h, (s, t)).await;
-
-    let e = quoted.engine(h);
-    let mut s = open(h, &e, 1).await;
-    serve(h, &mut s, 0, 4);
-    settles_pay::<H>(&mut s, 4, h.token_at(&mint, 4).await, 4).await;
-    serve(h, &mut s, 4, 4);
-    quoted.start_keyset(h);
-    advance(h, SECOND).await; // the mint's listing names its new keyset the next second
-    h.hold_key_fetches();
-    let p = Pay {
-        upto_chunk: 8,
-        token: h.token_at(&mint, 4).await, // of the keyset the mint started
-    };
-    let mut paying = Box::pin(s.pay(&p));
-    assert!(
-        waits_for_keys(h, paying.as_mut()).await,
-        "P holds the turn, waiting for the mint's keyset listing{at}"
-    );
-    let (keys, listings) = (keys_asked(h), h.listing_requests());
-    advance(h, Duration::from_secs(60)).await;
-    release(h).await; // the listing comes, in P's deadline's second: it names P's keyset
-    let r = answer_of(h, paying.as_mut()).await.expect("P answered");
-    assert!(
-        is_rej(&r, &RejCode::MintUnavailable),
-        "the listing that names P's keyset came in its deadline's second: it is not used, \
-         and P is mint-unavailable{at}: {r:?}"
-    );
-    assert_eq!(
-        (keys_asked(h) - keys, h.listing_requests() - listings),
-        (0, 0),
-        "a payment asks its mint for no keys, and for no keyset listing, at or past its \
-         deadline, though a listing that names its keyset comes then{at}: (key requests, \
-         listing requests) since"
-    );
-    assert!(!h.claimed_any(&p.token).await, "not swapped");
-    close(h, paying).await;
-    close(h, s).await;
+    release(h).await;
+    advance(h, SECOND).await; // a keyset the mint started is listed from this second
 }
 
 /// Flaws `TurnAtDeadlineSecond` and `TurnAtDeadlineSecondStructure`. A payment is answered
