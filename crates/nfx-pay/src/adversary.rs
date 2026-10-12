@@ -25,9 +25,19 @@
 //! listings: one that asks at its start too passes as one that asks only where a check
 //! needs one (`tests/listings_at_start.rs`).
 //!
-//! **Run it with [`adversary_suite!`](crate::adversary_suite)**, which emits one test per
-//! scenario from the list kept here: a runner cannot choose a subset. The list is pinned
-//! with the locked paths, so weakening the suite is a reviewed change.
+//! **Run it with [`adversary_suite!`](crate::adversary_suite)**: given a harness, it emits
+//! one test per scenario from the list kept here. The macro does not hold a runner to that
+//! list. A scenario can be run one by one, through the macro's `@each` arm or through
+//! [`run_scenario!`](crate::run_scenario) (the scenarios are public), as
+//! `tests/honest_timings.rs` runs one under a timing of its own and `tests/mutants.rs` runs
+//! them against the planted defects. What holds a file to the whole list is the lock
+//! (`crates/ci/locked.py`, `test_counts`): the macro may be named only in the test files
+//! the lock names, each held to a number of tests derived from this list (the whole of it
+//! for a harness file, every use counted for `tests/honest_timings.rs`), and every file of
+//! the crate is pinned. So to run fewer scenarios is a reviewed change of the pins, not an
+//! impossible one, and an engine's own harness file counts as running the suite once the
+//! lock names it. The list itself is pinned with the locked paths, so weakening the suite
+//! is a reviewed change too.
 //!
 //! Every check names what it requires: an assertion, or an `expect` whose message says it.
 //! A bare `unwrap` names nothing, and its panic is never counted as the suite failing

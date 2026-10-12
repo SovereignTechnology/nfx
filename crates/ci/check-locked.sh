@@ -100,7 +100,15 @@ fi
 #     cargo metadata, before any build); a test binary that did not run, that the build did
 #     not make, or that reported another number of tests than the one pinned for it (or, for
 #     the suite's files, than its sources declare); a test ignored or filtered out. The
-#     lock runs every target of the two crates as a test binary, and their doctests.
+#     lock runs every target of the two crates as a test binary, and their doctests;
+#   - the adversary suite's macro (`adversary_suite`) named in the code of any file but the
+#     suite's own and the test files locked.py names as running it (read before any build,
+#     and at a re-pin too). Each of those is held to a number of tests the suite's list of
+#     scenarios gives: the whole list for a harness file, every use counted for the file
+#     that runs the honest timings. A scenario can be run one by one, so it is this, not
+#     the macro, that holds a harness file to the whole list: a new one cannot be pinned
+#     at whatever number of tests ran, and the engine's (M2.1) is named in locked.py when
+#     it is written.
 #
 # CI is recognised by CI, GITLAB_CI or CI_JOB_ID. The pinned .github/workflows/ci.yml runs
 # this with CI=true: its lock job under env -i, its check job with LOCKED_DIRS_UNLOCKED

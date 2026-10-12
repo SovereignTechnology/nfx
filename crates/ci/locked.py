@@ -37,7 +37,14 @@ The facts, one per line:
   each library's doctests. The set of targets, and the numbers the suite's own files
   declare, are checked before any build; every number after the run. A test file added,
   removed, renamed or emptied, or a number of tests that changed, fails until it is
-  re-pinned, and then shows in the pins' diff.
+  re-pinned, and then shows in the pins' diff. A file that runs the adversary suite
+  through its macro is one of the test files this script names (`WHOLE_SUITE`,
+  `SUITE_BY_PARTS`), and its number is derived from the suite's list of scenarios: the
+  macro named in the code of any other file fails, before any build and at a re-pin too
+  (`suite_users`). A scenario can be run one by one, so it is this, not the macro, that
+  holds a harness file to the whole list, and keeps one from being pinned at whatever
+  number of tests ran at its pin; the engine's harness file is named there when it is
+  written (M2.1).
 
 Every path package must be a workspace member: a crate outside the workspace, wired in
 by path, would escape every check here. And every workspace member must be one the
@@ -66,7 +73,9 @@ directory made for the run, so the checkout's own is never read or trusted):
   exactly the number of tests pinned for it, all passed, none ignored or filtered out;
 - the suite, the mutants, the runner they share and the pay/1 vector tests each reported
   exactly the number of tests their pinned sources declare. A test runner that runs
-  nothing fails.
+  nothing fails. What the numbers do not say is which tests ran: a file that defined as
+  many tests of other names would report the same number, and is caught by its pin and
+  by whoever reads the diff of a re-pin, not here.
 
 Out of scope, and why: code in other crates. It may compile a pinned file (by
 `#[path]`, say), but it cannot change one, and a copy of money logic written anywhere is
@@ -258,33 +267,120 @@ def dep_info(filenames: list[str]) -> pathlib.Path | None:
     return None
 
 
+# The files that run the suite through its macro, `adversary_suite!`: test files of nfx-pay,
+# tests/<name>.rs, each named here, since a scenario can be run one by one (the macro's
+# `@each` arm is exported with it) and nothing in the macro holds a file to the whole list.
+# The lock does: no other file may name the macro in its code (`suite_users`), so a harness
+# file cannot be pinned with whatever number of tests ran at its pin.
+# - WHOLE_SUITE: the file's code names the macro once, as one use of the whole list, and
+#   the file runs as many tests as the list has scenarios. THE ENGINE'S HARNESS FILE (M2.1,
+#   docs/nfx/m2-plan.md) IS ADDED HERE WHEN IT IS WRITTEN: "the suite green against the
+#   real engine" is then the list's length by the lock, not by a reader's eye.
+# - SUITE_BY_PARTS: the file's uses are counted one by one, the whole list for each use of
+#   it and a test for each scenario named under an `@each` use; a use the count does not see
+#   fails.
+SUITE_MACRO = "adversary_suite"
+SUITE_SOURCE = "crates/nfx-pay/src/adversary.rs"  # defines it, and keeps the list
+WHOLE_SUITE = (
+    "adversary",
+    "round_trip",  # the same suite, the mint answering reads on a later poll
+    "woken_answers",  # the same suite, every mint call answered from another thread
+    "listings_at_start",  # the same suite, keyset listings asked at the start too
+)
+SUITE_BY_PARTS = (
+    # the same suite against each honest engine and mint that take their time differently,
+    # and the scenarios the file names one by one under a timing of their own
+    # (`@each <harness>;`, a name to a line)
+    "honest_timings",
+)
+# Where the macro may not be named in code but in the files above: the money crates, every
+# tracked file of them (a test file may `include!` one that is no Rust file), and every
+# Rust file elsewhere.
+SUITE_NAMED_IN = ["crates/nfx-pay", "crates/nfx-pay-wire", "*.rs"]
+
+
+def names_suite(text: str) -> list[str]:
+    """The lines of a file that name the suite's macro in what may be code: every line that
+    holds the word but those that are a line comment from their start (`//`, `///`, `//!`).
+    A line that begins so is no use of the macro wherever it stands (in a block comment or
+    a string it is none either); a line that names it after code, in a block comment or in a
+    string counts as one, which errs on the side of refusing."""
+    return [line for line in text.splitlines()
+            if re.search(rf"\b{SUITE_MACRO}\b", line) and not line.lstrip().startswith("//")]
+
+
+def suite_file(name: str) -> str:
+    """A test file of nfx-pay that runs the suite, read."""
+    path = CRATES / "nfx-pay" / "tests" / f"{name}.rs"
+    if not path.is_file():
+        fail(f"tests/{name}.rs is declared to run the suite (crates/ci/locked.py) and is "
+             "no file of nfx-pay")
+    return path.read_text()
+
+
+def suite_users() -> None:
+    """No file names the suite's macro in its code but the suite's own and the test files
+    declared above: a file that runs the suite, whole or scenario by scenario, has a count
+    the lock derives from the list, never one that is only what ran when it was pinned."""
+    declared = {f"crates/nfx-pay/tests/{name}.rs" for name in WHOLE_SUITE + SUITE_BY_PARTS}
+    found = subprocess.run(["git", "grep", "-l", "-z", "-w", "-e", SUITE_MACRO, "--", *SUITE_NAMED_IN],
+                           cwd=REPO, capture_output=True, text=True)
+    if found.returncode != 0:  # 1 is "no match": the suite's own file names it
+        fail(f"git grep for {SUITE_MACRO} failed or found nothing ({found.returncode}):\n"
+             f"{found.stderr[-3000:]}")
+    for f in sorted(x for x in found.stdout.split("\0") if x):
+        if f == SUITE_SOURCE or f in declared:
+            continue
+        lines = names_suite((REPO / f).read_text(errors="replace"))
+        if lines:
+            fail(f"{f} names {SUITE_MACRO} in its code, and the lock declares no count for it "
+                 f"({len(lines)} lines, the first: {lines[0].strip()[:120]}). Only a test file of "
+                 "nfx-pay that crates/ci/locked.py names may use the suite's macro: in "
+                 "WHOLE_SUITE if it runs the whole list once, in SUITE_BY_PARTS if its uses "
+                 "are counted one by one; a file pinned without either would be held to "
+                 "whatever number of tests ran at its pin")
+
+
 def test_counts() -> dict[str, int]:
-    """The number of tests each pinned test binary declares."""
+    """The number of tests each pinned test binary declares. Every file that uses the
+    suite's macro is among them (`suite_users`)."""
     adversary = (CRATES / "nfx-pay" / "src" / "adversary.rs").read_text()
     listed = re.search(r"adversary_suite!\(@each \$h;\n(.*?)\n\s*\);", adversary, re.S)
     if not listed:
         fail("cannot find the adversary_suite! list")
     mutants = (CRATES / "nfx-pay" / "tests" / "mutants.rs").read_text()
-    timings = (CRATES / "nfx-pay" / "tests" / "honest_timings.rs").read_text()
     runner = (CRATES / "nfx-pay" / "tests" / "runner.rs").read_text()
     pay1 = (CRATES / "nfx-pay-wire" / "tests" / "pay1.rs").read_text()
     scenarios = len(re.findall(r"^\s+[a-z_0-9]+,$", listed.group(1), re.M))
-    return {
-        "adversary": scenarios,
-        "round_trip": scenarios,  # the same suite, the mint answering reads on a later poll
-        "woken_answers": scenarios,  # the same suite, every mint call answered from another thread
-        "listings_at_start": scenarios,  # the same suite, keyset listings asked at the start too
-        # the same suite against each honest engine and mint that take their time
-        # differently, and the scenarios the file names one by one under a timing of their
-        # own (`@each <harness>;`, a name to a line)
-        "honest_timings": (
-            scenarios * len(re.findall(r"^\s+nfx_pay::adversary_suite!\((?!@)", timings, re.M))
-            + sum(len(re.findall(r"^\s+[a-z_0-9]+,$", names, re.M)) for names in
-                  re.findall(r"^\s+nfx_pay::adversary_suite!\(@each [^;]*;\n(.*?)\n\s*\);", timings, re.M | re.S))),
+    suite_users()
+    if set(WHOLE_SUITE) & set(SUITE_BY_PARTS):
+        fail(f"crates/ci/locked.py names {sorted(set(WHOLE_SUITE) & set(SUITE_BY_PARTS))} both "
+             "as running the whole suite once and as counted use by use")
+    counts = {}
+    for name in WHOLE_SUITE:
+        lines = names_suite(suite_file(name))
+        if len(lines) != 1 or not re.match(r"[ \t]*nfx_pay::adversary_suite!\((?!@)", lines[0]):
+            fail(f"tests/{name}.rs is declared to run the whole suite once (crates/ci/locked.py, "
+                 f"WHOLE_SUITE), and its code names {SUITE_MACRO} on {len(lines)} lines, or not as "
+                 "one use of the whole list: " + " | ".join(x.strip()[:80] for x in lines[:4]))
+        counts[name] = scenarios
+    for name in SUITE_BY_PARTS:
+        text = suite_file(name)
+        whole = re.findall(r"^\s+nfx_pay::adversary_suite!\((?!@)", text, re.M)
+        each = re.findall(r"^\s+nfx_pay::adversary_suite!\(@each [^;]*;\n(.*?)\n\s*\);", text, re.M | re.S)
+        lines = names_suite(text)
+        if len(lines) != len(whole) + len(each):
+            fail(f"tests/{name}.rs names {SUITE_MACRO} on {len(lines)} lines of its code, and the "
+                 f"lock counts {len(whole)} uses of the whole suite and {len(each)} of scenarios "
+                 "named one by one: a use its count does not see")
+        counts[name] = (scenarios * len(whole)
+                        + sum(len(re.findall(r"^\s+[a-z_0-9]+,$", names, re.M)) for names in each))
+    counts.update({
         "mutants": len(re.findall(r"^\s+[a-z_0-9]+: [svrwlt]\(", mutants, re.M)),
         "runner": len(re.findall(r"^#\[test\]$", runner, re.M)),
         "pay1": len(re.findall(r"^#\[test\]$", pay1, re.M)),
-    }
+    })
+    return counts
 
 
 def test_targets(members: list[dict]) -> list[str]:
