@@ -12762,10 +12762,12 @@ pub async fn a_viewer_pays_for_every_request_and_no_more<H: Harness>(h: &H) {
 
 /// What a ledger did on an earlier session, whose quote had another price, for
 /// [`the_price_is_the_sessions_whatever_it_did_before`].
-const EARLIER_PRICED: [&str; 3] = [
+const EARLIER_PRICED: [&str; 5] = [
     "took its quote, and no more",
     "requested a chunk, and paid nothing",
     "paid at its due point",
+    "paid at its due point, the ack lost and the later quote settling that payment",
+    "paid ahead after a refusal, the ack lost and the later quote settling that payment",
 ];
 
 /// The price is the session's quote's (NFX-07 §2, §3a): a seeder may quote another, within
@@ -12781,13 +12783,21 @@ async fn the_price_is_the_sessions_whatever_it_did_before<H: Harness>(h: &H) {
     for (first, then) in [(1u64, 3u64), (3, 1)] {
         for earlier in EARLIER_PRICED {
             for how in MADE {
-                let paid = earlier == EARLIER_PRICED[2];
+                // Paid, and its ack taken; or lost with the connection, so that the later
+                // session's quote, which shows the payment, settles it; that payment made at
+                // its due point, or ahead after a refusal.
+                let lost_ack = earlier == EARLIER_PRICED[3] || earlier == EARLIER_PRICED[4];
+                let ahead_before = earlier == EARLIER_PRICED[4];
+                let paid = earlier == EARLIER_PRICED[2] || lost_ack;
                 let e = h.engine(first, 4, 1000);
                 let mut s = open(h, &e, 1).await;
                 let mut v = h.viewer(3);
                 v.quote(s.quote()).expect("an honest quote is accepted");
                 let mut acked = 0;
-                if earlier != EARLIER_PRICED[0] {
+                if ahead_before {
+                    v.requested();
+                    v.refused();
+                } else if earlier != EARLIER_PRICED[0] {
                     let chunks = if paid { 2 } else { 1 };
                     for i in 0..chunks {
                         assert!(s.admit(&h.chunk(i)), "within the window");
@@ -12798,16 +12808,18 @@ async fn the_price_is_the_sessions_whatever_it_did_before<H: Harness>(h: &H) {
                     let pay = v
                         .due()
                         .await
-                        .expect("due answers at half the window")
-                        .expect("due at half the window");
+                        .expect("due answers at half the window, or after a refusal")
+                        .expect("due at half the window, or ahead after a refusal");
                     let ack = s.pay(&pay).await;
                     assert!(
                         ack.is_ok(),
                         "{first} sat a chunk on its first session: the watcher pays exactly the \
                          quoted price, and the seeder takes it: {ack:?}"
                     );
-                    v.ack(&ack.expect("the seeder took it"))
-                        .expect("its honest ack is taken");
+                    if !lost_ack {
+                        v.ack(&ack.expect("the seeder took it"))
+                            .expect("its honest ack is taken");
+                    }
                     acked = 2;
                 }
                 close(h, s).await;
@@ -12816,11 +12828,18 @@ async fn the_price_is_the_sessions_whatever_it_did_before<H: Harness>(h: &H) {
                 let s = open(h, &e, 1).await;
                 let mut q = s.quote().clone();
                 if paid {
-                    // The account as the restarted seeder kept it.
-                    (q.served, q.accepted_upto, q.spent_total) = (2, 2, 2 * first);
+                    // The account as the restarted seeder kept it: the chunks it served, and
+                    // the payment it took.
+                    let served = if ahead_before { 0 } else { 2 };
+                    (q.served, q.accepted_upto, q.spent_total) = (served, 2, 2 * first);
                 }
                 v.quote(&q)
                     .expect("the next session's honest quote, at another price, is accepted");
+                if ahead_before {
+                    // The two chunks it paid ahead for, requested now: its credit is used up.
+                    v.requested();
+                    v.requested();
+                }
                 // Due with two chunks owed, or at the session's end with one: the chunk it
                 // already owes counts.
                 if how == "ahead after a refusal" {
@@ -12898,6 +12917,146 @@ async fn the_price_is_the_sessions_whatever_it_did_before<H: Harness>(h: &H) {
         }
         close(h, (s0, s1)).await;
     }
+    // And each ledger's window is its own session's, as its price is: a seeder may quote
+    // its videos different windows too, and the watcher takes the two quotes in either
+    // order. Each ledger pays at half its own window, and nothing one chunk short of it,
+    // and ahead half of it after a refusal, all at its own price. Then video 0's seeder
+    // comes back quoting video 1's window, video 1's session still open: video 0 pays at
+    // half its later session's window.
+    for (zero, one) in [(1u64, 3u64), (3, 1)] {
+        for windows in [(4u64, 8u64), (8, 4)] {
+            for taken_last in [0u8, 1] {
+                a_window_and_a_price_a_video(h, (zero, one), windows, taken_last).await;
+            }
+        }
+    }
+}
+
+/// One cell of [`the_price_is_the_sessions_whatever_it_did_before`]'s last table: the
+/// seeder quotes its two videos the `prices` and the `windows` given, and the watcher takes
+/// video `taken_last`'s quote last.
+async fn a_window_and_a_price_a_video<H: Harness>(
+    h: &H,
+    prices: (u64, u64),
+    windows: (u64, u64),
+    taken_last: u8,
+) {
+    let quoted = format!(
+        "video 0 quoted {} sat a chunk and a window of {}, video 1 {} and {}, video \
+         {taken_last}'s quote taken last",
+        prices.0, windows.0, prices.1, windows.1
+    );
+    let (e0, e1) = (
+        h.engine(prices.0, windows.0, 1000),
+        h.engine(prices.1, windows.1, 1000),
+    );
+    let mut v0 = h.viewer(3);
+    let mut v1 = v0.sibling();
+    let mut s0 = open_on(h, &e0, 1, 0).await;
+    let mut s1 = open_on(h, &e1, 1, 1).await;
+    if taken_last == 1 {
+        v0.quote(s0.quote())
+            .expect("video 0's honest quote is accepted");
+    }
+    v1.quote(s1.quote())
+        .expect("video 1's honest quote, of another price and window, is accepted");
+    if taken_last == 0 {
+        v0.quote(s0.quote())
+            .expect("video 0's honest quote is accepted");
+    }
+    for (v, s, video, price, window) in [
+        (&mut v0, &mut s0, 0u8, prices.0, windows.0),
+        (&mut v1, &mut s1, 1, prices.1, windows.1),
+    ] {
+        let half = u16::try_from(window / 2).expect("a small window");
+        for i in 0..half - 1 {
+            assert!(s.admit(&h.chunk_of(video, i)), "within the window");
+            v.requested();
+        }
+        assert!(
+            v.due().await.expect("due answers").is_none(),
+            "{quoted}: video {video} pays nothing one chunk short of half its own session's \
+             window, {window}"
+        );
+        assert!(s.admit(&h.chunk_of(video, half - 1)), "within the window");
+        v.requested();
+        let pay = v.due().await.expect("due answers");
+        assert_eq!(
+            pay.as_ref().map(|pay| pay.upto_chunk),
+            Some(window / 2),
+            "{quoted}: video {video} pays at half its own session's window, {window}"
+        );
+        let r = s.pay(&pay.expect("a payment at the due point")).await;
+        assert!(
+            r.is_ok(),
+            "{quoted}: video {video}'s payment is at its own session's price, {price} sat a \
+             chunk, and the seeder takes it: {r:?}"
+        );
+        v.ack(&r.expect("the seeder took it"))
+            .expect("its honest ack is taken");
+        v.requested();
+        v.refused();
+        let ahead = v.due().await.expect("due answers after a refusal");
+        assert_eq!(
+            ahead.as_ref().map(|pay| pay.upto_chunk),
+            Some(window),
+            "{quoted}: after a refusal video {video} pays ahead half its own session's window, \
+             {window}"
+        );
+        let r = s.pay(&ahead.expect("a payment ahead")).await;
+        assert!(
+            r.is_ok(),
+            "{quoted}: video {video}'s payment ahead is at its own session's price, {price} sat \
+             a chunk, and the seeder takes it: {r:?}"
+        );
+        v.ack(&r.expect("the seeder took it"))
+            .expect("its honest ack is taken");
+    }
+    // Video 0's seeder restarted, quoting video 1's window: a new engine stands in for it,
+    // and its quote shows the account as it kept it, half the first window served and the
+    // whole of it paid for.
+    close(h, s0).await;
+    v0.end();
+    let e0 = h.engine(prices.0, windows.1, 1000);
+    let s0 = open_on(h, &e0, 1, 0).await;
+    let mut q = s0.quote().clone();
+    (q.served, q.accepted_upto, q.spent_total) = (windows.0 / 2, windows.0, windows.0 * prices.0);
+    v0.quote(&q)
+        .expect("video 0's later session's honest quote, of another window, is accepted");
+    let later = windows.1 / 2;
+    // Its credit is used up first, half the first window.
+    for _ in 0..windows.0 / 2 + later - 1 {
+        v0.requested();
+    }
+    assert!(
+        v0.due().await.expect("due answers").is_none(),
+        "{quoted}, then video 0 quoted a window of {} on a later session: it pays nothing one \
+         chunk short of half its later session's window",
+        windows.1
+    );
+    v0.requested();
+    let pay = v0.due().await.expect("due answers");
+    assert_eq!(
+        pay.as_ref().map(|pay| pay.upto_chunk),
+        Some(windows.0 + later),
+        "{quoted}, then video 0 quoted a window of {} on a later session, video 1's session \
+         still open: it pays at half its later session's window",
+        windows.1
+    );
+    let mut scale = open(h, &e0, 7).await;
+    let r = scale
+        .pay(&Pay {
+            upto_chunk: later,
+            token: pay.expect("a payment at the later due point").token,
+        })
+        .await;
+    assert!(
+        r.is_ok(),
+        "{quoted}, then video 0 quoted a window of {} on a later session: its payment, for \
+         {later} chunks, is worth exactly as many at its own session's price: {r:?}",
+        windows.1
+    );
+    close(h, (s0, s1, scale)).await;
 }
 
 /// The watcher pays once the unpaid count reaches half the window, rounded up (NFX-07 §3a),
