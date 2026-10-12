@@ -467,7 +467,12 @@ pub struct EngineParams {
 /// one is. The engine has settled once no answer is under way and its futures and tasks
 /// have had 100 turns of the runtime since: what an engine does between an answer and its
 /// next wait, on its own tasks and in the polls its answers wake, takes fewer turns than
-/// that. So:
+/// that. A turn is over once every task the runtime had ready as it began has run, however
+/// many they are, not once the suite's task is polled again: a runtime may poll it again
+/// with tasks still ready (tokio's current-thread runtime does after 61), so the suite
+/// queues a task of its own as a turn begins, and the turn ends as that task runs: the
+/// runtime a runner gives the suite takes up its ready tasks in the order they became
+/// ready, as that one does. So:
 /// - it waits for an answer, or checks that a future still waits, by polling it until it is
 ///   ready, or until the engine has settled with the future pending, which then waits on
 ///   the suite (a clock move, a release, another entry). It lets a future it drives beside

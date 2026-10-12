@@ -695,8 +695,10 @@ pub fn run_on_a_thread(secs: u64, body: impl FnOnce() + Send + 'static) -> Ran {
 
 /// Run `body`, a scenario's whole run on this thread, with `start` to start a task on the
 /// runtime it runs in: the suite runs an entry on a task of its own there (`on_a_task`),
-/// which that runtime polls when it is woken, in turn with the engine's own tasks. That
-/// runtime polls its tasks on this thread, as the current-thread runtime of
+/// which that runtime polls when it is woken, in turn with the engine's own tasks. The suite
+/// starts one more there, which ends each turn it waits (`yield_once`): the runtime takes
+/// up its ready tasks in the order they became ready. That runtime polls its
+/// tasks on this thread, as the current-thread runtime of
 /// [`run_scenario!`](crate::run_scenario) does: a run is judged by the first panic raised
 /// on its thread ([`run_on_a_thread`]), and a task polled on another thread would raise
 /// its panics there, where no run is judged by them.
@@ -705,6 +707,7 @@ pub fn with_tasks<T>(
     body: impl FnOnce() -> T,
 ) -> T {
     TASKS.with(|t| *t.borrow_mut() = Some(std::rc::Rc::new(start)));
+    PACE.with(|p| *p.borrow_mut() = None); // a pacer of an earlier run is that run's
     body()
 }
 
@@ -837,18 +840,143 @@ fn held_by(holder: Option<(bool, u32)>, first: bool, before: u32) -> Option<(boo
     }
 }
 
-/// A turn of the runtime: this task yields, so every other task it has ready runs, and so
-/// does the other future of a [`both`]. A panic that a thread of the scenario's own has
-/// kept by then is raised here (`raise_kept`), before the suite looks at what it waited
-/// that turn for.
+/// How the turns the suite waits end on this thread (`yield_once`): a task of the suite's
+/// own on the scenario's runtime, the pacer, ends them.
+#[derive(Default)]
+struct Pace {
+    /// Turns begun so far, and the last one over.
+    begun: u64,
+    over: u64,
+    /// The turn the pacer ends when it next runs, queued for it: 0 while it is not queued.
+    ends: u64,
+    /// The pacer's waker, once it has been polled.
+    pacer: Option<Waker>,
+    /// The waker of the suite's task, while it waits for a turn to end.
+    waits: Option<Waker>,
+    /// The pacer is gone, with its runtime.
+    gone: bool,
+}
+
+std::thread_local! {
+    /// The pace of the scenario running on this thread, once it has waited a turn.
+    static PACE: std::cell::RefCell<Option<Arc<Mutex<Pace>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The task that ends the suite's turns (`yield_once`). The runtime takes up its ready tasks
+/// in the order they became ready, so when this runs, every task that was ready as it was
+/// queued has run.
+struct Pacer(Arc<Mutex<Pace>>);
+
+impl Future for Pacer {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let waits = {
+            let mut pace = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            pace.pacer = Some(cx.waker().clone());
+            if pace.ends == 0 {
+                return Poll::Pending;
+            }
+            (pace.over, pace.ends) = (pace.ends, 0);
+            if pace.begun > pace.over {
+                // A turn began since this was queued: a task ready before it began may
+                // stand behind this one. It is queued again, behind them all, for that turn.
+                pace.ends = pace.begun;
+                cx.waker().wake_by_ref();
+            }
+            pace.waits.take()
+        };
+        if let Some(w) = waits {
+            w.wake();
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for Pacer {
+    fn drop(&mut self) {
+        let waits = {
+            let mut pace = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            pace.gone = true;
+            pace.waits.take()
+        };
+        if let Some(w) = waits {
+            w.wake();
+        }
+    }
+}
+
+/// Begin a turn on this thread, whose runner starts tasks with `start`: the pace, and the
+/// turn's number. The pacer is queued for it, started first if this thread has none, unless
+/// it is queued already for an earlier turn: it then queues itself again as it ends that
+/// one.
+fn begin_turn(start: &Starts) -> (Arc<Mutex<Pace>>, u64) {
+    let pace = PACE.with(|p| {
+        let mut p = p.borrow_mut();
+        let live = p
+            .as_ref()
+            .filter(|pace| !pace.lock().unwrap_or_else(PoisonError::into_inner).gone);
+        if let Some(pace) = live {
+            return pace.clone();
+        }
+        let pace = Arc::new(Mutex::new(Pace::default()));
+        start(Box::pin(Pacer(pace.clone())));
+        *p = Some(pace.clone());
+        pace
+    });
+    let (turn, pacer) = {
+        let mut p = pace.lock().unwrap_or_else(PoisonError::into_inner);
+        p.begun += 1;
+        let queue = p.ends == 0;
+        if queue {
+            p.ends = p.begun;
+        }
+        // One just started has no waker yet, and is queued as it is.
+        (p.begun, p.pacer.clone().filter(|_| queue))
+    };
+    if let Some(w) = pacer {
+        w.wake();
+    }
+    (pace, turn)
+}
+
+/// A turn of the runtime: this task yields until every other task the runtime had ready as
+/// the turn began has run, and so does the other future of a [`both`]. One yield does not
+/// give that. A runtime polls the task that yielded again once it has run some of its ready
+/// tasks, not all of them (tokio's current-thread runtime, 61 of them), and an engine may
+/// have thousands ready at once: the mock that passes every wake on by a task of its own
+/// has one for each waker its entries handed out, and a clock move wakes them all. [`TURNS`]
+/// yields on, tasks would still stand unrun, and one started behind them (an entry of the
+/// suite's on a task of its own, say) would not have been polled once, the engine taken to
+/// have settled. So the turn ends as a task of the suite's own runs ([`Pacer`]), queued as
+/// the turn begins ([`with_tasks`]): the runtime takes up its ready tasks in the order they
+/// became ready, so every task ready before that one has run by then. Where no runner gave
+/// the suite a way to start tasks, the turn is one yield. A panic that a thread of the
+/// scenario's own has kept by then is raised here (`raise_kept`), before the suite looks at
+/// what it waited that turn for.
 async fn yield_once() {
-    let mut yielded = false;
+    // The turn, once begun; with no runner, whether this has yielded.
+    let (mut turn, mut yielded) = (None, false);
     poll_fn(|cx| {
-        if yielded {
+        if turn.is_none() && !yielded {
+            match TASKS.with(|t| t.borrow().clone()) {
+                Some(start) => turn = Some(begin_turn(start.as_ref())),
+                None => {
+                    yielded = true;
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+            }
+        }
+        let Some((pace, n)) = &turn else {
+            return Poll::Ready(());
+        };
+        let mut pace = pace.lock().unwrap_or_else(PoisonError::into_inner);
+        if pace.over >= *n || pace.gone {
             Poll::Ready(())
         } else {
-            yielded = true;
-            cx.waker().wake_by_ref();
+            pace.waits = Some(cx.waker().clone());
             Poll::Pending
         }
     })
