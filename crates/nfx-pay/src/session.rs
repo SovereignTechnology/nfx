@@ -472,7 +472,10 @@ pub struct EngineParams {
 /// with tasks still ready (tokio's current-thread runtime does after 61), so the suite
 /// queues a task of its own as a turn begins, and the turn ends as that task runs: the
 /// runtime a runner gives the suite takes up its ready tasks in the order they became
-/// ready, as that one does. So:
+/// ready, as that one does. A turn is not ended on real time, so no thread of an engine's
+/// or a harness's keeps making tasks of that runtime ready without pause: a thread wakes a
+/// task as an answer comes, and while several woke or started tasks with no pause at all a
+/// turn would not end, and the run would be timed out as hung. So:
 /// - it waits for an answer, or checks that a future still waits, by polling it until it is
 ///   ready, or until the engine has settled with the future pending, which then waits on
 ///   the suite (a clock move, a release, another entry). It lets a future it drives beside
