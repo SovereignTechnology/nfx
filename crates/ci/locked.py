@@ -40,18 +40,25 @@ The facts, one per line:
   re-pinned, and then shows in the pins' diff. A file that runs the adversary suite
   through its macro is one of the test files this script names (`WHOLE_SUITE`,
   `SUITE_BY_PARTS`), and its number is derived from the suite's list of scenarios: the
-  macro named in the code of any other file fails, before any build and at a re-pin too
-  (`suite_users`). A scenario can be run one by one, so it is this, not the macro, that
+  macro named in the code of any other file fails (`suite_users`, which `test_counts`
+  calls: in a check before any build; at a re-pin before the build too, where nothing is
+  compared with the pins, and once more after the build, before the tests run and the
+  pins are written). A scenario can be run one by one, so it is this, not the macro, that
   holds a harness file to the whole list, and keeps one from being pinned at whatever
   number of tests ran at its pin; the engine's harness file is named there when it is
   written (M2.1). The numbers declared, each read from the pinned sources (`test_counts`):
   - a harness file (`WHOLE_SUITE`): the scenarios in the suite's list, a name to a line.
+    The file's code is inner `allow` attributes, plain `use` items and one invocation of
+    the macro in parentheses whose arguments begin no `@` arm, and nothing else
+    (`whole_use`): no attribute before the use, no item beside it, no test of its own;
     The scenarios the suite's file makes from its second list, each scenario whose seeders
     are paid run again at a second quoted mint (`scenarios_at_every_quoted_mint!`), are
     names of the list like any other, and the list's names of that kind must be that
     second list's, row for row;
   - the honest timings (`SUITE_BY_PARTS`): the list's length for each use of the whole
-    suite, and one for each scenario named under an `@each` use;
+    suite, and one for each scenario named under an `@each` use. The uses read from the
+    file's lines are the uses its code holds (`part_uses`), and its code names no `cfg`,
+    no `macro_rules`, no module kept in another file and no test of its own;
   - the mutants: one for each entry of the registry, in its form at every mint
     (`catches!`) and in its form of other mints (`catches_at_other_mints!`), and one for
     each row of the suite's second list, which the file takes once to check that what a
@@ -64,6 +71,21 @@ The facts, one per line:
     macro gives each scenario where a test file uses it.
   The suite's second list is held as its macro is: named in the code of no file but the
   suite's own (where it is defined and used once) and the mutants' (used once).
+  What "code" is: every tracked file of the two money crates is its crate's manifest or a
+  Rust source read by a lexer (`as_code`): line comments, block comments with the ones
+  nested in them, and the insides of string, raw string, byte string and character
+  literals are no code; a lifetime is. What the lexer cannot place fails by name and is
+  never guessed at: a comment or literal that does not end, a carriage return, a character
+  in code that is not printable ASCII, and a line that begins `//` and yet holds code
+  (inside a block comment or a string it is no line comment). On that code the name
+  `test` stands only in an attribute that reads `#[test]`, a line of its own, in
+  `cfg(test)`, as a macro's variable, and where the pay/1 vector tests give wasm's test
+  attribute that name (`test_words`); no file is taken in by `include!`; and a test
+  attribute stands only in the files the numbers above are read from, where the runner,
+  the pay/1 vector tests and the library's test modules also define no macro and compile
+  nothing on a condition. The older rules that go by lines stand beside these (a name
+  after code on a line, in a block comment or in a string is refused by them, on the safe
+  side); nothing they refused passes.
 
 Every path package must be a workspace member: a crate outside the workspace, wired in
 by path, would escape every check here. And every workspace member must be one the
@@ -292,8 +314,9 @@ def dep_info(filenames: list[str]) -> pathlib.Path | None:
 # `@each` arm is exported with it) and nothing in the macro holds a file to the whole list.
 # The lock does: no other file may name the macro in its code (`suite_users`), so a harness
 # file cannot be pinned with whatever number of tests ran at its pin.
-# - WHOLE_SUITE: the file's code names the macro once, as one use of the whole list, and
-#   the file runs as many tests as the list has scenarios. THE ENGINE'S HARNESS FILE (M2.1,
+# - WHOLE_SUITE: the file's code is inner `allow` attributes, plain `use` items and one
+#   invocation of the macro whose arguments begin no `@` arm, and nothing else
+#   (`whole_use`); the file runs as many tests as the list has scenarios. THE ENGINE'S HARNESS FILE (M2.1,
 #   docs/nfx/m2-plan.md) IS ADDED HERE WHEN IT IS WRITTEN: "the suite green against the
 #   real engine" is then the list's length by the lock, not by a reader's eye.
 # - SUITE_BY_PARTS: the file's uses are counted one by one, the whole list for each use of
@@ -331,33 +354,312 @@ PAIRS_JUDGED = "nfx_pay::scenarios_at_every_quoted_mint!(judged_at_each_quoted_m
 # nfx-pay's unit tests: the library's test modules, and its other sources, which hold none.
 LIB = "nfx-pay lib nfx_pay"
 LIB_TESTS_IN = "crates/nfx-pay/src/adversary/"
-# A line that is a test attribute and nothing else, and an attribute that makes a test
-# however it is written (on its item's line, by a path, under `cfg_attr`): in a file whose
-# tests are counted the two numbers are equal, so none is written another way.
+# A line that is a test attribute and nothing else, and an attribute that names `test` as
+# these three spellings do: on its item's line, by a path of plain segments, under a
+# `cfg_attr` written on one line. In a file whose tests are counted the two numbers are
+# equal. Other spellings (a space after `#`, a path that begins `::`, a `cfg_attr` over
+# several lines, a renamed attribute) this pattern does not see: `test_words` refuses
+# those, from the file's tokens.
 TEST_LINE = r"^[ \t]*#\[test\]$"
 TEST_WORD = r"#\[\s*(?:\w+\s*::\s*)*test\b|\bcfg_attr\([^\n]*,\s*(?:\w+\s*::\s*)*test\s*[,()]"
 ENTRY = r"^    [a-z_0-9]+: [svrwlt]\([SV]::[A-Za-z0-9]+\) => [a-z_0-9]+,$"
 
 
+# What follows reads a Rust source as code: its comments left out, its literals emptied.
+# The rules above it in this file's history go by lines (`names_suite`, `code_of`,
+# `test_lines`), and stand as they were: what they refuse is refused. These stand beside
+# them, and hold the line rules to what a line is: a line that begins `//` holds no code
+# (`as_code`), so none of them is told that code is a comment.
+MONEY_DIRS = ["crates/nfx-pay", "crates/nfx-pay-wire"]
+# The files of the money crates whose code may hold test attributes, counted where the
+# docstring says: the others hold none.
+TESTS_COUNTED_IN = ("crates/nfx-pay/tests/runner.rs", "crates/nfx-pay-wire/tests/pay1.rs",
+                    "crates/nfx-pay/tests/mutants.rs")
+LEX_STOP = re.compile(r'//|/\*|"|\'|[^\t\n\x20-\x7e]|(?<![A-Za-z0-9_])(?:r|br|cr)(?=["#])')
+LEX_STRING = re.compile(r'(?:[^"\\]|\\.)*"', re.S)
+LEX_CHAR = re.compile(r"\\(?:'[^'\n]*|[^'\n]+)'|[^'\\\n]'")
+LEX_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[0-9][A-Za-z0-9_]*|\S")
+_LEXED: dict[tuple[str, str], str] = {}
+
+
+def as_code(text: str, where: str) -> str:
+    """A Rust source's code: the text with every comment (a line comment, a block comment
+    with the ones nested in it) and the inside of every string, raw string, byte string and
+    character literal turned to spaces, each line end kept, so a line of it is that line's
+    code. A lifetime or a label is code; a raw identifier reads as `r`, `#` and its name.
+    What it cannot place fails, by name: a comment, string or character literal that does
+    not end, a quote that begins neither a character nor a lifetime, `r#` that begins
+    neither a raw string nor a raw identifier, a carriage return anywhere, and any
+    character in code that is not printable ASCII (a name is read by its ASCII spelling).
+    And a line of the source that begins `//` must hold no code: inside a block comment or
+    a string such a line is no line comment, and the rules that go by lines take it for
+    one."""
+    if (where, text) in _LEXED:
+        return _LEXED[where, text]
+
+    def no(what: str, at: int) -> None:
+        fail(f"{where}, line {text.count(chr(10), 0, at) + 1}: {what}: the lock reads this file "
+             "as Rust code, and will not guess at what it cannot place")
+
+    def blank(part: str) -> str:
+        return re.sub(r"[^\n]", " ", part)
+
+    if "\r" in text:
+        no("a carriage return", text.index("\r"))
+    out, i = [], 0
+    while True:
+        m = LEX_STOP.search(text, i)
+        if not m:
+            out.append(text[i:])
+            break
+        out.append(text[i:m.start()])
+        at, hit = m.start(), m.group()
+        if hit == "//":
+            end = text.find("\n", at)
+            end = len(text) if end < 0 else end
+            out.append(" " * (end - at))
+            i = end
+        elif hit == "/*":
+            depth, j = 1, at + 2
+            while depth:
+                n = re.compile(r"/\*|\*/").search(text, j)
+                if not n:
+                    no("a block comment that does not end", at)
+                depth += 1 if n.group() == "/*" else -1
+                j = n.end()
+            out.append(blank(text[at:j]))
+            i = j
+        elif hit == '"':
+            n = LEX_STRING.match(text, at + 1)
+            if not n:
+                no("a string that does not end", at)
+            out.append('"' + blank(text[at + 1:n.end() - 1]) + '"')
+            i = n.end()
+        elif hit == "'":
+            n = LEX_CHAR.match(text, at + 1)
+            if n:
+                out.append("'" + " " * (n.end() - at - 2) + "'")
+                i = n.end()
+            elif LEX_NAME.match(text, at + 1):
+                out.append("'")  # a lifetime or a label: its name is code
+                i = at + 1
+            else:
+                no("a quote that begins neither a character literal nor a lifetime", at)
+        elif hit in ("r", "br", "cr"):
+            j = m.end()
+            while text.startswith("#", j):
+                j += 1
+            hashes = j - m.end()
+            if text.startswith('"', j):
+                end = text.find('"' + "#" * hashes, j + 1)
+                if end < 0:
+                    no("a raw string that does not end", at)
+                out.append(hit + "#" * hashes + '"' + blank(text[j + 1:end]) + '"' + "#" * hashes)
+                i = end + 1 + hashes
+            elif hit == "r" and hashes == 1 and LEX_NAME.match(text, j):
+                out.append(hit)  # a raw identifier: `r`, then `#` and the name as code
+                i = m.end()
+            else:
+                no(f"`{hit}#` that begins neither a raw string nor a raw identifier", at)
+        else:
+            no(f"a character that is not printable ASCII in code ({hit!r})", at)
+    code = "".join(out)
+    for n, (line, left) in enumerate(zip(text.split("\n"), code.split("\n")), 1):
+        if line.lstrip().startswith("//") and left.strip():
+            fail(f"{where}, line {n}: a line that begins `//` and holds code (it ends a block "
+                 f"comment or a string: {left.strip()[:80]}): the lock's rules that go by lines "
+                 "take such a line for a comment")
+    _LEXED[where, text] = code
+    return code
+
+
+def tokens(code: str) -> list[str]:
+    """The tokens of a source's code (`as_code`): names, numbers, and every other
+    character alone."""
+    return TOKEN.findall(code)
+
+
+def named_in_code(text: str, word: str, where: str) -> int:
+    """How many times a source's code names `word`: as a token of its own, so in no
+    comment and no literal, and a raw identifier's name too."""
+    return tokens(as_code(text, where)).count(word)
+
+
+def test_words(text: str, where: str) -> int:
+    """The test attributes a source's code holds, each read from its tokens as `#[test]`
+    and nothing else. The name `test` stands in code only there, in `cfg(test)`, as a macro
+    variable (`$test`) and where the pay/1 vector tests give wasm's test attribute that name:
+    anywhere else fails, by name, so no test is made by a spelling the count does not take
+    (a path that ends in it, `cfg_attr`, a `use` that renames it, a macro handed it). And
+    each is a line of its own that reads `#[test]`, as the count goes by those lines; a
+    file `include!`d into another would be counted in neither, so no code names `include`
+    as a macro."""
+    t = tokens(as_code(text, where))
+    attributes = 0
+    for i, word in enumerate(t):
+        before, after = t[max(0, i - 2):i], t[i + 1:i + 2]
+        if word == "include" and after == ["!"]:
+            fail(f"{where} takes a file in by include!: the lock counts a file's tests where "
+                 "they are written")
+        if word != "test":
+            continue
+        if before == ["#", "["] and after == ["]"] and t[max(0, i - 3):i - 2] != ["!"]:
+            attributes += 1
+        elif not (before[-1:] == ["$"] or (before == ["cfg", "("] and after == [")"])
+                  or (where.endswith("nfx-pay-wire/tests/pay1.rs")
+                      and t[max(0, i - 2):i + 2] == ["wasm_bindgen_test", "as", "test", ";"])):
+            fail(f"{where} names `test` in its code where the lock does not know it "
+                 f"(`{' '.join(t[max(0, i - 4):i + 3])}`): a test is made by a line that reads "
+                 "#[test], which the lock counts, and the name stands elsewhere only in "
+                 "cfg(test) and as a macro's variable")
+    lines = len(re.findall(TEST_LINE, code_of(text), re.M))
+    plain = len(re.findall(TEST_LINE, as_code(text, where), re.M))
+    if not attributes == plain == lines:
+        fail(f"{where} has {attributes} test attributes in its code, {plain} of them a line of "
+             f"their own, and {lines} lines that read #[test] and nothing else, in a comment or "
+             "not: the lock counts a file's tests by those lines, so the three are one number")
+    return attributes
+
+
+def money_sources() -> dict[str, str]:
+    """Every tracked file of the two money crates, read: each is its crate's manifest or a
+    Rust source the lock can read as code (`as_code`), and a source's code holds test
+    attributes only where they are counted (`test_words`): the files this script counts
+    them in, and nfx-pay's own sources, which `lib_tests` holds to their numbers."""
+    files = [f for f in run("git", "ls-files", "-z", "--", *MONEY_DIRS, cwd=REPO).split("\0") if f]
+    sources = {}
+    for f in sorted(files):
+        if f in [f"{d}/Cargo.toml" for d in MONEY_DIRS]:
+            continue
+        if not f.endswith(".rs"):
+            fail(f"{f} is a file of a money crate that is neither its manifest nor a Rust "
+                 "source: the lock reads every file of those crates as code")
+        with open(REPO / f, encoding="utf-8", errors="replace", newline="") as source:
+            text = source.read()  # its line ends as they are: none is a carriage return
+        n = test_words(text, f)
+        if n and f not in TESTS_COUNTED_IN and not f.startswith("crates/nfx-pay/src/"):
+            fail(f"{f} has {n} test attributes in its code, and the lock counts none there: a "
+                 "file that runs the suite takes its tests from the suite's macro alone")
+        # Where tests are counted by their lines (the runner, the pay/1 vector tests, the
+        # library's test modules), no macro is defined and nothing is compiled on a
+        # condition: one line would make several tests, or none. The pay/1 vector tests
+        # name wasm's test attribute on a condition, and no other.
+        if f in TESTS_COUNTED_IN[:2] or f.startswith(LIB_TESTS_IN):
+            t = tokens(as_code(text, f))
+            odd = [w for w in ("macro_rules", "cfg", "cfg_attr") if w in t]
+            if f == TESTS_COUNTED_IN[1] and t.count("cfg") == 1 and "cfg_attr" not in t:
+                at = t.index("cfg")
+                if t[at - 2:at + 6] == ["#", "[", "cfg", "(", "target_arch", "=", '"', '"']:
+                    odd = [w for w in odd if w != "cfg"]
+            if odd:
+                fail(f"{f} names {odd} in its code, and the lock counts its tests by the lines "
+                     "that read #[test]: a macro or a condition would make several tests of "
+                     "one line, or none")
+        sources[f] = text
+    return sources
+
+
+def whole_use(name: str, text: str) -> None:
+    """A file declared to run the whole suite once is, in its code, inner `allow`
+    attributes, plain `use` items, and one invocation of the suite's macro, in parentheses,
+    whose arguments begin no `@` arm: nothing before it that could switch it off, nothing
+    beside it or after it that could make a test."""
+    where = f"tests/{name}.rs"
+    t = tokens(as_code(text, f"crates/nfx-pay/{where}"))
+
+    def closes(at: int) -> int:
+        """Where the bracket opened at `at` closes: the index past it, or past the end."""
+        depth = 0
+        for j in range(at, len(t)):
+            depth += (t[j] in ("(", "[", "{")) - (t[j] in (")", "]", "}"))
+            if depth == 0:
+                return j + 1
+        return len(t) + 1
+
+    i = 0
+    while True:
+        if t[i:i + 4] == ["#", "!", "[", "allow"]:
+            i = closes(i + 2)
+        elif t[i:i + 1] == ["use"] and ";" in t[i:]:
+            end = t.index(";", i)
+            if any(x == "as" or not (LEX_NAME.fullmatch(x) or x == ":") for x in t[i + 1:end]):
+                break
+            i = end + 1
+        else:
+            break
+    use = t[i:]
+    if (use[:6] != ["nfx_pay", ":", ":", SUITE_MACRO, "!", "("] or use[6:7] in (["@"], [")"])
+            or closes(i + 5) != len(t) - 1 or use[-1:] != [";"] or ";" in use[:-1]
+            or t.count(SUITE_MACRO) != 1):
+        fail(f"{where} is declared to run the whole suite once (crates/ci/locked.py, "
+             "WHOLE_SUITE), and its code is not inner `allow` attributes, plain `use` items and "
+             f"then `nfx_pay::{SUITE_MACRO}!(<a harness>);` alone, with no `@` arm: "
+             f"{' '.join(use[:14])[:120]}")
+
+
+def part_uses(name: str, text: str) -> tuple[int, int]:
+    """The tests a file counted use by use takes from the suite's macro, read from its
+    code: every naming of the macro is `nfx_pay::adversary_suite!(` and then a harness (the
+    whole list) or `@each <a harness>;` and scenarios' names, a comma after each. Its code
+    names no `cfg`, no `macro_rules`, no module kept in another file: nothing that could
+    switch a use off or make a test beside them. Gives the uses of the whole list, and
+    the scenarios named one by one."""
+    where = f"tests/{name}.rs"
+    t = tokens(as_code(text, f"crates/nfx-pay/{where}"))
+    for i, word in enumerate(t):
+        if word in ("cfg", "cfg_attr", "macro_rules") or (word == "mod" and t[i + 2:i + 3] != ["{"]):
+            fail(f"{where} is counted use by use of the suite's macro, and its code names "
+                 f"`{word}` (`{' '.join(t[max(0, i - 2):i + 4])}`): a use could be switched off, "
+                 "or a test made, where the count does not look")
+    whole = named = 0
+    for i, word in enumerate(t):
+        if word != SUITE_MACRO:
+            continue
+        j = i + 3
+        ok = t[max(0, i - 3):i] == ["nfx_pay", ":", ":"] and t[i + 1:j] == ["!", "("]
+        if ok and t[j:j + 1] not in (["@"], [")"]):
+            whole += 1
+            continue
+        if ok and t[j:j + 2] == ["@", "each"] and ";" in t[j:]:
+            j = t.index(";", j) + 1
+            names = 0
+            while j < len(t) and LEX_NAME.fullmatch(t[j]) and t[j + 1:j + 2] == [","]:
+                names, j = names + 1, j + 2
+            ok = names > 0 and t[j:j + 2] == [")", ";"]
+            named += names
+        else:
+            ok = False
+        if not ok:
+            fail(f"{where} names {SUITE_MACRO} in its code otherwise than as a use of the whole "
+                 f"suite or of scenarios named one by one, a comma after each: "
+                 f"{' '.join(t[max(0, i - 3):i + 8])[:120]}")
+    return whole, named
+
+
 def names_suite(text: str, word: str = SUITE_MACRO) -> list[str]:
     """The lines of a file that name the suite's macro (or `word`) in what may be code:
-    every line that holds the word but those that are a line comment from their start
-    (`//`, `///`, `//!`). A line that begins so is no use of the macro wherever it stands
-    (in a block comment or a string it is none either); a line that names it after code, in
-    a block comment or in a string counts as one, which errs on the side of refusing."""
+    every line that holds the word but those that begin `//` (`//`, `///`, `//!`). Such
+    a line is a line comment unless it stands inside a block comment or a string, where
+    it may end that and go on as code: `as_code` refuses every file of the money crates,
+    and every file this is asked about, in which a line that begins `//` holds code, so
+    here it is a comment. A line that names the word after code, in a block comment or in
+    a string counts as one, which errs on the side of refusing."""
     return [line for line in text.splitlines()
             if re.search(rf"\b{word}\b", line) and not line.lstrip().startswith("//")]
 
 
 def code_of(text: str) -> str:
-    """A file's lines but those that are a line comment from their start."""
+    """A file's lines but those that begin `//`: line comments, in a file `as_code` has
+    read (it refuses one where such a line holds code). Block comments and strings stay."""
     return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
 
 
 def test_lines(text: str, where: str) -> int:
-    """The tests a file's code declares, one for each line that is a test attribute and
-    nothing else: a file that holds the word in an attribute written any other way fails,
-    since its count would not follow it."""
+    """The tests a file declares, one for each line that is a test attribute and nothing
+    else: a file that holds the word in an attribute written in one of the other ways
+    `TEST_WORD` sees fails, since its count would not follow it. Every other spelling, and
+    such a line inside a block comment, `test_words` refuses."""
     code = code_of(text)
     lines = len(re.findall(TEST_LINE, code, re.M))
     words = len(re.findall(TEST_WORD, code))
@@ -398,6 +700,10 @@ def suite_users() -> None:
                  "WHOLE_SUITE if it runs the whole list once, in SUITE_BY_PARTS if its uses "
                  "are counted one by one; a file pinned without either would be held to "
                  "whatever number of tests ran at its pin")
+        if f.endswith(".rs") and named_in_code((REPO / f).read_text(errors="replace"), SUITE_MACRO, f):
+            fail(f"{f} names {SUITE_MACRO} in its code, on a line that reads as a comment's, and "
+                 "the lock declares no count for it: only a test file of nfx-pay that "
+                 "crates/ci/locked.py names may use the suite's macro")
     # The suite's second list, the same way: the suite's own file and the mutants' name it,
     # each on the lines `pairs` and `mutant_tests` hold them to, and no other file does.
     found = subprocess.run(["git", "grep", "-l", "-z", "-w", "-e", PAIRS_MACRO, "--", *SUITE_NAMED_IN],
@@ -415,6 +721,9 @@ def suite_users() -> None:
                  "at a second quoted mint from that list, and tests/mutants.rs, which takes it "
                  "once, may: a file that ran its rows would be held to whatever number of "
                  "tests ran at its pin")
+        if f.endswith(".rs") and named_in_code((REPO / f).read_text(errors="replace"), PAIRS_MACRO, f):
+            fail(f"{f} names {PAIRS_MACRO} in its code, on a line that reads as a comment's: "
+                 "only the suite's own file and tests/mutants.rs may")
 
 
 def pairs(adversary: str, listed: list[str]) -> int:
@@ -428,6 +737,9 @@ def pairs(adversary: str, listed: list[str]) -> int:
         fail(f"{SUITE_SOURCE} names {PAIRS_MACRO} on {len(own)} lines of its code, where it "
              "defines the macro and makes the scenarios at a second quoted mint from its list "
              "(2), or not as those two: " + " | ".join(x.strip()[:80] for x in own[:5]))
+    if named_in_code(adversary, PAIRS_MACRO, SUITE_SOURCE) != 2:
+        fail(f"{SUITE_SOURCE} names {PAIRS_MACRO} in its code otherwise than on those two lines, "
+             "once each")
     kept = re.search(rf"^macro_rules! {PAIRS_MACRO} \{{\n    \(\$with:ident\) => \{{\n"
                      r"        \$with! \{\n(.*?)\n        \}\n    \};\n\}$", adversary, re.M | re.S)
     if not kept:
@@ -455,6 +767,19 @@ def mutant_tests(mutants: str, rows: int) -> int:
     nowhere else; it uses each once; and the two registries hold entries and nothing more."""
     code = code_of(mutants)
     makers = ("catches", "catches_at_other_mints", "judged_at_each_quoted_mint")
+    # Its code, read as code: each of the three macros named where it is defined and where
+    # it is used once (the third also names the module it makes), the suite's second list
+    # once, three macros defined and no more, and nothing that could switch one of them off
+    # or keep tests in another file.
+    t = tokens(as_code(mutants, MUTANTS))
+    want = {"catches": 2, "catches_at_other_mints": 2, "judged_at_each_quoted_mint": 3,
+            PAIRS_MACRO: 1, "macro_rules": 3, "cfg": 0, "cfg_attr": 0}
+    got = {word: t.count(word) for word in want}
+    filed = [i for i, word in enumerate(t) if word == "mod" and t[i + 2:i + 3] != ["{"]]
+    if got != want or filed:
+        fail(f"tests/mutants.rs names in its code {got}, and the lock counts its tests by "
+             f"{want}, with no module kept in another file ({len(filed)}): a macro used twice, "
+             "one more defined, or a use switched off would not be counted")
     for macro in makers:
         body = re.findall(rf"^macro_rules! {macro} \{{\n(.*?)\n\}}$", code, re.M | re.S)
         if len(body) != 1 or len(re.findall(TEST_LINE, body[0], re.M)) != 1:
@@ -515,6 +840,12 @@ def test_counts() -> dict[str, int]:
     pay1 = (CRATES / "nfx-pay-wire" / "tests" / "pay1.rs").read_text()
     names = re.findall(r"^\s+([a-z_0-9]+),$", listed.group(1), re.M)
     scenarios = len(names)
+    # Every file of the money crates is read as code first: what cannot be read fails.
+    money_sources()
+    read = re.search(r"adversary_suite!\(@each \$h;\n(.*?)\n\s*\);", as_code(adversary, SUITE_SOURCE), re.S)
+    if not read or re.findall(r"^\s+([a-z_0-9]+),$", read.group(1), re.M) != names:
+        fail("the adversary_suite! list read from the suite's code is not the list read from "
+             "its lines: a name of it stands in a comment or a string")
     if len(set(names)) != scenarios or scenarios != len([x for x in listed.group(1).splitlines() if x.strip()]):
         fail("the adversary_suite! list has a line that is no scenario's name, or a name twice")
     suite_users()
@@ -525,6 +856,9 @@ def test_counts() -> dict[str, int]:
     if len(own) != 2:
         fail(f"{SUITE_SOURCE} names {SUITE_MACRO} on {len(own)} lines of its code, where it "
              "defines the macro and hands its list on (2): " + " | ".join(x.strip()[:80] for x in own[:5]))
+    if named_in_code(adversary, SUITE_MACRO, SUITE_SOURCE) != 2:
+        fail(f"{SUITE_SOURCE} names {SUITE_MACRO} in its code otherwise than on those two lines, "
+             "once each")
     if set(WHOLE_SUITE) & set(SUITE_BY_PARTS):
         fail(f"crates/ci/locked.py names {sorted(set(WHOLE_SUITE) & set(SUITE_BY_PARTS))} both "
              "as running the whole suite once and as counted use by use")
@@ -535,6 +869,7 @@ def test_counts() -> dict[str, int]:
             fail(f"tests/{name}.rs is declared to run the whole suite once (crates/ci/locked.py, "
                  f"WHOLE_SUITE), and its code names {SUITE_MACRO} on {len(lines)} lines, or not as "
                  "one use of the whole list: " + " | ".join(x.strip()[:80] for x in lines[:4]))
+        whole_use(name, suite_file(name))
         counts[name] = scenarios
     for name in SUITE_BY_PARTS:
         text = suite_file(name)
@@ -545,8 +880,12 @@ def test_counts() -> dict[str, int]:
             fail(f"tests/{name}.rs names {SUITE_MACRO} on {len(lines)} lines of its code, and the "
                  f"lock counts {len(whole)} uses of the whole suite and {len(each)} of scenarios "
                  "named one by one: a use its count does not see")
-        counts[name] = (scenarios * len(whole)
-                        + sum(len(re.findall(r"^\s+[a-z_0-9]+,$", names, re.M)) for names in each))
+        named = sum(len(re.findall(r"^\s+[a-z_0-9]+,$", names, re.M)) for names in each)
+        if part_uses(name, text) != (len(whole), named):
+            fail(f"tests/{name}.rs: the lock counts {len(whole)} uses of the whole suite and {named} "
+                 f"scenarios named one by one from its lines, and its code holds "
+                 f"{part_uses(name, text)}: a use that is not what its line looks like")
+        counts[name] = scenarios * len(whole) + named
     counts.update({
         "mutants": mutant_tests(mutants, pairs(adversary, names)),
         "runner": test_lines(runner, "tests/runner.rs"),
@@ -693,6 +1032,12 @@ def compiled(pin: bool) -> None:
     if not pin:
         check_facts(found)
         check_test_targets(test_targets(members))
+    else:
+        # A re-pin compares nothing with the pins, but what the sources must be is read
+        # here all the same, before any build: a file that uses the suite's macro
+        # undeclared, or a test made where no count looks, is not pinned at what ran.
+        test_counts()
+        lib_tests()
     # The build and the test run go in a target directory made for this run alone, so no
     # build directory left in the checkout (by a CI cache, a stale local build, or anything
     # else git does not track) can stand in for a compile or a test binary. In CI a
