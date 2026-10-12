@@ -263,7 +263,7 @@ macro_rules! run_scenario {
 }
 
 /// The scenarios whose seeders a case pays, each named twice and with the case both names
-/// run: at the one mint its seeders quote, and at the second of two ([`Quoted::paying`]).
+/// run: at the one mint its seeders quote, and at the second of two (`Quoted::paying`).
 /// NFX-07 §3 states the rules of a swap, its retry, its completion and the reads of its
 /// state of the swap and its account, never of a mint, so no case of them is run at a
 /// seeder's first mint only: `$with` is handed every row, and this file makes the second
@@ -327,7 +327,7 @@ macro_rules! second_mint_scenarios {
         $(
             #[doc = concat!(
                 "[`", stringify!($first), "`], every seeder its case starts quoting a second \
-                 mint and paid there: the case sees the harness as [`Quoted::paying`] gives it."
+                 mint and paid there: the case sees the harness as `Quoted::paying` gives it."
             )]
             pub async fn $second<H: Harness $(+ $bound)?>(h: &H) {
                 $case(&Quoted::Second.paying(h)).await;
@@ -2790,7 +2790,7 @@ async fn bad_tokens_are_refused_at_one_mint<H: Harness>(h: &H) {
     one_bad_proof_spoils_the_token_on_every_path(h).await;
 }
 
-/// [`bad_tokens_are_refused_at_one_mint`], and the case that names its mints itself: proofs
+/// `bad_tokens_are_refused_at_one_mint`, and the case that names its mints itself: proofs
 /// a mint refuses as invalid ban their peer at a second quoted mint as at the first.
 pub async fn bad_tokens_are_refused<H: Harness>(h: &H) {
     bad_tokens_are_refused_at_one_mint(h).await;
@@ -3144,7 +3144,7 @@ async fn a_double_spend_bans_the_peer_at_one_mint<H: Harness>(h: &H) {
     );
 }
 
-/// [`a_double_spend_bans_the_peer_at_one_mint`], and the case that names its mints itself:
+/// `a_double_spend_bans_the_peer_at_one_mint`, and the case that names its mints itself:
 /// a spent proof bans its peer at a second quoted mint as at the first.
 pub async fn a_double_spend_bans_the_peer<H: Harness>(h: &H) {
     a_double_spend_bans_the_peer_at_one_mint(h).await;
@@ -4045,8 +4045,8 @@ async fn a_seeder_answers_within_its_deadline_at_one_mint<H: Harness>(h: &H) {
     a_turn_in_the_deadlines_second_reaches_no_refusal(h).await;
 }
 
-/// [`a_seeder_answers_within_its_deadline_at_one_mint`], and the cases of a mint's keys and
-/// keyset listings at the deadline, which name their mint themselves ([`Quoted`]): each at
+/// `a_seeder_answers_within_its_deadline_at_one_mint`, and the cases of a mint's keys and
+/// keyset listings at the deadline, which name their mint themselves (`Quoted`): each at
 /// a second quoted mint as at the first.
 pub async fn a_seeder_answers_within_its_deadline<H: Harness>(h: &H) {
     a_seeder_answers_within_its_deadline_at_one_mint(h).await;
@@ -4217,7 +4217,7 @@ async fn every_answer_wakes_the_entry_awaiting_it_at_one_mint<H: Harness>(h: &H)
     a_listing_another_asked_for_wakes_its_payment(h).await;
 }
 
-/// [`every_answer_wakes_the_entry_awaiting_it_at_one_mint`], and the case that names its
+/// `every_answer_wakes_the_entry_awaiting_it_at_one_mint`, and the case that names its
 /// mints itself: a second quoted mint's keys and listings wake their payment as the first's.
 pub async fn every_answer_wakes_the_entry_awaiting_it<H: Harness>(h: &H) {
     every_answer_wakes_the_entry_awaiting_it_at_one_mint(h).await;
@@ -6903,7 +6903,7 @@ async fn an_unanswered_check_of_inputs_proves_nothing<H: Harness>(h: &H) {
 /// rules of a swap of its account, never of a mint. (What one mint's swaps come to alone,
 /// every scenario whose seeders are paid runs at each quoted mint:
 /// [`scenarios_at_every_quoted_mint!`](crate::scenarios_at_every_quoted_mint).) One seeder
-/// quotes this harness's mint and [`SECOND_MINT`]:
+/// quotes this harness's mint and `SECOND_MINT`:
 /// - while a swap of an account's is unknown its next payment is answered
 ///   `mint-unavailable` and not swapped, whichever quoted mint each is at: the unknown one
 ///   at the first and the next at the second, and the other way round, its client having
