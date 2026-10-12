@@ -13411,15 +13411,37 @@ const LICENCE_ENDS: [&str; 10] = [
     "the session's end",
 ];
 
+/// What can come between a refusal and the `due` that follows it without ending the
+/// refusal's licence, for [`a_refusal_licenses_the_due_that_follows_it`]: none is a decision
+/// of what to pay. A `last_pay`, paying or not, and another video's `due` are tried there
+/// too. The last is a timeout a second before the 180 s of the payment in flight on the
+/// session (flaw `EarlyTimeoutEndsLicence`): that payment is then acknowledged, so that the
+/// `due` that follows may pay.
+const LICENCE_STAYS: [&str; 13] = [
+    "a new request",
+    "the ack of the payment in flight",
+    "mint-unavailable to the payment in flight",
+    "a second quote on the open session",
+    "a timeout with no payment on the session",
+    "a ledger made for another video",
+    "a refused hello",
+    "a request on another video's session",
+    "a refused request on another video's session",
+    "a timeout with no payment on another video's session",
+    "another video's session ending",
+    "another video's honest quote, taken",
+    "a timeout before its 180 s on the payment in flight",
+];
+
 /// A refusal licenses the `due` that follows it on its ledger, and no other (NFX-07 §3a):
 /// that call pays ahead if it can, and the licence ends there, whether or not it paid, or at
 /// the session's end ([`LICENCE_ENDS`]). Once whatever kept that `due` from paying is gone,
-/// the watcher pays for the chunks it requested, at their due point, and nothing ahead,
-/// however many refusals came before that `due` (one, two or three: the licence is one).
-/// That nothing else which comes between the refusal and the `due` ends the licence is the
-/// table of [`a_refusals_licence_lasts_to_its_due_whatever_comes`]. A `last_pay` between
-/// the refusal and the `due` pays nothing ahead, and leaves the licence to the `due`. A
-/// refusal on one video licenses nothing on another.
+/// the watcher pays for the chunks it requested, at their due point, and nothing ahead.
+/// Nothing else that comes between the refusal and the `due` ends the licence
+/// ([`LICENCE_STAYS`]): a request sent, the answer to a payment in flight, a timeout before
+/// that payment's 180 s or with no payment on the session, or anything on another video. A
+/// `last_pay` between the refusal and the `due` pays nothing ahead, and leaves the licence
+/// to the `due`. A refusal on one video licenses nothing on another.
 async fn a_refusal_licenses_the_due_that_follows_it<H: Harness>(h: &H) {
     let unavailable = Rej {
         code: RejCode::MintUnavailable,
@@ -13625,6 +13647,116 @@ async fn a_refusal_licenses_the_due_that_follows_it<H: Harness>(h: &H) {
                  requested, and nothing ahead"
             );
         }
+        close(h, (s0, s1)).await;
+    }
+    // Nothing else that comes between the refusal and the due is a decision of what to pay:
+    // each leaves the licence to that due.
+    are_inputs(h, &LICENCE_STAYS);
+    for between in LICENCE_STAYS {
+        let e = h.engine(1, 4, 1000);
+        let mut s0 = open_on(h, &e, 1, 0).await;
+        let mut v0 = h.viewer(1);
+        let mut v1 = v0.sibling();
+        v0.quote(s0.quote())
+            .expect("video 0's honest quote is accepted");
+        // Video 1's session, where the event comes on one.
+        let mut s1 = None;
+        if between.ends_with("on another video's session")
+            || between == "another video's session ending"
+        {
+            let s = open_on(h, &e, 1, 1).await;
+            v1.quote(s.quote())
+                .expect("video 1's honest quote is accepted");
+            s1 = Some(s);
+        }
+        // A payment in flight when the request is refused, where the event is its answer.
+        let mut in_flight = None;
+        if between.ends_with("the payment in flight") {
+            for i in 0..2 {
+                assert!(s0.admit(&h.chunk_of(0, i)), "within the window");
+                v0.requested();
+            }
+            in_flight = v0
+                .due()
+                .await
+                .expect("video 0's due answers at half the window");
+            assert!(in_flight.is_some(), "due at half the window");
+        }
+        v0.requested();
+        v0.refused();
+        // What the due that follows pays up to: half the window ahead, beyond what is owed.
+        let mut upto = 2;
+        match between {
+            "a new request" => {
+                v0.requested();
+                upto = 3;
+            }
+            "the ack of the payment in flight" => {
+                let pay = in_flight.take().expect("video 0's payment in flight");
+                v0.ack(&s0.pay(&pay).await.expect("the seeder takes it"))
+                    .expect("its honest ack is taken");
+                upto = 4;
+            }
+            "mint-unavailable to the payment in flight" => {
+                v0.rej(&unavailable).await;
+                upto = 4;
+            }
+            "a second quote on the open session" => {
+                assert!(v0.quote(s0.quote()).is_err(), "one quote per session");
+            }
+            "a timeout with no payment on the session" => v0.timeout().await,
+            "a timeout before its 180 s on the payment in flight" => {
+                // A second before the 180 s from its sending are up, the payment
+                // unanswered: nothing is that call's. The payment is acknowledged after it.
+                advance(h, Duration::from_secs(179)).await;
+                v0.timeout().await;
+                assert!(
+                    !v0.stopped(),
+                    "a timeout before its payment's 180 s stops nothing"
+                );
+                let pay = in_flight.take().expect("video 0's payment in flight");
+                v0.ack(&s0.pay(&pay).await.expect("the seeder takes it"))
+                    .expect("its honest ack is taken");
+                upto = 4;
+            }
+            "a ledger made for another video" => {
+                let _third = v0.sibling();
+            }
+            "a refused hello" => {
+                // With each code but `banned`, which stops the watcher.
+                for code in hello_refusal_codes() {
+                    v0.hello_refused(&Rej { code, detail: None });
+                }
+            }
+            "a request on another video's session" => v1.requested(),
+            "a refused request on another video's session" => {
+                v1.requested();
+                v1.refused();
+            }
+            "a timeout with no payment on another video's session" => v1.timeout().await,
+            "another video's session ending" => {
+                close(h, s1.take()).await;
+                v1.end();
+            }
+            _ => {
+                assert_eq!(between, "another video's honest quote, taken", "an event");
+                let s = open_on(h, &e, 1, 1).await;
+                v1.quote(s.quote())
+                    .expect("video 1's honest quote is accepted");
+                s1 = Some(s);
+            }
+        }
+        let ahead = v0
+            .due()
+            .await
+            .expect("video 0's due answers after a refusal");
+        assert_eq!(
+            ahead.map(|pay| pay.upto_chunk),
+            Some(upto),
+            "{between}, between a refusal and the due that follows it, is no decision of what \
+             to pay: it leaves the licence to that due, which pays for what it owes and half \
+             the window ahead"
+        );
         close(h, (s0, s1)).await;
     }
     // A last_pay between the refusal and the due pays nothing ahead, and leaves the licence.
@@ -15720,11 +15852,68 @@ async fn a_payment_behind_an_answer_waits_from_its_sending<H: Harness>(h: &H) {
     }
 }
 
-/// The 180 s of a live session's payment are counted from sending, and do not start before
-/// it: a payment sent 100 s after the session's quote and the ack before it is reclaimed
-/// 180 s after it was sent, not before. That nothing which comes before they are up starts
-/// them again is the table of [`a_payment_waits_180_s_and_holds_its_place_whatever_comes`].
+/// The 180 s of a live session's payment are counted from sending too, and nothing that
+/// comes before they are up starts them again: on the session, a second quote, a new or a
+/// refused request, or a timeout; a ledger made for another video, a `hello` refused on the
+/// payment's own ledger (with each code but `banned`), or anything in
+/// [`ON_ANOTHER_VIDEO`] or [`ON_ANOTHER_SESSION`]. The seeder never answers the payment,
+/// and the event comes at 179 s: nothing is reclaimed then, and at 180 s the watcher
+/// reclaims it and stops. Nor do they start before sending: a payment sent 100 s after the
+/// session's quote and the ack before it is reclaimed 180 s after it was sent, not before.
 async fn the_live_wait_counts_from_sending<H: Harness>(h: &H) {
+    let on_the_session = [
+        "a second quote on the open session",
+        "a new request",
+        "a refused request",
+        "a timeout before 180 s",
+        "a ledger made for another video",
+        "a hello refused on its own ledger",
+    ];
+    for &event in on_the_session
+        .iter()
+        .chain(&ON_ANOTHER_VIDEO)
+        .chain(&ON_ANOTHER_SESSION)
+    {
+        are_inputs(h, &[event]);
+        let e = h.engine(1, 4, 1000);
+        let s = open(h, &e, 1).await;
+        let mut v = h.viewer(1);
+        v.quote(s.quote()).expect("an honest quote is accepted");
+        v.requested();
+        v.requested();
+        let unanswered = v.due().await.expect("due answers").expect("due");
+        advance(h, Duration::from_secs(179)).await;
+        let s = match event {
+            "a new request" => {
+                v.requested();
+                s
+            }
+            "a timeout before 180 s" => {
+                v.timeout().await;
+                s
+            }
+            "a hello refused on its own ledger" => {
+                // With each code but `banned`, which stops the watcher.
+                for code in hello_refusal_codes() {
+                    v.hello_refused(&Rej { code, detail: None });
+                }
+                s
+            }
+            _ => bring_about(h, &e, s, &mut v, event, true).await,
+        };
+        assert!(
+            !v.stopped() && !h.claimed_any(&unanswered.token).await,
+            "{event} at 179 s from sending: nothing is reclaimed yet, and nothing stops"
+        );
+        advance(h, SECOND).await;
+        v.timeout().await;
+        assert!(
+            v.stopped() && h.claimed_all(&unanswered.token).await,
+            "{event} starts no wait again: the live session's payment is reclaimed 180 s after \
+             it was sent, and the watcher stops"
+        );
+        close(h, s).await;
+    }
     let mut s = open(h, &h.engine(1, 4, 1000), 1).await;
     let mut v = h.viewer(1);
     v.quote(s.quote()).expect("an honest quote is accepted");
@@ -17191,12 +17380,12 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
     // Out of tries, it still takes its proofs back; and a retry is no try.
     out_of_tries_it_still_reclaims(h).await;
     a_retried_reclaim_is_no_try(h).await;
-    // Nor does a closed session's payment, reclaimed unanswered, use a try or restore one.
-    a_closed_sessions_reclaim_is_no_try(h).await;
+    // Nor does anything else use a try, or restore one, while tries are left.
+    only_an_unavailable_answer_uses_a_try(h).await;
     // Every such answer uses one, however its payment was made and however its reclaim
-    // ends. (What else may come, and what restores them, is the table of
-    // `the_tries_on_its_first_ledger_are_used_and_restored_by_nothing_else`.)
+    // ends; and every ack and every new session's accepted quote restores them all.
     every_unavailable_answer_uses_a_try(h).await;
+    every_ack_and_accepted_quote_restores_the_tries(h).await;
 }
 
 /// How the reclaim of a payment answered `mint-unavailable` ends, where the watcher may pay
@@ -17283,55 +17472,239 @@ async fn every_unavailable_answer_uses_a_try<H: Harness>(h: &H) {
     }
 }
 
+/// What restores the three tries, for [`every_ack_and_accepted_quote_restores_the_tries`]:
+/// an ack, on whichever of the seeder's videos, and a new session's accepted quote, on
+/// whichever, whether or not it settles a payment.
+const RESTORES: [&str; 5] = [
+    "an ack on its own video",
+    "an ack on another video",
+    "a new session's accepted quote that settles nothing",
+    "a new session's accepted quote that settles a payment",
+    "another video's new session's accepted quote",
+];
+
+/// An ack resets the count of `mint-unavailable` answers in a row, as a new session's
+/// accepted quote does (NFX-07 §3a): each of [`RESTORES`], with one try or two used on video
+/// 0 before it, leaves video 0 three tries. The count is the standing's, so an ack or a
+/// quote on video 1 restores them too; and a quote restores them whether or not it settles
+/// a payment (one the seeder swapped and credited, its ack lost with the connection).
+async fn every_ack_and_accepted_quote_restores_the_tries<H: Harness>(h: &H) {
+    let mu = Rej {
+        code: RejCode::MintUnavailable,
+        detail: None,
+    };
+    are_inputs(h, &RESTORES);
+    for used in [1, 2] {
+        for by in RESTORES {
+            let e = h.engine(1, 4, 1000);
+            let mut s0 = open_on(h, &e, 1, 0).await;
+            let mut v0 = h.viewer(1);
+            let mut v1 = v0.sibling();
+            v0.quote(s0.quote())
+                .expect("video 0's honest quote is accepted");
+            // Video 1's session, held since before the tries where its ack restores them.
+            let mut s1 = None;
+            if by == "an ack on another video" {
+                let s = open_on(h, &e, 1, 1).await;
+                v1.quote(s.quote())
+                    .expect("video 1's honest quote is accepted");
+                s1 = Some(s);
+            }
+            for i in 0..2 {
+                assert!(s0.admit(&h.chunk_of(0, i)), "within the window");
+                v0.requested();
+            }
+            for _ in 0..used {
+                v0.due()
+                    .await
+                    .expect("video 0's due answers")
+                    .expect("a try");
+                v0.rej(&mu).await;
+            }
+            match by {
+                "an ack on its own video"
+                | "a new session's accepted quote that settles a payment" => {
+                    let pay = v0
+                        .due()
+                        .await
+                        .expect("video 0's due answers")
+                        .expect("a try more");
+                    let ack = s0.pay(&pay).await.expect("this one the seeder takes");
+                    if by == "an ack on its own video" {
+                        v0.ack(&ack).expect("its honest ack is taken");
+                    } else {
+                        // Its ack never reaches the watcher: the connection drops.
+                        close(h, s0).await;
+                        v0.end();
+                        s0 = open_on(h, &e, 1, 0).await;
+                        v0.quote(s0.quote()).expect(
+                            "the new session's quote shows the payment: settled, and taken",
+                        );
+                    }
+                    for i in 2..4 {
+                        assert!(s0.admit(&h.chunk_of(0, i)), "within the window");
+                        v0.requested();
+                    }
+                }
+                "an ack on another video" => {
+                    let s = s1.as_mut().expect("video 1's session, held since before");
+                    for i in 0..2 {
+                        assert!(s.admit(&h.chunk_of(1, i)), "within the window");
+                        v1.requested();
+                    }
+                    let pay = v1
+                        .due()
+                        .await
+                        .expect("video 1's due answers")
+                        .expect("due on video 1");
+                    v1.ack(&s.pay(&pay).await.expect("the seeder takes it"))
+                        .expect("its honest ack is taken");
+                }
+                "a new session's accepted quote that settles nothing" => {
+                    close(h, s0).await;
+                    v0.end();
+                    s0 = open_on(h, &e, 1, 0).await;
+                    v0.quote(s0.quote())
+                        .expect("a new session's honest quote is accepted");
+                }
+                _ => {
+                    let s = open_on(h, &e, 1, 1).await;
+                    v1.quote(s.quote())
+                        .expect("video 1's new session's honest quote is accepted");
+                    s1 = Some(s);
+                }
+            }
+            let mut tries = 0;
+            while v0
+                .due()
+                .await
+                .expect("video 0's due answers, tries left or not")
+                .is_some()
+            {
+                tries += 1;
+                assert!(tries <= 3, "more than three tries");
+                v0.rej(&mu).await;
+            }
+            assert_eq!(
+                tries, 3,
+                "{used} of video 0's three tries used, then {by}: it restores them all, so \
+                 video 0 has three tries again"
+            );
+            close(h, (s0, s1)).await;
+        }
+    }
+}
+
 /// Only a `mint-unavailable` answer to a payment uses a try, and only an ack or a new
-/// session's accepted quote restores them. With two used on video 0's live session,
-/// video 0's closed session's payment, never answered, reclaimed at 180 s by video 1, which
-/// holds a session, with every proof back or lost to its keyset's expiry, neither uses the
-/// third nor gives back the others: one try is left.
-async fn a_closed_sessions_reclaim_is_no_try<H: Harness>(h: &H) {
+/// session's accepted quote restores them. With two used on video 0's live session, nothing
+/// else uses the third or gives back the others: video 1's session ending, a quote refused on
+/// video 1 (for its price, its `window` or its mints, or as a second quote), a second quote
+/// on video 0's session, a timeout with no payment on it, or one at 179 s from sending the
+/// second try (answered `mint-unavailable` after it), `hello`s refused on video 1 with every
+/// code but `banned`, nor video 0's closed session's payment, never answered, reclaimed at
+/// 180 s by video 1, which holds a session, with every proof back or lost to its keyset's
+/// expiry: one try is left.
+async fn only_an_unavailable_answer_uses_a_try<H: Harness>(h: &H) {
     let mu = Rej {
         code: RejCode::MintUnavailable,
         detail: None,
     };
     let unanswered = "video 0's closed session's payment reclaimed with every proof back";
     let expired = "video 0's closed session's payment lost to its keyset's expiry at 180 s";
-    for event in [unanswered, expired] {
+    for event in [
+        "video 1's session ending",
+        "video 1's quote over its price cap",
+        "video 1's quote with a window over its ceiling",
+        "video 1's quote naming no mint it holds",
+        "video 1's second quote",
+        "a second quote on video 0's session",
+        "a timeout with no payment on video 0's session",
+        "a timeout at 179 s from sending the second try",
+        "hellos refused on video 1",
+        unanswered,
+        expired,
+    ] {
+        are_inputs(h, &[event]);
         let e = h.engine(1, 4, 1000);
         let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
         let mut v0 = h.viewer(1);
         let mut v1 = v0.sibling();
-        // Video 1 takes its quote before the tries are used.
-        v1.quote(s1.quote())
-            .expect("video 1's honest quote is accepted");
+        // Video 1 takes its quote before the tries are used, where the event needs it.
+        let closed = event == unanswered || event == expired;
+        if matches!(event, "video 1's session ending" | "video 1's second quote") || closed {
+            v1.quote(s1.quote())
+                .expect("video 1's honest quote is accepted");
+        }
         v0.quote(s0.quote())
             .expect("video 0's honest quote is accepted");
         v0.requested();
         v0.requested();
-        for _ in 0..2 {
+        // The second try's answer comes after the event, where the event needs it in flight.
+        let in_flight = event == "a timeout at 179 s from sending the second try";
+        for _ in 0..(if in_flight { 1 } else { 2 }) {
             v0.due()
                 .await
                 .expect("video 0's due answers, tries left")
                 .expect("a try");
             v0.rej(&mu).await;
         }
+        let mut refused = s1.quote().clone();
         let mut unread = None;
-        let pay = v0
-            .due()
-            .await
-            .expect("video 0's due answers, a try left")
-            .expect("due on video 0: the payment is no try until answered");
-        close(h, s0).await;
-        v0.end();
-        if event == expired {
-            h.expire_keyset_of(&pay.token, 1);
-        } else {
-            unread = Some(pay.token);
+        match event {
+            "video 1's session ending" => {
+                close(h, s1).await;
+                v1.end();
+            }
+            "video 1's quote over its price cap" => refused.price_per_chunk = 2,
+            "video 1's quote with a window over its ceiling" => {
+                refused.window = h.window_ceiling() + 1;
+            }
+            "video 1's quote naming no mint it holds" => {
+                refused.mints = vec![format!("{}/", h.mint())];
+            }
+            "a second quote on video 0's session" => {
+                assert!(v0.quote(s0.quote()).is_err(), "one quote per session");
+            }
+            "a timeout with no payment on video 0's session" => v0.timeout().await,
+            "a timeout at 179 s from sending the second try" => {
+                v0.due()
+                    .await
+                    .expect("video 0's due answers, tries left")
+                    .expect("the second try");
+                advance(h, Duration::from_secs(179)).await;
+                v0.timeout().await;
+                v0.rej(&mu).await;
+            }
+            "hellos refused on video 1" => {
+                for code in hello_refusal_codes() {
+                    v1.hello_refused(&Rej { code, detail: None });
+                }
+            }
+            "video 1's second quote" => {}
+            _ => {
+                let pay = v0
+                    .due()
+                    .await
+                    .expect("video 0's due answers, a try left")
+                    .expect("due on video 0: the payment is no try until answered");
+                close(h, s0).await;
+                v0.end();
+                if event == expired {
+                    h.expire_keyset_of(&pay.token, 1);
+                } else {
+                    unread = Some(pay.token);
+                }
+                v1.requested();
+                v1.requested();
+                advance(h, Duration::from_secs(180)).await;
+            }
         }
-        v1.requested();
-        v1.requested();
-        advance(h, Duration::from_secs(180)).await;
-        // Video 1 pays once video 0's session has closed, reclaiming its payment first.
-        let payer = &mut v1;
+        if event.starts_with("video 1's quote") || event == "video 1's second quote" {
+            assert!(v1.quote(&refused).is_err(), "{event}: refused");
+        }
+        // Video 0 pays on; video 1 does once video 0's session has closed, reclaiming its
+        // payment first.
+        let payer = if closed { &mut v1 } else { &mut v0 };
         let mut left = 0;
         while payer
             .due()
@@ -17827,10 +18200,91 @@ pub async fn a_watchers_standing_spans_its_videos<H: Harness>(h: &H) {
         "it awaits video 0's quote, not video 1's"
     );
 
-    // Nor does a quote or ack on video 1 settle video 0's payment, whatever it shows. (That
-    // nothing but its answer frees the place of a payment in flight on a live session is the
-    // table of `a_payment_waits_180_s_and_holds_its_place_whatever_comes`.)
+    // Nor does a quote or ack on video 1 settle video 0's payment, whatever it shows; and
+    // nothing but its answer frees the slot of a payment in flight on a live session.
     another_videos_quote_or_ack_settles_nothing_of_it(h).await;
+    a_live_payment_holds_the_slot(h).await;
+}
+
+/// A payment in flight on a live session holds the standing's one slot until it is answered
+/// or its 180 s are up, whatever comes meanwhile: on its session, a second quote, a new or a
+/// refused request, or a timeout before 180 s; a ledger made for another video; video 1's
+/// first quote, taken; a `hello` refused on the payment's own ledger (with each code but
+/// `banned`); or anything in [`ON_ANOTHER_VIDEO`] or [`ON_ANOTHER_SESSION`]. Video
+/// 1, holding a session with chunks owed, pays nothing over it, by `due` or by `last_pay`.
+async fn a_live_payment_holds_the_slot<H: Harness>(h: &H) {
+    let on_video_0 = [
+        "a second quote on the open session",
+        "a new request",
+        "a refused request",
+        "a timeout before 180 s",
+        "a ledger made for another video",
+        "video 1's first quote, taken",
+        "a hello refused on its own ledger",
+    ];
+    for &event in on_video_0
+        .iter()
+        .chain(&ON_ANOTHER_VIDEO)
+        .chain(&ON_ANOTHER_SESSION)
+    {
+        are_inputs(h, &[event]);
+        let e = h.engine(1, 4, 1000);
+        let (s0, s1) = (open_on(h, &e, 1, 0).await, open_on(h, &e, 1, 1).await);
+        let mut v0 = h.viewer(1);
+        let mut v1 = v0.sibling();
+        if event != "video 1's first quote, taken" {
+            v1.quote(s1.quote())
+                .expect("video 1's honest quote is accepted");
+        }
+        v0.quote(s0.quote())
+            .expect("video 0's honest quote is accepted");
+        v0.requested();
+        v0.requested();
+        v0.due()
+            .await
+            .expect("video 0's due answers")
+            .expect("due on video 0");
+        let s0 = match event {
+            "a new request" => {
+                v0.requested();
+                s0
+            }
+            "a timeout before 180 s" => {
+                advance(h, Duration::from_secs(179)).await;
+                v0.timeout().await;
+                s0
+            }
+            "video 1's first quote, taken" => {
+                v1.quote(s1.quote())
+                    .expect("video 1's first quote is taken");
+                s0
+            }
+            "a hello refused on its own ledger" => {
+                // With each code but `banned`, which stops the watcher.
+                for code in hello_refusal_codes() {
+                    v0.hello_refused(&Rej { code, detail: None });
+                }
+                s0
+            }
+            _ => bring_about(h, &e, s0, &mut v0, event, true).await,
+        };
+        v1.requested();
+        v1.requested();
+        assert!(
+            v1.due()
+                .await
+                .expect("video 1's due answers, video 0's payment in flight")
+                .is_none()
+                && v1
+                    .last_pay()
+                    .await
+                    .expect("video 1's last_pay answers, video 0's payment in flight")
+                    .is_none(),
+            "{event}: video 0's payment is still in flight on its live session, so video 1 \
+             pays nothing over it"
+        );
+        close(h, (s0, s1)).await;
+    }
 }
 
 /// A quote or an ack on another video's ledger settles nothing of this video's payment, even
@@ -18096,9 +18550,10 @@ async fn another_videos_quote_or_ack_settles_nothing_of_it<H: Harness>(h: &H) {
 /// or left unsettled, 180 s after sending it and never before. A stop holds whatever the
 /// viewer waits on when it comes, and a quote that settles a payment, found spent before
 /// the stop, as it came or since, left unsettled or being reclaimed, settles it into the
-/// ledger only. What may come after a stop, in every state the standing can be in when it
-/// comes, a payment in flight on its live session included, is the table of
-/// [`nothing_undoes_a_stop_on_its_first_ledger_whatever_comes`].
+/// ledger only. So does a stop that comes while a payment is in flight on its live session,
+/// whatever comes before that payment's answer, and a matching ack then settles the payment
+/// into the ledger and nothing more; nor does a request undo a stop while a payment it came
+/// with waits.
 pub async fn a_stopped_viewer_pays_nothing<H: Harness>(h: &H) {
     let mut v = h.viewer(1);
     v.quote(open(h, &h.engine(1, 2, 1000), 1).await.quote())
@@ -18301,6 +18756,354 @@ pub async fn a_stopped_viewer_pays_nothing<H: Harness>(h: &H) {
     a_settling_quote_leaves_the_stop(h).await;
     // And a stop holds with its tries used, whatever brings it.
     a_stop_holds_with_its_tries_used(h).await;
+    // And with a payment in flight on its live session when it comes, whatever comes before
+    // that payment's answer; nor does a request undo it while a payment it came with waits.
+    a_stop_holds_with_a_payment_in_flight(h).await;
+    a_request_undoes_no_stop_while_a_payment_waits(h).await;
+}
+
+/// What can come while a payment is in flight on its live session, between a stop and the
+/// payment's answer, for [`a_stop_holds_with_a_payment_in_flight`]: on the payment's own
+/// ledger and session, or on a ledger made before for a third video, with a session whose
+/// honest quote it took where the event needs one. Each is one input to the watcher.
+const WHILE_IN_FLIGHT: [&str; 19] = [
+    "a timeout before 180 s from sending",
+    "a new request",
+    "a refused request",
+    "a second quote on its session",
+    "a ledger made for another video",
+    "a hello refused on its own ledger",
+    "a due with its payment in flight",
+    "a last_pay with its payment in flight",
+    "a request on another video's session",
+    "a refused request on another video's session",
+    "a timeout with no payment on another video's session",
+    "a due on another video's session",
+    "another video's session ending",
+    "a hello refused on another video",
+    "another video's quote over its price cap",
+    "another video's quote with a window over its ceiling",
+    "another video's quote naming no mint it holds",
+    "another video's honest quote, taken",
+    "another video's second quote",
+];
+
+/// How the seeder answers the payment in flight, for
+/// [`a_stop_holds_with_a_payment_in_flight`]: its honest ack, or `mint-unavailable`, every
+/// proof taken back.
+const THEN_ANSWERED: [&str; 2] = [
+    "acked by the seeder",
+    "refused mint-unavailable, every proof taken back",
+];
+
+/// Nothing undoes a stop (NFX-07 §3a), one that comes while a payment is in flight on its
+/// live session included. Video 0's payment is in flight, its ledger the first the watcher
+/// made or one made for another video ([`LEDGERS`]); the standing is stopped by each
+/// cause in [`STOPS`] on video 1, or by a `hello` refused `banned` on video 0's own ledger
+/// ([`STOPPED_ON`]); 60 s later comes each event of [`WHILE_IN_FLIGHT`]; then the seeder
+/// answers the payment ([`THEN_ANSWERED`]). The standing is stopped after the event, and
+/// after the answer the watcher pays nothing, at the session's end included. Its ledger is
+/// as the seeder's account then: the next session's quote, which shows the payment the
+/// seeder acked and none it refused, is taken.
+async fn a_stop_holds_with_a_payment_in_flight<H: Harness>(h: &H) {
+    are_inputs(h, &WHILE_IN_FLIGHT);
+    for ledger in LEDGERS {
+        let stops = STOPS
+            .iter()
+            .map(|by| (*by, STOPPED_ON[0]))
+            .chain([(STOPS[3], STOPPED_ON[1])]);
+        for (by, on) in stops {
+            for event in WHILE_IN_FLIGHT {
+                for answered in THEN_ANSWERED {
+                    a_stop_holds_in_flight(h, ledger, (by, on), event, answered).await;
+                }
+            }
+        }
+    }
+}
+
+/// One cell of [`a_stop_holds_with_a_payment_in_flight`]: video 0's payment in flight on
+/// its `ledger` ([`LEDGERS`]), the standing stopped by `by` `on` a ledger ([`STOPS`],
+/// [`STOPPED_ON`]), then `event` ([`WHILE_IN_FLIGHT`]), and the payment `answered`
+/// ([`THEN_ANSWERED`]).
+async fn a_stop_holds_in_flight<H: Harness>(
+    h: &H,
+    ledger: &str,
+    (by, on): (&str, &str),
+    event: &str,
+    answered: &str,
+) {
+    let unavailable = Rej {
+        code: RejCode::MintUnavailable,
+        detail: None,
+    };
+    let what = format!(
+        "{event}, while video 0's payment, {ledger}, is in flight on its live \
+         session and the standing stopped by {by} {on}"
+    );
+    let e = h.engine(1, 4, 1000);
+    let mut s0 = open_on(h, &e, 1, 0).await;
+    // Video 0's ledger: the first made, or made from video 1's.
+    let first = h.viewer(1);
+    let (mut v0, mut v1) = if ledger == LEDGERS[1] {
+        (first.sibling(), first)
+    } else {
+        let other = first.sibling();
+        (first, other)
+    };
+    let mut v2 = v0.sibling();
+    v0.quote(s0.quote())
+        .expect("video 0's honest quote is accepted");
+    // The third video's session, where the event comes on one.
+    let mut s2 = None;
+    if event.ends_with("on another video's session")
+        || event == "another video's session ending"
+        || event == "another video's second quote"
+    {
+        let s = open_on(h, &e, 1, 2).await;
+        v2.quote(s.quote())
+            .expect("the third video's honest quote is accepted");
+        s2 = Some(s);
+    }
+    for i in 0..2 {
+        assert!(s0.admit(&h.chunk_of(0, i)), "within the window");
+        v0.requested();
+    }
+    let pay = v0
+        .due()
+        .await
+        .expect("video 0's due answers")
+        .expect("due on video 0");
+    let s1 = if on == STOPPED_ON[1] {
+        stop_on_its_own(h, &e, &mut v0, by).await;
+        None
+    } else {
+        stop_by(h, &e, &mut v1, 1, by).await
+    };
+    assert!(
+        v0.stopped() && v1.stopped() && v2.stopped(),
+        "{by} {on} stops the standing"
+    );
+    advance(h, Duration::from_secs(60)).await;
+    match event {
+        "a timeout before 180 s from sending" => v0.timeout().await,
+        "a new request" => v0.requested(),
+        "a refused request" => {
+            v0.requested();
+            v0.refused();
+        }
+        "a second quote on its session" => {
+            assert!(v0.quote(s0.quote()).is_err(), "one quote per session");
+        }
+        "a ledger made for another video" => {
+            let _fourth = v0.sibling();
+        }
+        "a hello refused on its own ledger" | "a hello refused on another video" => {
+            // With each code but `banned`, which stops the watcher.
+            let refused = if event.ends_with("its own ledger") {
+                &mut v0
+            } else {
+                &mut v2
+            };
+            for code in hello_refusal_codes() {
+                refused.hello_refused(&Rej { code, detail: None });
+            }
+        }
+        "a due with its payment in flight" => assert!(
+            v0.due()
+                .await
+                .expect("video 0's due answers with its payment in flight")
+                .is_none(),
+            "{what}: it pays nothing"
+        ),
+        "a last_pay with its payment in flight" => assert!(
+            v0.last_pay()
+                .await
+                .expect("video 0's last_pay answers with its payment in flight")
+                .is_none(),
+            "{what}: it pays nothing"
+        ),
+        "a request on another video's session" => v2.requested(),
+        "a refused request on another video's session" => {
+            v2.requested();
+            v2.refused();
+        }
+        "a timeout with no payment on another video's session" => v2.timeout().await,
+        "a due on another video's session" => assert!(
+            v2.due()
+                .await
+                .expect("the third video's due answers")
+                .is_none(),
+            "{what}: it pays nothing"
+        ),
+        "another video's session ending" => {
+            close(h, s2.take()).await;
+            v2.end();
+        }
+        _ => {
+            let s = match s2.take() {
+                Some(s) => s,
+                None => open_on(h, &e, 1, 2).await,
+            };
+            let mut q = s.quote().clone();
+            match event {
+                "another video's quote over its price cap" => q.price_per_chunk = 2,
+                "another video's quote with a window over its ceiling" => {
+                    q.window = h.window_ceiling() + 1;
+                }
+                "another video's quote naming no mint it holds" => {
+                    q.mints = vec![format!("{}/", h.mint())];
+                }
+                _ => {}
+            }
+            if event == "another video's honest quote, taken" {
+                v2.quote(&q)
+                    .expect("an honest quote is taken, stopped or not");
+            } else {
+                assert!(v2.quote(&q).is_err(), "{event}: refused");
+            }
+            s2 = Some(s);
+        }
+    }
+    assert!(
+        v0.stopped() && v1.stopped() && v2.stopped(),
+        "{what}: it undoes no stop"
+    );
+    if answered == THEN_ANSWERED[0] {
+        let ack = s0.pay(&pay).await.expect("the seeder takes the payment");
+        v0.ack(&ack)
+            .expect("the seeder's honest ack is taken, stopped or not");
+    } else {
+        v0.rej(&unavailable).await;
+        assert!(
+            h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
+            "{what}: refused mint-unavailable, it took every proof back"
+        );
+    }
+    v0.requested();
+    v0.requested();
+    let due = v0.due().await.expect("video 0's due answers once stopped");
+    let last = v0
+        .last_pay()
+        .await
+        .expect("video 0's last_pay answers once stopped");
+    assert!(
+        due.is_none() && last.is_none() && v0.stopped() && v1.stopped(),
+        "{what}: nothing undoes a stop, so with the payment {answered} the watcher \
+         pays nothing more, at the session's end included"
+    );
+    close(h, s0).await;
+    v0.end();
+    let s0 = open_on(h, &e, 1, 0).await;
+    let taken = v0.quote(s0.quote());
+    assert!(
+        taken.is_ok() && v0.stopped() && v1.stopped(),
+        "{what}: with the payment {answered}, the ledger is as the seeder's \
+         account, stopped or not: the next session's honest quote equals it and is \
+         taken, and the standing stays stopped: {taken:?}"
+    );
+    close(h, (s0, s1, s2)).await;
+}
+
+/// What a payment the stop came with waits on, for
+/// [`a_request_undoes_no_stop_while_a_payment_waits`].
+const WAITS_STOPPED: [&str; 3] = [
+    "awaits a quote",
+    "is being reclaimed",
+    "is left unsettled by a closed session",
+];
+
+/// A request the watcher sends before a payment is settled or taken back, for the same.
+const REQUESTS_BETWEEN: [&str; 2] = ["a new request", "a refused request"];
+
+/// Nothing undoes a stop (NFX-07 §3a): a request does not, new or refused
+/// ([`REQUESTS_BETWEEN`]), sent while the payment the stop came with waits
+/// ([`WAITS_STOPPED`]). The seeder refuses the payment `underpaid`, which stops the watcher:
+/// it had swapped and credited it, so its proofs are found spent and the next session's
+/// quote, which shows it, settles it into the ledger and nothing more; or the mint is down,
+/// and the reclaim completes once it is back, every proof taken back. Or the session closes
+/// on the payment, the next one's quote equals the ledger, and an unsolicited ack stops the
+/// watcher there: the payment is taken back 180 s after it was sent. The request comes
+/// between the stop and that, and the watcher pays nothing after it.
+async fn a_request_undoes_no_stop_while_a_payment_waits<H: Harness>(h: &H) {
+    let underpaid = Rej {
+        code: RejCode::Underpaid,
+        detail: None,
+    };
+    are_inputs(h, &REQUESTS_BETWEEN);
+    for waits in WAITS_STOPPED {
+        for request in REQUESTS_BETWEEN {
+            let what = format!("{request}, sent while the payment the stop came with {waits}");
+            let e = h.engine(1, 4, 1000);
+            let mut s = open(h, &e, 1).await;
+            let mut v = h.viewer(1);
+            v.quote(s.quote()).expect("an honest quote is accepted");
+            for i in 0..2 {
+                assert!(s.admit(&h.chunk(i)), "within the window");
+                v.requested();
+            }
+            let pay = v.due().await.expect("due answers").expect("due");
+            match waits {
+                "awaits a quote" => {
+                    s.pay(&pay)
+                        .await
+                        .expect("the seeder swaps it, and the watcher is told otherwise");
+                    v.rej(&underpaid).await;
+                }
+                "is being reclaimed" => {
+                    h.mint_outage(true);
+                    v.rej(&underpaid).await;
+                }
+                _ => {
+                    close(h, s).await;
+                    v.end();
+                    s = open(h, &e, 1).await;
+                    v.quote(s.quote())
+                        .expect("a quote at the ledger is taken, the seeder never having seen it");
+                    let unsolicited = Ack {
+                        accepted_upto: 0,
+                        spent_total: 0,
+                    };
+                    assert!(
+                        v.ack(&unsolicited).is_err(),
+                        "an unsolicited ack is refused"
+                    );
+                }
+            }
+            assert!(v.stopped(), "the watcher has stopped");
+            v.requested();
+            if request == REQUESTS_BETWEEN[1] {
+                v.refused();
+            }
+            assert!(v.stopped(), "{what}: it undoes no stop");
+            // The payment is settled, or taken back.
+            match waits {
+                "awaits a quote" => {
+                    close(h, s).await;
+                    v.end();
+                    s = open(h, &e, 1).await;
+                    v.quote(s.quote())
+                        .expect("the quote shows the payment: settled into the ledger");
+                }
+                "is being reclaimed" => h.mint_outage(false),
+                _ => advance(h, Duration::from_secs(180)).await,
+            }
+            v.requested();
+            v.requested();
+            let due = v.due().await.expect("due answers once stopped");
+            let last = v.last_pay().await.expect("last_pay answers once stopped");
+            assert!(
+                due.is_none() && last.is_none() && v.stopped(),
+                "{what}: nothing undoes a stop, so once that payment is settled or taken back \
+                 the watcher pays nothing more, at the session's end included"
+            );
+            assert!(
+                h.claimed_all(&pay.token).await && !h.steal(&pay.token).await,
+                "{what}: the seeder has the payment, or the watcher took it back"
+            );
+            close(h, s).await;
+        }
+    }
 }
 
 /// What video 0's payment waits on when a cause in [`STOPS`] on video 1 stops the
