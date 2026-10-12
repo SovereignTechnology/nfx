@@ -10930,6 +10930,80 @@ pub async fn bad_configurations_are_refused<H: Harness>(h: &H) {
             "refused, a ttl half a second past its ceiling: {p:?}"
         );
     }
+    // So are the floors (flaws `AccountTtlFloorInSeconds`, `BanTtlFloorInSeconds`,
+    // `DebtTtlFloorRoundedUp` and `TtlFloorsNearestSecond`): `account_ttl` and `ban_ttl` are each at least `debt_ttl`, and
+    // `debt_ttl` at least 10 minutes, and half a second short of one is outside. Each row is
+    // outside by that bound alone.
+    let longer = h.debt_ttl() + half;
+    let p = EngineParams {
+        debt_ttl: longer,
+        account_ttl: h.debt_ttl(),
+        ban_ttl: longer,
+        ..good
+    };
+    assert!(
+        h.engine_checked(p).is_err(),
+        "refused, account_ttl half a second short of debt_ttl: {p:?}"
+    );
+    let p = EngineParams {
+        debt_ttl: longer,
+        account_ttl: longer,
+        ban_ttl: h.debt_ttl(),
+        ..good
+    };
+    assert!(
+        h.engine_checked(p).is_err(),
+        "refused, ban_ttl half a second short of debt_ttl: {p:?}"
+    );
+    let p = EngineParams {
+        debt_ttl: ten_minutes - half,
+        account_ttl: ten_minutes,
+        ban_ttl: ten_minutes,
+        ..good
+    };
+    assert!(
+        h.engine_checked(p).is_err(),
+        "refused, debt_ttl half a second short of 10 minutes: {p:?}"
+    );
+    // Nor by less than half a second, each ttl with a fraction of a second of its own (flaw
+    // `TtlFloorsNearestSecond`): 0.3 s short of a `debt_ttl` of 0.9 s past whole seconds.
+    let (long, short) = (
+        h.debt_ttl() + Duration::from_millis(900),
+        h.debt_ttl() + Duration::from_millis(600),
+    );
+    let p = EngineParams {
+        debt_ttl: long,
+        account_ttl: short,
+        ban_ttl: long,
+        ..good
+    };
+    assert!(
+        h.engine_checked(p).is_err(),
+        "refused, account_ttl 0.3 s short of debt_ttl, neither a whole number of seconds: \
+         {p:?}"
+    );
+    let p = EngineParams {
+        debt_ttl: long,
+        account_ttl: long,
+        ban_ttl: short,
+        ..good
+    };
+    assert!(
+        h.engine_checked(p).is_err(),
+        "refused, ban_ttl 0.3 s short of debt_ttl, neither a whole number of seconds: {p:?}"
+    );
+    // And ttls that are no whole number of seconds are inside where they meet their bounds.
+    let p = EngineParams {
+        debt_ttl: longer,
+        account_ttl: longer,
+        ban_ttl: longer,
+        ..good
+    };
+    assert!(
+        h.engine_checked(p).is_ok(),
+        "accepted, account_ttl and ban_ttl equal to a debt_ttl of half a second more than \
+         whole seconds: {p:?}"
+    );
     let long_debt = EngineParams {
         debt_ttl: Duration::from_secs(24 * 3600 + 1),
         account_ttl: Duration::from_secs(30 * 24 * 3600),
