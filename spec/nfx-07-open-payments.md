@@ -172,10 +172,13 @@ payment-enforced after release, so no mechanism pretends otherwise.
   are lost, within the bounds below.
 - An account with payments is kept. Forgetting it would contradict the watcher's ledger
   (§3a), which would then stop paying.
-- A seeder that stops serving a video keeps its accounts there, by the rules above: one
-  that never paid is forgotten there as on a video it serves, no later, and one that paid
-  is kept. Their unpaid chunks count toward the global cap until they age out, as any
-  others (service limit, below). It answers a `hello` for that video from a peer it keeps an
+- A seeder that stops serving a video keeps its accounts there, by the rules above, and
+  their unpaid chunks count toward the global cap until they age out, as any others
+  (service limit, below). There the first rule is a duty: an account that never paid MUST
+  be forgotten once it has had no open session for `account_ttl`, counted from its last
+  session's close, whether or not its peer ever returns, and its peer's `hello` for the
+  video is refused `unknown-video` from then on. A video that admits nothing more would
+  otherwise keep every free identity that ever opened an account on it. It answers a `hello` for that video from a peer it keeps an
   account for there, or a swap of one whose outcome is unknown, an answer lost or a swap
   abandoned in flight alike (below), as it would before: its wait for a payment in progress,
   taking a dead turn over included, its reads after that wait, its ban and session-id
@@ -1584,9 +1587,9 @@ paths on one host are two origins.
     seeder may quote another on a later session", which said it of a later session only;
     the mock already paid each ledger by its own session's window).
   The seeder's side:
-  - §3 bounded state: a never-paid account on a video the seeder stops serving is forgotten
-    as on a video it serves, no later. What "by the rules above" and "everything kept per
-    identity is bounded" said, now said of a dropped video, where "may be forgotten" could
-    be read as leave to keep such accounts for good: a dropped video admits nothing more,
-    but a seeder that drops videos one after another would keep whatever free identities
-    left on each.
+  - §3 bounded state: on a video the seeder has stopped serving, a never-paid account MUST
+    be forgotten once it has had no open session for `account_ttl`, whether or not its peer
+    returns, and its peer's `hello` is refused `unknown-video` from then (was: "may be
+    forgotten", as on a video it serves, which let a seeder keep such accounts for good; a
+    seeder that drops videos one after another would keep whatever free identities left on
+    each). A tightening, and one a peer can see: a `hello` that was answered is refused.
