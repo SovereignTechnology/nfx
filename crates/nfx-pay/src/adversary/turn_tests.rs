@@ -240,6 +240,42 @@ async fn a_turn_after_one_left_unfinished() {
 }
 
 #[test]
+fn turns_waited_by_one_task_after_another_end_alike() {
+    finished(crate::run_scenario!(turns_of_two_tasks()));
+}
+
+/// Turns the scenario's own task waits, then turns another task of the runtime waits, then
+/// the scenario's again: whoever waits a turn is the one woken as it ends.
+async fn turns_of_two_tasks() {
+    let tasks = Sleepers::default();
+    tasks.start(MANY);
+    yield_once().await;
+    assert_eq!(tasks.polls(), MANY, "a turn of the scenario's own task");
+    let theirs = tasks.clone();
+    let other = tokio::spawn(async move {
+        theirs.wake(MANY);
+        yield_once().await;
+        let after_one = theirs.polls();
+        theirs.wake(MANY);
+        yield_once().await;
+        (after_one, theirs.polls())
+    });
+    let seen = other.await.expect("the other task finished");
+    assert_eq!(
+        seen,
+        (2 * MANY, 3 * MANY),
+        "two turns waited by another task of the runtime"
+    );
+    tasks.wake(MANY);
+    yield_once().await;
+    assert_eq!(
+        tasks.polls(),
+        4 * MANY,
+        "and a turn of the scenario's own task again"
+    );
+}
+
+#[test]
 fn a_turn_with_no_runner_is_one_yield() {
     // No runner gave this thread a way to start tasks: the turn asks to be polled again,
     // once, and is over at that poll.
@@ -448,11 +484,22 @@ fn a_task_ended_between_turns_is_started_again() {
             tasks.start(MANY);
             yield_once().await;
             assert_eq!(tasks.polls(), MANY, "a first turn, waited");
-            let first = started
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .pop()
-                .expect("the suite's task was started for the first turn");
+            for turn in 2..=4 {
+                tasks.wake(MANY);
+                yield_once().await;
+                assert_eq!(tasks.polls(), turn * MANY, "turn {turn}, waited");
+            }
+            let first = {
+                let mut started = started.lock().unwrap_or_else(PoisonError::into_inner);
+                assert_eq!(
+                    started.len(),
+                    1,
+                    "one task of the suite's serves every turn of a run"
+                );
+                started
+                    .pop()
+                    .expect("the suite's task was started for the first turn")
+            };
             first.abort();
             assert!(
                 first.await.is_err_and(|e| e.is_cancelled()),
@@ -461,10 +508,10 @@ fn a_task_ended_between_turns_is_started_again() {
             tasks.wake(MANY);
             tasks.start(MANY);
             yield_once().await;
-            assert_eq!(tasks.polls(), 3 * MANY, "the next turn, waited");
+            assert_eq!(tasks.polls(), 6 * MANY, "the next turn, waited");
             tasks.wake(2 * MANY);
             yield_once().await;
-            assert_eq!(tasks.polls(), 5 * MANY, "and the one after");
+            assert_eq!(tasks.polls(), 8 * MANY, "and the one after");
         },
     );
     finished(ran);
@@ -473,6 +520,68 @@ fn a_task_ended_between_turns_is_started_again() {
         1,
         "one task more was started, for the turns after the first was ended"
     );
+}
+
+/// A task polled with a waker of its own at each poll, of which only the last one made
+/// wakes it: a runtime may hand a task another waker at every poll, and need not heed an
+/// earlier one.
+struct NewWakers {
+    task: Started,
+    made: Arc<AtomicU64>,
+}
+
+/// The waker of one poll of a [`NewWakers`].
+struct OneOf {
+    made: Arc<AtomicU64>,
+    this: u64,
+    task: Waker,
+}
+
+impl Wake for OneOf {
+    fn wake(self: Arc<Self>) {
+        if self.made.load(Ordering::SeqCst) == self.this {
+            self.task.wake_by_ref();
+        }
+    }
+}
+
+impl Future for NewWakers {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let waker = Waker::from(Arc::new(OneOf {
+            made: self.made.clone(),
+            this: self.made.fetch_add(1, Ordering::SeqCst) + 1,
+            task: cx.waker().clone(),
+        }));
+        self.task.as_mut().poll(&mut Context::from_waker(&waker))
+    }
+}
+
+#[test]
+fn the_suites_task_is_woken_by_the_waker_of_its_last_poll() {
+    // The runner's runtime gives the suite's task a new waker at each poll: every turn
+    // queues it by the one it was polled with last.
+    let ran = run_started(
+        |runtime, task| {
+            runtime.spawn(NewWakers {
+                task,
+                made: Arc::default(),
+            });
+        },
+        || async {
+            let tasks = Sleepers::default();
+            tasks.start(MANY);
+            yield_once().await;
+            assert_eq!(tasks.polls(), MANY, "a first turn");
+            for turn in 2..=5 {
+                tasks.wake(MANY);
+                yield_once().await;
+                assert_eq!(tasks.polls(), turn * MANY, "turn {turn}");
+            }
+        },
+    );
+    finished(ran);
 }
 
 #[test]

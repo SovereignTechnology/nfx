@@ -855,26 +855,49 @@ fn held_by(holder: Option<(bool, u32)>, first: bool, before: u32) -> Option<(boo
 }
 
 /// How the turns the suite waits end on this thread (`yield_once`): a task of the suite's
-/// own on the scenario's runtime, the pacer, ends them.
+/// own on the scenario's runtime, the pacer, ends them. The suite's task and the pacer
+/// share this, and both run on the scenario's thread. Each side keeps a copy of the other's
+/// waker ([`Turns`], [`Pacer`]), so once both have one a turn takes no lock here and clones
+/// no waker.
 #[derive(Default)]
 struct Pace {
     /// Turns begun so far, and the last one over.
-    begun: u64,
-    over: u64,
+    begun: AtomicU64,
+    over: AtomicU64,
     /// The turn the pacer ends when it next runs, queued for it: 0 while it is not queued.
-    ends: u64,
-    /// The pacer's waker, once it has been polled.
-    pacer: Option<Waker>,
-    /// The waker of the suite's task, while it waits for a turn to end.
-    waits: Option<Waker>,
+    ends: AtomicU64,
+    /// The suite's task waits for a turn to end: the pacer wakes it as it next ends one.
+    waits: AtomicBool,
     /// The pacer is gone, with its runtime.
-    gone: bool,
+    gone: AtomicBool,
+    /// The pacer's waker, once it has been polled, and the waker of the suite's task, once
+    /// it has waited for a turn to end; and how many times either was set. Whoever keeps a
+    /// copy of the other's takes it again once that count has moved.
+    wakers: Mutex<Wakers>,
+    set: AtomicU64,
+}
+
+/// The two wakers of a [`Pace`].
+#[derive(Default)]
+struct Wakers {
+    pacer: Option<Waker>,
+    suite: Option<Waker>,
+}
+
+/// The suite's side of a [`Pace`].
+struct Turns {
+    pace: Arc<Pace>,
+    /// The pacer's waker as the suite last took it, with the count it stood at
+    /// ([`Pace::set`]).
+    pacer: Option<Waker>,
+    seen: u64,
+    /// The waker the suite last left for the pacer.
+    left: Option<Waker>,
 }
 
 std::thread_local! {
-    /// The pace of the scenario running on this thread, once it has waited a turn.
-    static PACE: std::cell::RefCell<Option<Arc<Mutex<Pace>>>> =
-        const { std::cell::RefCell::new(None) };
+    /// The turns of the scenario running on this thread, once it has waited one.
+    static PACE: std::cell::RefCell<Option<Turns>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The task that ends the suite's turns (`yield_once`). The runtime takes up its ready tasks
@@ -883,90 +906,177 @@ std::thread_local! {
 /// the scenario's thread ([`with_tasks`]): polled first on another thread, this is no task
 /// of that runtime's, and it ends there, gone, having ended no turn.
 struct Pacer {
-    pace: Arc<Mutex<Pace>>,
+    pace: Arc<Pace>,
     /// The scenario's thread, and whether this has been polled yet.
     home: std::thread::ThreadId,
     polled: bool,
+    /// The waker this last left for the suite, its own.
+    left: Option<Waker>,
+    /// The waker of the suite's task as this last took it, with the count it stood at
+    /// ([`Pace::set`]).
+    suite: Option<Waker>,
+    seen: u64,
+}
+
+impl Pacer {
+    /// Wake the suite's task, if it waits for a turn to end.
+    fn wake_suite(&mut self) {
+        if !self.pace.waits.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let set = self.pace.set.load(Ordering::SeqCst);
+        if self.seen != set {
+            let wakers = self
+                .pace
+                .wakers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            (self.suite, self.seen) = (wakers.suite.clone(), set);
+        }
+        if let Some(w) = &self.suite {
+            w.wake_by_ref();
+        }
+    }
 }
 
 impl Future for Pacer {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        if !std::mem::replace(&mut self.polled, true) && std::thread::current().id() != self.home {
+        let this = &mut *self;
+        if !std::mem::replace(&mut this.polled, true) && std::thread::current().id() != this.home {
             return Poll::Ready(()); // dropped by whoever polled it: gone
         }
-        let waits = {
-            let mut pace = self.pace.lock().unwrap_or_else(PoisonError::into_inner);
-            pace.pacer = Some(cx.waker().clone());
-            if pace.ends == 0 {
-                return Poll::Pending;
-            }
-            (pace.over, pace.ends) = (pace.ends, 0);
-            if pace.begun > pace.over {
-                // A turn began since this was queued: a task ready before it began may
-                // stand behind this one. It is queued again, behind them all, for that turn.
-                pace.ends = pace.begun;
-                cx.waker().wake_by_ref();
-            }
-            pace.waits.take()
-        };
-        if let Some(w) = waits {
-            w.wake();
+        if !this.left.as_ref().is_some_and(|w| w.will_wake(cx.waker())) {
+            this.left = Some(cx.waker().clone());
+            this.pace
+                .wakers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pacer
+                .clone_from(&this.left);
+            this.pace.set.fetch_add(1, Ordering::SeqCst);
         }
+        let ends = this.pace.ends.swap(0, Ordering::SeqCst);
+        if ends == 0 {
+            return Poll::Pending;
+        }
+        this.pace.over.store(ends, Ordering::SeqCst);
+        let begun = this.pace.begun.load(Ordering::SeqCst);
+        if begun > ends {
+            // A turn began since this was queued: a task ready before it began may stand
+            // behind this one. It is queued again, behind them all, for that turn.
+            this.pace.ends.store(begun, Ordering::SeqCst);
+            cx.waker().wake_by_ref();
+        }
+        this.wake_suite();
         Poll::Pending
     }
 }
 
 impl Drop for Pacer {
     fn drop(&mut self) {
-        let waits = {
-            let mut pace = self.pace.lock().unwrap_or_else(PoisonError::into_inner);
-            pace.gone = true;
-            pace.waits.take()
-        };
-        if let Some(w) = waits {
-            w.wake();
-        }
+        // Gone first, then the wake: the suite's task, which says it waits before it looks
+        // (`turn_stands`), either is woken here or has seen this.
+        self.pace.gone.store(true, Ordering::SeqCst);
+        self.wake_suite();
     }
 }
 
-/// Begin a turn on this thread, whose runner starts tasks with `start`: the pace, and the
-/// turn's number. The pacer is queued for it, started first if this thread has none, unless
-/// it is queued already for an earlier turn: it then queues itself again as it ends that
-/// one.
-fn begin_turn(start: &Starts) -> (Arc<Mutex<Pace>>, u64) {
-    let pace = PACE.with(|p| {
+/// Begin a turn on this thread: its number, or `None` where no runner gave the suite a way
+/// to start tasks ([`with_tasks`]). The pacer is queued for it, started first if this thread
+/// has none that lives, unless it is queued already for an earlier turn: it then queues
+/// itself again as it ends that one.
+fn begin_turn() -> Option<u64> {
+    PACE.with(|p| {
         let mut p = p.borrow_mut();
-        let live = p
+        let lives = p
             .as_ref()
-            .filter(|pace| !pace.lock().unwrap_or_else(PoisonError::into_inner).gone);
-        if let Some(pace) = live {
-            return pace.clone();
+            .is_some_and(|t| !t.pace.gone.load(Ordering::SeqCst));
+        if !lives {
+            let start = TASKS.with(|t| t.borrow().clone())?;
+            let pace = Arc::new(Pace::default());
+            start(Box::pin(Pacer {
+                pace: pace.clone(),
+                home: std::thread::current().id(),
+                polled: false,
+                left: None,
+                suite: None,
+                seen: 0,
+            }));
+            *p = Some(Turns {
+                pace,
+                pacer: None,
+                seen: 0,
+                left: None,
+            });
         }
-        let pace = Arc::new(Mutex::new(Pace::default()));
-        start(Box::pin(Pacer {
-            pace: pace.clone(),
-            home: std::thread::current().id(),
-            polled: false,
-        }));
-        *p = Some(pace.clone());
-        pace
-    });
-    let (turn, pacer) = {
-        let mut p = pace.lock().unwrap_or_else(PoisonError::into_inner);
-        p.begun += 1;
-        let queue = p.ends == 0;
-        if queue {
-            p.ends = p.begun;
+        let t = p.as_mut()?;
+        let turn = t.pace.begun.fetch_add(1, Ordering::SeqCst) + 1;
+        let queue = t
+            .pace
+            .ends
+            .compare_exchange(0, turn, Ordering::SeqCst, Ordering::SeqCst);
+        if queue.is_ok() {
+            let set = t.pace.set.load(Ordering::SeqCst);
+            if t.seen != set {
+                let wakers = t.pace.wakers.lock().unwrap_or_else(PoisonError::into_inner);
+                (t.pacer, t.seen) = (wakers.pacer.clone(), set);
+            }
+            // One just started has no waker yet, and is queued as it is.
+            if let Some(w) = &t.pacer {
+                w.wake_by_ref();
+            }
         }
-        // One just started has no waker yet, and is queued as it is.
-        (p.begun, p.pacer.clone().filter(|_| queue))
-    };
-    if let Some(w) = pacer {
-        w.wake();
-    }
-    (pace, turn)
+        Some(turn)
+    })
+}
+
+/// How a turn the suite waits stands (`turn_stands`).
+enum Turn {
+    /// Every task ready as it began has run.
+    Over,
+    /// The pacer has yet to end it, and wakes the suite's task when it does.
+    Waits,
+    /// The pacer is gone, and the turn is not over.
+    Lost,
+}
+
+/// How turn `turn` of this thread stands, the suite's task, whose waker is `waker`, left to
+/// be woken where it waits.
+fn turn_stands(turn: u64, waker: &Waker) -> Turn {
+    PACE.with(|p| {
+        let mut p = p.borrow_mut();
+        let Some(t) = p.as_mut() else {
+            return Turn::Lost;
+        };
+        let stands = |pace: &Pace| {
+            if pace.over.load(Ordering::SeqCst) >= turn {
+                Some(Turn::Over)
+            } else if pace.gone.load(Ordering::SeqCst) {
+                Some(Turn::Lost)
+            } else {
+                None
+            }
+        };
+        if let Some(ended) = stands(&t.pace) {
+            return ended;
+        }
+        if !t.left.as_ref().is_some_and(|w| w.will_wake(waker)) {
+            t.left = Some(waker.clone());
+            t.pace
+                .wakers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .suite
+                .clone_from(&t.left);
+            t.pace.set.fetch_add(1, Ordering::SeqCst);
+        }
+        // It says it waits, then looks once more: a pacer that ended the turn, or went, in
+        // between has either seen that and wakes it, or is seen here.
+        t.pace.waits.store(true, Ordering::SeqCst);
+        stands(&t.pace).unwrap_or(Turn::Waits)
+    })
 }
 
 /// A turn of the runtime: this task yields until every other task the runtime had ready as
@@ -993,28 +1103,21 @@ async fn yield_once() {
     let (mut turn, mut yielded) = (None, false);
     poll_fn(|cx| {
         if turn.is_none() && !yielded {
-            match TASKS.with(|t| t.borrow().clone()) {
-                Some(start) => turn = Some(begin_turn(start.as_ref())),
-                None => {
-                    yielded = true;
-                    cx.waker().wake_by_ref();
-                    return Poll::Pending;
-                }
+            turn = begin_turn();
+            if turn.is_none() {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
             }
         }
-        let Some((pace, n)) = &turn else {
+        let Some(n) = turn else {
             return Poll::Ready(());
         };
-        let mut pace = pace.lock().unwrap_or_else(PoisonError::into_inner);
-        if pace.over >= *n {
-            return Poll::Ready(());
+        match turn_stands(n, cx.waker()) {
+            Turn::Over => Poll::Ready(()),
+            Turn::Waits => Poll::Pending,
+            Turn::Lost => std::panic::panic_any(NoRunner),
         }
-        if pace.gone {
-            drop(pace);
-            std::panic::panic_any(NoRunner)
-        }
-        pace.waits = Some(cx.waker().clone());
-        Poll::Pending
     })
     .await;
     raise_kept();
