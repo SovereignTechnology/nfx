@@ -8631,6 +8631,88 @@ async fn a_dropped_videos_hello_is_judged_as_it_arrives<H: Harness>(h: &H) {
         close(h, r).await;
     }
 
+    // What an answered hello leaves, the record that let it in a swap abandoned in flight
+    // and its read learning it as nothing (flaw `DroppedVideoInFlightHelloCreatesAccount`):
+    // the payer took the proofs back while the swap was on its way. From the payment's
+    // deadline the hello is answered, and quotes zeros; it created no account, so with the
+    // swap learnt as nothing the next is refused.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 7).await;
+    h.hold_next_swap();
+    let first = Pay {
+        upto_chunk: 1,
+        token: h.token(1).await,
+    };
+    close_waiting(h, s.pay(&first)).await; // its connection closes, its swap in flight
+    close(h, s).await;
+    h.drop_video(&e, 0);
+    assert!(
+        h.steal(&first.token).await,
+        "its payer takes the proofs back"
+    );
+    advance(h, Duration::from_secs(60)).await; // that payment's deadline, its swap in flight
+    let r = e.hello(&h.peer(7), &h.hello()).await;
+    let quoted = r
+        .as_ref()
+        .map(|s| {
+            let q = s.quote();
+            (q.served, q.accepted_upto, q.spent_total)
+        })
+        .map_err(|rej| rej.code.clone());
+    assert_eq!(
+        quoted,
+        Ok((0, 0, 0)),
+        "from its deadline, a first payment's swap abandoned in flight is a swap whose \
+         outcome is unknown: the hello of its peer for a video no longer served is answered, \
+         and its read learning the swap as nothing, an input spent and its outputs unsigned, \
+         quotes no account"
+    );
+    close(h, r).await;
+    let r = e.hello(&h.peer(7), &h.hello()).await.map(|_| ());
+    assert!(
+        is_rej(&r, &RejCode::UnknownVideo),
+        "a hello that a swap abandoned in flight let in created no account, as one that a \
+         lost answer let in: the swap learnt as nothing, the peer has neither an account nor \
+         an unknown swap there, and its next hello is refused unknown-video: {r:?}"
+    );
+    release(h).await;
+
+    // What a first payment leaves at its deadline where its swap was never sent (flaw
+    // `DroppedVideoCountsUnsentPayment`): it waited for its keys, and is no swap of unknown
+    // outcome. The turn is freed at the deadline, and the peer's hello refused as before.
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 7).await;
+    hold_refetch(h, &e);
+    let unsent = Pay {
+        upto_chunk: 1,
+        token: h.token(1).await,
+    };
+    let mut paying = Box::pin(s.pay(&unsent));
+    assert!(
+        waits_for_keys(h, paying.as_mut()).await,
+        "the peer's first payment holds its turn, waiting for the keys it asked for"
+    );
+    h.drop_video(&e, 0);
+    advance(h, Duration::from_secs(60)).await; // that payment's deadline, its swap never sent
+    let (peer, hello) = (h.peer(7), h.hello());
+    let mut arriving = Box::pin(e.hello(&peer, &hello));
+    let r = answer_of(h, arriving.as_mut()).await.map(|r| r.map(|_| ()));
+    assert!(
+        r.as_ref()
+            .is_some_and(|r| is_rej(r, &RejCode::UnknownVideo)),
+        "a first payment at its deadline whose swap was never sent left no swap of unknown \
+         outcome, and no account: its peer's hello for the video no longer served is refused \
+         unknown-video, as while the payment held its turn: {r:?}"
+    );
+    close(h, arriving).await;
+    close(h, paying).await;
+    assert!(
+        !h.claimed_any(&unsent.token).await,
+        "and the payment was never swapped"
+    );
+    close(h, s).await;
+    release(h).await;
+
     // A swap whose outcome is unknown on the seeder's other video is no record on this one
     // (flaws `DroppedVideoAnyUnknownSwap`, `DroppedVideoAnySwapInFlight`): peer 8's answer
     // was lost there, peer 9's swap abandoned in flight there, and neither has anything on
