@@ -221,15 +221,26 @@ type Session<H> = <<H as Harness>::Engine as SeederEngine>::Session;
 /// It is there to end a run that hangs, and it is sized for two things: a machine far busier
 /// than any the suite is expected to run on, and a mint that answers in milliseconds
 /// ([`Harness`]: how the suite waits). Measured on four cores, in an unoptimised build, with
-/// the mock's answers of 2 to 5 ms: the slowest scenario against an honest engine (in the
-/// runs measured, `a_late_outcome_is_credited_never_banned` or one of the six parts of the
-/// table of waits whose names end `beside_the_others_history_waits_from_its_sending`) takes
-/// about 10 s with a test binary's tests run four at once, and the slowest planted defect
-/// about 7 s; with forty busy loops beside them and 32 tests at once (eighteen runnable
-/// threads to a core), 136 to 181 s and 108 s, about three fifths of the limit at most. What
-/// the suite waits for in real time besides (5 s, for an engine to settle) ended there on
-/// the engine settling, never on that limit: the suite counts an engine's turns and its
-/// polls, not the time they take.
+/// the mock's answers of 2 to 5 ms, on the tree of commit `d3b1531`, on 2026-10-12: the
+/// slowest scenario against an honest engine (one of the six parts of the table of waits
+/// whose names end `beside_the_others_history_waits_from_its_sending`) takes 11 to 12 s
+/// with a test binary's tests run four at once (runs 38263428921 and 38265849812), and the
+/// slowest planted defect 9 s (run 38264649909). With forty busy loops beside them and 32
+/// tests at once (eighteen runnable threads to a core), the slowest honest scenario took
+/// 207 to 232 s in the four parts the honest timings were run in, each on a runner of its
+/// own (runs 38268532621, 38269763246, 38270993925 and 38272204478), 180 to 197 s in the
+/// four files that run the suite once, and the slowest planted defect of the 221 picked
+/// 121 s (run 38273389964). So that load takes up to 77% of the limit, and leaves 68 s of
+/// it: a suite three tenths longer would meet the limit there. The runners differ by more
+/// than that room: from one build, one took 133 s for the slowest scenario of a part and
+/// another 218 s (runs 38250856086 and 38251949925), so two such figures compare only
+/// where one runner gave both. About a sixth of each is the task of the suite's own that
+/// ends its turns (`yield_once`), and each grows with every scenario and every cell of a
+/// table added: these are that tree's, to be measured again as the suite grows. What the
+/// suite waits for in real time besides (5 s, for an engine to settle) was seen to end on
+/// the engine settling, never on that limit, when that load was first measured, and was
+/// not looked at again here: the suite counts an engine's turns and its polls, not the
+/// time they take.
 ///
 /// A slower mint it does time. The longest scenario,
 /// `a_late_outcome_is_credited_never_banned`, awaits about 1,400 answers one after another,
