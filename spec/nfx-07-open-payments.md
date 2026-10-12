@@ -172,9 +172,10 @@ payment-enforced after release, so no mechanism pretends otherwise.
   are lost, within the bounds below.
 - An account with payments is kept. Forgetting it would contradict the watcher's ledger
   (§3a), which would then stop paying.
-- A seeder that stops serving a video keeps its accounts there, by the rules above, and
-  their unpaid chunks count toward the global cap until they age out, as any others
-  (service limit, below). It answers a `hello` for that video from a peer it keeps an
+- A seeder that stops serving a video keeps its accounts there, by the rules above: one
+  that never paid is forgotten there as on a video it serves, no later, and one that paid
+  is kept. Their unpaid chunks count toward the global cap until they age out, as any
+  others (service limit, below). It answers a `hello` for that video from a peer it keeps an
   account for there, or a swap of one whose outcome is unknown, an answer lost or a swap
   abandoned in flight alike (below), as it would before: its wait for a payment in progress,
   taking a dead turn over included, its reads after that wait, its ban and session-id
@@ -1582,3 +1583,10 @@ paths on one host are two origins.
     a seeder may quote each of its videos its own window (was: "the session's quote's: a
     seeder may quote another on a later session", which said it of a later session only;
     the mock already paid each ledger by its own session's window).
+  The seeder's side:
+  - §3 bounded state: a never-paid account on a video the seeder stops serving is forgotten
+    as on a video it serves, no later. What "by the rules above" and "everything kept per
+    identity is bounded" said, now said of a dropped video, where "may be forgotten" could
+    be read as leave to keep such accounts for good: a dropped video admits nothing more,
+    but a seeder that drops videos one after another would keep whatever free identities
+    left on each.

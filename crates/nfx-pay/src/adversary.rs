@@ -7965,6 +7965,100 @@ async fn a_dropped_video_still_quotes_its_accounts<H: Harness>(h: &H) {
     a_dropped_videos_hello_is_judged_as_it_arrives(h).await;
     dropped_videos_hellos_on_every_path_recheck_as_they_answer(h).await;
     a_sweep_reads_a_dropped_videos_swaps(h).await;
+    a_dropped_videos_never_paid_accounts_are_forgotten(h).await;
+}
+
+/// Flaws `DroppedVideoNeverForgets` and `DroppedVideoIdleFromDrop`. A seeder that stops
+/// serving a video keeps its accounts
+/// there by the rules that hold for any, and forgets its never-paid ones as it does on a
+/// video it serves (NFX-07 §3, bounded state): everything kept per identity is bounded, on
+/// a video that admits nothing more too. Peer 1 paid; peers 2 and 3 owe a chunk each and
+/// never paid; peer 4 holds only a pre-payment whose swap's outcome is unknown. Ten seconds
+/// after their sessions close the seeder drops the video. A second before `account_ttl` has
+/// passed since their sessions closed,
+/// peer 2's `hello` is answered: its account is kept. At `account_ttl`, peer 3's is refused
+/// `unknown-video`, its account forgotten, and the seeder holds fewer identities; peer 1's
+/// is answered with its position, and so is peer 4's, the mint's reads down so that its
+/// swap stays unknown.
+async fn a_dropped_videos_never_paid_accounts_are_forgotten<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut paid = open(h, &e, 1).await;
+    assert_eq!(serve(h, &mut paid, 0, 1), 1, "within the window");
+    pay_one(h, &mut paid, 1)
+        .await
+        .expect("an exact payment is accepted");
+    let mut idle = Vec::new();
+    for peer in [2, 3] {
+        let mut s = open(h, &e, peer).await;
+        assert_eq!(serve(h, &mut s, 0, 1), 1, "within the window");
+        idle.push(s);
+    }
+    let mut unknown = open(h, &e, 4).await;
+    h.time_out_next_swap();
+    h.mint_outage(true);
+    let r = pay_one(h, &mut unknown, 1).await;
+    h.mint_outage(false);
+    assert!(
+        is_rej(&r, &RejCode::MintUnavailable),
+        "a pre-payment whose swap's outcome is unknown: {r:?}"
+    );
+    close(h, (paid, idle, unknown)).await;
+    advance(h, 10 * SECOND).await;
+    h.drop_video(&e, 0);
+    let held = landed(h, || h.identities_held(&e)).await;
+
+    // `account_ttl` runs from each account's last session's close, ten seconds before the
+    // drop, not from the drop (flaw `DroppedVideoIdleFromDrop`).
+    advance(h, h.account_ttl() - 11 * SECOND).await;
+    let s = e.hello(&h.peer(2), &h.hello()).await.expect(
+        "a never-paid account on a video no longer served is kept until account_ttl has \
+         passed since its last session closed: its hello is answered a second before",
+    );
+    assert_eq!(
+        s.quote().served,
+        1,
+        "its quote shows the account's position"
+    );
+    close(h, s).await;
+    advance(h, SECOND).await;
+    let r = e.hello(&h.peer(3), &h.hello()).await.map(|_| ());
+    assert!(
+        is_rej(&r, &RejCode::UnknownVideo),
+        "a never-paid account on a video no longer served is forgotten once it has had no \
+         open session for account_ttl, as on a video the seeder serves: its peer's hello is \
+         refused unknown-video: {r:?}"
+    );
+    assert!(
+        landed(h, || h.identities_held(&e)).await < held,
+        "and the seeder holds fewer identities than at the drop: what it keeps per identity \
+         is bounded on a video it no longer serves too"
+    );
+    let s = e
+        .hello(&h.peer(1), &h.hello())
+        .await
+        .expect("an account that paid is kept, on a video no longer served as on any");
+    assert_eq!(
+        (
+            s.quote().served,
+            s.quote().accepted_upto,
+            s.quote().spent_total
+        ),
+        (1, 1, 1),
+        "its quote shows the account's position"
+    );
+    close(h, s).await;
+    // The mint's reads down, peer 4's swap cannot be learnt: it stays unknown.
+    h.state_check_outage(true);
+    h.restore_outage(true);
+    let r = e.hello(&h.peer(4), &h.hello()).await;
+    h.state_check_outage(false);
+    h.restore_outage(false);
+    let s = r.expect(
+        "a peer whose only record on a video no longer served is a swap of unknown outcome \
+         is answered while it is unknown, account_ttl on as before",
+    );
+    close(h, s).await;
+    release(h).await;
 }
 
 /// Flaws `SweepSkipsDroppedVideos` and `SweepSkipsDroppedVideosInFlight`. A seeder that
