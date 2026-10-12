@@ -572,7 +572,12 @@ pub struct EngineParams {
 /// names none.) So a harness backs every mint its seeders quote, and a fault or an event
 /// that a method here brings about with no mint named, it brings about at each of them: an
 /// outage, a request held, lost or given up, a read left unanswered or limited, a
-/// [`MintEvent`], a keyset rotated, expired or listed to expire. What such a method counts
+/// [`MintEvent`], a keyset rotated, expired or listed to expire. (One mint is apart for the
+/// last: a mint that has started a keyset of its own, [`Harness::start_keyset_at`], issues
+/// from that one, and [`Harness::rotate_keyset`], [`Harness::expire_keyset`],
+/// [`Harness::keyset_expires_in`] and [`Harness::expire_active_keyset`] are of the keyset
+/// the other mints issue from: its own keyset's start and expiry are brought about by the
+/// method that names it.) What such a method counts
 /// or reports ([`Harness::key_requests`], [`Harness::listing_requests`],
 /// [`Harness::state_reads`], [`Harness::reads_out`], [`Harness::answers_under_way`]) is
 /// over all of them. No scenario has one mint down while another answers: that takes
