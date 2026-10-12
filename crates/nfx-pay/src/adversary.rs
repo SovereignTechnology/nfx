@@ -22906,6 +22906,13 @@ impl<'a, H: Harness> World<'a, H> {
 /// of the table's rule.
 const SET_UP: &str = "while bringing the state about: ";
 
+/// What [`Tally::ends`] raises where a state of its table could not be brought about and
+/// no check of the table's rule failed: the scenario fails, an honest watcher's too, but at
+/// no check of the suite's ([`Ran::failed_the_suite`] reads a message, and this is none), so
+/// a planted defect that only breaks a table's set-up is not caught by it. What failed.
+#[derive(Debug)]
+struct SetUpFailed(#[allow(dead_code)] String);
+
 /// What a table ran: its cells, and those skipped, by the reason each could not come
 /// about.
 #[derive(Default)]
@@ -22915,6 +22922,9 @@ struct Tally {
     /// The first cell whose state could not be brought about ([`World::build`]): no check
     /// of the table's rule.
     set_up: Option<String>,
+    /// The cells whose first run said `true`: in the wait's table, those in which the
+    /// checks at 179 s and at 180 s from sending ran ([`Tally::told`]).
+    said: usize,
 }
 
 impl Tally {
@@ -22951,12 +22961,26 @@ impl Tally {
 
     /// The table's end: it ran as many cells as `cells` says, and skipped as many, each
     /// for a reason it names, so a cell that stops running is seen here.
+    /// As many cells as `cells` says said `true` as they first ran ([`Tally::said`]): so
+    /// a cell that ran without the checks its `true` stands for is seen here.
+    fn told(&self, rule: &str, cells: usize) {
+        assert_eq!(
+            self.said, cells,
+            "{rule}: in as many cells as that the checks the cell's answer stands for ran"
+        );
+    }
+
     fn ends(&self, rule: &str, cells: (usize, usize)) {
         if let Some(first) = &self.set_up {
-            panic!(
+            // No check of the suite's, so nothing a planted defect is caught by: it is
+            // raised as `NoRunner` is, with a payload that is no message, and said on
+            // stderr for whoever reads an honest run that failed here.
+            let what = format!(
                 "THE TABLE'S SET-UP FAILED, and no check of its rule ({rule}): a state could \
                  not be brought about: {first}"
             );
+            eprintln!("{what}");
+            std::panic::panic_any(SetUpFailed(what));
         }
         let skipped: usize = self.skipped.iter().map(|(_, n)| n).sum();
         assert_eq!(
@@ -23109,12 +23133,14 @@ macro_rules! table {
                 }
                 turn += 1;
                 let before = $tally.ran;
+                let mut first = true;
                 for ending in $endings {
                     let cell = $cell($h, state, input, ending, turn).await;
                     // What a cell may leave: the mint down, the wallets holding older proofs.
                     $h.mint_outage(false);
                     $h.fund_older_keyset(0);
                     let answered = matches!(cell, Ok(Ok(true)));
+                    $tally.said += usize::from(answered && std::mem::take(&mut first));
                     $tally.take($rule, cell, || format!("{input}, with {state}"));
                     if !answered {
                         break;
@@ -23140,7 +23166,7 @@ const COMES_AFTER_SENDING: [u64; 5] = [1, 60, 100, 178, 179];
 /// standing holds nothing, a payment in flight on its live session (made each way), one
 /// awaiting a quote, an incomplete reclaim or a closed session's payment; none, some or all
 /// of its tries are used; and its ledger's past and the refusals licensing its next `due`
-/// vary from cell to cell (`rows`). The input comes at once or up to 170 s later
+/// vary from cell to cell (`rows`). The input comes 0, 30, 60, 100, 170 or 179 s later
 /// (`COMES_AFTER`). After it the watcher has stopped, on every ledger, and awaits no
 /// quote; it pays nothing before what it holds comes to its end (`World::resolve`, a
 /// payment in flight answered each way of `Ending`), nothing after it on a session with
@@ -23228,7 +23254,7 @@ async fn a_stop_holds<H: Harness>(
 /// it holds the standing's one place (NFX-07 §3a), whatever comes meanwhile: every input
 /// of `inputs`, over every state of `states` with a payment in flight on its live
 /// session or left unsettled by a closed one, stopped by each cause or not. The input
-/// comes 1 to 178 s after the payment was sent (`COMES_AFTER_SENDING`). Unless it
+/// comes 1, 60, 100, 178 or 179 s after the payment was sent (`COMES_AFTER_SENDING`). Unless it
 /// answered the payment, a third video with half its window owed then pays nothing over
 /// it, by `due` or by `last_pay`, nor does a ledger made since; nothing is reclaimed at
 /// 179 s from sending, by the session's timeout or, for a closed session's payment, by a
@@ -23248,6 +23274,7 @@ pub async fn a_payment_waits_180_s_and_holds_its_place_whatever_comes<H: Harness
     let endings = [Ending::Unanswered];
     table!(h, tally, rule, (takes, base, 0), endings, a_payment_waits);
     tally.ends(rule, (16_245, 38_626));
+    tally.told(rule, 14_746);
 }
 
 /// One cell of [`a_payment_waits_180_s_and_holds_its_place_whatever_comes`].
@@ -23280,7 +23307,9 @@ async fn a_payment_waits<H: Harness>(
         w.a_ledger_made_since_decides("after it, a ledger made since owing half its window")
             .await?;
     }
+    let mut waited = false;
     if let Some((by, sent, kind)) = waits(&w.held) {
+        waited = true;
         let early = "after it, at 179 s from the payment's sending";
         let late = "after it, at 180 s from the payment's sending";
         w.tick_to(sent + 179);
@@ -23301,7 +23330,7 @@ async fn a_payment_waits<H: Harness>(
         );
     }
     w.flags("at the end")?;
-    Ok(Ok(false))
+    Ok(Ok(waited))
 }
 
 /// How long after a payment was sent the watcher decides again, for
@@ -23435,8 +23464,8 @@ async fn as_time_passes<H: Harness>(
 /// other (NFX-07 §3a): nothing that comes between ends the licence but the session's end,
 /// and however many refusals came, the licence is one. Every input of `inputs`, over
 /// every state of `states` with one, two or three refusals licensing and no stop,
-/// whatever the standing holds and however many tries are used; the input comes at once or
-/// up to 170 s after the last refusal (`COMES_AFTER`). The `due` that follows it on the
+/// whatever the standing holds and however many tries are used; the input comes 0, 30,
+/// 60, 100, 170 or 179 s after the last refusal (`COMES_AFTER`). The `due` that follows it on the
 /// ledger pays ahead half its own session's window, less the credit held, unless the input
 /// was that decision or the session's end, or something keeps it from paying: and then the
 /// licence has ended there.
@@ -23510,7 +23539,7 @@ async fn a_licence_lasts<H: Harness>(
 /// such a quote does, and nothing else does; and only those answers count (NFX-07 §3a).
 /// Every input of `inputs`, over every state of `states` that is not stopped, with
 /// none to three tries used, whatever the standing holds and whatever its ledger has been
-/// through; the input comes at once or up to 170 s on (`COMES_AFTER`). Each
+/// through; the input comes 0, 30, 60, 100, 170 or 179 s on (`COMES_AFTER`). Each
 /// `mint-unavailable` answer to a payment uses a try, however the payment was made and
 /// however its reclaim ends (`Back`); an ack, and a new session's accepted quote on
 /// whichever video, settling a payment or not, restores them all; nothing else uses or
