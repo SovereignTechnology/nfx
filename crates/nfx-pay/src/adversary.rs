@@ -6858,16 +6858,17 @@ async fn an_unanswered_check_of_inputs_proves_nothing<H: Harness>(h: &H) {
     );
 }
 
-/// Flaws `UnknownPerMint`, `SweepReadsOneMintOnly`, `SweepReadsNewestMintOnly`,
-/// `SweepReadsFirstMintOnly`, `PayReadsOwnMintOnly` and `PayReadsOwnMintOnlyInFlight`. A
-/// seeder's two quoted mints hold its accounts' swaps at once, and NFX-07 §3 states the
+/// Flaws `UnknownPerMint`, `InFlightUnknownPerMint`, `SweepReadsOneMintOnly`,
+/// `SweepReadsNewestMintOnly`, `SweepReadsFirstMintOnly`, `PayReadsOwnMintOnly` and
+/// `PayReadsOwnMintOnlyInFlight`. A seeder's two quoted mints hold its accounts' swaps at once, and NFX-07 §3 states the
 /// rules of a swap of its account, never of a mint. (What one mint's swaps come to alone,
 /// every scenario whose seeders are paid runs at each quoted mint:
 /// [`scenarios_at_every_quoted_mint!`](crate::scenarios_at_every_quoted_mint).) One seeder
 /// quotes this harness's mint and [`SECOND_MINT`]:
 /// - while a swap of an account's is unknown its next payment is answered
 ///   `mint-unavailable` and not swapped, whichever quoted mint each is at: the unknown one
-///   at the first and the next at the second, and the other way round;
+///   at the first and the next at the second, and the other way round, its client having
+///   given it up or the swap abandoned in flight at its deadline;
 /// - "each unknown swap is decided on its own: one still unknown delays no other", and "a
 ///   background sweep reads every account's": with one account's swap undecidable at one
 ///   mint and another's claimed, its answer lost, at the other, a sweep learns the claim
@@ -6885,8 +6886,16 @@ async fn an_unanswered_check_of_inputs_proves_nothing<H: Harness>(h: &H) {
 /// mint's reads at a time, never across two.
 pub async fn a_seeders_two_mints_hold_its_swaps_at_once<H: Harness>(h: &H) {
     let unpaid = "an account, two chunks unpaid";
-    // An unknown swap stops its account's next payment, whichever quoted mint each is at.
-    for unknown_at_second in [false, true] {
+    // An unknown swap stops its account's next payment, whichever quoted mint each is at:
+    // one whose client gave it up, the mint holding it, or (`in_flight`) one abandoned in
+    // flight at its deadline, which has not reached the mint.
+    for (unknown_at_second, in_flight) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let cell = format!(
+            "the unknown one at the second quoted mint: {unknown_at_second}, abandoned in \
+             flight: {in_flight}"
+        );
         let (unknown_at, next_at) = if unknown_at_second {
             (SECOND_MINT.to_owned(), h.mint())
         } else {
@@ -6895,18 +6904,26 @@ pub async fn a_seeders_two_mints_hold_its_swaps_at_once<H: Harness>(h: &H) {
         let e = Quoted::Second.engine(h);
         let mut s = open(h, &e, 1).await;
         assert_eq!(serve(h, &mut s, 0, 2), 2, "{unpaid}");
-        h.hold_next_swap_reserving(); // undecidable for now: every read of it proves nothing
-        h.time_out_next_swap();
-        let r = s
-            .pay(&Pay {
-                upto_chunk: 1,
-                token: h.token_at(&unknown_at, 1).await,
+        let first = Pay {
+            upto_chunk: 1,
+            token: h.token_at(&unknown_at, 1).await,
+        };
+        let r = if in_flight {
+            h.hold_next_swap();
+            let (r, ()) = both(s.pay(&first), async {
+                settle(h).await;
+                advance(h, Duration::from_secs(60)).await;
             })
             .await;
+            r
+        } else {
+            h.hold_next_swap_reserving(); // undecidable for now: every read of it proves nothing
+            h.time_out_next_swap();
+            s.pay(&first).await
+        };
         assert!(
             is_rej(&r, &RejCode::MintUnavailable),
-            "a swap whose outcome is unknown (at the second quoted mint: \
-             {unknown_at_second}): {r:?}"
+            "a swap whose outcome is unknown ({cell}): {r:?}"
         );
         let next = Pay {
             upto_chunk: 2,
@@ -6916,22 +6933,20 @@ pub async fn a_seeders_two_mints_hold_its_swaps_at_once<H: Harness>(h: &H) {
         assert!(
             is_rej(&r, &RejCode::MintUnavailable),
             "while a swap of the account's is unknown, its next payment is answered \
-             mint-unavailable, whichever quoted mint each is at (the unknown one at the \
-             second: {unknown_at_second}): {r:?}"
+             mint-unavailable, whichever quoted mint each is at ({cell}): {r:?}"
         );
         assert!(
             !h.claimed_any(&next.token).await,
             "and it is not swapped: an account holds one unknown swap at most, not one for \
-             each quoted mint (the unknown one at the second: {unknown_at_second})"
+             each quoted mint ({cell})"
         );
-        release(h).await; // the mint finishes the first: a claim, learnt by a read
+        release(h).await; // the mint finishes the first: a claim, learnt by a read or landing
         advance(h, SECOND).await;
         let q = open(h, &e, 1).await.quote().clone();
         assert_eq!(
             (q.accepted_upto, q.spent_total),
             (1, 1),
-            "the first swap, finished, is learnt and credited (at the second quoted mint: \
-             {unknown_at_second})"
+            "the first swap, finished, is learnt and credited ({cell})"
         );
         close(h, s).await;
     }
@@ -7968,16 +7983,17 @@ async fn a_dropped_video_still_quotes_its_accounts<H: Harness>(h: &H) {
     a_dropped_videos_never_paid_accounts_are_forgotten(h).await;
 }
 
-/// Flaws `DroppedVideoNeverForgets` and `DroppedVideoIdleFromDrop`. A seeder that stops
-/// serving a video keeps its accounts
+/// Flaws `DroppedVideoNeverForgets`, `DroppedVideoIdleFromDrop` and
+/// `DroppedVideoForgetsOnHelloOnly`. A seeder that stops serving a video keeps its accounts
 /// there by the rules that hold for any, and forgets its never-paid ones as it does on a
 /// video it serves (NFX-07 §3, bounded state): everything kept per identity is bounded, on
-/// a video that admits nothing more too. Peer 1 paid; peers 2 and 3 owe a chunk each and
+/// a video that admits nothing more too. Peer 1 paid; peers 2, 3 and 5 owe a chunk each and
 /// never paid; peer 4 holds only a pre-payment whose swap's outcome is unknown. Ten seconds
 /// after their sessions close the seeder drops the video. A second before `account_ttl` has
 /// passed since their sessions closed,
 /// peer 2's `hello` is answered: its account is kept. At `account_ttl`, peer 3's is refused
-/// `unknown-video`, its account forgotten, and the seeder holds fewer identities; peer 1's
+/// `unknown-video`, its account forgotten, and the seeder holds two identities fewer, peer
+/// 5's account forgotten too though its peer never returned; peer 1's
 /// is answered with its position, and so is peer 4's, the mint's reads down so that its
 /// swap stays unknown.
 async fn a_dropped_videos_never_paid_accounts_are_forgotten<H: Harness>(h: &H) {
@@ -7988,7 +8004,7 @@ async fn a_dropped_videos_never_paid_accounts_are_forgotten<H: Harness>(h: &H) {
         .await
         .expect("an exact payment is accepted");
     let mut idle = Vec::new();
-    for peer in [2, 3] {
+    for peer in [2, 3, 5] {
         let mut s = open(h, &e, peer).await;
         assert_eq!(serve(h, &mut s, 0, 1), 1, "within the window");
         idle.push(s);
@@ -8005,7 +8021,6 @@ async fn a_dropped_videos_never_paid_accounts_are_forgotten<H: Harness>(h: &H) {
     close(h, (paid, idle, unknown)).await;
     advance(h, 10 * SECOND).await;
     h.drop_video(&e, 0);
-    let held = landed(h, || h.identities_held(&e)).await;
 
     // `account_ttl` runs from each account's last session's close, ten seconds before the
     // drop, not from the drop (flaw `DroppedVideoIdleFromDrop`).
@@ -8020,6 +8035,8 @@ async fn a_dropped_videos_never_paid_accounts_are_forgotten<H: Harness>(h: &H) {
         "its quote shows the account's position"
     );
     close(h, s).await;
+    // What the seeder holds now, the accounts' unpaid chunks long aged out of its count.
+    let held = landed(h, || h.identities_held(&e)).await;
     advance(h, SECOND).await;
     let r = e.hello(&h.peer(3), &h.hello()).await.map(|_| ());
     assert!(
@@ -8029,9 +8046,10 @@ async fn a_dropped_videos_never_paid_accounts_are_forgotten<H: Harness>(h: &H) {
          refused unknown-video: {r:?}"
     );
     assert!(
-        landed(h, || h.identities_held(&e)).await < held,
-        "and the seeder holds fewer identities than at the drop: what it keeps per identity \
-         is bounded on a video it no longer serves too"
+        landed(h, || h.identities_held(&e)).await + 2 <= held,
+        "and the seeder holds two identities fewer than a second before, at least: peer 3's \
+         account, and peer 5's, whose peer never came back. What it keeps per identity is \
+         bounded on a video it no longer serves too, whether or not the identity returns"
     );
     let s = e
         .hello(&h.peer(1), &h.hello())
@@ -9081,20 +9099,21 @@ pub async fn a_global_cap_bounds_free_service<H: Harness>(h: &H) {
 }
 
 /// Flaws `DroppedVideoPayKeepsDebt`, `DroppedVideoPayFreesAllDebt`,
-/// `DroppedVideoLateClaimKeepsDebt`, `DroppedVideoLateClaimFreesAllDebt` and
-/// `DroppedVideoCreditFreesPeerDebt`. A claim credited "frees from the global count exactly
+/// `DroppedVideoLateClaimKeepsDebt`, `DroppedVideoLandedLateClaimKeepsDebt`,
+/// `DroppedVideoLateClaimFreesAllDebt` and `DroppedVideoCreditFreesPeerDebt`. A claim credited "frees from the global count exactly
 /// the chunks it covers; the account's chunks beyond it are still unpaid" (NFX-07 §3, late
 /// outcomes), and "credit on one account never offsets another's debt" (service limit): on
 /// a video the seeder no longer serves as on any, since it keeps its accounts there by the
 /// rules that hold for any, and their unpaid chunks count as any others. One account's four
 /// unpaid chunks of video 0, and two its peer owes on video 1, fill a cap of 6, and the
 /// seeder drops video 0. A payment for two of video 0's chunks is acknowledged there, on
-/// the session open at the drop; or (`late`) it was claimed at the mint before the drop, its
-/// answer lost, and a sweep learns it after. Either way the seeder's other video admits
-/// two, and no more: the cells of a credit on a video no longer served, acknowledged or
-/// late, freeing too few, the account's other chunks, or its peer's on another video.
+/// the session open at the drop; or it was claimed at the mint before the drop, and is
+/// credited late after it: its answer lost, and learnt by a sweep, or its answer landing
+/// past its deadline. Each way the seeder's other video admits two, and no more: the cells
+/// of a credit on a video no longer served, acknowledged or late by either road, freeing
+/// too few, the account's other chunks, or its peer's on another video.
 async fn a_dropped_videos_credit_frees_what_it_covers<H: Harness>(h: &H) {
-    for late in [false, true] {
+    for credited in ["acknowledged", "learnt by a sweep", "landed late"] {
         let e = h.engine(1, 4, 6);
         let mut s = open(h, &e, 1).await;
         let mut elsewhere = open_on(h, &e, 1, 1).await;
@@ -9106,20 +9125,47 @@ async fn a_dropped_videos_credit_frees_what_it_covers<H: Harness>(h: &H) {
         );
         let mut other = open_on(h, &e, 2, 1).await;
         assert_eq!(serve_on(h, &mut other, 1, 0, 1), 0, "the cap is full");
-        if late {
-            lost_claim(h, &mut s, 2, 2).await;
-            close(h, s).await;
-            h.drop_video(&e, 0);
-            e.sweep().await;
-        } else {
-            h.drop_video(&e, 0);
-            let r = pay_to(h, &mut s, 2).await;
-            assert!(
-                matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (2, 2)),
-                "a payment on a session open when its video was dropped is verified as any \
-                 other: {r:?}"
-            );
-            close(h, s).await;
+        match credited {
+            "acknowledged" => {
+                h.drop_video(&e, 0);
+                let r = pay_to(h, &mut s, 2).await;
+                assert!(
+                    matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (2, 2)),
+                    "a payment on a session open when its video was dropped is verified as \
+                     any other: {r:?}"
+                );
+                close(h, s).await;
+            }
+            "learnt by a sweep" => {
+                lost_claim(h, &mut s, 2, 2).await;
+                close(h, s).await;
+                h.drop_video(&e, 0);
+                e.sweep().await;
+            }
+            _ => {
+                // The mint makes the claim, and its answer comes after the deadline.
+                h.hold_swap_responses();
+                let slow = Pay {
+                    upto_chunk: 2,
+                    token: h.token(2).await,
+                };
+                let (r, ()) = both(s.pay(&slow), async {
+                    settle(h).await;
+                    advance(h, Duration::from_secs(60)).await;
+                })
+                .await;
+                assert!(
+                    is_rej(&r, &RejCode::MintUnavailable),
+                    "the mint's answer held past the deadline: {r:?}"
+                );
+                close(h, s).await;
+                h.drop_video(&e, 0);
+                h.state_check_outage(true); // no read learns it before it lands
+                h.restore_outage(true);
+                release(h).await;
+                h.state_check_outage(false);
+                h.restore_outage(false);
+            }
         }
         assert_eq!(
             landed(h, || serve_on(h, &mut other, 1, 0, 4)).await,
@@ -9127,7 +9173,7 @@ async fn a_dropped_videos_credit_frees_what_it_covers<H: Harness>(h: &H) {
             "a claim credited on a video no longer served frees from the global count \
              exactly the chunks it covers, of the four its account owes there and the two \
              its peer owes on the seeder's other video: that video admits two, and no more \
-             (credited late: {late})"
+             (the claim {credited})"
         );
         close(h, (elsewhere, other)).await;
     }
@@ -10932,6 +10978,30 @@ pub async fn bad_configurations_are_refused<H: Harness>(h: &H) {
         assert!(
             h.engine_checked(p).is_err(),
             "refused, a ttl half a second past its ceiling: {p:?}"
+        );
+    }
+    // Nor is 0.3 s past one inside (flaw `TtlCeilingsNearestSecond`).
+    let less = Duration::from_millis(300);
+    let barely_over = [
+        EngineParams {
+            debt_ttl: day + less,
+            account_ttl: month,
+            ban_ttl: month,
+            ..good
+        },
+        EngineParams {
+            account_ttl: month + less,
+            ..good
+        },
+        EngineParams {
+            ban_ttl: month + less,
+            ..good
+        },
+    ];
+    for p in barely_over {
+        assert!(
+            h.engine_checked(p).is_err(),
+            "refused, a ttl 0.3 s past its ceiling: {p:?}"
         );
     }
     // So are the floors (flaws `AccountTtlFloorInSeconds`, `BanTtlFloorInSeconds`,
@@ -28101,7 +28171,9 @@ const LATE_LOOKS: [u64; 2] = [60, 65];
 ///   the one the seeder holds is of an earlier second by the look, and a listing would be
 ///   asked for.
 /// - The listing it asked for itself, the answer held: it comes at the look and names the
-///   payment's keyset, whose keys would be asked for.
+///   payment's keyset not. Asked for since the payment arrived, it would judge it, and
+///   nothing more would be asked for: at its deadline or later it judges nothing either.
+/// - The same, the listing naming its keyset: its keys would be asked for.
 /// - A listing another payment asked for, the answer held: it comes at the look, asked for
 ///   before this payment arrived, and names its keyset not, so a listing would be asked
 ///   for.
@@ -28110,8 +28182,9 @@ const LATE_LOOKS: [u64; 2] = [60, 65];
 ///   second of the look: it names the payment's keyset, whose keys would be asked for.
 /// - The same, the listing naming its keyset not: no rule would have anything asked for,
 ///   and the listing, which came at its deadline or later, judges nothing of it either.
-const ROUTES_TO_A_LATE_LOOK: [&str; 6] = [
+const ROUTES_TO_A_LATE_LOOK: [&str; 7] = [
     "the next second's listing",
+    "its own held listing, which names its keyset not",
     "its own held listing, which names its keyset",
     "another payment's held listing, which names its keyset not",
     "another payment's held listing, which names its keyset",
@@ -28129,7 +28202,15 @@ async fn a_payment_asks_for_nothing_at_a_late_look<H: Harness>(
     late: u64,
     route: &str,
 ) {
-    let [next, own_held, _, others_held, others_then, others_then_not] = ROUTES_TO_A_LATE_LOOK;
+    let [
+        next,
+        own_held_not,
+        own_held,
+        _,
+        others_held,
+        others_then,
+        others_then_not,
+    ] = ROUTES_TO_A_LATE_LOOK;
     let mint = quoted.mint(h);
     let cell = format!(
         "{late} s from its arrival, having waited for {route}{}",
@@ -28171,7 +28252,7 @@ async fn a_payment_asks_for_nothing_at_a_late_look<H: Harness>(
             advance(h, SECOND).await; // the mint's listing names its new keyset from now
         }
         h.hold_key_fetches();
-        if route != own_held {
+        if route != own_held && route != own_held_not {
             let mut first = Box::pin(s.pay(&q));
             assert!(
                 waits(h, first.as_mut()).await,

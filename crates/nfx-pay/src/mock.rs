@@ -4920,6 +4920,18 @@ pub enum SeederFlaw {
     /// Compares `account_ttl` and `ban_ttl` with `debt_ttl` after rounding each to the
     /// nearest second: one less than half a second short starts.
     TtlFloorsNearestSecond,
+    /// A swap abandoned in flight at one quoted mint does not stop its account's next
+    /// payment where that is a token of another: the payment is swapped.
+    InFlightUnknownPerMint,
+    /// Forgets a never-paid account on a video it no longer serves only as its own peer's
+    /// `hello` arrives: one whose peer never returns is kept for good.
+    DroppedVideoForgetsOnHelloOnly,
+    /// Compares the three ttls with their ceilings after rounding each to the nearest
+    /// second: one less than half a second past starts.
+    TtlCeilingsNearestSecond,
+    /// A claim that lands late on a video no longer served leaves its chunks in the global
+    /// count; one learnt by a read frees them.
+    DroppedVideoLandedLateClaimKeepsDebt,
 }
 
 /// How a payment came to its account's turn: the paths of the suite's matrix of payments,
@@ -7906,6 +7918,9 @@ struct State {
     /// The late claim being settled is of a quoted mint other than the first
     /// ([`SeederFlaw::OtherMintLateClaimKeepsDebt`] only).
     claim_elsewhere: bool,
+    /// The late claim being settled is one whose answer landed, not one a read learnt
+    /// ([`SeederFlaw::DroppedVideoLandedLateClaimKeepsDebt`] only).
+    claim_landed: bool,
     /// The videos it no longer serves ([`Harness::drop_video`]): it keeps their accounts.
     dropped: HashSet<usize>,
     /// Keysets whose keys a mint answered 12001, by mint ([`SeederFlaw::KeysRefusalCached`]
@@ -8051,8 +8066,13 @@ impl EngineConfig {
         } else {
             MAX_DEBT_TTL
         };
-        // The flaw: the ceilings compared in whole seconds.
-        let over = if flaw == Some(SeederFlaw::TtlsComparedInSeconds) {
+        // The flaws: the ceilings compared in whole seconds, or to the nearest second.
+        let near = |d: Duration| (d + Duration::from_millis(500)).as_secs();
+        let over = if flaw == Some(SeederFlaw::TtlCeilingsNearestSecond) {
+            near(self.debt_ttl) > max_debt_ttl.as_secs()
+                || near(self.account_ttl) > MAX_STATE_TTL.as_secs()
+                || near(self.ban_ttl) > MAX_STATE_TTL.as_secs()
+        } else if flaw == Some(SeederFlaw::TtlsComparedInSeconds) {
             self.debt_ttl.as_secs() > max_debt_ttl.as_secs()
                 || self.account_ttl.as_secs() > MAX_STATE_TTL.as_secs()
                 || self.ban_ttl.as_secs() > MAX_STATE_TTL.as_secs()
@@ -9872,7 +9892,8 @@ impl Inner {
                     .filter(|k| self.unknown_swap(st, *k, 0))
                     .collect()
             };
-            let dropped_kept = self.has(SeederFlaw::DroppedVideoNeverForgets);
+            let dropped_kept = self.has(SeederFlaw::DroppedVideoNeverForgets)
+                || self.has(SeederFlaw::DroppedVideoForgetsOnHelloOnly);
             let State {
                 accounts,
                 open_accounts,
@@ -9997,7 +10018,11 @@ impl Inner {
             || (st.dropped.contains(&key.1) && self.has(SeederFlaw::DroppedVideoPayKeepsDebt))
             || (late
                 && st.dropped.contains(&key.1)
-                && self.has(SeederFlaw::DroppedVideoLateClaimKeepsDebt));
+                && self.has(SeederFlaw::DroppedVideoLateClaimKeepsDebt))
+            || (late
+                && st.claim_landed
+                && st.dropped.contains(&key.1)
+                && self.has(SeederFlaw::DroppedVideoLandedLateClaimKeepsDebt));
         let all = self.has(SeederFlaw::CreditFreesAllDebt)
             || (late && self.has(SeederFlaw::LateCreditFreesAll))
             || (!late
@@ -11159,7 +11184,9 @@ impl Inner {
             if late {
                 st.claim_elsewhere = elsewhere;
                 if !late_lost {
+                    st.claim_landed = true;
                     self.settle_late(&mut st, pay, outcome);
+                    st.claim_landed = false;
                 }
             } else {
                 let answer = match spared {
@@ -11830,6 +11857,18 @@ impl MockEngine {
                 // past its payment's deadline. Its outcome is unknown as one whose answer
                 // was lost, from that deadline; before it, the payment holds its turn.
                 let now = e.clock.now();
+                // The flaw: a never-paid account there is forgotten only here, as its own
+                // peer's hello arrives.
+                if e.has(SeederFlaw::DroppedVideoForgetsOnHelloOnly) {
+                    let ttl = e.config.account_ttl.as_secs();
+                    let idle =
+                        st.accounts.get(&key).is_some_and(|a| {
+                            a.acked == 0 && a.last_active.saturating_add(ttl) <= now
+                        }) && !st.open_accounts.contains_key(&key);
+                    if idle {
+                        st.accounts.remove(&key);
+                    }
+                }
                 let swap_abandoned_in_flight = |st: &State| {
                     st.pays.values().any(|r| {
                         r.key == key && r.sent && !r.landed && (r.abandoned || now >= r.deadline)
@@ -12996,9 +13035,25 @@ impl MockSession {
                                 .is_none_or(|s| at(s.1.as_str()).as_ref() != Some(&mint))
                         })
             };
+            // The flaw: a swap abandoned in flight at another mint, the account's only
+            // unknown one, does not count.
+            let flight_elsewhere = e.has(SeederFlaw::InFlightUnknownPerMint) && {
+                let at = |t: &str| e.net.read(t).and_then(|i| i.mints.first().cloned());
+                !st.unknown.iter().any(|u| u.pay.key == self.key)
+                    && st
+                        .pays
+                        .iter()
+                        .filter(|(p, r)| **p != id && r.key == self.key && r.sent && !r.landed)
+                        .all(|(_, r)| {
+                            r.swap
+                                .as_ref()
+                                .is_none_or(|s| at(s.1.as_str()).as_ref() != Some(&mint))
+                        })
+            };
             if e.unknown_swap(&st, self.key, id)
                 && !e.has(SeederFlaw::UnknownUnbounded)
                 && !beyond
+                && !flight_elsewhere
                 && !other_mints_only
             {
                 if e.has(SeederFlaw::PayDropsDebtLog) {

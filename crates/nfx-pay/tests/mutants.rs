@@ -3533,6 +3533,26 @@ catches!(
     ttl_floors_nearest_second_woken: w(S::TtlFloorsNearestSecond) => bad_configurations_are_refused,
     ttl_floors_nearest_second_at_start: l(S::TtlFloorsNearestSecond) => bad_configurations_are_refused,
     ttl_floors_nearest_second_on_tasks: t(S::TtlFloorsNearestSecond) => bad_configurations_are_refused,
+    in_flight_unknown_per_mint: s(S::InFlightUnknownPerMint) => a_seeders_two_mints_hold_its_swaps_at_once,
+    in_flight_unknown_per_mint_round_trip: r(S::InFlightUnknownPerMint) => a_seeders_two_mints_hold_its_swaps_at_once,
+    in_flight_unknown_per_mint_woken: w(S::InFlightUnknownPerMint) => a_seeders_two_mints_hold_its_swaps_at_once,
+    in_flight_unknown_per_mint_at_start: l(S::InFlightUnknownPerMint) => a_seeders_two_mints_hold_its_swaps_at_once,
+    in_flight_unknown_per_mint_on_tasks: t(S::InFlightUnknownPerMint) => a_seeders_two_mints_hold_its_swaps_at_once,
+    dropped_video_forgets_on_hello_only: s(S::DroppedVideoForgetsOnHelloOnly) => only_the_sessions_video_is_admitted,
+    dropped_video_forgets_on_hello_only_round_trip: r(S::DroppedVideoForgetsOnHelloOnly) => only_the_sessions_video_is_admitted,
+    dropped_video_forgets_on_hello_only_woken: w(S::DroppedVideoForgetsOnHelloOnly) => only_the_sessions_video_is_admitted,
+    dropped_video_forgets_on_hello_only_at_start: l(S::DroppedVideoForgetsOnHelloOnly) => only_the_sessions_video_is_admitted,
+    dropped_video_forgets_on_hello_only_on_tasks: t(S::DroppedVideoForgetsOnHelloOnly) => only_the_sessions_video_is_admitted,
+    ttl_ceilings_nearest_second: s(S::TtlCeilingsNearestSecond) => bad_configurations_are_refused,
+    ttl_ceilings_nearest_second_round_trip: r(S::TtlCeilingsNearestSecond) => bad_configurations_are_refused,
+    ttl_ceilings_nearest_second_woken: w(S::TtlCeilingsNearestSecond) => bad_configurations_are_refused,
+    ttl_ceilings_nearest_second_at_start: l(S::TtlCeilingsNearestSecond) => bad_configurations_are_refused,
+    ttl_ceilings_nearest_second_on_tasks: t(S::TtlCeilingsNearestSecond) => bad_configurations_are_refused,
+    dropped_video_landed_late_claim_keeps_debt: s(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service,
+    dropped_video_landed_late_claim_keeps_debt_round_trip: r(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service,
+    dropped_video_landed_late_claim_keeps_debt_woken: w(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service,
+    dropped_video_landed_late_claim_keeps_debt_at_start: l(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service,
+    dropped_video_landed_late_claim_keeps_debt_on_tasks: t(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service,
 );
 
 catches_at_other_mints!(
@@ -3746,6 +3766,11 @@ catches_at_other_mints!(
     dropped_video_credit_frees_peer_debt_woken_at_other_mints: w(S::DroppedVideoCreditFreesPeerDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
     dropped_video_credit_frees_peer_debt_at_start_at_other_mints: l(S::DroppedVideoCreditFreesPeerDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
     dropped_video_credit_frees_peer_debt_on_tasks_at_other_mints: t(S::DroppedVideoCreditFreesPeerDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
+    dropped_video_landed_late_claim_keeps_debt_at_other_mints: s(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
+    dropped_video_landed_late_claim_keeps_debt_round_trip_at_other_mints: r(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
+    dropped_video_landed_late_claim_keeps_debt_woken_at_other_mints: w(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
+    dropped_video_landed_late_claim_keeps_debt_at_start_at_other_mints: l(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
+    dropped_video_landed_late_claim_keeps_debt_on_tasks_at_other_mints: t(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
 );
 
 /// Each scenario whose seeders are paid judges at their second quoted mint every answer of
