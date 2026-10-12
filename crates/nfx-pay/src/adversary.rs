@@ -19458,6 +19458,16 @@ const OTHER: usize = 1;
 const THIRD: usize = 2;
 const SINCE: usize = 3;
 
+/// Ledger `l` of a table's watcher, for a check's message.
+fn ledger(l: usize) -> &'static str {
+    match l {
+        OWN => "its own ledger",
+        OTHER => "another video's ledger",
+        THIRD => "a third video's ledger",
+        _ => "a ledger made since",
+    }
+}
+
 /// Why a watcher refuses a quote without stopping: its price over the cap, its `window`
 /// over the ceiling, or no mint it holds tokens from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19594,7 +19604,7 @@ impl std::fmt::Display for Input {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let does = match self.does {
             Does::Clock(secs) => return write!(f, "{secs} s with no input"),
-            Does::Sibling => "a ledger made for another video, from",
+            Does::Sibling => "a ledger made for another video, the call",
             Does::QuoteTaken => "a new session's honest quote, taken,",
             Does::QuoteRefused(Why::Price) => "a new session's quote over its price cap",
             Does::QuoteRefused(Why::Window) => {
@@ -20238,7 +20248,8 @@ impl<'a, H: Harness> World<'a, H> {
                 led.v.stopped() == stopped,
                 "{what}: nothing undoes a stop, and nothing but a stop or a payment found \
                  spent makes one: the watcher pays this seeder nothing is {stopped}, and \
-                 ledger {l} says {}",
+                 {} says {}",
+                ledger(l),
                 led.v.stopped()
             );
             let waits =
@@ -20247,7 +20258,8 @@ impl<'a, H: Harness> World<'a, H> {
                 led.v.awaiting_quote() == waits,
                 "{what}: a watcher awaits a quote with its three tries used or its own \
                  payment found spent, and none once it has stopped: that is {waits}, and \
-                 ledger {l} says {}",
+                 {} says {}",
+                ledger(l),
                 led.v.awaiting_quote()
             );
         }
@@ -20396,13 +20408,14 @@ impl<'a, H: Harness> World<'a, H> {
         }
         let paid = match paid {
             Ok(paid) => paid,
-            Err(e) => return Err(format!("{what}: {call} on ledger {l} answers: {e}")),
+            Err(e) => return Err(format!("{what}: {call} on {} answers: {e}", ledger(l))),
         };
         let got = paid.as_ref().map(|pay| pay.upto_chunk);
         ensure!(
             got == upto,
-            "{what}: {call} on ledger {l}: {why}: it pays up to {upto:?}, and the watcher paid \
-             up to {got:?}"
+            "{what}: {call} on {}: {why}: it pays up to {upto:?}, and the watcher paid \
+             up to {got:?}",
+            ledger(l)
         );
         if let Some(hold) = back {
             self.back(&hold.pay.token, what).await?;
@@ -20425,7 +20438,7 @@ impl<'a, H: Harness> World<'a, H> {
     /// A payment by ledger `l`, which the cell's state needs it to make.
     async fn pay(&mut self, l: usize, last: bool, what: &str) -> Result<(), String> {
         let paid = self.decide(l, last, what).await?;
-        ensure!(paid.is_some(), "{what}: ledger {l} makes a payment");
+        ensure!(paid.is_some(), "{what}: {} makes a payment", ledger(l));
         Ok(())
     }
 
