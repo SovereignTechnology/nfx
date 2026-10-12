@@ -168,7 +168,8 @@ macro_rules! adversary_suite {
             an_honest_pair_survives_a_refused_hello,
             an_honest_pair_survives_a_late_mint,
             a_paying_watcher_gets_through_a_full_cap,
-            a_payment_holds_its_place_as_time_passes,
+            a_payment_on_its_first_ledger_holds_its_place_as_time_passes,
+            a_payment_on_another_videos_ledger_holds_its_place_as_time_passes,
             nothing_undoes_a_stop_on_its_first_ledger_whatever_comes,
             nothing_undoes_a_stop_on_another_videos_ledger_whatever_comes,
             a_payment_waits_180_s_and_holds_its_place_whatever_comes,
@@ -16501,8 +16502,8 @@ async fn a_silent_seeder_takes_one_payment<H: Harness>(h: &H) {
 /// any later time). It swaps each payment it is sent and answers `mint-unavailable`, or
 /// drops the connection, the watcher coming back to a quote equal to its ledger and finding
 /// the proofs spent at 180 s; the watcher then sends nothing for ten minutes, or for a
-/// second more than the longest period a seeder keeps anything for, and asks again, three
-/// rounds in all.
+/// second more than the longest period a seeder keeps anything for (the harness's, and
+/// the 30 days NFX-07 allows one), and asks again, three rounds in all.
 async fn a_seeder_that_kept_a_payment_takes_no_more_with_time<H: Harness>(h: &H) {
     let unavailable = Rej {
         code: RejCode::MintUnavailable,
@@ -19638,19 +19639,21 @@ impl std::fmt::Display for Input {
 }
 
 /// How long the clock alone moves, as an input: under a minute; a payment's 180 s; ten
-/// minutes; and a second past the longest period a seeder keeps anything for (its ban, a
-/// never-paid account, a debt).
-fn clock_spans<H: Harness>(h: &H) -> [u64; 4] {
+/// minutes; a second past the longest period the harness's seeder keeps anything for (its
+/// ban, a never-paid account, a debt); and a second past the longest NFX-07 §3 lets any
+/// seeder keep anything for, 30 days. No period of the protocol is longer: a watcher that
+/// forgets something after a time of its own longer than that is not tried.
+fn clock_spans<H: Harness>(h: &H) -> [u64; 5] {
     let long = h.ban_ttl().max(h.account_ttl()).max(h.debt_ttl());
-    [59, 180, 600, long.as_secs() + 1]
+    [59, 180, 600, long.as_secs() + 1, 30 * 24 * 3600 + 1]
 }
 
 /// Every input to a watcher, for every table that asks what may come meanwhile: each
 /// method of the [`Viewer`] trait that takes one ([`VIEWER_METHODS`]), in each of its
 /// kinds ([`Does`]), on the cell's own ledger, on another video's and on one made as the
-/// input comes, with a session open, ended or never held; then the clock alone, for each span of [`clock_spans`]. A table
-/// runs them all: an input that cannot come ([`Input::fits`], [`World::bring`]) is skipped
-/// with its reason, and counted.
+/// input comes, with a session open, ended or never held; then the clock alone, for each
+/// span of [`clock_spans`]. A table runs them all: an input that cannot come
+/// ([`Input::fits`], [`World::bring`]) is skipped with its reason, and counted.
 fn inputs<H: Harness>(h: &H) -> Vec<Input> {
     let mut does = vec![
         Does::Sibling,
@@ -20025,11 +20028,13 @@ struct Need {
 /// A watcher in a state of [`states`], and what NFX-07 §3a says an honest one does from
 /// there: the tables' common ground. The suite plays the seeder, on three of its videos: it
 /// builds each quote from the account it keeps ([`Led`]), at 1 sat a chunk and windows of 4,
-/// 8 and 6 (and 10 on a ledger made as an input comes), claims a payment's proofs where its seeder does ([`Harness::steal`]), and
-/// answers by hand. So a cell awaits nothing but the watcher's own calls, and the tables
-/// can run every input over every state. Every decision the watcher takes on the way is
-/// checked against what the rules require ([`World::decide`]), and what it reports of
-/// itself too ([`World::flags`]).
+/// 8 and 6 (and 10 on a ledger made as an input comes), claims a payment's proofs where
+/// its seeder does ([`Harness::steal`]), and answers by hand. So a cell awaits nothing but
+/// the watcher's own calls, and the tables can run every input over every state they take.
+/// Every decision the watcher takes on the way is checked against what the rules require
+/// ([`World::decide`]), and what it reports of itself too ([`World::flags`]). What a
+/// payment is worth is not weighed here: only a seeder's own check values a token, and the
+/// price's tables ([`the_price_is_the_sessions_whatever_it_did_before`]) ask one.
 struct World<'a, H: Harness> {
     h: &'a H,
     led: Vec<Led<H::Viewer>>,
@@ -20087,6 +20092,33 @@ impl<'a, H: Harness> World<'a, H> {
             older,
             stop_on: THIRD,
         }
+    }
+
+    /// A ledger made now for another video, from the cell's own: the one it is.
+    fn made(&mut self) -> usize {
+        let made = self.led[OWN].v.sibling();
+        self.led.push(Led {
+            v: made,
+            open: false,
+            requested: 0,
+            acked: 0,
+            spent: 0,
+            licence: false,
+            window: TABLE_WINDOWS[SINCE],
+        });
+        self.led.len() - 1
+    }
+
+    /// A ledger made now for another video takes its first session's honest quote and
+    /// requests half its window: what it pays then, by `due` and by `last_pay`, is what the
+    /// standing lets a ledger made since pay ([`World::decide`]).
+    async fn a_ledger_made_since_decides(&mut self, what: &str) -> Result<(), String> {
+        let made = self.made();
+        self.open(made)?;
+        self.owe(made, TABLE_WINDOWS[SINCE] / 2);
+        self.decide(made, false, what).await?;
+        self.decide(made, true, what).await?;
+        Ok(())
     }
 
     /// The seeder's honest quote for ledger `l`: its account as it stands.
@@ -20568,20 +20600,12 @@ impl<'a, H: Harness> World<'a, H> {
         if let Err(why) = input.fits() {
             return Ok(Err(why));
         }
-        let l = input.on;
-        if l == SINCE {
-            // The ledger the input comes on is made now, from the cell's own.
-            let made = self.led[OWN].v.sibling();
-            self.led.push(Led {
-                v: made,
-                open: false,
-                requested: 0,
-                acked: 0,
-                spent: 0,
-                licence: false,
-                window: TABLE_WINDOWS[SINCE],
-            });
-        }
+        let l = if input.on == SINCE {
+            // The ledger the input comes on is made now.
+            self.made()
+        } else {
+            input.on
+        };
         if input.does.method().is_some() && self.led[l].open != (input.sess == Sess::Open) {
             return Ok(Err(if self.led[l].open {
                 "its own ledger holds a session in this state"
@@ -21089,26 +21113,27 @@ const COMES_AFTER_SENDING: [u64; 4] = [1, 60, 100, 178];
 /// Nothing undoes a stop (NFX-07 §3a), whatever the standing holds when it comes and
 /// whatever comes after it: every input of [`inputs`], in every stopped state of
 /// [`states`]. The stop is by each cause, on the cell's own ledger or a third video's; the
-/// standing holds nothing, a payment in flight on its live session (made each way, on a
-/// first or a resumed session), one awaiting a quote, an incomplete reclaim or a closed
-/// session's payment; none, some or all of its tries are used, and a refusal may license
-/// its next `due`. The input comes at once or up to 170 s later ([`COMES_AFTER`]). After it the watcher has stopped, on every
-/// ledger, and awaits no quote; it pays nothing before what it holds comes to its end
-/// ([`World::resolve`], a payment in flight answered each way of [`Ending`]), nothing after
-/// it on a session with chunks owed, by `due` or by `last_pay`, and nothing on the session
-/// after that, whose honest quote, equal to its ledger as the seeder's account stands, it
-/// takes.
+/// standing holds nothing, a payment in flight on its live session (made each way), one
+/// awaiting a quote, an incomplete reclaim or a closed session's payment; none, some or all
+/// of its tries are used; and its ledger's past and the refusals licensing its next `due`
+/// vary from cell to cell ([`rows`]). The input comes at once or up to 170 s later
+/// ([`COMES_AFTER`]). After it the watcher has stopped, on every ledger, and awaits no
+/// quote; it pays nothing before what it holds comes to its end ([`World::resolve`], a
+/// payment in flight answered each way of [`Ending`]), nothing after it on a session with
+/// chunks owed, by `due` or by `last_pay`, nothing on the session after that, whose honest
+/// quote, equal to its ledger as the seeder's account stands, it takes, and nothing on a
+/// ledger made since for another video.
 ///
 /// The table is run in two parts, by the ledger the cell is about ([`LEDGERS`]): this one is
 /// the first the watcher made.
 pub async fn nothing_undoes_a_stop_on_its_first_ledger_whatever_comes<H: Harness>(h: &H) {
-    nothing_undoes_a_stop(h, true, (27_458, 44_643)).await;
+    nothing_undoes_a_stop(h, true, (28_057, 44_643)).await;
 }
 
 /// [`nothing_undoes_a_stop_on_its_first_ledger_whatever_comes`], on a ledger the watcher
 /// made for another video.
 pub async fn nothing_undoes_a_stop_on_another_videos_ledger_whatever_comes<H: Harness>(h: &H) {
-    nothing_undoes_a_stop(h, false, (27_458, 44_643)).await;
+    nothing_undoes_a_stop(h, false, (28_057, 44_643)).await;
 }
 
 async fn nothing_undoes_a_stop<H: Harness>(h: &H, first: bool, cells: (usize, usize)) {
@@ -21162,6 +21187,8 @@ async fn a_stop_holds<H: Harness>(
     w.open(OWN)?;
     w.decide(OWN, false, next).await?;
     w.decide(OWN, true, next).await?;
+    w.a_ledger_made_since_decides("on a ledger made since, with half its window owed")
+        .await?;
     w.flags(next)?;
     Ok(Ok(answered))
 }
@@ -21170,11 +21197,12 @@ async fn a_stop_holds<H: Harness>(
 /// it holds the standing's one place (NFX-07 §3a), whatever comes meanwhile: every input
 /// of [`inputs`], over every state of [`states`] with a payment in flight on its live
 /// session or left unsettled by a closed one, stopped by each cause or not. The input
-/// comes 1 to 178 s after the payment was sent ([`COMES_AFTER_SENDING`]). Unless it answered the payment, a third video
-/// with half its window owed then pays nothing over it, by `due` or by `last_pay`; nothing
-/// is reclaimed at 179 s from sending, by the session's timeout or, for a closed session's
-/// payment, by a `due`; and at 180 s it is reclaimed, the watcher stopping where it was
-/// unanswered on its live session.
+/// comes 1 to 178 s after the payment was sent ([`COMES_AFTER_SENDING`]). Unless it
+/// answered the payment, a third video with half its window owed then pays nothing over
+/// it, by `due` or by `last_pay`, nor does a ledger made since; nothing is reclaimed at
+/// 179 s from sending, by the session's timeout or, for a closed session's payment, by a
+/// `due`; and at 180 s it is reclaimed, the watcher stopping where it was unanswered on its
+/// live session.
 pub async fn a_payment_waits_180_s_and_holds_its_place_whatever_comes<H: Harness>(h: &H) {
     let rule = "a payment's 180 s count from its sending, and until then it holds its place";
     let mut tally = Tally::default();
@@ -21188,7 +21216,7 @@ pub async fn a_payment_waits_180_s_and_holds_its_place_whatever_comes<H: Harness
     };
     let endings = [Ending::Unanswered];
     table!(h, tally, rule, (takes, base), endings, a_payment_waits);
-    tally.ends(rule, (8_134, 20_024));
+    tally.ends(rule, (8_300, 20_024));
 }
 
 /// One cell of [`a_payment_waits_180_s_and_holds_its_place_whatever_comes`].
@@ -21218,6 +21246,8 @@ async fn a_payment_waits<H: Harness>(
         w.owe(THIRD, TABLE_WINDOWS[THIRD] / 2);
         w.decide(THIRD, false, place).await?;
         w.decide(THIRD, true, place).await?;
+        w.a_ledger_made_since_decides("after it, a ledger made since owing half its window")
+            .await?;
     }
     if let Some((by, sent, kind)) = waits(&w.held) {
         let early = "after it, at 179 s from the payment's sending";
@@ -21242,9 +21272,9 @@ async fn a_payment_waits<H: Harness>(
 }
 
 /// How long after a payment was sent the watcher decides again, for
-/// [`a_payment_holds_its_place_as_time_passes`]: at once, around the seeder's own deadline
+/// [`a_payment_on_its_first_ledger_holds_its_place_as_time_passes`]: at once, around the seeder's own deadline
 /// of 60 s, up to the 180 s, and past them with no timeout fired; then [`clock_spans`]'
-/// longest.
+/// two longest.
 const DECIDES_AFTER: [u64; 11] = [0, 1, 40, 59, 60, 61, 120, 179, 180, 181, 240];
 
 /// One payment is in flight toward a seeder at a time, on its own ledger too, until it is
@@ -21258,18 +21288,34 @@ const DECIDES_AFTER: [u64; 11] = [0, 1, 40, 59, 60, 61, 120, 179, 180, 181, 240]
 /// 180 s, the watcher reclaims it, stops and pays nothing. A closed session's payment is
 /// reclaimed by the first decision from 180 s after it was sent, however long after, and by
 /// none before.
-pub async fn a_payment_holds_its_place_as_time_passes<H: Harness>(h: &H) {
+///
+/// The table is run in two parts, by the ledger the cell is about ([`LEDGERS`]): this one is
+/// the first the watcher made.
+pub async fn a_payment_on_its_first_ledger_holds_its_place_as_time_passes<H: Harness>(h: &H) {
+    a_payment_holds_its_place_as_time_passes(h, true).await;
+}
+
+/// [`a_payment_on_its_first_ledger_holds_its_place_as_time_passes`], on a ledger the watcher
+/// made for another video.
+pub async fn a_payment_on_another_videos_ledger_holds_its_place_as_time_passes<H: Harness>(h: &H) {
+    a_payment_holds_its_place_as_time_passes(h, false).await;
+}
+
+async fn a_payment_holds_its_place_as_time_passes<H: Harness>(h: &H, first: bool) {
     let rule = "one payment is in flight at a time until it is answered or its 180 s are up";
     let mut tally = Tally::default();
     let decisions: Vec<Input> = inputs(h)
         .into_iter()
         .filter(|i| matches!(i.does, Does::Due | Does::LastPay))
         .collect();
-    let long = clock_spans(h)[3];
-    // Crossed in full: each ledger and its past, each way the payment is made or left, the
-    // tries used. The refusals licensing its next due are spread.
-    let takes =
-        |s: &State| matches!(s.holds, Holds::InFlight(_) | Holds::Unsettled(_)) && s.stop.is_none();
+    let long = &clock_spans(h)[3..];
+    // Crossed in full: the ledger's past, each way the payment is made or left, the tries
+    // used. The refusals licensing its next due are spread.
+    let takes = |s: &State| {
+        s.first == first
+            && matches!(s.holds, Holds::InFlight(_) | Holds::Unsettled(_))
+            && s.stop.is_none()
+    };
     let base = |s: State| State { licence: 0, ..s };
     let mut turn = 0;
     for row in rows(takes, base) {
@@ -21280,7 +21326,7 @@ pub async fn a_payment_holds_its_place_as_time_passes<H: Harness>(h: &H) {
                 continue;
             }
         };
-        for after in DECIDES_AFTER.into_iter().chain([long]) {
+        for after in DECIDES_AFTER.into_iter().chain(long.iter().copied()) {
             for more in [false, true] {
                 for &input in &decisions {
                     if let Err(why) = comes_in(state, input) {
@@ -21308,7 +21354,7 @@ pub async fn a_payment_holds_its_place_as_time_passes<H: Harness>(h: &H) {
             }
         }
     }
-    tally.ends(rule, (51_840, 26_296));
+    tally.ends(rule, (28_080, 14_236));
 }
 
 /// One cell of [`a_payment_holds_its_place_as_time_passes`].
@@ -21349,9 +21395,10 @@ async fn as_time_passes<H: Harness>(
 /// and however many refusals came, the licence is one. Every input of [`inputs`], over
 /// every state of [`states`] with one, two or three refusals licensing and no stop,
 /// whatever the standing holds and however many tries are used; the input comes at once or
-/// up to 170 s after the last refusal ([`COMES_AFTER`]). The `due` that follows it on the ledger pays ahead half its own
-/// session's window, less the credit held, unless the input was that decision or the
-/// session's end, or something keeps it from paying: and then the licence has ended there.
+/// up to 170 s after the last refusal ([`COMES_AFTER`]). The `due` that follows it on the
+/// ledger pays ahead half its own session's window, less the credit held, unless the input
+/// was that decision or the session's end, or something keeps it from paying: and then the
+/// licence has ended there.
 /// From then on, what the standing held settled or taken back (a payment in flight
 /// answered each way, [`Ending`]) and its tries restored by another video's quote, the
 /// ledger pays for the chunks it requests at half its window, and never ahead again.
@@ -21367,7 +21414,7 @@ pub async fn a_refusals_licence_lasts_to_its_due_whatever_comes<H: Harness>(h: &
     };
     let endings = [Ending::Acked, Ending::Unavailable];
     table!(h, tally, rule, (takes, base), endings, a_licence_lasts);
-    tally.ends(rule, (12_450, 19_440));
+    tally.ends(rule, (12_714, 19_440));
 }
 
 /// One cell of [`a_refusals_licence_lasts_to_its_due_whatever_comes`].
@@ -21422,10 +21469,11 @@ async fn a_licence_lasts<H: Harness>(
 /// such a quote does, and nothing else does; and only those answers count (NFX-07 §3a).
 /// Every input of [`inputs`], over every state of [`states`] that is not stopped, with
 /// none to three tries used, whatever the standing holds and whatever its ledger has been
-/// through; the input comes at once or up to 170 s on ([`COMES_AFTER`]). Each `mint-unavailable` answer to a payment uses a
-/// try, however the payment was made and however its reclaim ends ([`Back`]); an ack, and
-/// a new session's accepted quote on whichever video, settling a payment or not, restores
-/// them all; nothing else uses or restores one. So once what the standing holds is settled
+/// through; the input comes at once or up to 170 s on ([`COMES_AFTER`]). Each
+/// `mint-unavailable` answer to a payment uses a try, however the payment was made and
+/// however its reclaim ends ([`Back`]); an ack, and a new session's accepted quote on
+/// whichever video, settling a payment or not, restores them all; nothing else uses or
+/// restores one. So once what the standing holds is settled
 /// or taken back, a third video, on a session it held from the start, makes exactly as
 /// many payments, each answered `mint-unavailable`, as tries are left, and then awaits a
 /// quote.
@@ -21435,7 +21483,7 @@ async fn a_licence_lasts<H: Harness>(
 pub async fn the_tries_on_its_first_ledger_are_used_and_restored_by_nothing_else<H: Harness>(
     h: &H,
 ) {
-    the_tries_are_used_and_restored_by_nothing_else(h, true, (14_232, 23_520)).await;
+    the_tries_are_used_and_restored_by_nothing_else(h, true, (14_548, 23_520)).await;
 }
 
 /// [`the_tries_on_its_first_ledger_are_used_and_restored_by_nothing_else`], on a ledger the
@@ -21445,7 +21493,7 @@ pub async fn the_tries_on_another_videos_ledger_are_used_and_restored_by_nothing
 >(
     h: &H,
 ) {
-    the_tries_are_used_and_restored_by_nothing_else(h, false, (14_232, 23_520)).await;
+    the_tries_are_used_and_restored_by_nothing_else(h, false, (14_548, 23_520)).await;
 }
 
 async fn the_tries_are_used_and_restored_by_nothing_else<H: Harness>(
