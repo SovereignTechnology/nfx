@@ -112,9 +112,9 @@ money-dep zmij 1.0.23 registry+https://github.com/rust-lang/crates.io-index 2966
 money-test nfx-pay doc nfx_pay 0
 money-test nfx-pay lib nfx_pay 5
 money-test nfx-pay test adversary 101
-money-test nfx-pay test honest_timings 2222
+money-test nfx-pay test honest_timings 2223
 money-test nfx-pay test listings_at_start 101
-money-test nfx-pay test mutants 2906
+money-test nfx-pay test mutants 3122
 money-test nfx-pay test round_trip 101
 money-test nfx-pay test runner 13
 money-test nfx-pay test woken_answers 101
