@@ -293,6 +293,143 @@ fn run_started<F: Future<Output = ()>>(
     })
 }
 
+/// `ran` ended on a turn that could not be waited: with the panic that is no check of the
+/// suite's (`NoRunner`), raised in the suite, and neither finished nor hung.
+fn no_turn_was_waited(ran: &Ran, runner: &str) {
+    let Ran::Panicked { file, payload, .. } = ran else {
+        panic!(
+            "{runner}: the run is reported as panicked, not as {}",
+            if matches!(ran, Ran::Hung) {
+                "hung"
+            } else {
+                "finished"
+            }
+        );
+    };
+    assert!(
+        payload.is::<NoRunner>(),
+        "{runner}: raised as a task started with no runner is"
+    );
+    assert!(
+        file.ends_with("nfx-pay/src/adversary.rs"),
+        "{runner}: {file}"
+    );
+    assert!(
+        !ran.failed_the_suite(),
+        "{runner}: no check of the suite's failed, and no planted defect is caught so"
+    );
+}
+
+#[test]
+fn a_runner_that_drops_the_suites_task_gives_no_turn() {
+    // The engine's one task is ready. A turn that ended at once would have the suite look
+    // with it unrun, and the scenario go on to finish.
+    let ran = run_started(
+        |_, task| drop(task),
+        || async {
+            let tasks = Sleepers::default();
+            tasks.start(1);
+            yield_once().await;
+            assert_eq!(tasks.polls(), 1, "the turn was waited");
+        },
+    );
+    no_turn_was_waited(&ran, "a start that drops the task");
+    // The same where the suite settles: a hundred turns, none of them waited.
+    let ran = run_started(
+        |_, task| drop(task),
+        || async {
+            let tasks = Sleepers::default();
+            tasks.start(1);
+            for _ in 0..TURNS {
+                yield_once().await;
+            }
+        },
+    );
+    no_turn_was_waited(&ran, "a start that drops the task, a hundred turns");
+}
+
+#[test]
+fn a_runner_that_starts_the_suites_task_elsewhere_gives_no_turn() {
+    // Polled on another thread, the suite's task ends no turn of this thread's runtime:
+    // taken for one that did, it would end each turn as one yield does.
+    let ran = run_started(
+        |_, mut task| {
+            let elsewhere = std::thread::spawn(move || {
+                let mut cx = Context::from_waker(Waker::noop());
+                let done = task.as_mut().poll(&mut cx).is_ready();
+                (done, task)
+            });
+            // Kept, as a runtime keeps a task it polls: dropped only if it finished.
+            match elsewhere.join() {
+                Ok((true, task)) => drop(task),
+                Ok((false, task)) => std::mem::forget(task),
+                Err(_) => {}
+            }
+        },
+        || async {
+            let tasks = Sleepers::default();
+            tasks.start(MANY);
+            yield_once().await;
+            assert_eq!(tasks.polls(), MANY, "the turn was waited");
+        },
+    );
+    no_turn_was_waited(&ran, "a start on another thread");
+    // The same with that thread still at it as the turn begins to wait.
+    let ran = run_started(
+        |_, mut task| {
+            std::thread::spawn(move || {
+                let mut cx = Context::from_waker(Waker::noop());
+                while task.as_mut().poll(&mut cx).is_pending() {
+                    std::thread::park_timeout(Duration::from_millis(1));
+                }
+            });
+        },
+        || async {
+            let tasks = Sleepers::default();
+            tasks.start(MANY);
+            yield_once().await;
+            assert_eq!(tasks.polls(), MANY, "the turn was waited");
+        },
+    );
+    no_turn_was_waited(&ran, "a start on another thread, not joined");
+}
+
+#[test]
+fn a_turn_whose_task_is_ended_under_it_is_not_taken_for_over() {
+    // The runner started the suite's task where it should, and something ends it while a
+    // turn waits on it, with tasks ready as the turn began still to run.
+    let started = Arc::new(Mutex::new(Vec::new()));
+    let kept = started.clone();
+    let ran = run_started(
+        move |runtime, task| {
+            let handle = runtime.spawn(task);
+            kept.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(handle);
+        },
+        move || async move {
+            let tasks = Sleepers::default();
+            tasks.start(1);
+            yield_once().await;
+            assert_eq!(tasks.polls(), 1, "a first turn, waited");
+            tokio::spawn(async move {
+                for task in started
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .iter()
+                {
+                    task.abort();
+                }
+            });
+            tasks.wake(1);
+            tasks.start(MANY);
+            yield_once().await;
+            assert_eq!(tasks.polls(), 2 + MANY, "the turn was waited");
+        },
+    );
+    no_turn_was_waited(&ran, "the suite's task ended while a turn waits");
+}
+
 #[test]
 fn a_task_ended_between_turns_is_started_again() {
     // Ended with no turn under way, it is gone: the next turn starts another, and is

@@ -701,7 +701,11 @@ pub fn run_on_a_thread(secs: u64, body: impl FnOnce() + Send + 'static) -> Ran {
 /// tasks on this thread, as the current-thread runtime of
 /// [`run_scenario!`](crate::run_scenario) does: a run is judged by the first panic raised
 /// on its thread ([`run_on_a_thread`]), and a task polled on another thread would raise
-/// its panics there, where no run is judged by them.
+/// its panics there, where no run is judged by them. So `start` keeps every task it is
+/// given, on that runtime. A `start` that drops the suite's task, or starts it where it is
+/// first polled on another thread, leaves the suite no turn to wait: the first turn then
+/// ends the run with a panic that is no check of the suite's (`yield_once`), so such a run
+/// is never reported as finished, nor a planted defect as caught by it.
 pub fn with_tasks<T>(
     start: impl Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + 'static,
     body: impl FnOnce() -> T,
@@ -865,15 +869,25 @@ std::thread_local! {
 
 /// The task that ends the suite's turns (`yield_once`). The runtime takes up its ready tasks
 /// in the order they became ready, so when this runs, every task that was ready as it was
-/// queued has run.
-struct Pacer(Arc<Mutex<Pace>>);
+/// queued has run. That holds of the runtime the scenario runs in, which polls its tasks on
+/// the scenario's thread ([`with_tasks`]): polled first on another thread, this is no task
+/// of that runtime's, and it ends there, gone, having ended no turn.
+struct Pacer {
+    pace: Arc<Mutex<Pace>>,
+    /// The scenario's thread, and whether this has been polled yet.
+    home: std::thread::ThreadId,
+    polled: bool,
+}
 
 impl Future for Pacer {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if !std::mem::replace(&mut self.polled, true) && std::thread::current().id() != self.home {
+            return Poll::Ready(()); // dropped by whoever polled it: gone
+        }
         let waits = {
-            let mut pace = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut pace = self.pace.lock().unwrap_or_else(PoisonError::into_inner);
             pace.pacer = Some(cx.waker().clone());
             if pace.ends == 0 {
                 return Poll::Pending;
@@ -897,7 +911,7 @@ impl Future for Pacer {
 impl Drop for Pacer {
     fn drop(&mut self) {
         let waits = {
-            let mut pace = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut pace = self.pace.lock().unwrap_or_else(PoisonError::into_inner);
             pace.gone = true;
             pace.waits.take()
         };
@@ -921,7 +935,11 @@ fn begin_turn(start: &Starts) -> (Arc<Mutex<Pace>>, u64) {
             return pace.clone();
         }
         let pace = Arc::new(Mutex::new(Pace::default()));
-        start(Box::pin(Pacer(pace.clone())));
+        start(Box::pin(Pacer {
+            pace: pace.clone(),
+            home: std::thread::current().id(),
+            polled: false,
+        }));
         *p = Some(pace.clone());
         pace
     });
@@ -952,9 +970,14 @@ fn begin_turn(start: &Starts) -> (Arc<Mutex<Pace>>, u64) {
 /// have settled. So the turn ends as a task of the suite's own runs ([`Pacer`]), queued as
 /// the turn begins ([`with_tasks`]): the runtime takes up its ready tasks in the order they
 /// became ready, so every task ready before that one has run by then. Where no runner gave
-/// the suite a way to start tasks, the turn is one yield. A panic that a thread of the
-/// scenario's own has kept by then is raised here (`raise_kept`), before the suite looks at
-/// what it waited that turn for.
+/// the suite a way to start tasks, the turn is one yield. Where one did, and the pacer is
+/// gone with the turn not over (the runner's way to start a task dropped it, or started it
+/// on no runtime that polls its tasks on this thread, or the task was ended since), no turn
+/// can be waited: this raises what [`on_a_task`] raises with no runner (`NoRunner`), which is
+/// no check of the suite's, so the run is reported as panicked and never as finished, where
+/// a turn that ended at once would have had the suite look at an engine none of whose tasks
+/// had run. A panic that a thread of the scenario's own has kept by then is raised here
+/// (`raise_kept`), before the suite looks at what it waited that turn for.
 async fn yield_once() {
     // The turn, once begun; with no runner, whether this has yielded.
     let (mut turn, mut yielded) = (None, false);
@@ -973,12 +996,15 @@ async fn yield_once() {
             return Poll::Ready(());
         };
         let mut pace = pace.lock().unwrap_or_else(PoisonError::into_inner);
-        if pace.over >= *n || pace.gone {
-            Poll::Ready(())
-        } else {
-            pace.waits = Some(cx.waker().clone());
-            Poll::Pending
+        if pace.over >= *n {
+            return Poll::Ready(());
         }
+        if pace.gone {
+            drop(pace);
+            std::panic::panic_any(NoRunner)
+        }
+        pace.waits = Some(cx.waker().clone());
+        Poll::Pending
     })
     .await;
     raise_kept();
@@ -1290,8 +1316,9 @@ struct TaskNow<T> {
 }
 
 /// What [`on_a_task`] raises where no runner gave the suite a way to start tasks, or a
-/// [`Task`] awaited again once its output was taken: no check of the suite's, and nothing a
-/// planted defect is caught by.
+/// [`Task`] awaited again once its output was taken, and what a turn raises whose pacer is
+/// gone before it is over (`yield_once`): no check of the suite's, and nothing a planted
+/// defect is caught by.
 struct NoRunner;
 
 /// Start `entry` as a task of the runtime the scenario runs in ([`with_tasks`]): polled by
