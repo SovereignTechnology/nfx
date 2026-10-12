@@ -16436,6 +16436,112 @@ pub async fn a_lying_seeder_takes_at_most_one_payment<H: Harness>(h: &H) {
     nothing_else_settles_what_it_waits_on(h, &BETWEEN_ROUNDS).await;
     nothing_else_settles_what_it_waits_on(h, &ON_ANOTHER_VIDEO).await;
     nothing_else_settles_what_it_waits_on(h, &ON_ANOTHER_SESSION).await;
+    // Nor does time: a seeder that answers nothing takes one payment, however long the
+    // watcher goes on deciding, and one that kept a payment takes no second however long
+    // the watcher waits.
+    a_silent_seeder_takes_one_payment(h).await;
+    a_seeder_that_kept_a_payment_takes_no_more_with_time(h).await;
+}
+
+/// A seeder that never answers, and claims the proofs of every payment it is sent, takes
+/// one payment (NFX-07 §3a): one is in flight at a time until it is answered or its 180 s
+/// are up, on its own ledger too, and unanswered at 180 s the watcher stops. The watcher
+/// decides each minute for ten, by `due` or by `last_pay`, its session's timeout firing each
+/// time, with no new request or half a window more requested a minute.
+async fn a_silent_seeder_takes_one_payment<H: Harness>(h: &H) {
+    for call in CATCH_UPS {
+        for more in [0, 2] {
+            let s = open(h, &h.engine(1, 4, 1000), 1).await;
+            let mut v = h.viewer(1);
+            v.quote(s.quote()).expect("an honest quote is accepted");
+            v.requested();
+            v.requested();
+            let mut taken = 0;
+            for minute in 0..=10 {
+                for _ in 0..(if minute == 0 { 0 } else { more }) {
+                    v.requested();
+                }
+                let pay = if call == CATCH_UPS[1] {
+                    v.last_pay().await.expect("last_pay answers, each minute")
+                } else {
+                    v.due().await.expect("due answers, each minute")
+                };
+                if let Some(pay) = pay {
+                    assert!(
+                        h.steal(&pay.token).await,
+                        "the seeder claims the payment's proofs, and answers nothing"
+                    );
+                    taken += 1;
+                }
+                advance(h, Duration::from_secs(60)).await;
+                v.timeout().await;
+            }
+            assert_eq!(
+                taken, 1,
+                "a seeder that never answers and claims every payment's proofs, the watcher \
+                 deciding by {call} each minute for 600 s with {more} requests more a minute: \
+                 one payment is in flight at a time until it is answered or its 180 s are up, \
+                 and unanswered at 180 s the watcher stops, so the seeder has taken one payment"
+            );
+            assert!(
+                v.stopped(),
+                "a seeder that never answers ({call}, {more} requests more a minute): the \
+                 watcher has stopped"
+            );
+            close(h, s).await;
+        }
+    }
+}
+
+/// A seeder that kept one payment takes no second, however long the watcher then waits
+/// (NFX-07 §3a: nothing is paid until a quote shows the payment, from a new session and at
+/// any later time). It swaps each payment it is sent and answers `mint-unavailable`, or
+/// drops the connection, the watcher coming back to a quote equal to its ledger and finding
+/// the proofs spent at 180 s; the watcher then sends nothing for ten minutes, or for a
+/// second more than the longest period a seeder keeps anything for, and asks again, three
+/// rounds in all.
+async fn a_seeder_that_kept_a_payment_takes_no_more_with_time<H: Harness>(h: &H) {
+    let unavailable = Rej {
+        code: RejCode::MintUnavailable,
+        detail: None,
+    };
+    for dropped in [false, true] {
+        for idle in &clock_spans(h)[2..] {
+            let e = h.engine(1, 4, 1000);
+            let mut s = open(h, &e, 1).await;
+            let mut v = h.viewer(1);
+            v.quote(s.quote()).expect("an honest quote is accepted");
+            let mut taken = 0;
+            for _ in 0..3 {
+                v.requested();
+                v.requested();
+                let pay = v.due().await.expect("due answers, round after round");
+                if let Some(pay) = pay {
+                    assert!(h.steal(&pay.token).await, "the seeder keeps it");
+                    taken += 1;
+                    if dropped {
+                        close(h, s).await;
+                        v.end();
+                        advance(h, Duration::from_secs(180)).await;
+                        s = open(h, &e, 1).await;
+                        v.quote(s.quote())
+                            .expect("a quote equal to the ledger is taken");
+                    } else {
+                        v.rej(&unavailable).await;
+                    }
+                }
+                advance(h, Duration::from_secs(*idle)).await;
+            }
+            assert_eq!(
+                taken, 1,
+                "a seeder that kept a payment (its connection dropped: {dropped}), the watcher \
+                 asking again {idle} s later and {idle} s after that: the payment awaits a \
+                 quote that shows it, at any later time, and nothing is paid until one does, so \
+                 the seeder has taken that one payment"
+            );
+            close(h, s).await;
+        }
+    }
 }
 
 /// What can come between a seeder's rounds, for [`nothing_else_settles_what_it_waits_on`]:

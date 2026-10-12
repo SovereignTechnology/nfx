@@ -3262,4 +3262,11 @@ catches!(
     late_keys_refusal_cached_at_start: l(S::LateKeysRefusalCached) => a_seeder_answers_within_its_deadline,
     late_keys_refusal_cached_on_tasks: t(S::LateKeysRefusalCached) => a_seeder_answers_within_its_deadline,
     viewer_early_timeout_ends_licence: v(V::EarlyTimeoutEndsLicence) => a_viewer_pays_ahead_only_after_a_refusal,
+    viewer_pays_over_own_payment_at_60: v(V::PaysOverOwnPaymentAt60) => a_payment_holds_its_place_as_time_passes,
+    viewer_pays_over_own_payment_at_60_takes_more: v(V::PaysOverOwnPaymentAt60) => a_lying_seeder_takes_at_most_one_payment,
+    viewer_pays_over_own_payment_at_120: v(V::PaysOverOwnPaymentAt120) => a_payment_holds_its_place_as_time_passes,
+    viewer_pays_over_own_payment_at_120_takes_more: v(V::PaysOverOwnPaymentAt120) => a_lying_seeder_takes_at_most_one_payment,
+    viewer_pays_over_own_payment_at_180: v(V::PaysOverOwnPaymentAt180) => a_payment_holds_its_place_as_time_passes,
+    viewer_lost_lapses_takes_more: v(V::LostLapses) => a_lying_seeder_takes_at_most_one_payment,
+    viewer_unsettled_lapses: v(V::UnsettledLapses) => a_payment_holds_its_place_as_time_passes,
 );
