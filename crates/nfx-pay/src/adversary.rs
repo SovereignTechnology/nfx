@@ -1685,6 +1685,10 @@ impl<T> Drop for Side<T> {
 #[cfg(test)]
 mod side_tests;
 
+/// What a turn of the suite's waiting holds, whatever the engine is.
+#[cfg(test)]
+mod turn_tests;
+
 const SECOND: Duration = Duration::from_secs(1);
 
 async fn open<H: Harness>(h: &H, e: &H::Engine, peer: u8) -> Session<H> {
