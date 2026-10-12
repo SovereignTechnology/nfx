@@ -1073,7 +1073,13 @@ async fn close<H: Harness, T>(h: &H, closed: T) {
 const TURNS: usize = 100;
 
 /// The longest the suite waits, in real time, for an engine to settle: far above any honest
-/// answer, a mint's round trips taking milliseconds, and below the runner's timeout.
+/// answer, a mint's round trips taking milliseconds, and below the runner's timeout. It is
+/// looked at between turns, and ends none: a turn lasts until every task ready as it began
+/// has run (`yield_once`), and the runtime of [`run_scenario!`](crate::run_scenario) takes
+/// up a task another thread made ready before any of its own, so while other threads keep
+/// making tasks ready without pause a turn does not end, and the run ends at
+/// [`SCENARIO_SECS`], reported as hung ([`Ran::Hung`]): a failure, of an honest engine's
+/// test and of a planted defect's alike, at no check.
 const SETTLE_LIMIT: Duration = Duration::from_secs(5);
 
 /// Poll `f` once on this task, with its waker: its output, if it is ready.
