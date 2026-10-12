@@ -176,6 +176,45 @@ macro_rules! adversary_suite {
             a_refusals_licence_lasts_to_its_due_whatever_comes,
             the_tries_on_its_first_ledger_are_used_and_restored_by_nothing_else,
             the_tries_on_another_videos_ledger_are_used_and_restored_by_nothing_else,
+            exact_payment_opens_the_next_window_at_a_second_mint,
+            underpaid_is_refused_and_credits_nothing_at_a_second_mint,
+            overpaid_is_refused_and_credits_nothing_at_a_second_mint,
+            bad_tokens_are_refused_at_a_second_mint,
+            a_stale_pay_changes_nothing_at_a_second_mint,
+            an_overflowing_claim_is_underpaid_at_a_second_mint,
+            a_double_spend_bans_the_peer_at_a_second_mint,
+            a_banned_peer_stays_banned_at_a_second_mint,
+            a_new_hello_continues_the_account_at_a_second_mint,
+            a_session_id_names_one_open_session_at_a_second_mint,
+            service_waits_for_the_swap_at_a_second_mint,
+            a_seeder_answers_within_its_deadline_at_a_second_mint,
+            a_turn_taken_over_at_the_deadline_runs_no_check_at_a_second_mint,
+            a_turn_freed_by_a_drop_at_the_deadline_runs_no_check_at_a_second_mint,
+            a_turn_freed_by_an_answer_at_the_deadline_runs_no_check_at_a_second_mint,
+            a_turn_freed_by_an_outcome_at_the_deadline_runs_no_check_at_a_second_mint,
+            a_turn_held_past_the_deadline_runs_no_check_at_a_second_mint,
+            every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+            a_late_outcome_is_credited_never_banned_at_a_second_mint,
+            the_deadline_frees_the_account_at_a_second_mint,
+            racing_outcomes_settle_once_at_a_second_mint,
+            a_mint_outage_is_not_a_ban_at_a_second_mint,
+            only_the_sessions_video_is_admitted_at_a_second_mint,
+            a_global_cap_bounds_free_service_at_a_second_mint,
+            the_global_cap_holds_whatever_payments_do_at_a_second_mint,
+            prepaid_chunks_are_served_whatever_the_cap_at_a_second_mint,
+            debt_counts_for_exactly_debt_ttl_at_a_second_mint,
+            only_never_paid_accounts_are_forgotten_at_a_second_mint,
+            bans_expire_and_state_stays_bounded_at_a_second_mint,
+            a_hello_holds_no_state_at_a_second_mint,
+            payments_on_a_live_turn_keep_nothing_at_a_second_mint,
+            payments_on_a_dead_turn_keep_nothing_at_a_second_mint,
+            credit_covers_only_its_own_video_at_a_second_mint,
+            debt_is_freed_exactly_once_at_a_second_mint,
+            prepayment_extends_service_exactly_at_a_second_mint,
+            peers_are_isolated_at_a_second_mint,
+            one_accounts_payments_are_serialised_at_a_second_mint,
+            a_dropped_pay_is_credited_or_never_claimed_at_a_second_mint,
+            concurrent_entries_read_two_a_second_at_a_second_mint,
         );
     };
     (@each $h:expr; $($name:ident),* $(,)?) => {
@@ -221,6 +260,287 @@ macro_rules! run_scenario {
         })
     };
 }
+
+/// The scenarios whose seeders a case pays, each named twice and with the case both names
+/// run: at the one mint its seeders quote, and at the second of two ([`Quoted::paying`]).
+/// NFX-07 §3 states the rules of a swap, its retry, its completion and the reads of its
+/// state of the swap and its account, never of a mint, so no case of them is run at a
+/// seeder's first mint only: `$with` is handed every row, and this file makes the second
+/// scenario of each from it. A scenario of the suite that is in no row says why
+/// ([`AT_ONE_MINT`]); `tests/runner.rs` holds the suite's list to the two.
+#[macro_export]
+macro_rules! scenarios_at_every_quoted_mint {
+    ($with:ident) => {
+        $with! {
+            exact_payment_opens_the_next_window, exact_payment_opens_the_next_window_at_a_second_mint: exact_payment_opens_the_next_window;
+            underpaid_is_refused_and_credits_nothing, underpaid_is_refused_and_credits_nothing_at_a_second_mint: underpaid_is_refused_and_credits_nothing;
+            overpaid_is_refused_and_credits_nothing, overpaid_is_refused_and_credits_nothing_at_a_second_mint: overpaid_is_refused_and_credits_nothing;
+            bad_tokens_are_refused, bad_tokens_are_refused_at_a_second_mint: bad_tokens_are_refused_at_one_mint;
+            a_stale_pay_changes_nothing, a_stale_pay_changes_nothing_at_a_second_mint: a_stale_pay_changes_nothing;
+            an_overflowing_claim_is_underpaid, an_overflowing_claim_is_underpaid_at_a_second_mint: an_overflowing_claim_is_underpaid;
+            a_double_spend_bans_the_peer, a_double_spend_bans_the_peer_at_a_second_mint: a_double_spend_bans_the_peer_at_one_mint;
+            a_banned_peer_stays_banned, a_banned_peer_stays_banned_at_a_second_mint: a_banned_peer_stays_banned;
+            a_new_hello_continues_the_account, a_new_hello_continues_the_account_at_a_second_mint: a_new_hello_continues_the_account;
+            a_session_id_names_one_open_session, a_session_id_names_one_open_session_at_a_second_mint: a_session_id_names_one_open_session;
+            service_waits_for_the_swap, service_waits_for_the_swap_at_a_second_mint: service_waits_for_the_swap;
+            a_seeder_answers_within_its_deadline, a_seeder_answers_within_its_deadline_at_a_second_mint: a_seeder_answers_within_its_deadline_at_one_mint;
+            a_turn_taken_over_at_the_deadline_runs_no_check, a_turn_taken_over_at_the_deadline_runs_no_check_at_a_second_mint: a_turn_taken_over_at_the_deadline_runs_no_check;
+            a_turn_freed_by_a_drop_at_the_deadline_runs_no_check, a_turn_freed_by_a_drop_at_the_deadline_runs_no_check_at_a_second_mint: a_turn_freed_by_a_drop_at_the_deadline_runs_no_check;
+            a_turn_freed_by_an_answer_at_the_deadline_runs_no_check, a_turn_freed_by_an_answer_at_the_deadline_runs_no_check_at_a_second_mint: a_turn_freed_by_an_answer_at_the_deadline_runs_no_check;
+            a_turn_freed_by_an_outcome_at_the_deadline_runs_no_check, a_turn_freed_by_an_outcome_at_the_deadline_runs_no_check_at_a_second_mint: a_turn_freed_by_an_outcome_at_the_deadline_runs_no_check;
+            a_turn_held_past_the_deadline_runs_no_check, a_turn_held_past_the_deadline_runs_no_check_at_a_second_mint: a_turn_held_past_the_deadline_runs_no_check;
+            every_answer_wakes_the_entry_awaiting_it, every_answer_wakes_the_entry_awaiting_it_at_a_second_mint: every_answer_wakes_the_entry_awaiting_it_at_one_mint;
+            a_late_outcome_is_credited_never_banned, a_late_outcome_is_credited_never_banned_at_a_second_mint: a_late_outcome_is_credited_never_banned_at_one_mint;
+            the_deadline_frees_the_account, the_deadline_frees_the_account_at_a_second_mint: the_deadline_frees_the_account;
+            racing_outcomes_settle_once, racing_outcomes_settle_once_at_a_second_mint: racing_outcomes_settle_once + Sync;
+            a_mint_outage_is_not_a_ban, a_mint_outage_is_not_a_ban_at_a_second_mint: a_mint_outage_is_not_a_ban;
+            only_the_sessions_video_is_admitted, only_the_sessions_video_is_admitted_at_a_second_mint: only_the_sessions_video_is_admitted;
+            a_global_cap_bounds_free_service, a_global_cap_bounds_free_service_at_a_second_mint: a_global_cap_bounds_free_service;
+            the_global_cap_holds_whatever_payments_do, the_global_cap_holds_whatever_payments_do_at_a_second_mint: the_global_cap_holds_whatever_payments_do;
+            prepaid_chunks_are_served_whatever_the_cap, prepaid_chunks_are_served_whatever_the_cap_at_a_second_mint: prepaid_chunks_are_served_whatever_the_cap;
+            debt_counts_for_exactly_debt_ttl, debt_counts_for_exactly_debt_ttl_at_a_second_mint: debt_counts_for_exactly_debt_ttl;
+            only_never_paid_accounts_are_forgotten, only_never_paid_accounts_are_forgotten_at_a_second_mint: only_never_paid_accounts_are_forgotten;
+            bans_expire_and_state_stays_bounded, bans_expire_and_state_stays_bounded_at_a_second_mint: bans_expire_and_state_stays_bounded;
+            a_hello_holds_no_state, a_hello_holds_no_state_at_a_second_mint: a_hello_holds_no_state;
+            payments_on_a_live_turn_keep_nothing, payments_on_a_live_turn_keep_nothing_at_a_second_mint: payments_on_a_live_turn_keep_nothing;
+            payments_on_a_dead_turn_keep_nothing, payments_on_a_dead_turn_keep_nothing_at_a_second_mint: payments_on_a_dead_turn_keep_nothing;
+            credit_covers_only_its_own_video, credit_covers_only_its_own_video_at_a_second_mint: credit_covers_only_its_own_video;
+            debt_is_freed_exactly_once, debt_is_freed_exactly_once_at_a_second_mint: debt_is_freed_exactly_once;
+            prepayment_extends_service_exactly, prepayment_extends_service_exactly_at_a_second_mint: prepayment_extends_service_exactly;
+            peers_are_isolated, peers_are_isolated_at_a_second_mint: peers_are_isolated;
+            one_accounts_payments_are_serialised, one_accounts_payments_are_serialised_at_a_second_mint: one_accounts_payments_are_serialised;
+            a_dropped_pay_is_credited_or_never_claimed, a_dropped_pay_is_credited_or_never_claimed_at_a_second_mint: a_dropped_pay_is_credited_or_never_claimed;
+            concurrent_entries_read_two_a_second, concurrent_entries_read_two_a_second_at_a_second_mint: concurrent_entries_read_two_a_second + Sync;
+        }
+    };
+}
+
+/// The second scenario of each row of [`scenarios_at_every_quoted_mint!`], and the rows'
+/// names ([`AT_EVERY_QUOTED_MINT`]).
+macro_rules! second_mint_scenarios {
+    ($($first:ident, $second:ident: $case:ident $(+ $bound:ident)?;)*) => {
+        /// Every scenario that runs at each quoted mint: its name at the first, and at the
+        /// second ([`scenarios_at_every_quoted_mint!`](crate::scenarios_at_every_quoted_mint)).
+        pub const AT_EVERY_QUOTED_MINT: &[(&str, &str)] =
+            &[$((stringify!($first), stringify!($second))),*];
+        $(
+            #[doc = concat!(
+                "[`", stringify!($first), "`], every seeder its case starts quoting a second \
+                 mint and paid there: the case sees the harness as [`Quoted::paying`] gives it."
+            )]
+            pub async fn $second<H: Harness $(+ $bound)?>(h: &H) {
+                $case(&Quoted::Second.paying(h)).await;
+            }
+        )*
+    };
+}
+
+scenarios_at_every_quoted_mint!(second_mint_scenarios);
+
+/// Why a scenario runs at one mint only: its case is a watcher's ledger, and pays no
+/// seeder.
+const A_WATCHERS_LEDGER: &str = "a watcher's ledger: no seeder is paid";
+/// Its watcher pays, at the mint the harness gives every watcher: a harness has none of
+/// another mint ([`Harness::viewer`]).
+const ITS_WATCHER_PAYS: &str = "its watcher pays at the harness's own mint";
+/// Its seeders ask no mint for anything: nothing is paid.
+const ASKS_NO_MINT: &str = "no mint is asked for anything";
+/// It names its mints itself, and runs each case of a mint's keys and listings at each
+/// quoted mint ([`QUOTED`]).
+const NAMES_ITS_MINTS: &str = "it names its mints itself";
+
+/// Every scenario of the suite that is not run at each quoted mint
+/// ([`AT_EVERY_QUOTED_MINT`]), and why.
+pub const AT_ONE_MINT: &[(&str, &str)] = &[
+    ("foreign_and_lookalike_mints_are_refused", NAMES_ITS_MINTS),
+    ("open_sessions_are_capped_and_released", ASKS_NO_MINT),
+    ("every_request_counts_whole_or_not", ASKS_NO_MINT),
+    ("an_unpaid_window_stops_serving", ASKS_NO_MINT),
+    ("the_window_is_per_account", ASKS_NO_MINT),
+    (
+        "an_honest_watcher_streams_two_videos_at_once",
+        ITS_WATCHER_PAYS,
+    ),
+    ("bad_configurations_are_refused", ASKS_NO_MINT),
+    ("concurrent_admission_is_atomic", ASKS_NO_MINT),
+    (
+        "a_viewer_pays_for_every_request_and_no_more",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "a_viewer_owes_nothing_for_refused_requests",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "a_viewer_pays_ahead_only_after_a_refusal",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "a_viewer_refuses_quotes_it_cannot_honour",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "a_viewer_stops_on_a_wrong_or_unsolicited_ack",
+        A_WATCHERS_LEDGER,
+    ),
+    ("a_viewer_reclaims_a_refused_payment", A_WATCHERS_LEDGER),
+    ("a_viewer_reclaims_an_unanswered_payment", A_WATCHERS_LEDGER),
+    (
+        "a_viewer_settles_a_lost_payment_after_180_s",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_due_on_its_first_ledger_waits_from_its_sending",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_ahead_on_its_first_ledger_waits_from_its_sending",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_last_payment_on_its_first_ledger_waits_from_its_sending",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_due_on_another_videos_ledger_waits_from_its_sending",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_ahead_on_another_videos_ledger_waits_from_its_sending",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_last_payment_on_another_videos_ledger_waits_from_its_sending",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_due_on_its_first_ledger_beside_the_others_history_waits_from_its_sending",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_ahead_on_its_first_ledger_beside_the_others_history_waits_from_its_sending",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_last_payment_on_its_first_ledger_beside_the_others_history_waits_from_its_sending",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_due_on_another_videos_ledger_beside_the_others_history_waits_from_its_sending",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_ahead_on_another_videos_ledger_beside_the_others_history_waits_from_its_sending",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_last_payment_on_another_videos_ledger_beside_the_others_history_waits_from_its_sending",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_due_on_its_first_ledger_waits_at_a_sessions_end",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_ahead_on_its_first_ledger_waits_at_a_sessions_end",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_last_payment_on_its_first_ledger_waits_at_a_sessions_end",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_due_on_another_videos_ledger_waits_at_a_sessions_end",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_ahead_on_another_videos_ledger_waits_at_a_sessions_end",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_last_payment_on_another_videos_ledger_waits_at_a_sessions_end",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_due_on_its_first_ledger_beside_the_others_history_waits_at_a_sessions_end",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_ahead_on_its_first_ledger_beside_the_others_history_waits_at_a_sessions_end",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_last_payment_on_its_first_ledger_beside_the_others_history_waits_at_a_sessions_end",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_due_on_another_videos_ledger_beside_the_others_history_waits_at_a_sessions_end",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_ahead_on_another_videos_ledger_beside_the_others_history_waits_at_a_sessions_end",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_last_payment_on_another_videos_ledger_beside_the_others_history_waits_at_a_sessions_end",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_on_its_first_ledger_holds_at_most_64_proofs",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_payment_on_another_videos_ledger_holds_at_most_64_proofs",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_mixed_selection_on_its_first_ledger_is_swapped_to_fewer",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "every_mixed_selection_on_another_videos_ledger_is_swapped_to_fewer",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "the_due_point_holds_on_its_first_ledger_whatever_came_before",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "the_due_point_holds_on_another_videos_ledger_whatever_came_before",
+        A_WATCHERS_LEDGER,
+    ),
+    ("a_viewer_settles_only_on_an_exact_match", A_WATCHERS_LEDGER),
+    (
+        "a_lying_seeder_takes_at_most_one_payment",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "a_refusing_seeder_takes_at_most_half_a_window",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "an_unavailable_seeder_gets_three_tries_a_session",
+        A_WATCHERS_LEDGER,
+    ),
+    ("a_watchers_standing_spans_its_videos", A_WATCHERS_LEDGER),
+    ("a_stopped_viewer_pays_nothing", A_WATCHERS_LEDGER),
+    ("an_honest_pair_streams_a_whole_video", ITS_WATCHER_PAYS),
+    ("an_honest_pair_resumes_after_a_reconnect", ITS_WATCHER_PAYS),
+    ("an_honest_pair_waits_out_a_slow_mint", ITS_WATCHER_PAYS),
+    ("an_honest_pair_rides_out_a_mint_outage", ITS_WATCHER_PAYS),
+    (
+        "an_honest_pair_survives_a_dropped_connection",
+        ITS_WATCHER_PAYS,
+    ),
+    ("an_honest_pair_survives_a_fast_reconnect", ITS_WATCHER_PAYS),
+    (
+        "an_honest_pair_survives_a_reordered_payment",
+        ITS_WATCHER_PAYS,
+    ),
+    ("an_honest_pair_survives_a_refused_hello", ITS_WATCHER_PAYS),
+    ("an_honest_pair_survives_a_late_mint", ITS_WATCHER_PAYS),
+    ("a_paying_watcher_gets_through_a_full_cap", ITS_WATCHER_PAYS),
+];
 
 type Session<H> = <<H as Harness>::Engine as SeederEngine>::Session;
 
@@ -2350,7 +2670,7 @@ async fn keys_are_the_quoted_keysets_own<H: Harness>(h: &H) {
 /// Tokens of the wrong shape are `bad-token`: the wrong unit, two mints, more than 64
 /// proofs, locked proofs, a missing or invalid DLEQ, or not a token at all. A proof the mint refuses as invalid
 /// is `bad-token` too, and bans the peer.
-pub async fn bad_tokens_are_refused<H: Harness>(h: &H) {
+async fn bad_tokens_are_refused_at_one_mint<H: Harness>(h: &H) {
     let e = h.engine(3, 4, 1000);
     let mut s = open(h, &e, 1).await;
     serve(h, &mut s, 0, 4);
@@ -2424,7 +2744,12 @@ pub async fn bad_tokens_are_refused<H: Harness>(h: &H) {
 
     one_bad_proof_spoils_the_token(h).await;
     one_bad_proof_spoils_the_token_on_every_path(h).await;
-    // Proofs a mint refuses as invalid ban their peer at a second quoted mint as at the first.
+}
+
+/// [`bad_tokens_are_refused_at_one_mint`], and the case that names its mints itself: proofs
+/// a mint refuses as invalid ban their peer at a second quoted mint as at the first.
+pub async fn bad_tokens_are_refused<H: Harness>(h: &H) {
+    bad_tokens_are_refused_at_one_mint(h).await;
     a_refused_proof_bans_at_a_second_mint(h, true).await;
 }
 
@@ -2645,7 +2970,7 @@ async fn an_account_spends_at_most_2_53_minus_1<H: Harness>(h: &H) {
 /// spent proof sits among fresh ones: first, in the middle or last. The swap is atomic,
 /// so the fresh proofs stay unclaimed. A peer with an account on one video is banned for
 /// a double-spend on another, where it has none yet. Other peers are unaffected.
-pub async fn a_double_spend_bans_the_peer<H: Harness>(h: &H) {
+async fn a_double_spend_bans_the_peer_at_one_mint<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let token = h.token(4).await;
     let mut first = open(h, &e, 1).await;
@@ -2773,7 +3098,12 @@ pub async fn a_double_spend_bans_the_peer<H: Harness>(h: &H) {
         landed(h, || s.banned()).await,
         "a peer whose only account is pre-paid (never served) is banned on a double spend"
     );
-    // A spent proof bans its peer at a second quoted mint as at the first.
+}
+
+/// [`a_double_spend_bans_the_peer_at_one_mint`], and the case that names its mints itself:
+/// a spent proof bans its peer at a second quoted mint as at the first.
+pub async fn a_double_spend_bans_the_peer<H: Harness>(h: &H) {
+    a_double_spend_bans_the_peer_at_one_mint(h).await;
     a_refused_proof_bans_at_a_second_mint(h, false).await;
 }
 
@@ -3488,7 +3818,7 @@ pub async fn service_waits_for_the_swap<H: Harness>(h: &H) {
 /// turn, the key fetch and the swap all count. A payment whose swap is held on its way to
 /// the mint gets `mint-unavailable` at exactly 60 s, and so does one whose key request goes
 /// unanswered; a payment queued behind a held one is answered 60 s after its own arrival.
-pub async fn a_seeder_answers_within_its_deadline<H: Harness>(h: &H) {
+async fn a_seeder_answers_within_its_deadline_at_one_mint<H: Harness>(h: &H) {
     for keys in [false, true] {
         let e = h.engine(1, 4, 1000);
         let mut s = open(h, &e, 1).await;
@@ -3669,6 +3999,13 @@ pub async fn a_seeder_answers_within_its_deadline<H: Harness>(h: &H) {
 
     checks_after_the_deadline_answer_nothing(h).await;
     a_turn_in_the_deadlines_second_reaches_no_refusal(h).await;
+}
+
+/// [`a_seeder_answers_within_its_deadline_at_one_mint`], and the cases of a mint's keys and
+/// keyset listings at the deadline, which name their mint themselves ([`Quoted`]): each at
+/// a second quoted mint as at the first.
+pub async fn a_seeder_answers_within_its_deadline<H: Harness>(h: &H) {
+    a_seeder_answers_within_its_deadline_at_one_mint(h).await;
     a_listing_that_comes_late_judges_nothing(h, Quoted::First).await;
     the_keyset_rule_waits_for_its_listing(h, Quoted::First).await;
     // The rules NFX-07 §3 states per mint, at a second quoted mint as at the first.
@@ -3707,7 +4044,7 @@ pub async fn a_seeder_answers_within_its_deadline<H: Harness>(h: &H) {
 ///
 /// Where the mint answers a call in the poll that sends it, nothing is awaited but what is
 /// held.
-pub async fn every_answer_wakes_the_entry_awaiting_it<H: Harness>(h: &H) {
+async fn every_answer_wakes_the_entry_awaiting_it_at_one_mint<H: Harness>(h: &H) {
     // A payment's every answer, its swap held, on a fresh engine: the keyset listing, keys,
     // the outcome.
     let e = h.engine(1, 4, 1000);
@@ -3834,6 +4171,12 @@ pub async fn every_answer_wakes_the_entry_awaiting_it<H: Harness>(h: &H) {
     a_closed_payments_outcome_wakes_what_waits_for_its_turn(h).await;
     a_refused_key_request_wakes_its_payment(h).await;
     a_listing_another_asked_for_wakes_its_payment(h).await;
+}
+
+/// [`every_answer_wakes_the_entry_awaiting_it_at_one_mint`], and the case that names its
+/// mints itself: a second quoted mint's keys and listings wake their payment as the first's.
+pub async fn every_answer_wakes_the_entry_awaiting_it<H: Harness>(h: &H) {
+    every_answer_wakes_the_entry_awaiting_it_at_one_mint(h).await;
     a_second_mints_answers_wake_its_payment(h).await;
 }
 
@@ -4354,7 +4697,7 @@ async fn every_outcome_that_is_no_claim_wakes_its_payment<H: Harness>(h: &H) {
 /// only the entries whose swaps they covered, as fixed when sent; none is sent at an
 /// entry's deadline; and a `hello` that waited for a payment reads after it. Outputs
 /// unsigned with an input spent are nothing, whatever the other inputs are.
-pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
+async fn a_late_outcome_is_credited_never_banned_at_one_mint<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 4);
     let mut s = open(h, &e, 1).await;
     serve(h, &mut s, 0, 4);
@@ -6469,7 +6812,51 @@ pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
     // Every refusal on every path to the turn, and every wait on the clock.
     hellos_behind_every_refusal_read_after_it(h).await;
     entries_waiting_for_a_dead_turn_are_woken_after_a_move(h).await;
-    // A swap's outcomes at a second quoted mint, as at the first.
+    an_unanswered_check_of_inputs_proves_nothing(h).await;
+}
+
+/// Flaw `StateDownIsSpent`. A read refused or unanswered proves nothing for the swaps it
+/// covered (NFX-07 §3, late outcomes), and a swap's state is two reads: a check of its
+/// inputs (NUT-07) and a restore of its outputs (NUT-09). The mint holds a swap, its inputs
+/// reserved, and the seeder's client has given it up. The mint's checks of proofs then go
+/// unanswered while its restores answer: the account's `hello` reads the outputs unsigned
+/// and nothing of the inputs, so the swap stays unknown, and credits nothing. The mint
+/// finishes the request, a claim: the account's next read learns it, and it is credited.
+async fn an_unanswered_check_of_inputs_proves_nothing<H: Harness>(h: &H) {
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    assert_eq!(serve(h, &mut s, 0, 2), 2, "an account, two chunks unpaid");
+    let p = parked(h, &mut s, 4).await;
+    close(h, s).await;
+    advance(h, SECOND).await;
+    h.state_check_outage(true);
+    let q = open(h, &e, 1).await.quote().clone();
+    h.state_check_outage(false);
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (0, 0),
+        "a swap the mint still holds is credited nothing, its outputs unsigned"
+    );
+    release(h).await; // the mint finishes the request: a claim
+    assert!(
+        h.claimed_all(&p.token).await,
+        "the mint has finished the swap it held: a claim"
+    );
+    advance(h, SECOND).await;
+    let q = open(h, &e, 1).await.quote().clone();
+    assert_eq!(
+        (q.accepted_upto, q.spent_total),
+        (4, 4),
+        "a read whose check of the swap's inputs went unanswered proved nothing, its outputs \
+         unsigned or not: the swap stayed unknown, and its claim, made since, is learnt and \
+         credited"
+    );
+}
+
+/// [`a_late_outcome_is_credited_never_banned_at_one_mint`], and the case of one seeder's two
+/// quoted mints at once, which names them itself.
+pub async fn a_late_outcome_is_credited_never_banned<H: Harness>(h: &H) {
+    a_late_outcome_is_credited_never_banned_at_one_mint(h).await;
     a_second_mints_swaps_are_settled_as_the_firsts(h).await;
 }
 
@@ -31591,6 +31978,8 @@ fn keys_asked<H: Harness>(h: &H) -> u64 {
 /// The quoted mint a case of steps 3 and 5 pays at. NFX-07 §3 states their rules per mint:
 /// the keys a seeder holds, its keyset listing, how often it asks for one, and what it
 /// judges by it. So each such case runs at a seeder's second quoted mint as at its first.
+/// A case of a swap's outcome, its retry, its completion or the reads of its state names no
+/// mint: the scenario it is in runs whole at each quoted mint ([`Quoted::paying`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Quoted {
     /// The one mint the seeder quotes: this harness's.
@@ -31629,6 +32018,11 @@ impl Quoted {
                 })
                 .expect("a seeder quoting two mints"),
         }
+    }
+
+    /// `h` as a case that pays at this mint sees it ([`Paying`]).
+    fn paying<H: Harness>(self, h: &H) -> Paying<'_, H> {
+        Paying { h, quoted: self }
     }
 
     /// The URL of the mint the case pays at.
@@ -31671,6 +32065,346 @@ impl Quoted {
             Quoted::First => h.keyset_expires_in(after),
             Quoted::Second => h.start_keyset_at(SECOND_MINT, after),
         }
+    }
+}
+
+/// A harness as a case that pays at one quoted mint sees it: `h`, its seeders quoting the
+/// mint the case pays at ([`Quoted`]) and its tokens that mint's. At the first it is `h`
+/// itself; at the second, every seeder the case starts quotes [`SECOND_MINT`] after this
+/// harness's mint, every token the case asks for is the second mint's, and the mint the
+/// case names is that one. All else is `h`'s: its clock, its peers and videos, and the
+/// mint's faults and events, which a harness gives for every mint it backs at once
+/// ([`Harness`], its mints). So a
+/// case written for a harness runs at each quoted mint as it stands
+/// ([`Quoted::paying`]), and no case of a mint's answers has a second copy to keep.
+///
+/// A case that names its mints itself (one seeder's two mints at once, a token of each)
+/// is run once, with the harness itself.
+struct Paying<'a, H: Harness> {
+    h: &'a H,
+    quoted: Quoted,
+}
+
+impl<H: Harness> Harness for Paying<'_, H> {
+    type Engine = H::Engine;
+    type Viewer = H::Viewer;
+
+    fn engine(&self, price: u64, window: u64, global_cap: u64) -> Self::Engine {
+        match self.quoted {
+            Quoted::First => self.h.engine(price, window, global_cap),
+            Quoted::Second => self
+                .engine_checked(EngineParams {
+                    price,
+                    window,
+                    global_cap,
+                    debt_ttl: self.h.debt_ttl(),
+                    account_ttl: self.h.account_ttl(),
+                    ban_ttl: self.h.ban_ttl(),
+                    mints: 1,
+                    extra_mint: None,
+                })
+                .expect("a seeder quoting two mints"),
+        }
+    }
+
+    fn engine_checked(&self, params: EngineParams) -> Result<Self::Engine, String> {
+        match self.quoted {
+            Quoted::First => self.h.engine_checked(params),
+            Quoted::Second => self.h.engine_checked(EngineParams {
+                extra_mint: params.extra_mint.or(Some(SECOND_MINT)),
+                ..params
+            }),
+        }
+    }
+
+    fn mint(&self) -> String {
+        self.quoted.mint(self.h)
+    }
+
+    async fn token(&self, amount: u64) -> String {
+        match self.quoted {
+            Quoted::First => self.h.token(amount).await,
+            Quoted::Second => self.h.token_at(SECOND_MINT, amount).await,
+        }
+    }
+
+    async fn bad_token(&self, kind: BadToken, amount: u64) -> String {
+        match self.quoted {
+            Quoted::First => self.h.bad_token(kind, amount).await,
+            Quoted::Second => self.h.bad_token_at(SECOND_MINT, kind, amount).await,
+        }
+    }
+
+    fn identities_held(&self, engine: &Self::Engine) -> usize {
+        self.h.identities_held(engine)
+    }
+
+    fn hello_for(&self, v: u8) -> Hello {
+        self.h.hello_for(v)
+    }
+
+    fn hello(&self) -> Hello {
+        self.h.hello()
+    }
+
+    fn unknown_hello(&self) -> Hello {
+        self.h.unknown_hello()
+    }
+
+    fn session_cap(&self) -> usize {
+        self.h.session_cap()
+    }
+
+    fn peer(&self, n: u8) -> PeerId {
+        self.h.peer(n)
+    }
+
+    fn chunk_of(&self, v: u8, n: u16) -> String {
+        self.h.chunk_of(v, n)
+    }
+
+    fn chunk(&self, n: u16) -> String {
+        self.h.chunk(n)
+    }
+
+    fn foreign_chunk(&self) -> String {
+        self.h.foreign_chunk()
+    }
+
+    fn drop_video(&self, engine: &Self::Engine, v: u8) {
+        self.h.drop_video(engine, v);
+    }
+
+    fn viewer(&self, max_price: u64) -> Self::Viewer {
+        self.h.viewer(max_price)
+    }
+
+    fn window_ceiling(&self) -> u64 {
+        self.h.window_ceiling()
+    }
+
+    fn dialled(&self, url: &str) -> bool {
+        self.h.dialled(url)
+    }
+
+    fn hold_swaps(&self) {
+        self.h.hold_swaps();
+    }
+
+    fn hold_swap_responses(&self) {
+        self.h.hold_swap_responses();
+    }
+
+    fn hold_next_swap(&self) {
+        self.h.hold_next_swap();
+    }
+
+    fn hold_key_fetches(&self) {
+        self.h.hold_key_fetches();
+    }
+
+    fn refuse_keys(&self, url: &str, refused: bool) {
+        self.h.refuse_keys(url, refused);
+    }
+
+    fn forget_keys(&self, engine: &Self::Engine) {
+        self.h.forget_keys(engine);
+    }
+
+    fn race_release_with_clock(&self, by: Duration) {
+        self.h.race_release_with_clock(by);
+    }
+
+    fn spawn_thread(&self, side: Box<dyn FnOnce() + Send>) {
+        self.h.spawn_thread(side);
+    }
+
+    fn mint_outage(&self, down: bool) {
+        self.h.mint_outage(down);
+    }
+
+    fn lose_next_swap_response(&self) {
+        self.h.lose_next_swap_response();
+    }
+
+    fn lose_next_reclaim_response(&self) {
+        self.h.lose_next_reclaim_response();
+    }
+
+    fn restore_outage(&self, down: bool) {
+        self.h.restore_outage(down);
+    }
+
+    fn time_out_next_swap(&self) {
+        self.h.time_out_next_swap();
+    }
+
+    fn process_timed_out_mid_read(&self) {
+        self.h.process_timed_out_mid_read();
+    }
+
+    fn deliver_responses_mid_read(&self) {
+        self.h.deliver_responses_mid_read();
+    }
+
+    fn state_check_outage(&self, down: bool) {
+        self.h.state_check_outage(down);
+    }
+
+    fn hold_next_swap_reserving(&self) {
+        self.h.hold_next_swap_reserving();
+    }
+
+    fn roll_back_reserved(&self) {
+        self.h.roll_back_reserved();
+    }
+
+    fn state_reads(&self) -> u64 {
+        self.h.state_reads()
+    }
+
+    fn reads_out(&self) -> usize {
+        self.h.reads_out()
+    }
+
+    fn key_requests(&self) -> u64 {
+        self.h.key_requests()
+    }
+
+    fn listing_requests(&self) -> u64 {
+        self.h.listing_requests()
+    }
+
+    fn answers_under_way(&self) -> bool {
+        self.h.answers_under_way()
+    }
+
+    fn limit_state_reads(&self, max: Option<usize>) {
+        self.h.limit_state_reads(max);
+    }
+
+    fn unanswered_reads_take(&self, wait: Duration) {
+        self.h.unanswered_reads_take(wait);
+    }
+
+    fn gather_state_reads(&self, n: usize, wait: Duration) {
+        self.h.gather_state_reads(n, wait);
+    }
+
+    fn advance_during_next_land(&self, by: Duration) {
+        self.h.advance_during_next_land(by);
+    }
+
+    fn advanced_during_land(&self) -> bool {
+        self.h.advanced_during_land()
+    }
+
+    fn gather_admissions(&self, n: usize, wait: Duration) {
+        self.h.gather_admissions(n, wait);
+    }
+
+    fn sweep_during_next_read(&self, engine: &Self::Engine) {
+        self.h.sweep_during_next_read(engine);
+    }
+
+    fn rotate_keyset(&self) {
+        self.h.rotate_keyset();
+    }
+
+    fn start_keyset_at(&self, url: &str, final_expiry: Option<Duration>) {
+        self.h.start_keyset_at(url, final_expiry);
+    }
+
+    fn expire_keyset(&self) {
+        self.h.expire_keyset();
+    }
+
+    fn keyset_expires_in(&self, after: Option<Duration>) {
+        self.h.keyset_expires_in(after);
+    }
+
+    fn expire_active_keyset(&self) {
+        self.h.expire_active_keyset();
+    }
+
+    fn fund_older_keyset(&self, amount: u64) {
+        self.h.fund_older_keyset(amount);
+    }
+
+    fn expire_older_keyset(&self) {
+        self.h.expire_older_keyset();
+    }
+
+    fn expire_keyset_of(&self, token: &str, proofs: usize) {
+        self.h.expire_keyset_of(token, proofs);
+    }
+
+    fn before_next_swap(&self, event: MintEvent) {
+        self.h.before_next_swap(event);
+    }
+
+    fn clock_secs(&self) -> u64 {
+        self.h.clock_secs()
+    }
+
+    fn advance(&self, by: Duration) {
+        self.h.advance(by);
+    }
+
+    fn debt_ttl(&self) -> Duration {
+        self.h.debt_ttl()
+    }
+
+    fn account_ttl(&self) -> Duration {
+        self.h.account_ttl()
+    }
+
+    fn ban_ttl(&self) -> Duration {
+        self.h.ban_ttl()
+    }
+
+    async fn token_at(&self, url: &str, amount: u64) -> String {
+        self.h.token_at(url, amount).await
+    }
+
+    async fn bad_token_at(&self, url: &str, kind: BadToken, amount: u64) -> String {
+        self.h.bad_token_at(url, kind, amount).await
+    }
+
+    async fn reencode(&self, token: &str) -> String {
+        self.h.reencode(token).await
+    }
+
+    async fn combine(&self, tokens: &[&str]) -> String {
+        self.h.combine(tokens).await
+    }
+
+    async fn claimed_any(&self, token: &str) -> bool {
+        self.h.claimed_any(token).await
+    }
+
+    async fn claimed_all(&self, token: &str) -> bool {
+        self.h.claimed_all(token).await
+    }
+
+    async fn steal(&self, token: &str) -> bool {
+        self.h.steal(token).await
+    }
+
+    async fn steal_one(&self, token: &str) -> bool {
+        self.h.steal_one(token).await
+    }
+
+    async fn reserve_rest(&self, token: &str) -> bool {
+        self.h.reserve_rest(token).await
+    }
+
+    async fn release_oldest_swap(&self) {
+        self.h.release_oldest_swap().await;
+    }
+
+    async fn release_swaps(&self) {
+        self.h.release_swaps().await;
     }
 }
 

@@ -10,7 +10,7 @@ use nfx_pay::adversary;
 use nfx_pay::mock::{MockHarness, SeederFlaw as S, ViewerFlaw as V};
 
 macro_rules! catches {
-    ($($test:ident: $harness:expr => $scenario:ident),* $(,)?) => {
+    ($($test:ident: $kind:ident($flaw:expr) => $scenario:ident),* $(,)?) => {
         $(
             #[test]
             fn $test() {
@@ -19,24 +19,87 @@ macro_rules! catches {
                 // no check (a bare unwrap), names no behaviour, so none is a catch. The time
                 // allowed is the suite's own, and so is the way it is run: a late catch under
                 // load is not taken for a hang.
-                let run = nfx_pay::run_scenario!(adversary::$scenario(&$harness));
-                match &run {
-                    adversary::Ran::Finished => panic!(
-                        "{} did not catch the planted defect",
-                        stringify!($scenario)
-                    ),
-                    adversary::Ran::Hung => {
-                        panic!("{} hung on the planted defect", stringify!($scenario))
-                    }
-                    adversary::Ran::Panicked { file, line, .. } => assert!(
-                        run.failed_the_suite(),
-                        "{} failed no check of the suite: it panicked at {file}:{line}",
-                        stringify!($scenario)
-                    ),
-                }
+                let run = nfx_pay::run_scenario!(adversary::$scenario(&$kind($flaw)));
+                caught(&run, stringify!($scenario));
+                // And one that judges a mint's answer must be registered in its form of
+                // quoted mints other than the first too (`catches_at_other_mints!`).
+                $flaw.is_registered_at_every_mint(stringify!($kind));
             }
         )*
     };
+}
+
+/// The same, the defect one of quoted mints other than the first
+/// ([`MockHarness::at_other_mints`]): the seeder has it only while it judges an answer of
+/// such a mint, and is honest at its first. NFX-07 §3 states the rules of a swap's outcome,
+/// its retry, its completion and the reads of its state of the swap and its account, never
+/// of a mint, so every defect that judges a mint's answer is registered here too, on each
+/// harness it is registered on above: `catches!` refuses one that is not, once its run has
+/// shown that it judges one ([`nfx_pay::mock::judges_a_mints_answer`]). A defect is so
+/// never caught at a seeder's first mint and missed at its others.
+macro_rules! catches_at_other_mints {
+    ($($test:ident: $kind:ident($flaw:expr) => $scenario:ident),* $(,)?) => {
+        /// Every defect registered at other mints, with the harness it is registered on.
+        const AT_OTHER_MINTS: &[(&str, S)] = &[$((stringify!($kind), $flaw)),*];
+        $(
+            #[test]
+            fn $test() {
+                let run = nfx_pay::run_scenario!(
+                    adversary::$scenario(&$kind($flaw).at_other_mints())
+                );
+                caught(&run, stringify!($scenario));
+            }
+        )*
+    };
+}
+
+/// A run against a planted defect must have failed a check of the suite.
+fn caught(run: &adversary::Ran, scenario: &str) {
+    match run {
+        adversary::Ran::Finished => panic!("{scenario} did not catch the planted defect"),
+        adversary::Ran::Hung => panic!("{scenario} hung on the planted defect"),
+        adversary::Ran::Panicked { file, line, .. } => assert!(
+            run.failed_the_suite(),
+            "{scenario} failed no check of the suite: it panicked at {file}:{line}"
+        ),
+    }
+}
+
+/// The defects that are of quoted mints other than the first by their own making: each is
+/// honest at a seeder's first mint already, and has no second form.
+const OF_OTHER_MINTS_ALREADY: [S; 5] = [
+    S::OtherMintSpentNoBan,
+    S::OtherMintInvalidNoBan,
+    S::OtherMintLateClaimNotCredited,
+    S::OtherMintReadClaimNotCredited,
+    S::OtherMintLateClaimKeepsDebt,
+];
+
+/// A planted defect, as `catches!` asks after its registration at every quoted mint.
+trait Planted {
+    /// Panics if this defect, registered on harness `kind`, judges a mint's answer and is
+    /// not registered there in its form of other mints.
+    fn is_registered_at_every_mint(&self, kind: &str);
+}
+
+impl Planted for V {
+    /// A watcher's defect: no seeder has it.
+    fn is_registered_at_every_mint(&self, _kind: &str) {}
+}
+
+impl Planted for S {
+    fn is_registered_at_every_mint(&self, kind: &str) {
+        let registered = OF_OTHER_MINTS_ALREADY.contains(self)
+            || AT_OTHER_MINTS
+                .iter()
+                .any(|(k, flaw)| *k == kind && flaw == self);
+        assert!(
+            registered || !nfx_pay::mock::judges_a_mints_answer(*self),
+            "{self:?} judges a mint's answer (a swap's outcome, its retry, its completion or \
+             a read of its state), and is registered on harness `{kind}` at every mint only: \
+             register it there in its form of other mints too (`catches_at_other_mints!`)"
+        );
+    }
 }
 
 /// A flawed seeder whose mint answers every call in the poll that sends it. Some two hundred
@@ -3361,4 +3424,250 @@ catches!(
     viewer_unavailable_ends_licence_on_the_table: v(V::UnavailableEndsLicence) => a_refusals_licence_lasts_to_its_due_whatever_comes,
     viewer_own_stop_ack_not_settled_on_the_table: v(V::OwnStopAckNotSettled) => nothing_undoes_a_stop_on_its_first_ledger_whatever_comes,
     viewer_early_timeout_ends_licence_on_the_table: v(V::EarlyTimeoutEndsLicence) => a_refusals_licence_lasts_to_its_due_whatever_comes,
+    state_check_down_is_spent_of_a_held_swap_round_trip: r(S::StateDownIsSpent) => a_late_outcome_is_credited_never_banned,
+    state_check_down_is_spent_of_a_held_swap_woken: w(S::StateDownIsSpent) => a_late_outcome_is_credited_never_banned,
+    state_check_down_is_spent_of_a_held_swap_at_start: l(S::StateDownIsSpent) => a_late_outcome_is_credited_never_banned,
+    state_check_down_is_spent_of_a_held_swap_on_tasks: t(S::StateDownIsSpent) => a_late_outcome_is_credited_never_banned,
 );
+
+catches_at_other_mints!(
+    forged_proof_not_banned_at_other_mints: s(S::InvalidNoBan) => bad_tokens_are_refused_at_a_second_mint,
+    spent_without_ban_at_other_mints: s(S::NoBanOnSpent) => a_double_spend_bans_the_peer_at_a_second_mint,
+    ban_per_video_at_other_mints: s(S::BanPerVideo) => a_banned_peer_stays_banned_at_a_second_mint,
+    spent_total_per_session_at_other_mints: s(S::SpentTotalPerSession) => a_new_hello_continues_the_account_at_a_second_mint,
+    ban_forgets_debt_at_other_mints: s(S::BanForgetsDebt) => the_global_cap_holds_whatever_payments_do_at_a_second_mint,
+    paid_debt_stays_counted_at_other_mints: s(S::PaidDebtStaysCounted) => a_global_cap_bounds_free_service_at_a_second_mint,
+    outage_bans_at_other_mints: s(S::OutageBans) => a_mint_outage_is_not_a_ban_at_a_second_mint,
+    outage_credits_at_other_mints: s(S::OutageCredits) => a_mint_outage_is_not_a_ban_at_a_second_mint,
+    ack_spent_peer_wide_at_other_mints: s(S::AckSpentPeerWide) => a_new_hello_continues_the_account_at_a_second_mint,
+    live_keyed_by_peer_at_other_mints: s(S::LiveKeyedByPeer) => a_global_cap_bounds_free_service_at_a_second_mint,
+    credit_frees_all_debt_at_other_mints: s(S::CreditFreesAllDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
+    credit_from_snapshot_at_other_mints: s(S::CreditFromSnapshot) => service_waits_for_the_swap_at_a_second_mint,
+    late_outcome_bans_at_other_mints: s(S::LateOutcomeBans) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_claim_not_credited_at_other_mints: s(S::LateClaimNotCredited) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_by_the_flag_only_at_other_mints: s(S::LateByFlagOnly) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    stale_turn_frees_at_other_mints: s(S::StaleTurnFrees) => the_deadline_frees_the_account_at_a_second_mint,
+    landed_records_leak_at_other_mints: s(S::LandKeepsFinished) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    bans_without_an_account_at_other_mints: s(S::BansWithoutAccount) => a_hello_holds_no_state_at_a_second_mint,
+    waiting_kept_empty_at_other_mints: s(S::WaitingKeptEmpty) => a_hello_holds_no_state_at_a_second_mint,
+    ban_needs_this_videos_account_at_other_mints: s(S::BanNeedsThisAccount) => a_double_spend_bans_the_peer_at_a_second_mint,
+    late_claim_keeps_its_debt_at_other_mints: s(S::LateClaimKeepsDebt) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    ban_needs_a_paid_account_elsewhere_at_other_mints: s(S::BanNeedsPaidOrThis) => a_double_spend_bans_the_peer_at_a_second_mint,
+    late_credit_from_the_snapshot_at_other_mints: s(S::LateCreditFromSnapshot) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    no_retry_of_an_unanswered_swap_at_other_mints: s(S::NoRetry) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_bans_on_its_own_spent_at_other_mints: s(S::RetryBansOnSpent) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    restore_by_token_at_other_mints: s(S::RestoreByToken) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_spent_is_its_own_at_other_mints: s(S::RetrySpentIsOwn) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    unknown_only_in_time_at_other_mints: s(S::UnknownOnlyInTime) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    unknown_only_while_awaited_at_other_mints: s(S::UnknownOnlyWhileAwaited) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_spent_restore_down_known_at_other_mints: s(S::RetrySpentRestoreDownKnown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_credit_needs_an_account_at_other_mints: s(S::LateCreditNeedsAccount) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    not_signed_is_final_at_other_mints: s(S::NotSignedFinal) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    not_signed_stays_unknown_at_other_mints: s(S::NotSignedStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    not_signed_stays_unknown_in_flight_at_other_mints: s(S::NotSignedStaysUnknown) => the_deadline_frees_the_account_at_a_second_mint,
+    late_claim_skips_a_banned_peer_at_other_mints: s(S::LateClaimSkipsBanned) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    decided_lost_relearnt_at_other_mints: s(S::DecidedLostRelearnt) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    decided_keeps_the_turn_at_other_mints: s(S::DecidedKeepsTurn) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    state_check_down_is_spent_at_other_mints: s(S::StateDownIsSpent) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    pending_is_spent_at_other_mints: s(S::PendingIsSpent) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_pending_is_known_at_other_mints: s(S::RetryPendingKnown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    pending_bans_at_other_mints: s(S::PendingBans) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    learning_stops_at_the_first_unknown_at_other_mints: s(S::LearnStopsAtFirstUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    in_flight_stops_at_the_first_unknown_at_other_mints: s(S::InFlightStopsAtFirstUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    no_recheck_after_a_read_at_other_mints: s(S::NoRecheckAfterRead) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    a_decided_swap_frees_any_turn_at_other_mints: s(S::DecidedFreesAnyTurn) => the_deadline_frees_the_account_at_a_second_mint,
+    a_decided_swap_leaves_waiters_at_other_mints: s(S::DecidedLeavesWaiters) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    undecided_never_expires_at_other_mints: s(S::UndecidedNeverExpires) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    expiry_drops_at_other_mints: s(S::ExpiryDrops) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    in_flight_never_expires_at_other_mints: s(S::FlightNeverExpires) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    lost_claim_without_recheck_at_other_mints: s(S::LostNoRecheck) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    pending_first_attempt_unknown_at_other_mints: s(S::PendingFirstUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    completion_with_fresh_outputs_at_other_mints: s(S::CompleteFreshOutputs) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    completion_spent_is_nothing_at_other_mints: s(S::CompleteSpentIsNothing) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    completion_pending_is_nothing_at_other_mints: s(S::CompletePendingIsNothing) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    completion_refused_stays_unknown_at_other_mints: s(S::CompleteRefusedStaysUnknown) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    completion_invalid_stays_unknown_at_other_mints: s(S::CompleteInvalidStaysUnknown) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    retry_refused_is_known_at_other_mints: s(S::RetryRefusedIsKnown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    completion_lost_by_restore_at_other_mints: s(S::CompleteLostByRestore) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    completion_invalid_bans_at_other_mints: s(S::CompleteInvalidBans) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    completion_unreachable_is_nothing_at_other_mints: s(S::CompleteUnreachableNothing) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    completion_restore_down_is_nothing_at_other_mints: s(S::CompleteRestoreDownNothing) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    retry_refused_restore_down_known_at_other_mints: s(S::RetryRefusedRestoreDownKnown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_refused_is_a_claim_at_other_mints: s(S::RetryRefusedIsClaim) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_lost_is_nothing_at_other_mints: s(S::RetryLostIsNothing) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    first_refused_bans_at_other_mints: s(S::FirstRefusedBans) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    first_refused_unknown_at_other_mints: s(S::FirstRefusedUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    completion_ignores_the_deadline_at_other_mints: s(S::CompleteIgnoresDeadline) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    retry_invalid_by_restore_at_other_mints: s(S::RetryInvalidByRestore) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_expired_at_once_at_other_mints: s(S::RetryExpiredAtOnce) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    completion_expired_at_once_at_other_mints: s(S::CompleteExpiredAtOnce) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    first_expired_bans_at_other_mints: s(S::FirstExpiredBans) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    first_expired_unknown_at_other_mints: s(S::FirstExpiredUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    expired_spent_is_the_claim_at_other_mints: s(S::ExpiredSpentIsClaim) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    expired_restore_on_state_down_at_other_mints: s(S::ExpiredRestoreOnStateDown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    expired_restore_down_known_at_other_mints: s(S::ExpiredRestoreDownKnown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_expired_stays_unknown_at_other_mints: s(S::RetryExpiredStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_restore_uncapped_at_other_mints: s(S::RetryRestoreUncapped) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    completion_restore_uncapped_at_other_mints: s(S::CompleteRestoreUncapped) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    retry_resend_uncapped_at_other_mints: s(S::RetryResendUncapped) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    expired_state_uncapped_at_other_mints: s(S::ExpiredStateUncapped) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    late_credit_frees_all_at_other_mints: s(S::LateCreditFreesAll) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_credit_frees_all_round_trip_at_other_mints: r(S::LateCreditFreesAll) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    signed_needs_states_at_other_mints: s(S::SignedNeedsStates) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    signed_needs_states_round_trip_at_other_mints: r(S::SignedNeedsStates) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    complete_refused_is_nothing_at_other_mints: s(S::CompleteRefusedIsNothing) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    ban_needs_served_at_other_mints: s(S::BanNeedsServed) => a_double_spend_bans_the_peer_at_a_second_mint,
+    wakes_one_drops_rest_at_other_mints: s(S::WakesOneDropsRest) => one_accounts_payments_are_serialised_at_a_second_mint,
+    wakes_one_drops_rest_round_trip_at_other_mints: r(S::WakesOneDropsRest) => one_accounts_payments_are_serialised_at_a_second_mint,
+    land_stale_clock_at_other_mints: s(S::LandStaleClock) => racing_outcomes_settle_once_at_a_second_mint,
+    land_stale_clock_round_trip_at_other_mints: r(S::LandStaleClock) => racing_outcomes_settle_once_at_a_second_mint,
+    retry_at_deadline_at_other_mints: s(S::RetryAtDeadline) => the_deadline_frees_the_account_at_a_second_mint,
+    retry_at_deadline_round_trip_at_other_mints: r(S::RetryAtDeadline) => the_deadline_frees_the_account_at_a_second_mint,
+    land_freed_after_deadline_at_other_mints: r(S::LandFreedAfterDeadline) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_nothing_frees_debt_at_other_mints: s(S::LateNothingFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    late_nothing_frees_debt_round_trip_at_other_mints: r(S::LateNothingFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    nothing_in_flight_frees_debt_at_other_mints: s(S::NothingInFlightFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    nothing_in_flight_frees_debt_round_trip_at_other_mints: r(S::NothingInFlightFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    own_nothing_frees_debt_at_other_mints: s(S::OwnNothingFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    own_nothing_frees_debt_round_trip_at_other_mints: r(S::OwnNothingFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    pay_nothing_frees_debt_at_other_mints: s(S::PayNothingFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    pay_nothing_frees_debt_round_trip_at_other_mints: r(S::PayNothingFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    own_nothing_in_flight_frees_debt_at_other_mints: s(S::OwnNothingInFlightFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    own_nothing_in_flight_frees_debt_round_trip_at_other_mints: r(S::OwnNothingInFlightFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    pay_nothing_in_flight_frees_debt_at_other_mints: s(S::PayNothingInFlightFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    pay_nothing_in_flight_frees_debt_round_trip_at_other_mints: r(S::PayNothingInFlightFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    land_in_time_at_deadline_at_other_mints: s(S::LandInTimeAtDeadline) => racing_outcomes_settle_once_at_a_second_mint,
+    land_in_time_at_deadline_round_trip_at_other_mints: r(S::LandInTimeAtDeadline) => racing_outcomes_settle_once_at_a_second_mint,
+    retry_spent_unsigned_stays_unknown_at_other_mints: s(S::RetrySpentUnsignedStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_spent_unsigned_stays_unknown_round_trip_at_other_mints: r(S::RetrySpentUnsignedStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_refused_unsigned_stays_unknown_at_other_mints: s(S::RetryRefusedUnsignedStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_refused_unsigned_stays_unknown_round_trip_at_other_mints: r(S::RetryRefusedUnsignedStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_expired_unsigned_stays_unknown_at_other_mints: s(S::RetryExpiredUnsignedStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_expired_unsigned_stays_unknown_round_trip_at_other_mints: r(S::RetryExpiredUnsignedStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    spent_beside_pending_unknown_at_other_mints: s(S::SpentBesidePendingUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    spent_beside_pending_unknown_round_trip_at_other_mints: r(S::SpentBesidePendingUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    invalid_creates_account_at_other_mints: s(S::InvalidCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    invalid_creates_account_round_trip_at_other_mints: r(S::InvalidCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    credit_frees_peer_debt_at_other_mints: s(S::CreditFreesPeerDebt) => the_global_cap_holds_whatever_payments_do_at_a_second_mint,
+    credit_frees_peer_debt_round_trip_at_other_mints: r(S::CreditFreesPeerDebt) => the_global_cap_holds_whatever_payments_do_at_a_second_mint,
+    unreachable_creates_account_at_other_mints: s(S::UnreachableCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    unreachable_creates_account_round_trip_at_other_mints: r(S::UnreachableCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    pending_creates_account_at_other_mints: s(S::PendingCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    pending_creates_account_round_trip_at_other_mints: r(S::PendingCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    outputs_refused_creates_account_at_other_mints: s(S::OutputsRefusedCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    outputs_refused_creates_account_round_trip_at_other_mints: r(S::OutputsRefusedCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    expired_creates_account_at_other_mints: s(S::ExpiredCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    expired_creates_account_round_trip_at_other_mints: r(S::ExpiredCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    lost_creates_account_at_other_mints: s(S::LostCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    lost_creates_account_round_trip_at_other_mints: r(S::LostCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    late_nothing_creates_account_at_other_mints: s(S::LateNothingCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    late_nothing_creates_account_round_trip_at_other_mints: r(S::LateNothingCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    land_freed_after_deadline_synchronous_at_other_mints: s(S::LandFreedAfterDeadline) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_credit_frees_all_round_trip_woken_at_other_mints: w(S::LateCreditFreesAll) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    signed_needs_states_round_trip_woken_at_other_mints: w(S::SignedNeedsStates) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    wakes_one_drops_rest_round_trip_woken_at_other_mints: w(S::WakesOneDropsRest) => one_accounts_payments_are_serialised_at_a_second_mint,
+    land_stale_clock_round_trip_woken_at_other_mints: w(S::LandStaleClock) => racing_outcomes_settle_once_at_a_second_mint,
+    retry_at_deadline_round_trip_woken_at_other_mints: w(S::RetryAtDeadline) => the_deadline_frees_the_account_at_a_second_mint,
+    land_freed_after_deadline_woken_at_other_mints: w(S::LandFreedAfterDeadline) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_nothing_frees_debt_round_trip_woken_at_other_mints: w(S::LateNothingFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    nothing_in_flight_frees_debt_round_trip_woken_at_other_mints: w(S::NothingInFlightFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    own_nothing_frees_debt_round_trip_woken_at_other_mints: w(S::OwnNothingFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    pay_nothing_frees_debt_round_trip_woken_at_other_mints: w(S::PayNothingFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    own_nothing_in_flight_frees_debt_round_trip_woken_at_other_mints: w(S::OwnNothingInFlightFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    pay_nothing_in_flight_frees_debt_round_trip_woken_at_other_mints: w(S::PayNothingInFlightFreesDebt) => debt_is_freed_exactly_once_at_a_second_mint,
+    land_in_time_at_deadline_round_trip_woken_at_other_mints: w(S::LandInTimeAtDeadline) => racing_outcomes_settle_once_at_a_second_mint,
+    retry_spent_unsigned_stays_unknown_round_trip_woken_at_other_mints: w(S::RetrySpentUnsignedStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_refused_unsigned_stays_unknown_round_trip_woken_at_other_mints: w(S::RetryRefusedUnsignedStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    retry_expired_unsigned_stays_unknown_round_trip_woken_at_other_mints: w(S::RetryExpiredUnsignedStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    spent_beside_pending_unknown_round_trip_woken_at_other_mints: w(S::SpentBesidePendingUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    invalid_creates_account_round_trip_woken_at_other_mints: w(S::InvalidCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    credit_frees_peer_debt_round_trip_woken_at_other_mints: w(S::CreditFreesPeerDebt) => the_global_cap_holds_whatever_payments_do_at_a_second_mint,
+    unreachable_creates_account_round_trip_woken_at_other_mints: w(S::UnreachableCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    pending_creates_account_round_trip_woken_at_other_mints: w(S::PendingCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    outputs_refused_creates_account_round_trip_woken_at_other_mints: w(S::OutputsRefusedCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    expired_creates_account_round_trip_woken_at_other_mints: w(S::ExpiredCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    lost_creates_account_round_trip_woken_at_other_mints: w(S::LostCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    late_nothing_creates_account_round_trip_woken_at_other_mints: w(S::LateNothingCreatesAccount) => a_hello_holds_no_state_at_a_second_mint,
+    outcome_unwoken_at_other_mints: s(S::OutcomeUnwoken) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    outcome_unwoken_round_trip_at_other_mints: r(S::OutcomeUnwoken) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    outcome_unwoken_woken_at_other_mints: w(S::OutcomeUnwoken) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    dropped_video_spent_no_ban_at_other_mints: s(S::DroppedVideoSpentNoBan) => only_the_sessions_video_is_admitted_at_a_second_mint,
+    dropped_video_spent_no_ban_round_trip_at_other_mints: r(S::DroppedVideoSpentNoBan) => only_the_sessions_video_is_admitted_at_a_second_mint,
+    dropped_video_spent_no_ban_round_trip_woken_at_other_mints: w(S::DroppedVideoSpentNoBan) => only_the_sessions_video_is_admitted_at_a_second_mint,
+    no_claim_unwoken_at_other_mints: s(S::NoClaimUnwoken) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    no_claim_unwoken_round_trip_at_other_mints: r(S::NoClaimUnwoken) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    no_claim_unwoken_woken_at_other_mints: w(S::NoClaimUnwoken) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    no_claim_unwoken_on_tasks_at_other_mints: t(S::NoClaimUnwoken) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    dropped_land_wakes_none_at_other_mints: s(S::DroppedLandWakesNone) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    dropped_land_wakes_none_round_trip_at_other_mints: r(S::DroppedLandWakesNone) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    dropped_land_wakes_none_woken_at_other_mints: w(S::DroppedLandWakesNone) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    dropped_land_wakes_none_on_tasks_at_other_mints: t(S::DroppedLandWakesNone) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    banned_claim_not_credited_at_other_mints: s(S::BannedClaimNotCredited) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    banned_claim_not_credited_round_trip_at_other_mints: r(S::BannedClaimNotCredited) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    banned_claim_not_credited_woken_at_other_mints: w(S::BannedClaimNotCredited) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    banned_claim_not_credited_at_start_at_other_mints: l(S::BannedClaimNotCredited) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    banned_claim_not_credited_on_tasks_at_other_mints: t(S::BannedClaimNotCredited) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    credit_spills_to_peers_at_other_mints: s(S::CreditSpillsToPeers) => peers_are_isolated_at_a_second_mint,
+    credit_spills_to_peers_round_trip_at_other_mints: r(S::CreditSpillsToPeers) => peers_are_isolated_at_a_second_mint,
+    credit_spills_to_peers_woken_at_other_mints: w(S::CreditSpillsToPeers) => peers_are_isolated_at_a_second_mint,
+    credit_spills_to_peers_at_start_at_other_mints: l(S::CreditSpillsToPeers) => peers_are_isolated_at_a_second_mint,
+    credit_spills_to_peers_on_tasks_at_other_mints: t(S::CreditSpillsToPeers) => peers_are_isolated_at_a_second_mint,
+    dropped_video_pay_keeps_debt_at_other_mints: s(S::DroppedVideoPayKeepsDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
+    dropped_video_pay_keeps_debt_round_trip_at_other_mints: r(S::DroppedVideoPayKeepsDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
+    dropped_video_pay_keeps_debt_woken_at_other_mints: w(S::DroppedVideoPayKeepsDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
+    dropped_video_pay_keeps_debt_at_start_at_other_mints: l(S::DroppedVideoPayKeepsDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
+    dropped_video_pay_keeps_debt_on_tasks_at_other_mints: t(S::DroppedVideoPayKeepsDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
+    state_check_down_is_spent_of_a_held_swap_round_trip_at_other_mints: r(S::StateDownIsSpent) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    state_check_down_is_spent_of_a_held_swap_woken_at_other_mints: w(S::StateDownIsSpent) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    state_check_down_is_spent_of_a_held_swap_at_start_at_other_mints: l(S::StateDownIsSpent) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    state_check_down_is_spent_of_a_held_swap_on_tasks_at_other_mints: t(S::StateDownIsSpent) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+);
+
+/// Each scenario whose seeders are paid judges at their second quoted mint every answer of
+/// a mint it judges at the first (`nfx_pay::scenarios_at_every_quoted_mint!`): what the
+/// mint answered to a swap, its retry and its completion, what a read of the swap's inputs
+/// and outputs showed, and whether the outcome was settled in time or late, as the honest
+/// mock notes them. (A case in which a watcher pays, at the mint a harness gives every
+/// watcher, pays there in both: what its seeder judges of that mint, the cases that pay a
+/// seeder themselves have it judge of the second.)
+macro_rules! judged_at_each_quoted_mint {
+    ($($first:ident, $second:ident: $case:ident $(+ $bound:ident)?;)*) => {
+        mod judged_at_each_quoted_mint {
+            use super::*;
+            $(
+                #[test]
+                fn $first() {
+                    let h = Arc::new(MockHarness::noting_answers());
+                    let noted = h.clone();
+                    let run = nfx_pay::run_scenario!(adversary::$first(&*h));
+                    assert!(
+                        matches!(run, adversary::Ran::Finished),
+                        "{} passes against the honest mock",
+                        stringify!($first)
+                    );
+                    let at_first = noted.answers_judged();
+                    let h = Arc::new(MockHarness::noting_answers());
+                    let noted = h.clone();
+                    let run = nfx_pay::run_scenario!(adversary::$second(&*h));
+                    assert!(
+                        matches!(run, adversary::Ran::Finished),
+                        "{} passes against the honest mock",
+                        stringify!($second)
+                    );
+                    let at_second = noted.answers_judged();
+                    for (asked, answer, other) in &at_first {
+                        assert!(
+                            *other || at_second.contains(&(*asked, answer.clone(), true)),
+                            "{} judges, at its seeders' first quoted mint, this answer to \
+                             {asked}: {answer}; {} judges it at their second",
+                            stringify!($first),
+                            stringify!($second)
+                        );
+                    }
+                }
+            )*
+        }
+    };
+}
+
+nfx_pay::scenarios_at_every_quoted_mint!(judged_at_each_quoted_mint);

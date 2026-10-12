@@ -565,6 +565,17 @@ pub struct EngineParams {
 /// engine may spawn tasks on the runtime it was made in (the suite makes each engine on its
 /// own task), never on whatever thread polls its futures.
 ///
+/// **Its mints.** A seeder quotes the harness's own mint and whatever others the suite
+/// names ([`EngineParams`]), and the suite pays at each ([`Harness::token_at`]): it runs
+/// every scenario whose seeders it pays at the second of two quoted mints as at the one,
+/// NFX-07 §3 stating its rules of a swap and its account, never of a mint. So a harness
+/// backs every mint its seeders quote, and what a method here that names no mint does to
+/// "the mint", it does to each of them at once: an outage, a request held, lost or given
+/// up, a read left unanswered, a [`MintEvent`]; and the keyset events, which are of the
+/// keyset every mint issues from until it starts one of its own
+/// ([`Harness::start_keyset_at`]). No scenario has one mint down while another answers:
+/// that takes faults that name a mint, which a harness does not have.
+///
 /// **The panic hook.** The runner notes the first panic raised on a scenario's thread with
 /// a panic hook of its own, set over the hook that stood and handing every panic on to it
 /// ([`crate::adversary::run_on_a_thread`]). So a harness and its engine leave the process's
