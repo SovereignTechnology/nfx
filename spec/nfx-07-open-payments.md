@@ -572,8 +572,9 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   - Pay once the account's unpaid count reaches half of `window`, rounded up (3 of a
     `window` of 5), for each payment, on whichever of the seeder's ledgers and whatever
     came before it (as for the token's shape, above), so the seeder need not stall while a
-    payment is in flight. The `window` is the session's quote's: a seeder may quote
-    another on a later session.
+    payment is in flight. The `window` is the open session's quote's, whatever an earlier
+    session's or another video's was: a seeder may quote another on a later session, and
+    each of its videos its own.
   - Never pay ahead of need, except right after a refusal. A refusal licenses the next
     time the watcher decides what to pay on that video's ledger, and no other: then, if
     nothing else stops a payment, pay ahead half of `window`, rounded down, less any
@@ -1574,3 +1575,10 @@ paths on one host are two origins.
     mint's refusal of the keys (12001) that comes then is not used, as keys and a listing
     are not (was: silent for a payment whose turn came in time, and the mock asked once in
     its deadline's second).
+- Draft 2026-10-12 (M2.0 thirty-first audit, `docs/nfx/reviews/2026-09-24-m2.0-thirty-first-audit.md`).
+  The watcher's side:
+  - §3a: the `window` a watcher pays by is the open session's quote's "whatever an earlier
+    session's or another video's was", as the price's sentence already said of the price:
+    a seeder may quote each of its videos its own window (was: "the session's quote's: a
+    seeder may quote another on a later session", which said it of a later session only;
+    the mock already paid each ledger by its own session's window).
