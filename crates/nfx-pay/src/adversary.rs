@@ -18590,25 +18590,29 @@ async fn a_stopped_viewer_waits_from_sending<H: Harness>(h: &H) {
             .expect("a session, its quote taken");
         advance(h, Duration::from_secs(179)).await;
         let s = bring_about(h, &e, s, &mut v, event, false).await;
+        let early = v.due().await.expect("due answers once stopped, at 179 s");
         assert!(
-            v.due()
-                .await
-                .expect("due answers once stopped, at 179 s")
-                .is_none()
-                && !h.claimed_any(&unread.token).await,
+            !h.claimed_any(&unread.token).await,
             "stopped, then {event} at 179 s from sending: the closed session's payment is not \
              reclaimed before 180 s"
         );
-        advance(h, SECOND).await;
         assert!(
-            v.due()
-                .await
-                .expect("due answers once stopped, at 180 s")
-                .is_none()
-                && h.claimed_all(&unread.token).await
-                && !h.steal(&unread.token).await,
+            early.is_none(),
+            "stopped, then {event} at 179 s from sending the closed session's payment: nothing \
+             undoes a stop, whatever the watcher waits on, so that due pays nothing"
+        );
+        advance(h, SECOND).await;
+        let late = v.due().await.expect("due answers once stopped, at 180 s");
+        assert!(
+            h.claimed_all(&unread.token).await && !h.steal(&unread.token).await,
             "stopped, then {event} at 179 s from sending: that starts no wait again, and the \
              closed session's payment is reclaimed 180 s after it was sent"
+        );
+        assert!(
+            late.is_none(),
+            "stopped, then {event} at 179 s from sending the closed session's payment: nothing \
+             undoes a stop, whatever the watcher waits on, so the due that reclaims the payment \
+             at 180 s pays nothing after it"
         );
         close(h, s).await;
     }
@@ -18943,13 +18947,20 @@ async fn an_honest_ack_leaves_the_standing_stopped<H: Harness>(h: &H) {
     // which shows the payment, equals the ledger and is taken.
     close(h, s0).await;
     v0.end();
+    assert!(
+        v0.stopped() && v1.stopped(),
+        "the session's end leaves the standing stopped"
+    );
     let s0 = open_on(h, &e, 1, 0).await;
     let taken = v0.quote(s0.quote());
     assert!(
-        taken.is_ok() && v0.stopped() && v1.stopped(),
+        v0.stopped() && v1.stopped(),
+        "a new session's honest quote leaves the standing stopped"
+    );
+    assert!(
+        taken.is_ok(),
         "stopped, a matching ack still settles its payment into the ledger, and nothing more: \
-         the next session's honest quote equals the ledger and is taken, and the standing \
-         stays stopped: {taken:?}"
+         the next session's honest quote equals the ledger and is taken: {taken:?}"
     );
     close(h, (s0, s1)).await;
 }
