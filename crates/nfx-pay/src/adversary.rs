@@ -8900,6 +8900,60 @@ pub async fn a_global_cap_bounds_free_service<H: Harness>(h: &H) {
         "a peer's videos do not share chunks in the count"
     );
     a_dropped_videos_unpaid_chunks_count_until_they_age_out(h).await;
+    a_dropped_videos_credit_frees_what_it_covers(h).await;
+}
+
+/// Flaws `DroppedVideoPayKeepsDebt`, `DroppedVideoPayFreesAllDebt`,
+/// `DroppedVideoLateClaimKeepsDebt`, `DroppedVideoLateClaimFreesAllDebt` and
+/// `DroppedVideoCreditFreesPeerDebt`. A claim credited "frees from the global count exactly
+/// the chunks it covers; the account's chunks beyond it are still unpaid" (NFX-07 §3, late
+/// outcomes), and "credit on one account never offsets another's debt" (service limit): on
+/// a video the seeder no longer serves as on any, since it keeps its accounts there by the
+/// rules that hold for any, and their unpaid chunks count as any others. One account's four
+/// unpaid chunks of video 0, and two its peer owes on video 1, fill a cap of 6, and the
+/// seeder drops video 0. A payment for two of video 0's chunks is acknowledged there, on
+/// the session open at the drop; or (`late`) it was claimed at the mint before the drop, its
+/// answer lost, and a sweep learns it after. Either way the seeder's other video admits
+/// two, and no more: the cells of a credit on a video no longer served, acknowledged or
+/// late, freeing too few, the account's other chunks, or its peer's on another video.
+async fn a_dropped_videos_credit_frees_what_it_covers<H: Harness>(h: &H) {
+    for late in [false, true] {
+        let e = h.engine(1, 4, 6);
+        let mut s = open(h, &e, 1).await;
+        let mut elsewhere = open_on(h, &e, 1, 1).await;
+        assert_eq!(
+            serve(h, &mut s, 0, 4) + serve_on(h, &mut elsewhere, 1, 0, 2),
+            6,
+            "a peer's four unpaid chunks of video 0, and its two of video 1, fill the global \
+             cap"
+        );
+        let mut other = open_on(h, &e, 2, 1).await;
+        assert_eq!(serve_on(h, &mut other, 1, 0, 1), 0, "the cap is full");
+        if late {
+            lost_claim(h, &mut s, 2, 2).await;
+            close(h, s).await;
+            h.drop_video(&e, 0);
+            e.sweep().await;
+        } else {
+            h.drop_video(&e, 0);
+            let r = pay_to(h, &mut s, 2).await;
+            assert!(
+                matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (2, 2)),
+                "a payment on a session open when its video was dropped is verified as any \
+                 other: {r:?}"
+            );
+            close(h, s).await;
+        }
+        assert_eq!(
+            landed(h, || serve_on(h, &mut other, 1, 0, 4)).await,
+            2,
+            "a claim credited on a video no longer served frees from the global count \
+             exactly the chunks it covers, of the four its account owes there and the two \
+             its peer owes on the seeder's other video: that video admits two, and no more \
+             (credited late: {late})"
+        );
+        close(h, (elsewhere, other)).await;
+    }
 }
 
 /// Flaws `DroppedVideoFreesDebt`, `DroppedVideoDebtNeverAges`, `DroppedVideoPayKeepsDebt`
@@ -8907,9 +8961,10 @@ pub async fn a_global_cap_bounds_free_service<H: Harness>(h: &H) {
 /// serving count toward the global cap until they are paid or age out, as any others
 /// (NFX-07 §3: the cap counts the unpaid chunks admitted within the last `debt_ttl` across
 /// all peers and videos). Video 0's unpaid chunks fill a cap of 10, and ten seconds on the
-/// seeder drops video 0: video 1 admits nothing unpaid. A debtor pays for its two chunks, on
-/// its session open at the drop: video 1 admits two, and no more, then or a second before
-/// `debt_ttl` has passed since video 0's admissions; and admits again once it has.
+/// seeder drops video 0: video 1 admits nothing unpaid. A debtor that owes four chunks pays
+/// for two of them, on its session open at the drop: video 1 admits two, and no more
+/// (`DroppedVideoPayFreesAllDebt` frees the debtor's other two as well), then or a second
+/// before `debt_ttl` has passed since video 0's admissions; and admits again once it has.
 async fn a_dropped_videos_unpaid_chunks_count_until_they_age_out<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 10);
     let mut debtors = Vec::new();
@@ -8931,7 +8986,8 @@ async fn a_dropped_videos_unpaid_chunks_count_until_they_age_out<H: Harness>(h: 
          last debt_ttl: they still count toward the global cap, and its other video admits \
          nothing unpaid"
     );
-    let r = match debtors.last_mut() {
+    // The first debtor owes four chunks, and pays for two of them.
+    let r = match debtors.first_mut() {
         Some(s) => pay_to(h, s, 2).await,
         None => panic!("three debtors"),
     };
@@ -8944,7 +9000,8 @@ async fn a_dropped_videos_unpaid_chunks_count_until_they_age_out<H: Harness>(h: 
         serve_on(h, &mut other, 1, 0, 4),
         2,
         "a payment on a video no longer served frees from the global count exactly the \
-         chunks it covers: its other video admits two, and no more"
+         chunks it covers, of the four its account owes: its other video admits two, and no \
+         more"
     );
     advance(h, h.debt_ttl() - 11 * SECOND).await;
     assert_eq!(
