@@ -8600,8 +8600,9 @@ async fn a_dropped_videos_hello_is_judged_as_it_arrives<H: Harness>(h: &H) {
                     "from its deadline, a first payment's swap abandoned in flight is a swap \
                      whose outcome is unknown: the hello of its peer for a video no longer \
                      served is answered, and reads it as any hello reads its account's \
-                     unknown swaps (flaw `DroppedVideoInFlightHelloSkipsRead`): the mint has \
-                     made the claim, and its quote shows the payment"
+                     unknown swaps, one that took that payment's dead turn over as it \
+                     arrived as any other: the mint has made the claim, and its quote shows \
+                     the payment"
                 );
             } else {
                 assert_eq!(
@@ -9897,7 +9898,10 @@ pub async fn bans_expire_and_state_stays_bounded<H: Harness>(h: &H) {
             settle(h).await;
             assert!(
                 h.key_requests() > asked,
-                "the payment waits for the keys it asked for"
+                "a payment asks for its keys before it reads its account's unknown swaps: its \
+                 read comes once, after its checks, just before its swap (NFX-07 §3, late \
+                 outcomes), so the keys are asked for though the mint leaves reads unanswered \
+                 for 40 s, and the payment waits for them"
             );
             advance(h, Duration::from_secs(30)).await;
             release(h).await;
