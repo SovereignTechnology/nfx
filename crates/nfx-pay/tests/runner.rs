@@ -631,10 +631,17 @@ fn the_suite_closes_connections_through_its_helper() {
 #[test]
 fn every_scenario_runs_at_each_quoted_mint_or_says_why() {
     // The suite's list, as `adversary_suite!` keeps it: one name a line, from the line
-    // that hands them over to the one that closes it.
-    let from = SUITE
-        .find("$crate::adversary_suite!(@each $h;")
-        .expect("the suite's list");
+    // that hands them over to the one that closes it. That line is found by the arm it
+    // hands them to, which the suite's file names once: the macro's own name is spelled in
+    // no code here, a string's included, since the lock refuses it in the code of any file
+    // it does not name as running the suite (`crates/ci/locked.py`, `suite_users`).
+    let hands_over = "!(@each $h;";
+    assert_eq!(
+        SUITE.matches(hands_over).count(),
+        1,
+        "the suite's file hands one list of scenarios to its `@each` arm"
+    );
+    let from = SUITE.find(hands_over).expect("the suite's list");
     let list = &SUITE[from..];
     let list = &list[..list.find(");").expect("the end of the suite's list")];
     let names: Vec<&str> = list
@@ -662,8 +669,8 @@ fn every_scenario_runs_at_each_quoted_mint_or_says_why() {
         let alone = AT_ONE_MINT.iter().filter(|(n, _)| n == name).count();
         assert!(
             (paired, alone) == (1, 0) || (paired, alone) == (0, 1),
-            "{name} is run at every quoted mint (`scenarios_at_every_quoted_mint!`) or says \
-             why not (`AT_ONE_MINT`): once, in one of the two"
+            "{name} is run at every quoted mint (`AT_EVERY_QUOTED_MINT`) or says why not \
+             (`AT_ONE_MINT`): once, in one of the two"
         );
     }
     // And each row's two scenarios, and each that says why, are scenarios of the suite.

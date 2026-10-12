@@ -338,9 +338,16 @@ macro_rules! second_mint_scenarios {
 
 scenarios_at_every_quoted_mint!(second_mint_scenarios);
 
-/// Why a scenario runs at one mint only: its case is a watcher's ledger, and pays no
-/// seeder.
-const A_WATCHERS_LEDGER: &str = "a watcher's ledger: no seeder is paid";
+/// Why a scenario runs at one mint only: its cases are of a watcher's ledger, and the
+/// payments they judge are the watcher's, at the mint the harness gives every watcher
+/// ([`Harness::viewer`]), a harness having none of another mint: taken by a seeder, or by
+/// the suite in a seeder's place, which starts none (the tables that share one list of a
+/// watcher's inputs and states). Where such a case pays a seeder a token of its own too
+/// (a crowd's payment that frees a cap, an account's earlier payment), that is a claim in
+/// time, which the scenarios run at every quoted mint judge at each.
+const A_WATCHERS_LEDGER: &str = "a watcher's ledger: its payments are the watcher's, at the \
+                                 harness's own mint, taken by a seeder or by the suite in a \
+                                 seeder's place";
 /// Its watcher pays, at the mint the harness gives every watcher: a harness has none of
 /// another mint ([`Harness::viewer`]).
 const ITS_WATCHER_PAYS: &str = "its watcher pays at the harness's own mint";
@@ -541,6 +548,38 @@ pub const AT_ONE_MINT: &[(&str, &str)] = &[
     ("an_honest_pair_survives_a_refused_hello", ITS_WATCHER_PAYS),
     ("an_honest_pair_survives_a_late_mint", ITS_WATCHER_PAYS),
     ("a_paying_watcher_gets_through_a_full_cap", ITS_WATCHER_PAYS),
+    (
+        "a_payment_on_its_first_ledger_holds_its_place_as_time_passes",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "a_payment_on_another_videos_ledger_holds_its_place_as_time_passes",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "nothing_undoes_a_stop_on_its_first_ledger_whatever_comes",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "nothing_undoes_a_stop_on_another_videos_ledger_whatever_comes",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "a_payment_waits_180_s_and_holds_its_place_whatever_comes",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "a_refusals_licence_lasts_to_its_due_whatever_comes",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "the_tries_on_its_first_ledger_are_used_and_restored_by_nothing_else",
+        A_WATCHERS_LEDGER,
+    ),
+    (
+        "the_tries_on_another_videos_ledger_are_used_and_restored_by_nothing_else",
+        A_WATCHERS_LEDGER,
+    ),
     (
         "a_seeders_two_mints_hold_its_swaps_at_once",
         NAMES_ITS_MINTS,
