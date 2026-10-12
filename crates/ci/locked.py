@@ -44,7 +44,26 @@ The facts, one per line:
   (`suite_users`). A scenario can be run one by one, so it is this, not the macro, that
   holds a harness file to the whole list, and keeps one from being pinned at whatever
   number of tests ran at its pin; the engine's harness file is named there when it is
-  written (M2.1).
+  written (M2.1). The numbers declared, each read from the pinned sources (`test_counts`):
+  - a harness file (`WHOLE_SUITE`): the scenarios in the suite's list, a name to a line.
+    The scenarios the suite's file makes from its second list, each scenario whose seeders
+    are paid run again at a second quoted mint (`scenarios_at_every_quoted_mint!`), are
+    names of the list like any other, and the list's names of that kind must be that
+    second list's, row for row;
+  - the honest timings (`SUITE_BY_PARTS`): the list's length for each use of the whole
+    suite, and one for each scenario named under an `@each` use;
+  - the mutants: one for each entry of the registry, in its form at every mint
+    (`catches!`) and in its form of other mints (`catches_at_other_mints!`), and one for
+    each row of the suite's second list, which the file takes once to check that what a
+    scenario judges at its seeders' first mint it judges at their second. The file's code
+    has a test attribute in those three macros and nowhere else, uses each once, and holds
+    nothing in the two registries but entries;
+  - the runner, and the pay/1 vector tests: the test attributes of the file;
+  - nfx-pay's own unit tests: the test attributes of the library's test modules
+    (src/adversary/), the rest of src/ holding none in its code but the one the suite's
+    macro gives each scenario where a test file uses it.
+  The suite's second list is held as its macro is: named in the code of no file but the
+  suite's own (where it is defined and used once) and the mutants' (used once).
 
 Every path package must be a workspace member: a crate outside the workspace, wired in
 by path, would escape every check here. And every workspace member must be one the
@@ -71,8 +90,9 @@ directory made for the run, so the checkout's own is never read or trusted):
 - every test binary of the money crates ran, and no other: the binaries run are the ones
   the build made and checked, one for each target cargo metadata lists, and each reported
   exactly the number of tests pinned for it, all passed, none ignored or filtered out;
-- the suite, the mutants, the runner they share and the pay/1 vector tests each reported
-  exactly the number of tests their pinned sources declare. A test runner that runs
+- the suite, the mutants, the runner they share, nfx-pay's unit tests and the pay/1
+  vector tests each reported exactly the number of tests their pinned sources declare
+  (above). A test runner that runs
   nothing fails. What the numbers do not say is which tests ran: a file that defined as
   many tests of other names would report the same number, and is caught by its pin and
   by whoever reads the diff of a re-pin, not here.
@@ -297,16 +317,55 @@ SUITE_BY_PARTS = (
 # tracked file of them (a test file may `include!` one that is no Rust file), and every
 # Rust file elsewhere.
 SUITE_NAMED_IN = ["crates/nfx-pay", "crates/nfx-pay-wire", "*.rs"]
+# The suite's second list: the scenarios whose seeders are paid, each with its name at a
+# second quoted mint. The suite's file makes those scenarios from it, and names them in the
+# suite's list; the mutants take it once, for a test of each row. It is exported as the
+# suite's macro is, and a file that took it could run its rows with no word of that macro,
+# so it is held the same way: named in the code of the suite's own file on two lines, where
+# it is defined and where the second scenarios are made from it, in the mutants' on one,
+# and in no other file's.
+PAIRS_MACRO = "scenarios_at_every_quoted_mint"
+PAIRS_MADE = "scenarios_at_every_quoted_mint!(second_mint_scenarios);"
+MUTANTS = "crates/nfx-pay/tests/mutants.rs"
+PAIRS_JUDGED = "nfx_pay::scenarios_at_every_quoted_mint!(judged_at_each_quoted_mint);"
+# nfx-pay's unit tests: the library's test modules, and its other sources, which hold none.
+LIB = "nfx-pay lib nfx_pay"
+LIB_TESTS_IN = "crates/nfx-pay/src/adversary/"
+# A line that is a test attribute and nothing else, and an attribute that makes a test
+# however it is written (on its item's line, by a path, under `cfg_attr`): in a file whose
+# tests are counted the two numbers are equal, so none is written another way.
+TEST_LINE = r"^[ \t]*#\[test\]$"
+TEST_WORD = r"#\[\s*(?:\w+\s*::\s*)*test\b|\bcfg_attr\([^\n]*,\s*(?:\w+\s*::\s*)*test\s*[,()]"
+ENTRY = r"^    [a-z_0-9]+: [svrwlt]\([SV]::[A-Za-z0-9]+\) => [a-z_0-9]+,$"
 
 
-def names_suite(text: str) -> list[str]:
-    """The lines of a file that name the suite's macro in what may be code: every line that
-    holds the word but those that are a line comment from their start (`//`, `///`, `//!`).
-    A line that begins so is no use of the macro wherever it stands (in a block comment or
-    a string it is none either); a line that names it after code, in a block comment or in a
-    string counts as one, which errs on the side of refusing."""
+def names_suite(text: str, word: str = SUITE_MACRO) -> list[str]:
+    """The lines of a file that name the suite's macro (or `word`) in what may be code:
+    every line that holds the word but those that are a line comment from their start
+    (`//`, `///`, `//!`). A line that begins so is no use of the macro wherever it stands
+    (in a block comment or a string it is none either); a line that names it after code, in
+    a block comment or in a string counts as one, which errs on the side of refusing."""
     return [line for line in text.splitlines()
-            if re.search(rf"\b{SUITE_MACRO}\b", line) and not line.lstrip().startswith("//")]
+            if re.search(rf"\b{word}\b", line) and not line.lstrip().startswith("//")]
+
+
+def code_of(text: str) -> str:
+    """A file's lines but those that are a line comment from their start."""
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+
+
+def test_lines(text: str, where: str) -> int:
+    """The tests a file's code declares, one for each line that is a test attribute and
+    nothing else: a file that holds the word in an attribute written any other way fails,
+    since its count would not follow it."""
+    code = code_of(text)
+    lines = len(re.findall(TEST_LINE, code, re.M))
+    words = len(re.findall(TEST_WORD, code))
+    if lines != words:
+        fail(f"{where} has {words} attributes that name `test` in its code, and {lines} of them "
+             "are a line of their own that reads #[test]: the lock counts a file's tests by "
+             "those lines")
+    return lines
 
 
 def suite_file(name: str) -> str:
@@ -339,11 +398,114 @@ def suite_users() -> None:
                  "WHOLE_SUITE if it runs the whole list once, in SUITE_BY_PARTS if its uses "
                  "are counted one by one; a file pinned without either would be held to "
                  "whatever number of tests ran at its pin")
+    # The suite's second list, the same way: the suite's own file and the mutants' name it,
+    # each on the lines `pairs` and `mutant_tests` hold them to, and no other file does.
+    found = subprocess.run(["git", "grep", "-l", "-z", "-w", "-e", PAIRS_MACRO, "--", *SUITE_NAMED_IN],
+                           cwd=REPO, capture_output=True, text=True)
+    if found.returncode != 0:
+        fail(f"git grep for {PAIRS_MACRO} failed or found nothing ({found.returncode}):\n"
+             f"{found.stderr[-3000:]}")
+    for f in sorted(x for x in found.stdout.split("\0") if x):
+        if f in (SUITE_SOURCE, MUTANTS):
+            continue
+        lines = names_suite((REPO / f).read_text(errors="replace"), PAIRS_MACRO)
+        if lines:
+            fail(f"{f} names {PAIRS_MACRO} in its code ({len(lines)} lines, the first: "
+                 f"{lines[0].strip()[:120]}). Only the suite's own file, which makes the scenarios "
+                 "at a second quoted mint from that list, and tests/mutants.rs, which takes it "
+                 "once, may: a file that ran its rows would be held to whatever number of "
+                 "tests ran at its pin")
+
+
+def pairs(adversary: str, listed: list[str]) -> int:
+    """The rows of the suite's second list, each a scenario whose seeders are paid and its
+    name at a second quoted mint: read from the macro that keeps it, a row to a line. The
+    suite's file names that macro in its code where it defines it and where it makes the
+    second scenarios from it, and nowhere else; and the names of that kind in the suite's
+    list are the rows' second names, each row's first name a scenario of the list too."""
+    own = names_suite(adversary, PAIRS_MACRO)
+    if [x.strip() for x in own] != [f"macro_rules! {PAIRS_MACRO} {{", PAIRS_MADE]:
+        fail(f"{SUITE_SOURCE} names {PAIRS_MACRO} on {len(own)} lines of its code, where it "
+             "defines the macro and makes the scenarios at a second quoted mint from its list "
+             "(2), or not as those two: " + " | ".join(x.strip()[:80] for x in own[:5]))
+    kept = re.search(rf"^macro_rules! {PAIRS_MACRO} \{{\n    \(\$with:ident\) => \{{\n"
+                     r"        \$with! \{\n(.*?)\n        \}\n    \};\n\}$", adversary, re.M | re.S)
+    if not kept:
+        fail(f"cannot find the list {PAIRS_MACRO}! keeps")
+    rows = []
+    for line in kept.group(1).splitlines():
+        row = re.fullmatch(r"            ([a-z_0-9]+), ([a-z_0-9]+): [a-z_0-9]+(?: \+ [A-Za-z]+)?;", line)
+        if not row:
+            fail(f"a line of {PAIRS_MACRO}!'s list that is no row of it: {line.strip()[:120]}")
+        rows.append(row.groups())
+    firsts, seconds = [a for a, _ in rows], [b for _, b in rows]
+    made = [name for name in listed if name.endswith("_at_a_second_mint")]
+    if (sorted(seconds) != sorted(made) or len(set(firsts + seconds)) != 2 * len(rows)
+            or not set(firsts) <= set(listed) or any(b != f"{a}_at_a_second_mint" for a, b in rows)):
+        fail(f"{PAIRS_MACRO}!'s {len(rows)} rows and the suite's list disagree: the list names "
+             f"{len(made)} scenarios at a second mint, and each row is a scenario of the list and "
+             "its name there, once")
+    return len(rows)
+
+
+def mutant_tests(mutants: str, rows: int) -> int:
+    """The tests tests/mutants.rs declares: its registry's entries, at every mint and at
+    other mints, and one for each row of the suite's second list, which it takes once. The
+    file's code has a test attribute in the three macros that make those, one each, and
+    nowhere else; it uses each once; and the two registries hold entries and nothing more."""
+    code = code_of(mutants)
+    makers = ("catches", "catches_at_other_mints", "judged_at_each_quoted_mint")
+    for macro in makers:
+        body = re.findall(rf"^macro_rules! {macro} \{{\n(.*?)\n\}}$", code, re.M | re.S)
+        if len(body) != 1 or len(re.findall(TEST_LINE, body[0], re.M)) != 1:
+            fail(f"tests/mutants.rs defines {macro}! {len(body)} times, or not with one test "
+                 "attribute in it")
+    if test_lines(mutants, "tests/mutants.rs") != len(makers):
+        fail("tests/mutants.rs has a test attribute outside the three macros that make its "
+             "tests, whose uses the lock counts")
+    entries = 0
+    for macro in makers[:2]:
+        uses = re.findall(rf"\b{macro}!\s*[(\[{{]", code)
+        block = re.findall(rf"^{macro}!\(\n(.*?)\n\);$", code, re.M | re.S)
+        if len(uses) != 1 or len(block) != 1:
+            fail(f"tests/mutants.rs uses {macro}! {len(uses)} times in its code, and the lock "
+                 f"counts the entries of one use, the registry ({len(block)} found)")
+        lines = [line for line in block[0].splitlines() if line.strip()]
+        odd = [line for line in lines if not re.match(ENTRY, line)]
+        if odd:
+            fail(f"tests/mutants.rs: a line of {macro}!'s registry that is no entry of it, a "
+                 f"name, a harness kind, a defect and a scenario: {odd[0].strip()[:120]}")
+        entries += len(lines)
+    if entries != len(re.findall(r"^\s+[a-z_0-9]+: [svrwlt]\(", code, re.M)):
+        fail("tests/mutants.rs has a line that reads as a registry entry outside its two registries")
+    taken = names_suite(mutants, PAIRS_MACRO)
+    if taken != [PAIRS_JUDGED] or re.findall(rf"\b{makers[2]}!\s*[(\[{{]", code):
+        fail(f"tests/mutants.rs takes the suite's second list once, as `{PAIRS_JUDGED}`, and its "
+             f"code names {PAIRS_MACRO} on {len(taken)} lines, or uses {makers[2]}! by hand: "
+             + " | ".join(x.strip()[:80] for x in taken[:4]))
+    return entries + rows
+
+
+def lib_tests() -> int:
+    """nfx-pay's unit tests: the test attributes of the library's test modules. No other
+    source of the crate has one in its code but the suite's file, in the arm of its macro
+    that gives each scenario its test where a test file uses it."""
+    files = [f for f in run("git", "ls-files", "-z", "--", "crates/nfx-pay/src", cwd=REPO).split("\0") if f]
+    count = 0
+    for f in sorted(files):
+        n = test_lines((REPO / f).read_text(errors="replace"), f)
+        if f.startswith(LIB_TESTS_IN):
+            count += n
+        elif n != (1 if f == SUITE_SOURCE else 0):
+            fail(f"{f} has {n} test attributes in its code: the library's unit tests are counted "
+                 f"in {LIB_TESTS_IN}, and the suite's file has the one its macro gives a scenario")
+    return count
 
 
 def test_counts() -> dict[str, int]:
-    """The number of tests each pinned test binary declares. Every file that uses the
-    suite's macro is among them (`suite_users`)."""
+    """The number of tests each pinned test file declares (the module's doc says how each
+    is read; nfx-pay's unit tests are `lib_tests`). Every file that uses the suite's macro
+    is among them (`suite_users`)."""
     adversary = (CRATES / "nfx-pay" / "src" / "adversary.rs").read_text()
     listed = re.search(r"adversary_suite!\(@each \$h;\n(.*?)\n\s*\);", adversary, re.S)
     if not listed:
@@ -351,7 +513,10 @@ def test_counts() -> dict[str, int]:
     mutants = (CRATES / "nfx-pay" / "tests" / "mutants.rs").read_text()
     runner = (CRATES / "nfx-pay" / "tests" / "runner.rs").read_text()
     pay1 = (CRATES / "nfx-pay-wire" / "tests" / "pay1.rs").read_text()
-    scenarios = len(re.findall(r"^\s+[a-z_0-9]+,$", listed.group(1), re.M))
+    names = re.findall(r"^\s+([a-z_0-9]+),$", listed.group(1), re.M)
+    scenarios = len(names)
+    if len(set(names)) != scenarios or scenarios != len([x for x in listed.group(1).splitlines() if x.strip()]):
+        fail("the adversary_suite! list has a line that is no scenario's name, or a name twice")
     suite_users()
     # The suite's own file names the macro in its code twice: where it defines it, and where
     # its first arm hands the list to the second. A third would be another way in (a macro
@@ -383,9 +548,9 @@ def test_counts() -> dict[str, int]:
         counts[name] = (scenarios * len(whole)
                         + sum(len(re.findall(r"^\s+[a-z_0-9]+,$", names, re.M)) for names in each))
     counts.update({
-        "mutants": len(re.findall(r"^\s+[a-z_0-9]+: [svrwlt]\(", mutants, re.M)),
-        "runner": len(re.findall(r"^#\[test\]$", runner, re.M)),
-        "pay1": len(re.findall(r"^#\[test\]$", pay1, re.M)),
+        "mutants": mutant_tests(mutants, pairs(adversary, names)),
+        "runner": test_lines(runner, "tests/runner.rs"),
+        "pay1": test_lines(pay1, "nfx-pay-wire's tests/pay1.rs"),
     })
     return counts
 
@@ -427,7 +592,8 @@ def pinned_tests() -> dict[str, int]:
 
 def check_test_targets(targets: list[str]) -> None:
     """The money crates' test targets are exactly the ones the pins count, and each of the
-    suite's files declares the number of tests pinned for it: both known before any build."""
+    suite's files, and nfx-pay's unit tests, declares the number of tests pinned for it:
+    both known before any build."""
     pinned = pinned_tests()
     old, new = set(pinned), set(targets)
     if old != new:
@@ -439,6 +605,10 @@ def check_test_targets(targets: list[str]) -> None:
         if got != [n]:
             got = got[0] if len(got) == 1 else got
             fail(f"tests/{name}.rs declares {n} tests, and its pin counts {got}")
+    n = lib_tests()
+    if pinned.get(LIB) != n:
+        fail(f"nfx-pay's unit tests ({LIB_TESTS_IN}) declare {n} tests, and their pin counts "
+             f"{pinned.get(LIB)}")
 
 
 def facts_now() -> tuple[list[str], dict, list[dict]]:
@@ -610,7 +780,7 @@ def compiled_in(pin: bool, found: list[str], members: list[dict], build_dir: pat
     # The money tests ran, all of them: every test binary the build made, which is every
     # target cargo metadata lists, and then each library's doctests. `cargo test` exits 0
     # when a runner skips them, so each binary is matched to what it reported.
-    want = test_counts()
+    want, want_lib = test_counts(), lib_tests()
     out = subprocess.run(["cargo", "test", "--color", "never", "--locked", "--offline",
                           *target_dir, "-p", "nfx-pay", "-p", "nfx-pay-wire", "--all-targets"],
                          cwd=CRATES, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -656,6 +826,9 @@ def compiled_in(pin: bool, found: list[str], members: list[dict], build_dir: pat
         if got != [n]:
             got = got[0] if len(got) == 1 else got
             fail(f"tests/{name}.rs: {n} tests declared, {got} ran and passed")
+    if ran.get(LIB) != want_lib:
+        fail(f"nfx-pay's unit tests ({LIB_TESTS_IN}): {want_lib} tests declared, {ran.get(LIB)} ran "
+             "and passed")
     tests = sorted(f"{TESTS}{label} {n}" for label, n in ran.items())
 
     if pin:

@@ -99,8 +99,9 @@ fi
 #   - a test target of a money crate added, removed or renamed without a re-pin (read from
 #     cargo metadata, before any build); a test binary that did not run, that the build did
 #     not make, or that reported another number of tests than the one pinned for it (or, for
-#     the suite's files, than its sources declare); a test ignored or filtered out. The
-#     lock runs every target of the two crates as a test binary, and their doctests;
+#     the suite's files and nfx-pay's unit tests, than its sources declare); a test ignored
+#     or filtered out. The lock runs every target of the two crates as a test binary, and
+#     their doctests;
 #   - the adversary suite's macro (`adversary_suite`) named in the code of any file but the
 #     suite's own and the test files locked.py names as running it (read before any build,
 #     and at a re-pin too). Each of those is held to a number of tests the suite's list of
@@ -108,7 +109,22 @@ fi
 #     that runs the honest timings. A scenario can be run one by one, so it is this, not
 #     the macro, that holds a harness file to the whole list: a new one cannot be pinned
 #     at whatever number of tests ran, and the engine's (M2.1) is named in locked.py when
-#     it is written.
+#     it is written;
+#   - the suite's second list (`scenarios_at_every_quoted_mint`: each scenario whose
+#     seeders are paid, and its name at a second quoted mint) named in the code of any file
+#     but the suite's own and tests/mutants.rs, or there otherwise than once each; a name
+#     of the suite's list at a second mint that is no row of it, or a row that is none of
+#     the list's;
+#   - a number of tests declared that differs from its pin (before any build) or from what
+#     ran: for a harness file the names in the suite's list; for the honest timings that
+#     number for each use of the whole suite and one for each scenario named one by one;
+#     for the mutants one for each entry of the two registries (at every mint, at other
+#     mints) and one for each row of the suite's second list; for the runner, the pay/1
+#     vector tests and nfx-pay's unit tests (src/adversary/) their test attributes. A test
+#     attribute where the count does not look (outside the mutants' three macros, in
+#     another source of the library, written otherwise than as a line of its own), a use
+#     of a registry's macro beside the registry, or a line of a registry or of a list
+#     that is no entry of it, fails rather than go uncounted.
 #
 # CI is recognised by CI, GITLAB_CI or CI_JOB_ID. The pinned .github/workflows/ci.yml runs
 # this with CI=true: its lock job under env -i, its check job with LOCKED_DIRS_UNLOCKED
