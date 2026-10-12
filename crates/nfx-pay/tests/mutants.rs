@@ -11,6 +11,8 @@ use nfx_pay::mock::{MockHarness, SeederFlaw as S, ViewerFlaw as V};
 
 macro_rules! catches {
     ($($test:ident: $kind:ident($flaw:expr) => $scenario:ident),* $(,)?) => {
+        /// Every entry's harness kind and defect, as written.
+        const REGISTERED: &[(&str, &str)] = &[$((stringify!($kind), stringify!($flaw))),*];
         $(
             #[test]
             fn $test() {
@@ -21,9 +23,6 @@ macro_rules! catches {
                 // load is not taken for a hang.
                 let run = nfx_pay::run_scenario!(adversary::$scenario(&$kind($flaw)));
                 caught(&run, stringify!($scenario));
-                // And one that judges a mint's answer must be registered in its form of
-                // quoted mints other than the first too (`catches_at_other_mints!`).
-                $flaw.is_registered_at_every_mint(stringify!($kind));
             }
         )*
     };
@@ -33,10 +32,13 @@ macro_rules! catches {
 /// ([`MockHarness::at_other_mints`]): the seeder has it only while it judges an answer of
 /// such a mint, and is honest at its first. NFX-07 §3 states the rules of a swap's outcome,
 /// its retry, its completion and the reads of its state of the swap and its account, never
-/// of a mint, so every defect that judges a mint's answer is registered here too, on each
-/// harness it is registered on above: `catches!` refuses one that is not, once its run has
-/// shown that it judges one ([`nfx_pay::mock::judges_a_mints_answer`]). A defect is so
-/// never caught at a seeder's first mint and missed at its others.
+/// of a mint. What is enforced, by the tests of `judged_at_each_quoted_mint` below: every
+/// defect an honest seeder asks after while it judges such an answer, in the case of a
+/// scenario that runs at each quoted mint, is registered here on each harness kind it is
+/// registered on above, or is named with its reason (`NO_FORM_OF_OTHER_MINTS`,
+/// `OF_OTHER_MINTS_ALREADY`). A defect the mock asks after elsewhere (in a payment's own
+/// path, of a key request or a keyset listing, of a read as a whole) is under no such
+/// demand: the mock says so where it asks.
 macro_rules! catches_at_other_mints {
     ($($test:ident: $kind:ident($flaw:expr) => $scenario:ident),* $(,)?) => {
         /// Every defect registered at other mints, with the harness it is registered on.
@@ -75,32 +77,28 @@ const OF_OTHER_MINTS_ALREADY: [S; 5] = [
     S::OtherMintLateClaimKeepsDebt,
 ];
 
-/// A planted defect, as `catches!` asks after its registration at every quoted mint.
-trait Planted {
-    /// Panics if this defect, registered on harness `kind`, judges a mint's answer and is
-    /// not registered there in its form of other mints.
-    fn is_registered_at_every_mint(&self, kind: &str);
-}
+/// The defects a seeder asks after while it judges a mint's answer that have no entry at
+/// other mints all the same, each with why.
+const NO_FORM_OF_OTHER_MINTS: &[(S, &str)] = &[(
+    S::NoDeadline,
+    "it has no deadline at all, which is a payment's own wait for its answer: it is asked \
+     after as an outcome lands only so that the landing agrees with that wait, and with the \
+     wait honest, which abandons the payment at its deadline, what it answers there changes \
+     nothing (its entry at other mints passes the suite, and is none)",
+)];
 
-impl Planted for V {
-    /// A watcher's defect: no seeder has it.
-    fn is_registered_at_every_mint(&self, _kind: &str) {}
-}
+/// The scenarios at a second mint whose case judges an answer of the seeder's first mint
+/// too, each with why. None: a case that pays at the first mint again, a watcher's or one
+/// that names its mints, is run outside the case both mints share.
+const JUDGES_THE_FIRST_MINT_TOO: &[(&str, &str)] = &[];
 
-impl Planted for S {
-    fn is_registered_at_every_mint(&self, kind: &str) {
-        let registered = OF_OTHER_MINTS_ALREADY.contains(self)
-            || AT_OTHER_MINTS
-                .iter()
-                .any(|(k, flaw)| *k == kind && flaw == self);
-        assert!(
-            registered || !nfx_pay::mock::judges_a_mints_answer(*self),
-            "{self:?} judges a mint's answer (a swap's outcome, its retry, its completion or \
-             a read of its state), and is registered on harness `{kind}` at every mint only: \
-             register it there in its form of other mints too (`catches_at_other_mints!`)"
-        );
-    }
-}
+/// The scenarios whose case does not judge each answer as many times at the second mint as
+/// at the first, each with why: only that it judges each at both is required of them.
+const COUNTS_MAY_DIFFER: &[(&str, &str)] = &[(
+    "racing_outcomes_settle_once_at_a_second_mint",
+    "its outcomes race the clock on threads of their own: which side of its deadline each \
+     lands is real time's, at either mint",
+)];
 
 /// A flawed seeder whose mint answers every call in the poll that sends it. Some two hundred
 /// seeder defects, all older than the twenty-ninth audit, are registered here alone. The
@@ -3553,6 +3551,16 @@ catches!(
     dropped_video_landed_late_claim_keeps_debt_woken: w(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service,
     dropped_video_landed_late_claim_keeps_debt_at_start: l(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service,
     dropped_video_landed_late_claim_keeps_debt_on_tasks: t(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service,
+    late_invalid_bans: s(S::LateInvalidBans) => a_late_outcome_is_credited_never_banned,
+    late_invalid_bans_round_trip: r(S::LateInvalidBans) => a_late_outcome_is_credited_never_banned,
+    late_invalid_bans_woken: w(S::LateInvalidBans) => a_late_outcome_is_credited_never_banned,
+    late_invalid_bans_at_start: l(S::LateInvalidBans) => a_late_outcome_is_credited_never_banned,
+    late_invalid_bans_on_tasks: t(S::LateInvalidBans) => a_late_outcome_is_credited_never_banned,
+    late_invalid_stays_unknown: s(S::LateInvalidStaysUnknown) => a_late_outcome_is_credited_never_banned,
+    late_invalid_stays_unknown_round_trip: r(S::LateInvalidStaysUnknown) => a_late_outcome_is_credited_never_banned,
+    late_invalid_stays_unknown_woken: w(S::LateInvalidStaysUnknown) => a_late_outcome_is_credited_never_banned,
+    late_invalid_stays_unknown_at_start: l(S::LateInvalidStaysUnknown) => a_late_outcome_is_credited_never_banned,
+    late_invalid_stays_unknown_on_tasks: t(S::LateInvalidStaysUnknown) => a_late_outcome_is_credited_never_banned,
 );
 
 catches_at_other_mints!(
@@ -3771,15 +3779,48 @@ catches_at_other_mints!(
     dropped_video_landed_late_claim_keeps_debt_woken_at_other_mints: w(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
     dropped_video_landed_late_claim_keeps_debt_at_start_at_other_mints: l(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
     dropped_video_landed_late_claim_keeps_debt_on_tasks_at_other_mints: t(S::DroppedVideoLandedLateClaimKeepsDebt) => a_global_cap_bounds_free_service_at_a_second_mint,
+    late_invalid_bans_at_other_mints: s(S::LateInvalidBans) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_invalid_bans_round_trip_at_other_mints: r(S::LateInvalidBans) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_invalid_bans_woken_at_other_mints: w(S::LateInvalidBans) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_invalid_bans_at_start_at_other_mints: l(S::LateInvalidBans) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_invalid_bans_on_tasks_at_other_mints: t(S::LateInvalidBans) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_invalid_stays_unknown_at_other_mints: s(S::LateInvalidStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_invalid_stays_unknown_round_trip_at_other_mints: r(S::LateInvalidStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_invalid_stays_unknown_woken_at_other_mints: w(S::LateInvalidStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_invalid_stays_unknown_at_start_at_other_mints: l(S::LateInvalidStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    late_invalid_stays_unknown_on_tasks_at_other_mints: t(S::LateInvalidStaysUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    never_restores_an_unknown_outcome_at_other_mints: s(S::NeverRestores) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    in_flight_waits_for_the_unknown_at_other_mints: s(S::InFlightWaitsForUnknown) => a_late_outcome_is_credited_never_banned_at_a_second_mint,
+    completes_at_debt_ttl_at_other_mints: s(S::CompletesAtDebtTtl) => bans_expire_and_state_stays_bounded_at_a_second_mint,
+    outcome_lands_on_poll_at_other_mints: s(S::OutcomeLandsOnPoll) => a_dropped_pay_is_credited_or_never_claimed_at_a_second_mint,
+    outcome_lands_on_poll_round_trip_at_other_mints: r(S::OutcomeLandsOnPoll) => a_dropped_pay_is_credited_or_never_claimed_at_a_second_mint,
+    outcome_lands_on_poll_woken_at_other_mints: w(S::OutcomeLandsOnPoll) => a_dropped_pay_is_credited_or_never_claimed_at_a_second_mint,
+    outcome_woken_early_on_tasks_at_other_mints: t(S::OutcomeWokenEarly) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    spent_woken_early_on_tasks_at_other_mints: t(S::SpentWokenEarly) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    invalid_woken_early_on_tasks_at_other_mints: t(S::InvalidWokenEarly) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    unreachable_woken_early_on_tasks_at_other_mints: t(S::UnreachableWokenEarly) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    lost_woken_early_on_tasks_at_other_mints: t(S::LostWokenEarly) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    pending_woken_early_on_tasks_at_other_mints: t(S::PendingWokenEarly) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    outputs_refused_woken_early_on_tasks_at_other_mints: t(S::OutputsRefusedWokenEarly) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
+    expired_woken_early_on_tasks_at_other_mints: t(S::ExpiredWokenEarly) => every_answer_wakes_the_entry_awaiting_it_at_a_second_mint,
 );
 
-/// Each scenario whose seeders are paid judges at their second quoted mint every answer of
-/// a mint it judges at the first (`nfx_pay::scenarios_at_every_quoted_mint!`): what the
-/// mint answered to a swap, its retry and its completion, what a read of the swap's inputs
-/// and outputs showed, and whether the outcome was settled in time or late, as the honest
-/// mock notes them. (A case in which a watcher pays, at the mint a harness gives every
-/// watcher, pays there in both: what its seeder judges of that mint, the cases that pay a
-/// seeder themselves have it judge of the second.)
+/// The case of each scenario whose seeders are paid, run at their first quoted mint and at
+/// their second (`nfx_pay::scenarios_at_every_quoted_mint!`), against the honest mock noting
+/// what its seeders judged: what a mint answered to a swap, its retry and its completion,
+/// what a read of the swap's inputs and outputs showed, and whether the outcome was settled
+/// in time or late. Required:
+/// - at the first mint the case judges no answer of another, and at the second none of the
+///   first (`JUDGES_THE_FIRST_MINT_TOO` names what must stay, with why): a case that pays at
+///   the first mint again, whatever it is, fails;
+/// - it judges the same answers at both, each as many times (`COUNTS_MAY_DIFFER` names the
+///   cases where only the answers are held, with why);
+/// - every defect the honest seeder asked after while it judged one, at either mint, is
+///   registered at other mints on each harness kind it is registered on at every mint, or
+///   is named with its reason.
+///
+/// What this does not hold: an answer no case judges at the first mint; a mint's keys and
+/// keyset listings, which are not noted; and which case of a scenario judged what.
 macro_rules! judged_at_each_quoted_mint {
     ($($first:ident, $second:ident: $case:ident $(+ $bound:ident)?;)*) => {
         mod judged_at_each_quoted_mint {
@@ -3789,13 +3830,14 @@ macro_rules! judged_at_each_quoted_mint {
                 fn $first() {
                     let h = Arc::new(MockHarness::noting_answers());
                     let noted = h.clone();
-                    let run = nfx_pay::run_scenario!(adversary::$first(&*h));
+                    let run = nfx_pay::run_scenario!(adversary::$case(&*h));
                     assert!(
                         matches!(run, adversary::Ran::Finished),
                         "{} passes against the honest mock",
-                        stringify!($first)
+                        stringify!($case)
                     );
-                    let at_first = noted.answers_judged();
+                    let (at_first, asked_first) =
+                        (noted.answers_judged(), noted.defects_asked_while_judging());
                     let h = Arc::new(MockHarness::noting_answers());
                     let noted = h.clone();
                     let run = nfx_pay::run_scenario!(adversary::$second(&*h));
@@ -3804,20 +3846,88 @@ macro_rules! judged_at_each_quoted_mint {
                         "{} passes against the honest mock",
                         stringify!($second)
                     );
-                    let at_second = noted.answers_judged();
-                    for (asked, answer, other) in &at_first {
-                        assert!(
-                            *other || at_second.contains(&(*asked, answer.clone(), true)),
-                            "{} judges, at its seeders' first quoted mint, this answer to \
-                             {asked}: {answer}; {} judges it at their second",
-                            stringify!($first),
-                            stringify!($second)
-                        );
-                    }
+                    let (at_second, asked_second) =
+                        (noted.answers_judged(), noted.defects_asked_while_judging());
+                    judged_alike(
+                        stringify!($second),
+                        (&at_first, &asked_first),
+                        (&at_second, &asked_second),
+                    );
                 }
             )*
         }
     };
+}
+
+/// What a harness noted of one run: the answers judged, and the defects asked after.
+type Noted<'a> = (&'a [(&'static str, String, bool, u64)], &'a [S]);
+
+/// What `judged_at_each_quoted_mint` requires of a case's two runs, every failure named at
+/// once.
+fn judged_alike(second: &str, at_first: Noted<'_>, at_second: Noted<'_>) {
+    let mut wrong = Vec::new();
+    for (asked, answer, other, n) in at_first.0 {
+        if *other {
+            wrong.push(format!(
+                "at the first mint the case judges an answer of another: {asked}: {answer}, \
+                 {n} times"
+            ));
+        }
+    }
+    let stays = JUDGES_THE_FIRST_MINT_TOO.iter().any(|(s, _)| *s == second);
+    for (asked, answer, other, n) in at_second.0 {
+        if !*other && !stays {
+            wrong.push(format!(
+                "at the second mint the case judges an answer of the first: {asked}: \
+                 {answer}, {n} times"
+            ));
+        }
+    }
+    let counted = !COUNTS_MAY_DIFFER.iter().any(|(s, _)| *s == second);
+    let times = |noted: Noted<'_>, at_other: bool, asked: &str, answer: &str| {
+        noted
+            .0
+            .iter()
+            .find(|(a, b, other, _)| *a == asked && b == answer && *other == at_other)
+            .map_or(0, |(.., n)| *n)
+    };
+    for (asked, answer, other, n) in at_first.0 {
+        let there = times(at_second, true, asked, answer);
+        if !*other && (there == 0 || (counted && there != *n)) {
+            wrong.push(format!(
+                "{asked}: {answer} is judged {n} times at the first mint and {there} at the \
+                 second"
+            ));
+        }
+    }
+    for (asked, answer, other, n) in at_second.0 {
+        if *other && times(at_first, false, asked, answer) == 0 {
+            wrong.push(format!(
+                "{asked}: {answer} is judged {n} times at the second mint and never at the \
+                 first"
+            ));
+        }
+    }
+    for flaw in at_first.1.iter().chain(at_second.1) {
+        let name = format!("S::{flaw:?}");
+        if OF_OTHER_MINTS_ALREADY.contains(flaw)
+            || NO_FORM_OF_OTHER_MINTS.iter().any(|(f, _)| f == flaw)
+        {
+            continue;
+        }
+        for (kind, _) in REGISTERED.iter().filter(|(_, f)| *f == name) {
+            let twin = AT_OTHER_MINTS.iter().any(|(k, f)| k == kind && f == flaw);
+            let said = format!(
+                "{flaw:?} is asked after while a mint's answer is judged, and is registered \
+                 on harness `{kind}` at every mint only: register it there at other mints \
+                 too (`catches_at_other_mints!`), or name it with its reason"
+            );
+            if !twin && !wrong.contains(&said) {
+                wrong.push(said);
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{second}: {}", wrong.join("; "));
 }
 
 nfx_pay::scenarios_at_every_quoted_mint!(judged_at_each_quoted_mint);

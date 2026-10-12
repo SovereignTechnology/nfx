@@ -398,7 +398,11 @@ struct Ledger {
     /// The answers of their mints the seeders have judged, if they are noted
     /// ([`MockHarness::noting_answers`]): what was asked, what the mint answered, and
     /// whether it is a quoted mint other than the seeder's first.
-    judged: Option<std::collections::BTreeSet<(&'static str, String, bool)>>,
+    judged: Option<std::collections::BTreeMap<(&'static str, String, bool), u64>>,
+    /// The defects the seeders asked after while they judged a mint's answer, if those are
+    /// noted ([`MockHarness::noting_answers`]). Its own lock: a seeder notes one wherever it
+    /// asks.
+    asked: Option<Arc<Mutex<Vec<SeederFlaw>>>>,
     /// Calls answered from another thread whose caller has not been woken yet
     /// ([`Harness::answers_under_way`]).
     under_way: usize,
@@ -2186,10 +2190,6 @@ thread_local! {
     static JUDGED_AT_ANOTHER_MINT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
-/// The planted defects asked after so far, in this process, while a seeder that had them
-/// judged a mint's answer ([`Inner::judging`]).
-static JUDGING: Mutex<Vec<SeederFlaw>> = Mutex::new(Vec::new());
-
 /// A seeder's judging of one mint's answer ([`Inner::judging`]): what its thread judged
 /// before, put back as this is dropped.
 struct Judging(Option<Option<bool>>);
@@ -2200,18 +2200,6 @@ impl Drop for Judging {
             JUDGED_AT_ANOTHER_MINT.set(before);
         }
     }
-}
-
-/// Whether a seeder with defect `flaw` has, so far in this process, had it asked after
-/// while it judged an answer of a mint: a swap's outcome as it landed, a retry's or a
-/// completion's answer, or what a read of a swap's state showed. NFX-07 §3 states those
-/// rules of a swap and its account, never of a mint, so such a defect must fail the suite
-/// in its form that acts at quoted mints other than the first too
-/// ([`MockHarness::at_other_mints`]): `tests/mutants.rs` asks this of every defect it
-/// registers, once its run is over, and refuses one that has no such entry.
-#[must_use]
-pub fn judges_a_mints_answer(flaw: SeederFlaw) -> bool {
-    lock(&JUDGING).contains(&flaw)
 }
 
 /// A defect planted in a mock engine, to prove the adversary suite catches it.
@@ -4932,6 +4920,11 @@ pub enum SeederFlaw {
     /// A claim that lands late on a video no longer served leaves its chunks in the global
     /// count; one learnt by a read frees them.
     DroppedVideoLandedLateClaimKeepsDebt,
+    /// An invalid outcome that lands late bans the peer; a spent one does not.
+    LateInvalidBans,
+    /// An invalid outcome that lands late is dropped, and its swap kept as one of unknown
+    /// outcome: the account's next payment is answered `mint-unavailable`.
+    LateInvalidStaysUnknown,
 }
 
 /// How a payment came to its account's turn: the paths of the suite's matrix of payments,
@@ -8144,6 +8137,9 @@ struct Inner {
     flaw_at_other_mints: bool,
     /// It notes each answer of a mint it judges ([`MockHarness::noting_answers`]).
     notes_answers: bool,
+    /// Where it notes each defect it asks after while it judges a mint's answer
+    /// ([`MockHarness::noting_answers`]).
+    asked: Option<Arc<Mutex<Vec<SeederFlaw>>>>,
     state: Mutex<State>,
     /// The time it ages its state to, where it does so on a task of its own
     /// ([`Timing::ages_on_a_task`]): the clock's as that task last saw it, or as the
@@ -8254,6 +8250,10 @@ impl Inner {
     /// A read's round trip, sent by `by`: back once the mint has answered it, its sender
     /// woken as it comes back. The flaws: not woken, or woken before the answer can be
     /// seen.
+    ///
+    /// A read is one round trip for every swap it covers, at whichever mints: its wake is
+    /// the read's, and judges no one mint's answer. So these defects have no form of other
+    /// mints ([`MockHarness::at_other_mints`]).
     async fn read_back(&self, by: Learner) {
         let unwoken = match by {
             Learner::Hello => self.has(SeederFlaw::ReadUnwoken),
@@ -8277,20 +8277,21 @@ impl Inner {
         self.net.round_trip_as(!unwoken, early).await;
     }
 
-    /// Whether, with tasks of its own, it wakes a payment before it settles its swap's
-    /// outcome `outcome` (the flaws).
-    fn wakes_early(&self, outcome: Swap) -> bool {
-        match self.flaw {
-            Some(SeederFlaw::OutcomeWokenEarly) => true,
-            Some(SeederFlaw::SpentWokenEarly) => outcome == Swap::Spent,
-            Some(SeederFlaw::InvalidWokenEarly) => outcome == Swap::Invalid,
-            Some(SeederFlaw::UnreachableWokenEarly) => outcome == Swap::Unreachable,
-            Some(SeederFlaw::LostWokenEarly) => outcome == Swap::Lost,
-            Some(SeederFlaw::PendingWokenEarly) => outcome == Swap::Pending,
-            Some(SeederFlaw::OutputsRefusedWokenEarly) => outcome == Swap::OutputsRefused,
-            Some(SeederFlaw::ExpiredWokenEarly) => outcome == Swap::Expired,
-            _ => false,
-        }
+    /// Whether, with tasks of its own, it wakes a payment before it settles the outcome
+    /// `outcome` of its swap of `token` (the flaws): a judging of that answer.
+    fn wakes_early(&self, token: &str, outcome: Swap) -> bool {
+        let _judging = self.judging(token);
+        self.has(SeederFlaw::OutcomeWokenEarly)
+            || match outcome {
+                Swap::Spent => self.has(SeederFlaw::SpentWokenEarly),
+                Swap::Invalid => self.has(SeederFlaw::InvalidWokenEarly),
+                Swap::Unreachable => self.has(SeederFlaw::UnreachableWokenEarly),
+                Swap::Lost => self.has(SeederFlaw::LostWokenEarly),
+                Swap::Pending => self.has(SeederFlaw::PendingWokenEarly),
+                Swap::OutputsRefused => self.has(SeederFlaw::OutputsRefusedWokenEarly),
+                Swap::Expired => self.has(SeederFlaw::ExpiredWokenEarly),
+                Swap::Claimed => false,
+            }
     }
 
     /// The flaws ([`SeederFlaw::OutcomeWokenEarly`] and the like), on a task of the seeder's
@@ -8305,7 +8306,7 @@ impl Inner {
         outcome: Swap,
     ) {
         let outcome = self.after_swap(id, token, outputs, outcome);
-        if self.wakes_early(outcome) {
+        if self.wakes_early(token, outcome) {
             let waker = {
                 let mut st = self.state();
                 st.woken_early.insert(id);
@@ -8444,23 +8445,34 @@ impl Inner {
 
     /// Whether this seeder has defect `f` here. One whose defect is of quoted mints other
     /// than its first ([`MockHarness::at_other_mints`]) has it only while it judges an
-    /// answer of such a mint ([`Inner::judging`]). A defect asked after while a mint's
-    /// answer is judged is noted as one that judges a mint's answer
-    /// ([`judges_a_mints_answer`]).
+    /// answer of such a mint ([`Inner::judging`]). A seeder that notes what it judges
+    /// ([`MockHarness::noting_answers`]) notes each defect it asks after while it judges a
+    /// mint's answer, whether or not it has it ([`MockHarness::defects_asked_while_judging`]).
     fn has(&self, f: SeederFlaw) -> bool {
-        if self.flaw != Some(f) {
+        if self.flaw != Some(f) && self.asked.is_none() {
             return false;
         }
-        match JUDGED_AT_ANOTHER_MINT.get() {
-            Some(other) => {
-                let mut judging = lock(&JUDGING);
-                if !judging.contains(&f) {
-                    judging.push(f);
-                }
-                other || !self.flaw_at_other_mints
+        let judging = JUDGED_AT_ANOTHER_MINT.get();
+        if judging.is_some()
+            && let Some(asked) = &self.asked
+        {
+            let mut asked = lock(asked);
+            if !asked.contains(&f) {
+                asked.push(f);
             }
-            None => !self.flaw_at_other_mints,
         }
+        self.flaw == Some(f)
+            && match judging {
+                Some(other) => other || !self.flaw_at_other_mints,
+                None => !self.flaw_at_other_mints,
+            }
+    }
+
+    /// Whether this seeder has defect `f` as it judges an answer of the mint of `token`,
+    /// where the asking is all of the judging ([`Inner::judging`]).
+    fn has_judging(&self, f: SeederFlaw, token: &str) -> bool {
+        let _judging = self.judging(token);
+        self.has(f)
     }
 
     /// From here until what it returns is dropped, this seeder judges no mint's answer,
@@ -8469,7 +8481,7 @@ impl Inner {
     /// settling of a mint's answer among them. A defect of those books is none of a mint's
     /// answer: it shows only together with what it does where no answer is judged.
     fn keeping_books(&self) -> Judging {
-        if self.flaw.is_none() {
+        if self.flaw.is_none() && self.asked.is_none() {
             return Judging(None);
         }
         Judging(Some(JUDGED_AT_ANOTHER_MINT.replace(None)))
@@ -8483,16 +8495,18 @@ impl Inner {
         }
         let other = self.token_at_other_mint(token);
         if let Some(judged) = self.net.ledger().judged.as_mut() {
-            judged.insert((asked, format!("{answer:?}"), other));
+            *judged
+                .entry((asked, format!("{answer:?}"), other))
+                .or_default() += 1;
         }
     }
 
     /// From here until what it returns is dropped, this seeder judges an answer its mint
     /// gave, or gives yet, about the swap of `token`: the swap's outcome as it lands, its
     /// retry, its completion, or what a read of its state shows. A seeder with no defect
-    /// notes nothing.
+    /// that notes nothing marks nothing.
     fn judging(&self, token: &str) -> Judging {
-        if self.flaw.is_none() {
+        if self.flaw.is_none() && self.asked.is_none() {
             return Judging(None);
         }
         let other = self.token_at_other_mint(token);
@@ -8615,6 +8629,14 @@ impl Inner {
 
     /// Whether a defect of the matrix of payments does `slip` with a payment that came to
     /// its turn so, refused by `check`.
+    ///
+    /// The matrix's defects (this one, [`Inner::reads_at`], [`Inner::runs_early`],
+    /// [`Inner::judges`], and those of a payment dropped on its way) are of a payment's own
+    /// path to its swap: which check runs when, what a refusal or a drop leaves, when a read
+    /// is sent, which keyset listing judges it. None is what the seeder makes of a mint's
+    /// answer about a swap, so none has a form of other mints
+    /// ([`MockHarness::at_other_mints`]); a keyset listing is a mint's answer too, and that
+    /// form does not reach it.
     fn slips(&self, slip: Slip, came: Came, check: Option<Check>) -> bool {
         check.is_some_and(|c| self.flaw.and_then(SeederFlaw::refusal_slip) == Some((slip, came, c)))
     }
@@ -8692,6 +8714,9 @@ impl Inner {
         flight: Vec<InFlight>,
         until: Option<u64>,
     ) -> Option<Learnt> {
+        // Asked of the read as a whole, which may cover swaps at several mints: whether
+        // and how a read is sent is no judging of one mint's answer. (`NeverRestores` is
+        // asked again where an outcome lands, which is.)
         if self.has(SeederFlaw::NeverRestores) {
             return None;
         }
@@ -8708,6 +8733,8 @@ impl Inner {
             .map(|u| (u.since, false))
             .chain(flight.iter().map(|f| (f.4, true)))
             .collect();
+        // How many requests a read is, like their order (`RestoreBeforeInputs`), is how the
+        // seeder asks, for the swaps of every mint the read covers: no judging of an answer.
         let mut reads: Vec<Read> = if self.has(SeederFlaw::ReadsPerSwap) {
             items
                 .iter()
@@ -8719,13 +8746,13 @@ impl Inner {
         // Undecided with every input unspent `account_ttl` after it became unknown: its
         // payer has had the inputs back all that time and never spent them. The seeder
         // completes the swap: a claim is credited late, like any other.
-        let ttl = if self.has(SeederFlaw::CompletesAtDebtTtl) {
-            self.config.debt_ttl.as_secs()
-        } else {
-            self.config.account_ttl.as_secs()
-        };
         for (i, read) in reads.iter_mut().enumerate() {
             let _judging = self.judging(&items[i].0);
+            let ttl = if self.has(SeederFlaw::CompletesAtDebtTtl) {
+                self.config.debt_ttl.as_secs()
+            } else {
+                self.config.account_ttl.as_secs()
+            };
             let (since, in_flight) = since[i];
             let due = *read == Read::Unspent
                 && self.clock.now() >= since.saturating_add(ttl)
@@ -8789,9 +8816,12 @@ impl Inner {
                 .unknown
                 .iter()
                 .any(|u| lost.iter().any(|l| l.outputs == u.outputs));
-            if !(lost_open && self.has(SeederFlaw::InFlightWaitsForUnknown)) {
+            {
                 for (f, &read) in flight.iter().zip(flight_reads) {
                     let _judging = self.judging(&f.2);
+                    if lost_open && self.has(SeederFlaw::InFlightWaitsForUnknown) {
+                        continue;
+                    }
                     let (id, pay) = (f.0, &f.1);
                     if !decided(read) {
                         if self.has(SeederFlaw::InFlightStopsAtFirstUnknown) {
@@ -10181,6 +10211,9 @@ impl Inner {
             Swap::Spent | Swap::Invalid if self.has(SeederFlaw::LateOutcomeBans) => {
                 self.ban(st, pay.key);
             }
+            Swap::Invalid if self.has(SeederFlaw::LateInvalidBans) => {
+                self.ban(st, pay.key);
+            }
             Swap::Spent | Swap::Invalid if self.has(SeederFlaw::LateNothingCreatesAccount) => {
                 self.account(st, pay.key);
             }
@@ -11181,7 +11214,15 @@ impl Inner {
             if early || (outcome != Swap::Claimed && self.has(SeederFlaw::NoClaimUnwoken)) {
                 wake.clear();
             }
-            if late {
+            if late && outcome == Swap::Invalid && self.has(SeederFlaw::LateInvalidStaysUnknown) {
+                // The flaw: nothing is settled, and the swap is one of unknown outcome.
+                st.unknown.push(Unknown {
+                    pay: pay.clone(),
+                    token: token.to_owned(),
+                    outputs,
+                    since: self.clock.now(),
+                });
+            } else if late {
                 st.claim_elsewhere = elsewhere;
                 if !late_lost {
                     st.claim_landed = true;
@@ -11655,9 +11696,13 @@ impl MockEngine {
         if flaw != Some(SeederFlaw::NoValidate) {
             config.check(flaw)?;
         }
-        let (flaw_at_other_mints, notes_answers) = {
+        let (flaw_at_other_mints, notes_answers, asked) = {
             let l = net.ledger();
-            (flaw.is_some() && l.flaw_at_other_mints, l.judged.is_some())
+            (
+                flaw.is_some() && l.flaw_at_other_mints,
+                l.judged.is_some(),
+                l.asked.clone(),
+            )
         };
         let e = Inner {
             config,
@@ -11669,6 +11714,7 @@ impl MockEngine {
             clock,
             flaw_at_other_mints,
             notes_answers,
+            asked,
             net,
             flaw,
             state: Mutex::new(State::default()),
@@ -13129,11 +13175,13 @@ impl MockSession {
                     }));
                     return;
                 }
+                // The flaw: the outcome is settled only as its payment is next polled.
+                let on_poll = e3.has_judging(SeederFlaw::OutcomeLandsOnPoll, &token);
                 let land = move || {
                     let outcome = e2.after_swap(id, &token, outputs, outcome);
                     e2.land(id, &settle, &token, outputs, outcome);
                 };
-                if e3.has(SeederFlaw::OutcomeLandsOnPoll) {
+                if on_poll {
                     let mut st = e3.state();
                     if let Some(r) = st.pays.get_mut(&id).filter(|r| !r.finished) {
                         r.on_poll = Some(Box::new(land));
@@ -13372,6 +13420,10 @@ impl MockSession {
             .as_ref()
             .is_err_and(|r| r.code != RejCode::MintUnavailable);
         let detail = answer.as_ref().err().and_then(|r| r.detail.as_deref());
+        // What a refusal leaves. "An earlier payment's outcome is not known yet" is the
+        // seeder's own refusal, by what it holds: this payment's swap was never sent, and
+        // no answer of a mint is judged here. So the defects of that refusal, like those of
+        // every other refusal below, have no form of other mints.
         let creates = (record.waited && by_check && e.has(SeederFlaw::WaitedRefusalCreatesAccount))
             || (took_over && by_check && e.has(SeederFlaw::TakeoverRefusalCreatesAccount))
             || (record.waited
@@ -16312,24 +16364,49 @@ impl MockHarness {
     }
 
     /// An honest harness that notes each answer of a mint its seeders judge
-    /// ([`MockHarness::answers_judged`]).
+    /// ([`MockHarness::answers_judged`]), and each defect they ask after while they judge
+    /// one ([`MockHarness::defects_asked_while_judging`]).
     #[must_use]
     pub fn noting_answers() -> Self {
         let h = Self::default();
-        h.net.ledger().judged = Some(std::collections::BTreeSet::new());
+        {
+            let mut l = h.net.ledger();
+            l.judged = Some(std::collections::BTreeMap::new());
+            l.asked = Some(Arc::new(Mutex::new(Vec::new())));
+        }
         h
     }
 
     /// The answers of their mints this harness's seeders have judged so far
     /// ([`MockHarness::noting_answers`]): what was asked (a swap, its retry, its completion,
-    /// a read of its state), what the mint answered, and whether that mint is a quoted mint
-    /// other than the seeder's first. Each once, in order. `tests/mutants.rs` holds every
-    /// scenario that pays at each quoted mint to judging at the second every answer it
-    /// judges at the first.
+    /// a read of its state), what the mint answered, whether that mint is a quoted mint
+    /// other than the seeder's first, and how many times. `tests/mutants.rs` holds the case
+    /// of every scenario that pays at each quoted mint to judging the same answers, as
+    /// many times, at the second as at the first.
     #[must_use]
-    pub fn answers_judged(&self) -> Vec<(&'static str, String, bool)> {
+    pub fn answers_judged(&self) -> Vec<(&'static str, String, bool, u64)> {
         let l = self.net.ledger();
-        l.judged.iter().flatten().cloned().collect()
+        l.judged
+            .iter()
+            .flatten()
+            .map(|((asked, answer, other), n)| (*asked, answer.clone(), *other, *n))
+            .collect()
+    }
+
+    /// The defects this harness's seeders, honest, asked after while they judged a mint's
+    /// answer ([`MockHarness::noting_answers`]): each place where a planted defect would
+    /// change what a seeder makes of an answer its mint gave about a swap (its outcome as
+    /// it lands, its retry, its completion, a read of its state). What a run against the
+    /// defect itself would show depends on how far that run gets; what an honest run asks
+    /// does not. `tests/mutants.rs` requires each of them to be registered in its form of
+    /// other mints too ([`MockHarness::at_other_mints`]), or named with its reason.
+    #[must_use]
+    pub fn defects_asked_while_judging(&self) -> Vec<SeederFlaw> {
+        let l = self.net.ledger();
+        l.asked
+            .as_ref()
+            .map(|a| lock(a).clone())
+            .unwrap_or_default()
     }
 
     /// A harness whose viewers carry `flaw` (the suite must fail against it).
