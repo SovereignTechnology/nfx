@@ -372,6 +372,19 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    money code: `nfx-wallet`, pay/1 (NFX-07), the mint extension (NFX-09) and the web
    wallet. It gets the locked-directory rule and its own security stage (ADR 0008 §4).
 
+10. **Proposed: funding on standard mints** (ADR 0100,
+    `docs/decisions/0100-creator-managed-mode.md`, branch `spec/creator-managed`,
+    2026-09-25, issue #1). The creator sells the key at a **keyholder** (its own `nfxd`
+    or a hosted HTTPS service) for ordinary ecash and issues a certificate; seeders
+    serve certificate holders. `mode: seeder` (default) = the watcher pays seeders per
+    chunk (M2.0 as built); `mode: creator` = the creator pays retainers in batches on
+    the seeder's period, verified by byte challenges against its own copy. **No mint
+    extension anywhere**; NFX-09 is shelved as a Draft. `mode` is an additive manifest
+    tag, so nothing frozen is bumped. M2 unchanged; M3 = keyholder + certificates, then
+    `mode: creator`. **Accepted 2026-09-27**: ecash + optional bolt11 at the keyholder; permanent or
+    renewable certificates per video; both modes ship in M3. Next: NFX-08 rewrite and
+    NFX-13.
+
 ## Not verified / known gaps
 
 - **GitLab CI's first real run failed only its last step.** Vectors,
