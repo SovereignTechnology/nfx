@@ -23,6 +23,24 @@ release notes unless they ask not to be.
 In scope: anything in this repository. Out of scope: the hosting infrastructure, and
 issues that require an already-compromised machine or physical access.
 
+The repository includes the NFX specification (`spec/`), the Rust crates (`crates/`),
+the browser test player (`web/player/`) and the v0 demo (`packages/`). Protocol-level
+weaknesses in the specification are in scope, including ones that no implementation
+introduced.
+
+The threat model table and the money-path invariants below describe the v0 demo
+(`packages/`) and are pinned by its tests; they are not a threat model for NFX.
+NFX-specific security considerations live in the spec documents:
+
+- NFX-02 §4, *Parse/verify algorithm*: when a catalog manifest is accepted;
+- NFX-03 §7, *Security notes*: what a bad availability beacon can and cannot do;
+- NFX-04 §2, *Rate limits (normative baselines)*: the limits a scoped relay enforces;
+- NFX-05 §4, *Verification (the "Blossom rule")*: every file is checked against its
+  signed sha256 before use or storage;
+- NFX-07 §3, *Seeder duties (verification, in order)*: open-mode payments (Draft);
+- NFX-08 §1, *Trust posture (state it plainly)*, and §4.1, *Seeder verification
+  (licensed)*: licensed mode (Draft).
+
 ---
 
 ## Guiding rule

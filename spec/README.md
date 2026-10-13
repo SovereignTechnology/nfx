@@ -51,6 +51,9 @@ implementation needs.
 - **Final** — submitted upstream (NIP for the nostr documents, NUT extension for the
   mint API) or explicitly declared self-standing.
 
+These states describe the documents, not the code. For what is built and the current
+milestone, see `docs/nfx/status.md`.
+
 ## Conformance
 
 L1 reader · L2 watcher · L3 seeder · L4 mint · L5 scoped relay — checklists in
@@ -76,3 +79,9 @@ the repository license. Rationale and full context: `docs/decisions/0006-*` (f).
 - 2026-09-23 — decisions after the A1 spikes (ADR 0008 addendum): per-rendition web
   swarms, paid iroh delivery per member, mint state keyed by manifest address, voucher
   presenter binding, no "any mint", fees off the top, seeder blank outputs.
+- 2026-09-24 — M1 freeze: NFX-02, NFX-03, NFX-04, NFX-05 and NFX-06 are Frozen (M1).
+  Real iroh tickets are pinned byte for byte (`test-vectors/tickets.json`), targeted
+  deletions are specified (NFX-02 §6, NFX-04 §1; `test-vectors/deletion.json`), and the
+  JSON schemas are checked against the vectors in CI. From here a behavior change needs a
+  `specver` bump (NFX-01 §4); clarifications that change no behavior are edited in place.
+  Record: `docs/nfx/freeze-m1-candidate.md`.

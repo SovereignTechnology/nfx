@@ -6,7 +6,10 @@ address (`38504:<creator>:<namespace>:<video-id>`). It then:
    (NFX-03);
 2. plays over `nfx://` while the video is fetched over iroh. Every file is checked
    against its sha256 before it plays (NFX-05 §4);
-3. seeds the video once it has all of it.
+3. seeds the video only if sharing is on ("Share videos I watch", the `share` setting):
+   it then fetches the whole video and seeds it. Sharing is off by default. Without it
+   the video is only served to the window, the app announces nothing, and it never asks
+   the router to open a port.
 
 ```sh
 ./run.sh      # build (release) and start; needs web/player's npm ci for hls.js
@@ -33,7 +36,7 @@ The data directory is the app's data dir, or `NFX_DESKTOP_DATA`:
 | Path | What |
 |---|---|
 | `node.key` | This node's Nostr key, mode 0600, created on first run. Never printed; only the public key is shown. |
-| `settings.json` | Relays and iroh relays. |
+| `settings.json` | `relays` (Nostr scoped relays), `iroh_relays` (the network's own iroh relays; none disables relaying, so direct connections only) and `share` (`false` unless turned on). |
 | `store/` | Content by sha256. `store/.nfxd/` holds iroh-blobs' index. |
 
 ## Security

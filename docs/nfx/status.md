@@ -16,7 +16,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 
 - **`nfx-media` (A2, 2026-09-23):**
   - the demo's L8 planning (probe, ladder, argv, storyboard) ported to Rust, with
-    L8's own unit expectations ported alongside (20 cases);
+    L8's own unit expectations ported alongside (20 cases at 2026-09-23; `l8_parity.rs`
+    has 21 `#[test]` functions now, the pre-push audit having added one);
   - an ISO-BMFF reader that takes CODECS from `avcC`/`esds` (5 cases, including every
     truncation of a valid init);
   - a packager and the `nfx-package` CLI: CMAF tail, content addressing, and a
@@ -117,7 +118,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
   - Verification is `nfx-proto` itself, compiled to WASM (`crates/nfx-wasm`), so it needs
     no WebCrypto and works from an insecure context. With `&video=<d>&segs=<n>` the hash
     list is also bound to the manifest.
-  - `npm run e2e` (PASS on every run, loopback only):
+  - `npm run e2e`, run in `web/player/` (PASS on every run, loopback only):
     - an ffmpeg clip goes through `nfx-package`, then `nfxd key new`, `nfxd run` (seed,
       embedded relay, origin) and `nfxd publish`;
     - headless Chromium in a fresh context plays it: 360p and 720p levels, 7 files
@@ -151,17 +152,19 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
   - `watch` works like a viewer: it resolves the manifest, learns seeders from verified
     beacons and holds the video on the origin.
   - The page plays through `nfx://` while misses are pulled over iroh and re-hashed; the
-    app then fetches the whole video and seeds it.
+    app then fetches the whole video and seeds it only if sharing is on (off by default;
+    see L4 below).
   - The key is created at first run (mode 0600, never printed). The CSP allows only the
     app's own scripts.
   - Its own Cargo workspace (like spike S2), outside CI: clippy is clean, and
     `cargo deny` passes with a desktop policy (MPL-2.0 per crate for Servo's CSS
     parsers, `unic-*` unmaintained notices ignored by ID).
-  - `./e2e.sh` (PASS) runs in a private headless GNOME Shell:
+  - `crates/desktop/e2e.sh` (PASS) runs in a private headless GNOME Shell:
     - it packages a clip and starts an `nfxd` seeder with an embedded relay;
     - the app watches before the manifest exists;
-    - once the manifest is published, the app plays 360p and 720p past 3 s and ends up
-      seeding the video.
+    - once the manifest is published, the app plays 360p and 720p past 3 s; it runs
+      twice, with sharing off (plays and only serves the window) and with sharing on
+      (plays and ends up seeding the video).
 - **M1 hardening (2026-09-24,
   [`reviews/2026-09-24-hardening.md`](reviews/2026-09-24-hardening.md)):**
   - **Independent audit, then fixes (2026-09-24,
@@ -217,7 +220,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
     - by address alone, with the origin found through a verified beacon's `https`
       endpoint (a self-signed TLS proxy in front of nfxd, `--https-url`);
     - an address nobody published, which fails with "no valid manifest".
-  - `npm run unit` checks the origin sanitiser (8 cases).
+  - `npm run unit` (in `web/player/`) checks the origin sanitiser (8 cases).
 - **`nfx-wasm`, `nfx-proto` for browsers (2026-09-23):**
   - It exports `verifyManifest`, `verifyBeacon`, `sha256Hex` and `VerifiedHashList`
     (constructed from a manifest's `video` and `segs`, or `fromRoot`, with `check` and
@@ -225,11 +228,14 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
   - JS numbers must be safe integers, and structured results are JSON.
   - The logic is tested natively. The bindings run under Node in `check.sh`
     (`wasm-pack test --node nfx-wasm`), so CI covers them.
-  - `npm run typecheck` is strict and clean. Neither runs in CI: they need Chromium,
-    ffmpeg and a cargo build.
+  - `npm run typecheck` (in `web/player/`) is strict and clean. Neither runs in CI: they
+    need Chromium, ffmpeg and a cargo build.
 
-- **Repository:** the private GitLab project. Every push
-  was a fast-forward of `main` with sovtech's OK. The demo history, the spec commit
+- **Repository:** created private on 2026-09-23 with the owner's OK, and public now.
+  ngit is the source of truth
+  (`nostr://npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx`) and
+  `https://github.com/SovereignTechnology/nfx` mirrors it. Every push was a
+  fast-forward of `main` with the owner's OK. The demo history, the spec commit
   `2e25df1` and a merge of demo `main` `6cd8765` are all in `main`.
 - **ADR numbering** is coordinated with the demo session. 0006 and 0008 are this
   repository's; the demo recorded both in its own `docs/status.md` and uses 0009 onward.
@@ -256,7 +262,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 ## Done in A0
 
 1. **Repository.** a local clone was cloned with `--no-local` from
-   `spec/nfx-suite-m0`. Remotes: `origin` = the private GitLab project; `demo` = the private demo repository,
+   `spec/nfx-suite-m0` (its spec commit `2e25df1` is in `main`). Remotes at A0:
+   `origin` = the private GitLab project; `demo` = the private demo repository,
    fetch-only, tracking `main` only. Demo `main` is merged, so the
    mirror is current as of `6cd8765`.
 2. **The repository's working notes (not published)** and this file. Both state the read-only mirror rule and that
@@ -264,7 +271,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 3. **CI.**
    - `crates/ci/check.sh` runs every check: vectors, add-only, fmt, clippy
      `-D warnings`, test, deny, and wasm.
-   - `crates/ci/gitlab-ci.yml` is dormant; see "Not verified".
+   - `crates/ci/gitlab-ci.yml` was dormant at A0. It was enabled afterwards and is green;
+     see "Housekeeping" and "Not verified".
 4. **ADR 0008** (`docs/decisions/0008-multi-network-master-plan.md`).
    - ADR 0006 is amended: the demo is described in the present tense, plus a token note.
 5. **Spec amendments 1–9** from the plan, plus the implementation-driven fixes listed
@@ -279,9 +287,11 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
      `/<root>/<sha256>.<ext>` path;
    - NFX-04 §7 allows an embedded relay;
    - NFX-11 pins iroh 1.x and adds `canon` §9.
-6. **Test vectors.** 11 files, all regenerated by `generate.py`:
+6. **Test vectors.** 11 files, all regenerated by `generate.py` (A0 snapshot,
+   2026-09-23; `generate.py` now writes 14):
    - valid: manifest, open manifest, beacon (all 4 endpoint types), hash list;
-   - invalid corpora: 33 manifests, 11 beacons, 9 hash lists, 2 playlists;
+   - invalid corpora: 33 manifests, 11 beacons, 9 hash lists, 2 playlists (now 33, 13,
+     11 and 3, counted in `spec/test-vectors/*-invalid.json`);
    - canon: 14 cases;
    - voucher, gossip envelope, derived identifiers.
 7. **`nfx-proto`** (`crates/nfx-proto`).
@@ -291,14 +301,16 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
      beacon content, hash-list bytes to root, canon texts, digests and signatures.
      Every invalid case is rejected for its stated reason.
    - 12 test groups pass **natively and on `wasm32`** under Node (`wasm-pack test --node`).
+     A0 snapshot, 2026-09-23: `crates/nfx-proto/tests/vectors.rs` now has 14 `#[test]`
+     functions.
 
 ## Verification (2026-09-23, on laptop)
 
 | Check | Result |
 |---|---|
-| `generate.py --verify` | 11/11 OK |
-| `cargo test --workspace` | 12/12 |
-| `wasm-pack test --node nfx-proto` | 12/12 |
+| `generate.py --verify` | 11/11 OK (A0 snapshot; `generate.py` now covers 14 files) |
+| `cargo test --workspace` | 12/12 (A0 snapshot; `nfx-proto` was the only member) |
+| `wasm-pack test --node nfx-proto` | 12/12 (A0 snapshot; 14 tests now) |
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean |
 | `cargo fmt --check` | clean |
 | `cargo deny check` | advisories, bans, licenses, sources ok |
@@ -316,7 +328,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    - ~~`nfxd`~~ done, with gossip since 2026-09-24;
    - ~~a scoped relay~~ done (`nfx-node::relay`, for `nfxd` to embed or run alone);
    - ~~a test player page~~ done (`web/player/`);
-   - ~~the desktop viewer~~ done (`crates/desktop/`, Tauri 2, `./e2e.sh`);
+   - ~~the desktop viewer~~ done (`crates/desktop/`, Tauri 2, `crates/desktop/e2e.sh`);
    - ~~**the Phase A exit run: multi-host**~~ PASS 2026-09-24, host-b ↔ laptop
      ([`phase-a-exit.md`](phase-a-exit.md)).
 2. ~~**`nfx-proto` WASM bindings**~~ done (`crates/nfx-wasm`; the test player uses
@@ -377,8 +389,9 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 - **The canon rule was cross-checked Python ↔ Rust only.** The JavaScript note (sort by
   code point, not UTF-16) is untested until the web client exists. The WASM build is
   the intended single implementation for browsers.
-- **iroh tickets in `beacon.json` are placeholders.** Ticket encodings pin at the M1
-  freeze (S1).
+- ~~**iroh tickets in `beacon.json` are placeholders.**~~ Resolved at the M1 freeze
+  (2026-09-24): the tickets are real, pinned byte for byte in `tickets.json` (NFX-06 §2),
+  and `beacon.json` carries them.
 - **NFX-12's Hypercore stack pin** (hypercore 11, hyperdrive 13, hyperswarm 4,
   protomux 3) comes from the demo seeder's `package.json`, plus hyperdrive 13 inferred
   as the matching series. It is unverified until spike S5.

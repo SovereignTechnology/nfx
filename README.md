@@ -1,89 +1,121 @@
-# nutflix
+# NFX
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+A Nostr-identified, peer-seeded video network: an open standard with a Rust reference
+implementation.
 
-> Status: **Stage 0 complete** (scaffold, frozen contracts, mocks, spikes). Stage 1 parallel
-> build not yet started. See [`docs/nfx/status.md`](docs/nfx/status.md).
+NFX lets a creator publish a signed video manifest on Nostr and lets peers seed and watch
+the video, checking every file against signed hashes. The normative specification is in
+`spec/`. The Rust reference implementation in `crates/` covers iroh (native), a WebRTC
+mesh (browsers) and an HTTP origin, which a public deployment puts behind TLS and a CDN.
+The optional Hypercore profile (NFX-12) and payments (Cashu ecash, per delivered chunk)
+are specified as drafts.
 
-A Nostr-native peer-to-peer video network where seeders are paid per block in Cashu ecash,
-the creator picks the mint, and the UI aims at YouTube rather than at a protocol demo.
+**Status (2026-10-12):** NFX is pre-release. There is no released version, so build from
+source. The free end-to-end slice (milestone M1: publish, seed, fetch, play; no payments)
+is built and passed its exit run. That run and the Phase A exit run before it used two
+hosts on a private network with plain HTTP and WebSocket endpoints; they did not cover
+NAT traversal, TLS, a CDN or paid delivery. What each run left out:
+[M1](docs/nfx/m1-exit.md#what-this-does-not-cover),
+[Phase A](docs/nfx/phase-a-exit.md#what-this-does-not-cover).
+Payments and the Hypercore profile are not implemented on `main`. NFX-01 to NFX-06 are
+Frozen; the status of every document and its freeze milestone is in
+[spec/README.md](spec/README.md). Log and resume point:
+[docs/nfx/status.md](docs/nfx/status.md).
 
-> **Standardization (2026-09-16):** the normative protocol going forward is the NFX suite
-> in [`spec/`](spec/README.md) (iroh transport, content-addressed fMP4/CMAF segments,
-> open + licensed modes). The TypeScript workspace below is the **v0 prototype** — a
-> Pear-runtime-only desktop app (the web shell lane never shipped); see
-> [ADR 0006](docs/decisions/0006-standardization-suite-nfx.md) for the fork and its
-> consequences. Implementers: read `spec/`, not `packages/`.
+## Repository layout
 
-**"Nutflix" is the brand name only.** Package scope is `@sovit/*`, the wire protocol is
-`pay/1`, and nothing in the code depends on the brand (build plan §9.11).
+| Path | What it is |
+|---|---|
+| `spec/` | NFX-01 to NFX-12, the JSON schemas (`schemas/`) and the regenerable test vectors (`test-vectors/`) |
+| `crates/` | The Cargo workspace (edition 2024), with the five members below |
+| `crates/nfx-proto` | Wire formats: manifests, beacons, hash lists, canonical JSON, vouchers, gossip envelopes. Pure (no I/O, clock or RNG); builds natively and for `wasm32` |
+| `crates/nfx-node` | The peer: content store, iroh seeding and fetching, gossip presence, Nostr manifests and beacons, pull-through origin, embeddable scoped relay, browser-mesh tracker and WebRTC bridge |
+| `crates/nfx-media` | NFX-05 packaging (ladder planning, CMAF output, content addressing); ships the `nfx-package` binary |
+| `crates/nfx-wasm` | `nfx-proto` for browsers: verifies manifests, beacons, hash lists and files from JS |
+| `crates/nfxd` | The headless node: `key`, `publish`, `delete` and `run` |
+| `crates/desktop` | Tauri 2 desktop viewer on top of the `nfxd` daemon; its own Cargo workspace, sharing is opt-in |
+| `crates/spikes` | Spike code and tools (`s1-iroh`, `s2-tauri`, `nfx-verify-store`), each its own workspace |
+| `crates/ci` | `check.sh` and the CI job definition |
+| `web/player` | The browser test player: hls.js behind a loader that verifies every file with `nfx-wasm`, plus the WebRTC mesh |
+| `web/spikes` | Browser spike code (`s3-mesh`, `s4-cmaf`) |
+| `docs/` | `decisions/` (ADRs) and `nfx/` (status, plans, exit runs, reviews, spike write-ups); index in [docs/README.md](docs/README.md) |
+| `deploy/` | systemd units and a hardening test for the v0 demo's seeder and gateway |
+| `packages/`, `scripts/` | The v0 demo, a read-only mirror (see [The v0 demo](#the-v0-demo)) |
 
-## Read first
+## Quick start
 
-| Document | What it is |
-|----------|------------|
-| [`docs/plan/build-plan.md`](docs/plan/build-plan.md) | The *what*: assumptions, threat model, architecture, data model, `pay/1`, payment flow, UI, hardening, phases, open questions |
-| [`SECURITY.md`](SECURITY.md) | Threat table (normative for the adversary suite), money-path invariants, locked directories |
-| [`docs/decisions/`](docs/decisions/) | ADRs — 0002 stack, 0003 spike resolutions |
-| [`docs/spikes/`](docs/spikes/) | S-A per-peer gating, S-B browser Hypercore, S-C transcode |
-| [`docs/vendor/`](docs/vendor/) | Pinned upstream specs and READMEs. **The API is what is in here and in `node_modules/`, not what you remember.** |
-
-## Layout
-
-```
-packages/core         @sovit/core        runtime-agnostic protocol lib: contracts, mocks, (nostr, manifest, media, payment…)
-packages/seeder       @sovit/seeder      Corestore + Hyperblobs seeder daemon, pay/1 server side
-packages/gateway      @sovit/gateway     seeder + WS bridge + Blossom HTTP
-packages/ui           @sovit/ui          React design system + screens, talks only to NetworkAdapter
-packages/app-desktop  @sovit/app-desktop Electron + pear-runtime Bare worker shell
-packages/app-web      @sovit/app-web     static web shell: in-page Hypercore over WS, service-worker player
-```
-
-`packages/core/src/contracts/` is the frozen interface surface (`CONTRACTS_VERSION`).
-`payment/`, `signer/`, `pay-protocol/`, `wallet/spend.ts` and `gateway/src/auth/` are
-**locked** — interfaces and tests only — until the Stage 2 security session.
-
-## Getting started
+Clone from Nostr (needs ngit's `git-remote-nostr`) or, instead, from the GitHub mirror:
 
 ```sh
 git clone nostr://npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx
+# or: git clone https://github.com/SovereignTechnology/nfx
 cd nfx
-npm ci --ignore-scripts     # .npmrc already sets ignore-scripts + exact pins
-npm run hooks:install       # pre-commit: lane path allowlist + locked-dir check
-npm run ci                  # lint + typecheck/build + test + locked-dir check
 ```
 
-Requires Node ≥ 22.12. Refresh vendored docs with `scripts/vendor-docs.sh`.
-
-### Working in a lane
+Prerequisites: a Rust toolchain at least as new as `rust-version` in `crates/Cargo.toml`;
+for the player, the `wasm32-unknown-unknown` target, wasm-pack and Node; for packaging,
+ffmpeg and ffprobe on `PATH` (or `NFX_FFMPEG` and `NFX_FFPROBE`). The versions CI uses
+are pinned in `crates/ci/gitlab-ci.yml`.
 
 ```sh
-scripts/new-lane-worktree.sh L2 packages/seeder/
-cd .worktrees/L2            # .lane holds the allowlist; the hook enforces it
+repo=$PWD                                  # the root of the clone
+cargo build --release --locked --manifest-path crates/Cargo.toml -p nfxd -p nfx-media
+export PATH="$repo/crates/target/release:$PATH"
+work=$(mktemp -d); echo "$work"            # a scratch directory for the demo files
+cd "$work"
+cp /path/to/any-video.mp4 clip.mp4         # any local video that ffmpeg can read
 ```
 
-## CI and hardening
+Package the clip, create a key, and run a node that seeds it. `--embed-relay` and
+`--origin` take `ip:port`; a bare `:port` is refused.
 
-There is deliberately **no `.gitlab-ci.yml`** at the root yet: no runner is registered
-against this namespace. The pipeline lives in [`ci/gitlab-ci.yml`](ci/gitlab-ci.yml) and
-mirrors `npm run ci`, plus the network-only supply-chain gates (`npm audit signatures`,
-lockfile drift, advisories); move it to the root when a runner exists.
+```sh
+nfx-package clip.mp4 --video nfx:testnet:1:my-video --out pkg   # pkg/store, pkg/nfx.json
+pub=$(nfxd key new node.key | head -n 1)   # prints the public key as hex, then as npub
+A=38504:$pub:nfx:testnet:1:my-video        # the manifest address
+nfxd run --key node.key --store pkg/store --seed "$A" \
+  --embed-relay 127.0.0.1:7447 --origin 127.0.0.1:3473
+```
 
-`npm run ci` = lint → typecheck/build → test → locked-dir check → native-module inventory
-(`docs/native-modules.txt`, `scripts/native-module-inventory.sh --check`) → Electron
-security lint (`scripts/electron-security-lint.mjs`). Other tooling from build-plan §7:
+In a second terminal, change to the scratch directory printed above and set `repo` (the
+clone root) and `PATH` again. Publish the manifest to the embedded relay. It prints the
+address, and the node then logs `<address>: Seeding`. Then serve the browser test player,
+which listens on `0.0.0.0:3471`:
 
-| Tool | Purpose |
-|------|---------|
-| `scripts/reproducible-web-build.sh --twice` | Clean build → deterministic tree hash → unsigned Nostr event template (`artifacts/web-build/`) |
-| `scripts/csp-sri.mjs <index.html>` | SRI on every script/stylesheet + strict CSP as `<meta>` and a headers file; fails on inline or third-party code |
-| `deploy/systemd/` | Hardened seeder/gateway units, directive-by-directive README, and the measured `MemoryDenyWriteExecute` result |
+```sh
+nfxd publish --key node.key --relay ws://127.0.0.1:7447 --package pkg --title "My video"
+cd "$repo/web/player" && npm ci --ignore-scripts && npm run serve
+# open http://127.0.0.1:3471/?a=<address>&relay=ws://127.0.0.1:7447&origin=http://127.0.0.1:3473
+```
 
-## Contributing
+## Checks
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md).
-Security issues: see [SECURITY.md](SECURITY.md) — do not open a public issue.
+```sh
+PYTHON=/path/to/venv/bin/python crates/ci/check.sh
+```
 
-## Licence
+`check.sh` stops at the first failing step. The step list, what each one needs and the
+environment switches are in [CONTRIBUTING.md](CONTRIBUTING.md#checks). CI runs what
+`check.sh` runs. The browser end-to-end suites (`npm run e2e` and `npm run e2e:mesh` in
+`web/player`, `./e2e.sh` in `crates/desktop`) are separate.
 
-Copyright (C) 2026 sovtech. AGPL-3.0-or-later — see [LICENSE](LICENSE).
+## Documentation
+
+- [spec/README.md](spec/README.md): the suite, its reading order, status and conformance.
+- [docs/README.md](docs/README.md): the index of the documentation tree.
+- [docs/nfx/status.md](docs/nfx/status.md): current status, milestone log, what is next.
+- [ADR 0008](docs/decisions/0008-multi-network-master-plan.md): the master plan.
+
+## The v0 demo
+
+`packages/` (with `scripts/`) is a separate TypeScript prototype for the Pear runtime,
+mirrored here read-only from its own repository. It is not an NFX implementation: read
+`spec/`, not `packages/` ([ADR 0006](docs/decisions/0006-standardization-suite-nfx.md)).
+
+## Contributing, security, licence
+
+See [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) and
+[SECURITY.md](SECURITY.md) (how to report a vulnerability).
+
+Copyright (C) 2026 sovtech. Code: AGPL-3.0-or-later (see [LICENSE](LICENSE)).
+Specification text in `spec/` is CC0.
