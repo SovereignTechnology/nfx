@@ -1,31 +1,42 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Every master-plan check (ADR 0008), in the order CI runs them. Run from anywhere:
 #   crates/ci/check.sh
-# Env: PYTHON (needs coincurve; default python3), NFX_SKIP_WASM=1 to skip the wasm run.
+# Env: PYTHON (needs coincurve; default python3), NFX_SKIP_WASM=1 to skip the wasm run,
+# NFX_FFMPEG and NFX_FFPROBE (the ffmpeg and ffprobe nfx-media's packaging test runs;
+# default: the ones on PATH; with no ffmpeg that test is skipped). The lock's steps are
+# handed PYTHON and, if set, PATH, HOME, CARGO_HOME, RUSTUP_HOME, CI (which puts the lock
+# in its CI mode) and LOCKED_DIRS_UNLOCKED (1 unlocks: the lock then compares nothing with
+# its pins and builds nothing; refused in CI), and no other variable
+# (crates/ci/check-locked.sh).
 set -euo pipefail
 
 repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 cd "$repo"
 py=${PYTHON:-python3}
 step() { printf '\n== %s\n' "$*"; }
+# The lock's steps run as the lock job runs them: under `env -i`, with only the variables
+# the lock's allow-list names. The job's own (the CI host's GITHUB_* or CI_*, the tool pins,
+# a coloured cargo) are none of its business, and in CI mode it refuses any it does not know.
+locked() {
+  local keep=() v
+  for v in PATH HOME CI CARGO_HOME RUSTUP_HOME LOCKED_DIRS_UNLOCKED; do
+    [ -z "${!v+x}" ] || keep+=("$v=${!v}")
+  done
+  /usr/bin/env -i "${keep[@]}" PYTHON="$py" /bin/bash -p crates/ci/check-locked.sh "$@"
+}
+
+# First, before any unpinned code runs.
+step "locked paths: money code only as reviewed (docs/nfx/m2-plan.md)"
+locked
 
 step "spec: test vectors regenerate byte for byte"
 "$py" spec/test-vectors/generate.py --verify
 step "spec: JSON schemas agree with the vectors"
 "$py" spec/schemas/check.py
 
-step "add-only: mirrored demo paths unchanged on this side since the last demo merge"
-if git rev-parse -q --verify refs/remotes/demo/main >/dev/null; then
-  changed=$(git diff --name-only demo/main...HEAD -- \
-    packages docs/plan docs/lanes docs/handoff docs/status.md scripts)
-  if [ -n "$changed" ]; then
-    printf 'mirrored demo paths were edited here:\n%s\n' "$changed" >&2
-    exit 1
-  fi
-  echo "ok"
-else
-  echo "skipped: no demo/main ref (no demo-base tag)"
-fi
+step "locked paths: cached crates match Cargo.lock, then fetch"
+locked --sources
+(cd crates && cargo fetch --locked)
 
 cd crates
 step "cargo fmt --check"
@@ -43,9 +54,13 @@ fi
 step "cargo deny check"
 cargo deny check
 if [ "${NFX_SKIP_WASM:-0}" != 1 ]; then
-  step "wasm32: nfx-proto vectors under node"
+  step "wasm32: nfx-proto and pay/1 vectors under node"
   wasm-pack test --node nfx-proto
+  wasm-pack test --node nfx-pay-wire
   step "wasm32: nfx-wasm bindings under node"
   wasm-pack test --node nfx-wasm
 fi
+# Last, after everything else has run: the files again, then what was compiled.
+step "locked paths: unchanged, and nfx-pay built only from pinned files and dependencies"
+(cd .. && locked --compiled)
 printf '\nall checks passed\n'

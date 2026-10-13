@@ -9,6 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+nfx-pay-wire.workspace = true
 base64.workspace = true
 hex.workspace = true
 k256.workspace = true

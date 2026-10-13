@@ -1,0 +1,24 @@
+[package]
+name = "nfx-pay-wire"
+version = "0.1.0"
+description = "The pay/1 wire (NFX-07) and the pure modules it rests on: canonical JSON, namespaces and video addresses, and the NFX error type. Locked whole with the money code"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+base64.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true
+
+[lints]
+workspace = true

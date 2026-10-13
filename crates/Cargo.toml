@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["nfx-media", "nfx-node", "nfx-proto", "nfx-wasm", "nfxd"]
+members = ["nfx-media", "nfx-node", "nfx-pay", "nfx-pay-wire", "nfx-proto", "nfx-wasm", "nfxd"]
 
 [workspace.package]
 edition = "2024"
@@ -25,6 +25,8 @@ n0-future = "0.3.2"
 nostr-memory = "0.45.2"
 nostr-sdk = "0.45.4"
 nfx-node = { path = "nfx-node", version = "0.1.0" }
+nfx-pay = { path = "nfx-pay", version = "0.1.0" }
+nfx-pay-wire = { path = "nfx-pay-wire", version = "0.1.0" }
 nfx-proto = { path = "nfx-proto", version = "0.1.0" }
 k256 = { version = "0.14.0", default-features = false, features = ["schnorr", "arithmetic"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -44,3 +46,8 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# Release builds keep integer overflow checks: a wrapped count in the payment code must
+# panic, never silently free or jam the global cap (M2.0 third audit).
+[profile.release]
+overflow-checks = true

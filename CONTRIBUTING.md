@@ -18,10 +18,7 @@ repository holds the specification (`spec/`), the Rust reference implementation
 ## Where changes go
 
 New work goes in `spec/`, `crates/`, `web/` and `docs/nfx/`, plus decision records in
-`docs/decisions/` and the root documents. `packages/` and `scripts/` (and the demo's
-planning documents) are a read-only mirror of the v0 demo, which is built in a separate
-repository. They are not edited here (ADR 0008 §3); the add-only check in
-`crates/ci/check.sh` catches an edit to them.
+`docs/decisions/` and the root documents.
 
 ## Workflow
 
@@ -33,7 +30,14 @@ repository. They are not edited here (ADR 0008 §3); the add-only check in
 4. Run `crates/ci/check.sh` before you push (see below).
 5. Open a pull request against `main`. Explain *why*, not just *what*; the diff already
    shows what changed.
-6. CI must pass and the change must be approved in review. Then it merges.
+6. CI must pass. Review must approve. Then it merges. CI is two jobs: the lock job
+   and the check job, which runs `crates/ci/check.sh`. You can run that script yourself
+   before you push: it runs `crates/ci/check-locked.sh`'s checks too, though the
+   verdict on the money code is the lock job's.
+
+The money code is locked: a change under `crates/nfx-pay`, `crates/nfx-pay-wire` or any
+other path that `crates/ci/check-locked.sh` lists fails CI until it has been reviewed
+and re-pinned. See [`docs/nfx/m2-plan.md`](docs/nfx/m2-plan.md) before you touch it.
 
 ## Spec first
 
@@ -62,15 +66,14 @@ PYTHON=path/to/venv/bin/python crates/ci/check.sh
 
 CI runs this same script. In order, it:
 
-1. recomputes the spec test vectors and compares them with the files on disk;
-2. checks the JSON schemas against the vectors;
-3. runs the add-only check on the mirrored demo paths (skipped when there is no
-   `demo/main` ref to compare with);
+1. runs the locked-paths check first, before any unpinned code runs;
+2. recomputes the spec test vectors and compares them with the files on disk;
+3. checks the JSON schemas against the vectors;
 4. runs `cargo fmt --check`, `cargo clippy` with warnings denied, and `cargo test`;
 5. packages a real clip with ffmpeg, only if `ffmpeg` is on `PATH`
    (`NFX_FFMPEG` and `NFX_FFPROBE` point at other binaries);
 6. runs `cargo deny check`;
-7. runs the `nfx-proto` and `nfx-wasm` tests for `wasm32` under Node
+7. runs the `nfx-proto`, `nfx-pay-wire` and `nfx-wasm` tests for `wasm32` under Node
    (`NFX_SKIP_WASM=1` skips this step).
 
 It needs:
@@ -80,10 +83,10 @@ It needs:
 - a Rust toolchain at least as new as `rust-version` in `crates/Cargo.toml`, with
   `clippy`, `rustfmt` and the `wasm32-unknown-unknown` target;
 - `cargo-deny` for the `cargo deny check` step, which always runs;
-- `wasm-pack` and Node (use the version pinned in `crates/ci/gitlab-ci.yml`) for the
+- `wasm-pack` and Node (use the version pinned in `.github/workflows/ci.yml`) for the
   `wasm32` step, unless you skip it with `NFX_SKIP_WASM=1`.
 
-The versions CI uses are pinned in `crates/ci/gitlab-ci.yml`. A clean test build is
+The versions CI uses are pinned in `.github/workflows/ci.yml`. A clean test build is
 heavy; CI sets `CARGO_BUILD_JOBS=2` and `CARGO_PROFILE_TEST_DEBUG=0` to keep it light,
 and you can do the same.
 
@@ -117,14 +120,9 @@ Do **not** add `Co-Authored-By` trailers or tool-attribution lines.
 
 ## Architectural decisions
 
-Anything that constrains the project long-term (a transport, a datastore, a protocol
-rule) gets a short record in `docs/decisions/NNNN-title.md` covering the context, the
-decision and the consequences, in the format of
-[ADR 0001](docs/decisions/0001-record-architecture-decisions.md). Accepted records are
-not edited; a decision that no longer holds is marked superseded by a new record. The
-demo repository numbers its own records too (0001 to 0005, 0007 and 0009 onward; 0006
-and 0008 are this repository's, see ADR 0008), so agree the number of a new record in
-the issue before you use it.
+Anything that constrains the project long-term — language, framework, datastore,
+protocol — gets a short record in `docs/decisions/NNNN-title.md` covering the context,
+the decision and the consequences. Future contributors need to know why, not just what.
 
 ## Reporting a security issue
 

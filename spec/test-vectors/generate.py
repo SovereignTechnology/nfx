@@ -37,6 +37,8 @@ VIDEO_ID = "salt-flats-dusk"
 TTL = 120
 MAX_SAFE_INT = 2**53 - 1
 
+from pay1 import pay1_vectors  # noqa: E402  (pinned with the money code: crates/ci/check-locked.sh)
+
 
 def uvarint(n: int) -> bytes:
     """Unsigned LEB128, postcard's integer encoding."""
@@ -191,6 +193,9 @@ def render_hashlist(hashlist: dict) -> bytes:
 
 
 def main() -> int:
+    # pay/1's nesting vectors go 2000 levels deep, past the default recursion limit of
+    # json's encoder on Python 3.11 (the CI image's); 3.12 passed only by accident.
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), 10_000))
     ap = argparse.ArgumentParser()
     ap.add_argument("--verify", action="store_true")
     args = ap.parse_args()
@@ -753,6 +758,7 @@ def main() -> int:
             "tickets": tickets,
         },
         "derived.json": derived,
+        "pay1.json": pay1_vectors(),
         "licensed.json": {
             "description": "NFX-08 §2 licensed-mode encryption of one file: stored = nonce || "
                            "XChaCha20-Poly1305-Encrypt(K, nonce, plaintext, aad) (IETF construction, "

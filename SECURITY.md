@@ -23,13 +23,10 @@ release notes unless they ask not to be.
 In scope: anything in this repository. Out of scope: the hosting infrastructure, and
 issues that require an already-compromised machine or physical access.
 
-The repository includes the NFX specification (`spec/`), the Rust crates (`crates/`),
-the browser test player (`web/player/`) and the v0 demo (`packages/`). Protocol-level
-weaknesses in the specification are in scope, including ones that no implementation
-introduced.
+The repository includes the NFX specification (`spec/`), the Rust crates (`crates/`)
+and the browser test player (`web/player/`). Protocol-level weaknesses in the
+specification are in scope, including ones that no implementation introduced.
 
-The threat model table and the money-path invariants below describe the v0 demo
-(`packages/`) and are pinned by its tests; they are not a threat model for NFX.
 NFX-specific security considerations live in the spec documents:
 
 - NFX-02 §4, *Parse/verify algorithm*: when a catalog manifest is accepted;
@@ -41,78 +38,25 @@ NFX-specific security considerations live in the spec documents:
 - NFX-08 §1, *Trust posture (state it plainly)*, and §4.1, *Seeder verification
   (licensed)*: licensed mode (Draft).
 
----
+## Money code
 
-## Guiding rule
+The paths that hold money code are locked. `crates/ci/check-locked.sh` lists them, pins
+every file in them by hash (`crates/ci/locked.sha256`) and fails any change that has not
+been reviewed and re-pinned. The payment rules themselves are in
+[NFX-07](spec/nfx-07-open-payments.md), and the plan for the money path and its security
+stage in [`docs/nfx/m2-plan.md`](docs/nfx/m2-plan.md).
 
-**Bound the loss of any single interaction to a block's worth of sats, verify before you
-pay, and never trust a peer or a server for anything you can check yourself.**
+Cryptography comes from libraries only (ADR 0008 §4); nothing here is hand-written. A
+contributor who finds a hash, signature, blinding or key-derivation primitive being
+implemented in this repository stops and reports it.
 
-## Threat model
+## The demo's threat model
 
-This table is the normative source for the adversary test suite
-(`packages/core/src/payment/__tests__/`, `packages/core/src/pay-protocol/__tests__/`,
-`packages/gateway/src/auth/__tests__/`). Every row has a named test. It is reproduced
-verbatim from `docs/plan/build-plan.md` §1; change it there first.
+Until 2026-10-11 this file also held the threat table (T1 to T16), the money-path
+invariants and the locked directories of the TypeScript demo that was mirrored here.
+They describe the demo, not NFX, and left with the mirror. They are in the demo's
+repository (`nutflix-demo`) and here at the tag `demo-base`:
 
-| # | Actor | Attack | Control | Residual loss |
-|---|-------|--------|---------|---------------|
-| T1 | Malicious seeder | Serves wrong bytes | Hypercore Merkle proof per block, before `download` fires | 0 |
-| T2 | Malicious seeder | Stalls | Hypercore already multi-sources; per-peer timeout, drop | Time |
-| T3 | Malicious viewer | Downloads, never pays | Window (4 blocks), then stream destroy + ban | ~4 blocks of sats |
-| T4 | Malicious viewer | Pays seeder, stiffs creator | Seeder requires both proof sets | 0 |
-| T5 | Malicious viewer | Double-spends | DLEQ offline check; async swap at mint; ban on failure | ≤ window |
-| T6 | MITM | Steals proofs in flight | Noise secret-stream + P2PK lock to recipient | 0 |
-| T7 | Any peer | Forged proofs | NUT-12 DLEQ against cached mint keyset | 0 |
-| T8 | Mint | Rug / compromise | Small balances, creator-chosen mint, one-click melt-out, mint shown in UI | Balance at that mint |
-| T9 | Impostor creator | Fake video under real title | Signed NIP-71 event; UI shows verified pubkey/NIP-05, not just display name | Reputation |
-| T10 | Sybil seeders | Join topic, serve nothing | Pay-after-verify makes them unprofitable; peer reputation | Time |
-| T11 | Internet | DoS seeder/gateway | Per-pubkey rate limits, max streams, OS hardening | Availability |
-| T12 | npm | Compromised dep | Lockfile, `npm ci --ignore-scripts`, exact pins, native module audit | Depends |
-| T13 | Portal operator | Malicious JS | Open source, reproducible build, hash in signed Nostr event, SRI, CSP. **Not fully fixable in a browser — say so in the UI.** | Web session |
-| T14 | Host | Keys read from disk/logs | Encrypted at rest, secure memory, log redaction | Keys on host |
-| T15 | Content | XSS via titles/descriptions/comments | Render as text or sanitized markdown; CSP no-inline; Electron `contextIsolation`, no `nodeIntegration`, sandboxed renderer | 0 |
-| T16 | Content | Malicious thumbnail/blob | Thumbnails are Blossom blobs with `x` hash in imeta; verify before display; images decoded in renderer only | 0 |
-
-## Non-negotiable invariants of the money path
-
-Specified in `docs/plan/build-plan.md` §1–§3 and enforced by the adversary tests:
-
-1. **Pay after verify.** A viewer pays only for blocks Hypercore has emitted `download`
-   for from that specific peer. Hypercore does not emit `download` for a block that failed
-   its Merkle proof.
-2. **Exact amounts.** A `PAY` must cover exactly `blocks × price` split per the video's
-   `split` tag. Underpayment and overpayment are both rejected.
-3. **Two locked sets.** Every `PAY` carries a seeder proof set and a creator proof set,
-   each P2PK-locked (NUT-11) to its recipient, each carrying DLEQ (NUT-12).
-4. **Offline verification before `ACK`.** DLEQ against the cached mint keyset, P2PK target
-   check, amount check, mint allowlist — all before the seeder acknowledges.
-5. **Window then cut.** `uploaded − paid` per peer may not exceed the window (default 4
-   blocks). Past it the seeder destroys the stream and bans the pubkey.
-6. **Ban on double-spend.** An async swap at the mint that reports an already-spent proof
-   bans the paying pubkey; the ban list is persisted.
-7. **No key or proof in a log, ever.** A redaction layer sits in front of every logger.
-8. **No browser persistence of proofs or keys.** The web shell holds NIP-60 state in memory
-   only.
-
-## Locked directories {#locked}
-
-These directories are the audit surface. Until Stage 2 of the execution plan (not published) they
-contain **only** interfaces, re-exports and tests (`MockPaymentEngine` lives in
-`packages/core/src/mocks/`, outside the lock). CODEOWNERS plus
-`scripts/check-locked-dirs.sh` fail any change that adds implementation there.
-
+```sh
+git show demo-base:SECURITY.md
 ```
-packages/core/src/payment/
-packages/core/src/signer/
-packages/core/src/pay-protocol/
-packages/core/src/wallet/spend.ts
-packages/gateway/src/auth/
-```
-
-## No model writes crypto
-
-Hashing, signatures, blinding, DLEQ, key derivation and secure memory come from
-`@cashu/cashu-ts`, `sodium-native` / `sodium-universal`, `nostr-tools` and `hypercore`.
-Any contributor — human or agent — who finds themselves implementing one of these stops
-and reports.

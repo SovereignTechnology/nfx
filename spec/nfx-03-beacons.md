@@ -68,12 +68,12 @@ ignore tags they do not know (NFX-01 §4). No payments, no media.
 
 - `video` MUST equal the `a` tag's d component (redundant on purpose: content is
   self-describing when mirrored off-relay).
-- `endpoints[].t`: `iroh` (NFX-06), `https` (origin-style, NFX-05 §6 serves
-  `GET <base>/<sha256>`), `webrtc` (bridge, NFX-10 §2), `hyper` (optional Hypercore
-  profile, NFX-12). Several may be present; at least one MUST be. New endpoint types
-  are non-breaking additions (NFX-01 §4): a client MUST skip endpoints whose `t` it
-  does not implement, and MUST NOT reject the beacon because of them. The registry of
-  `t` values is NFX-11 §3.
+- `endpoints[].t`: `iroh` (NFX-06), `https` (origin-style: `url` is the origin's base
+  URL, under which NFX-05 §6 serves `GET <base>/<sha256>`), `webrtc` (bridge, NFX-10
+  §2), `hyper` (optional Hypercore profile, NFX-12). Several may be present; at least
+  one MUST be. New endpoint types are non-breaking additions (NFX-01 §4): a client MUST
+  skip endpoints whose `t` it does not implement, and MUST NOT reject the beacon because
+  of them. The registry of `t` values is NFX-11 §3.
 - `chunks`: `"all"` or an integer count of hash-list entries currently held. Partial
   seeders are legal; clients prefer `"all"` but MAY fetch from partials.
 - `tickets` key **`meta` is reserved** (the metadata collection, NFX-06 §2) and MUST
@@ -131,3 +131,7 @@ edit in this spec is ever required to grow the relay set.
 - **Frozen at M1, 2026-09-24** (sovtech). From here on, a behaviour change needs a
   `specver` bump (NFX-01 §4); only clarifications that change no behaviour are edited in
   place. Record: `docs/nfx/freeze-m1-candidate.md`.
+- 2026-09-29 (clarification, no behaviour change; M2.0 twenty-ninth audit,
+  `docs/nfx/reviews/2026-09-24-m2.0-twenty-ninth-audit.md`): §4 says in words that an
+  `https` endpoint's `url` is the origin's base URL, which `GET <base>/<sha256>` already
+  meant; NFX-05 §6 and NFX-07 §4 define an origin by that base URL.

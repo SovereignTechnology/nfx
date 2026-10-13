@@ -80,10 +80,190 @@ normal seeder upstream and a normal p2p-media-loader peer downstream.
 
 ## 3. Payments in the browser
 
+A page pays from the user's NIP-60 wallet, encrypted to the user's key on the user's
+relays, since proofs are never kept in browser storage (§3.2), and what it earns goes
+there too. Other clients may pay from that wallet at the same time: the user's other
+pages, sites and devices. A page's **partition** is the browser storage, with its Web
+Locks, that it shares with other pages: that of one web origin (scheme, host and port)
+in one browser profile, or, for a player embedded in another site's page, that of its
+web origin under that site; a private browsing session has its own. What this section
+says of a page holds for a worker it pays or earns from. Whether a page pays an origin
+(§3.1) or a peer (§3.2), or earns from a peer (§3.2):
+
+- **Its proofs are its own.** A page pays only with proofs of its own, as NFX-07 §3a
+  says every client of a shared wallet does: proofs fresh from a swap it made for that
+  payment (NUT-03), set aside in its record (below). It keeps no proofs between
+  payments, so that is one swap per payment, and the swap's input fees (NUT-02) are the
+  page's.
+- **Every payment has a record, written before its swaps.** A payment a page makes or
+  earns has a **record** in two parts:
+  - its *secret part*, in the wallet, encrypted to the user's key as the wallet's token
+    events are: the inputs of the payment's first swap (the swap that makes the
+    payment's proofs, or, for a payment earned, the one that claims them), and a NUT-13
+    seed drawn at random for the record. Every swap of the record derives its outputs
+    from that seed (NFX-07 §3a). It names the page's partition (a random id kept in its
+    storage), and only a page of that partition acts on it: it is no NIP-60 token event,
+    so no client pays from it, and every other client, browser or not, leaves it alone.
+    The id is made once, by the first page of the partition to pay or earn, before it
+    makes any record: holding the Web Lock under which the partition's standings are
+    changed (below), it reads the id from the partition's storage and, only if none is
+    there, draws one at random and writes it. So pages that open together make one id,
+    and every later page reads it;
+  - its *plain part*, in the partition's storage, holding nothing that can spend: the
+    payee or payer; the payment's **sending time**, by which the page sends the payment,
+    if at all; the relays that accepted the secret part; the keyset and counters each
+    swap's outputs use, none used twice; for a reclaim, which outputs are its inputs;
+    which outputs are the payment's; and what each swap and the payment came to.
+
+  A page sends a swap only once both parts name it: the secret part accepted by one of
+  the wallet's relays, which the plain part names, and the swap written into the plain
+  part. A retry of a swap reuses its outputs (NUT-19). The page notes what a swap came
+  to in the plain part before it acts on it, so it sends a payment only once the
+  payment's first swap is noted done. NFX-07's 180 s wait for an unanswered payment is
+  counted from the sending time. What a record's swaps make stays in the record until
+  the page writes it into the wallet: a swap's change, proofs a reclaim takes back and a
+  payment earned as soon as the swap that made them is done, and a payment's own proofs
+  only if the payment ends unsent. A payment made ends served or acked, settled by a
+  quote, unsent, or with its reclaim ended; a payment earned, once its swap's outcome is
+  learnt. A first swap that made nothing, because another client spent one of its inputs
+  first, made no payment: the payment ends unsent, and no payee is judged by it. Beyond
+  this, the record's form is the page's own.
+
+  This rule is open mode's (NFX-07), where every request of a page that moves value at
+  a mint is a swap (NUT-03). In licensed mode a page that pays or earns makes two that
+  move value and are no swaps: the licence purchase (`POST /v1/nfx/license`, §3.3,
+  NFX-08 §4) and an earning page's `redeem` (`POST /v1/nfx/redeem`, §3.2, NFX-09 §2).
+  Their records are specified with licensed mode (NFX-08, NFX-09), not here.
+- **One page acts on a record at a time.** Each record has a Web Lock of its own, named
+  by the record. The page that makes a record takes its lock before anything names the
+  record, and holds it until the record ends: its payment ended, what it came to in the
+  partition's standing (below) for a payment made, and what it holds unspent in the
+  wallet. A page acts on a record (sends its swaps or its payment, waits for an answer
+  or a body, reclaims, learns what a swap did, or notes what it came to) only while it
+  holds that lock. The browser frees a page's locks when the page closes, and when it
+  unloads the page into a back/forward cache, kept there or not (Web Locks §2.6: locks
+  end with the unloading of their document). So a page put in that cache has closed,
+  for this section, from the `pagehide` that puts it there: it acts on no record from
+  then on, and another page may take its records up. Shown again, it holds none of the
+  locks it held, whatever the browser did with them. It first lets go of every lock it
+  held, in case the browser kept one, since a request for a lock the page still holds
+  would wait behind the page's own hold; then it asks for each lock anew, and under a
+  lock so taken it reads both parts of the record again before it acts, as a page
+  taking the record up does (below). A page frozen in a background tab is not unloaded:
+  it holds its locks until it resumes or is discarded, and its payments wait with it. A
+  page that cannot take Web Locks (outside a secure context) pays and earns nothing.
+  Every page of the partition that pays or earns asks for the lock of each record not
+  yet ended that it does not hold, so it takes the record up once the holder has closed,
+  and only then. That page reads both parts again under the lock, the secret part from
+  the relays that accepted it, and then:
+  - a record whose plain part names no relay that accepted its secret part sent no
+    swap: it ends with nothing;
+  - otherwise it learns what each swap of the record did as NFX-07 says for that swap
+    (§3 for a payment earned; §3a's reclaims for a payment made, its first swap too):
+    it reads the swap's inputs (NUT-07) and restores its outputs (NUT-09), and calls no
+    proof spent before that restore. A swap of a payment made whose outcome stays
+    unknown is sent again, with the same outputs;
+  - a payment made whose first swap was not noted done was never sent: once that swap
+    is decided, what it made goes into the wallet, and the record ends with no payment.
+    One whose first swap was noted done, and that has not ended, goes on as NFX-07
+    says for what its record notes: refused, it is reclaimed; with no answer noted, it
+    is in flight from its sending time, and reclaimed 180 s after it;
+  - it writes into the wallet every output of the record's swaps that is unspent and not
+    in the wallet already, a payment's own proofs only if the payment ends unsent, and,
+    for a payment made, its first swap's inputs that are unspent and no longer in the
+    wallet. A payment earned's inputs are the payer's: they reach the wallet only
+    through the swap that claims them.
+
+  Until a page can read the secret part, the record is incomplete, as a reclaim the mint
+  cannot serve yet is. A page notes a record's end, and what it came to in the standing,
+  in one transaction of the partition's storage, so it counts once. Once a record has
+  ended, its secret part may be deleted (NIP-09).
+- **A partition never opened again loses what its records hold.** A record that no page
+  takes up again (its partition's storage cleared by the user or the browser, its site
+  never visited again, or its secret part lost by every relay that accepted it) is no
+  page's, and what it holds is lost: a payment in flight, and what a swap made that its
+  page closed before writing into the wallet (a swap's change, proofs a reclaim took
+  back, a payment earned). That is at most the value of its first swap's inputs for each
+  such record. NFX-07 keeps one payment in flight to a payee at a time, so a partition
+  loses at most one payment per payee it was paying, and the rest only from swaps whose
+  pages closed before writing it. A stated concession. A page SHOULD ask that its
+  partition's storage persist (`navigator.storage.persist()`), so the browser does not
+  clear it to free space.
+- **Its standings are its partition's.** NFX-07's client, §3a's watcher and §4's client
+  alike, is the page's partition. Its pages keep its standings (§3a's per seeder, §4's
+  per origin) in its storage, since they hold no proofs, and change them only under a
+  Web Lock, so a stop, a try used or a back-off holds for them all, and one payment is
+  in flight to a payee among them all, named by its record. A page holding that lock
+  waits for no other lock. Two partitions are two clients, though they pay from one
+  wallet, as two devices are: each keeps standings of its own, and storage cleared makes
+  a new partition. So a lying payee takes one payment per name (a seeder's identity, an
+  origin's base URL) from each partition that pays it (each web origin, browser
+  profile, device and private session, and again after storage is cleared), each with
+  its own payment in flight to it: a new partition gains it what a new name does
+  (NFX-07 §3a, §4). A stated concession.
+- **A closed page's payments to a seeder are settled by no quote.** A page's mesh
+  identity (§3.2) is its own, since two pages cannot share one at a tracker, and so are
+  its ledgers, which NFX-07 §3a keeps as long as the identity: a quote settles only
+  payments made under it. So a payment that awaits a quote (NFX-07 §3a) when its page
+  closes, or that a reclaim after it closes finds spent, awaits one no page can get, and
+  the partition pays that seeder nothing more, as it pays an origin nothing more that
+  kept a closed page's payment (§3.1). A stated concession, the cost of the one-payment
+  bound.
+  Credit is the ledger's too: a seeder that refuses everything takes at most half a
+  page's window ceiling for each video (NFX-07 §3a) from each page, a new page's identity
+  holding none of an earlier one's.
+
 ### 3.1 HTTPS
 
-When fetching from a paying origin or HTTPS seeder, the player's HTTP request hooks
-(hls.js / p2p-media-loader) attach the NFX-07 §4 `X-NFX-*` headers.
+When fetching from a paying origin or HTTPS seeder, the player pays as NFX-07 §4 says,
+every client rule of it included, as the page's partition (§3). Each rule's form in a
+browser is below: the request, the origin's answers, the load and its wait, and what
+the page cannot see.
+
+- **The request.** A paid request is a `fetch` of `<base>/<sha256>` over HTTPS (NFX-07
+  §4), whichever of NFX-05 §6's paths the player asked for, with `X-NFX-Pay`,
+  `mode: "cors"`, `redirect: "manual"`, `credentials: "omit"` and `cache: "no-store"`,
+  and no other header a preflight would have to allow (a CORS-safelisted one, such as
+  `Accept`, may go). So the token goes (under `no-cors` the browser drops the header
+  unsent), and the preflight asks only for what NFX-07 §4's origin allows; no redirect
+  is followed, and one shows as such (an `opaqueredirect` answer: a refusal, NFX-07 §4);
+  no cookie goes, so `Access-Control-Allow-Origin: *` admits it; and no copy in the HTTP
+  cache answers it or adds a conditional header. A service worker of the page's passes a
+  request carrying `X-NFX-Pay` to the network untouched, so no copy it holds answers one
+  either. It is never an `XMLHttpRequest`, which follows a redirect with the request's
+  headers, the token included: whatever loads the file (hls.js, p2p-media-loader), a
+  paid load goes through a loader that makes such a `fetch`.
+- **What the origin sends.** A cross-origin paid request is preceded by a CORS
+  preflight, which the browser passes only on a `2xx`, and a `402`'s `X-NFX-Price` and
+  `X-NFX-Mints` are readable only if exposed. A browser can pay only an origin that
+  sends what NFX-07 §4 says an origin serving browsers SHOULD.
+- **The load and its wait.** NFX-07 §4's client waits 180 s from sending for a final
+  status and for a `200`'s whole body, so nothing but the page's own end stops a paid
+  `fetch` before it ends or 180 s after its sending time (§3). No loader timeout applies
+  to it (hls.js's load policies, p2p-media-loader's `httpNotReceivingBytesTimeoutMs`). A
+  load the player drops (a seek, a level or ABR switch, its `destroy`) leaves it
+  running, detached: the page still reads and verifies its body, which decides whether
+  it was served, then keeps the file or drops it. It fetches the whole file, never the
+  rest of one loaded in part (as p2p-media-loader does, with `Range`). While it runs,
+  and while its reclaim does, no load from that origin is a paid request: a loader's
+  retry, or a second load at once (p2p-media-loader's `simultaneousHttpDownloads`,
+  hls.js's main and audio streams), waits, fails, or goes to another source. A page
+  that closes or navigates away stops waiting: a payment the origin had swapped is then
+  lost, and the partition pays that origin nothing more (NFX-07 §4's stated
+  concession); the reclaim falls to another page of the partition (§3).
+- **What the page cannot see.** It cannot see when the browser sends the `GET`, which
+  may be later than its `fetch`: after the preflight, or once a connection to the
+  origin is free. The page calls `fetch` by the sending time its record names (§3) and
+  counts NFX-07 §4's 180 s from that time; a `GET` the browser sends later is a request
+  that comes late (NFX-07 §4's stated concession). A `fetch` that fails before a status
+  (a network error, which is also how a failed preflight, a redirect under
+  `redirect: "error"` and an answer without `Access-Control-Allow-Origin` look) is a
+  paid request with no final status: the page reclaims 180 s after its sending time, as
+  NFX-07 §4 says, never sooner. A `200` whose body stream fails is a `200` cut short
+  (NFX-07 §4). A browser may send a `GET` again by itself when its connection failed
+  early; the copy carries the same token, so it takes no second payment, and its answer
+  is the request's. A `402` whose price or mints the page cannot read names none
+  (NFX-07 §4).
 
 ### 3.2 Paid browser mesh (M2)
 
@@ -91,16 +271,24 @@ Browser peers earn sats for serving other browsers. There is one rule set for th
 mesh, and it is NFX-07's:
 
 - **Messages.** The pay/1 messages of NFX-07 §2 (`hello`, `quote`, `pay`, `ack`,
-  `rej`), byte-identical JSON, travel on the WebRTC data channel p2p-media-loader
-  already holds open between two peers. There is one pay session per remote peer and
-  video, as on iroh. A browser↔bridge link is the same (§2).
+  `rej`, `refuse`), byte-identical JSON, travel on the WebRTC data channel
+  p2p-media-loader already holds open between two peers. A peer opens a pay session per
+  remote peer and video it watches, as on iroh, and NFX-07 §3 allows several open at once
+  on one account, up to the per-peer cap. The channel meets NFX-07 §2's delivery rule:
+  a message unacknowledged for 60 s closes it. A browser↔bridge link is the same (§2).
 - **Unit and window.** The mesh accounts in **chunks, where one chunk is one NFX-05
   file**. That is a whole segment or init, never a WebRTC message fragment. `quote.window`
   is the number of chunks a peer will upload unpaid, default 8 (about 16 s of video at
-  2 s segments). A chunk counts as delivered only once all its bytes have arrived and
-  passed NFX-05 §4. An aborted or failed transfer counts for nothing, so a payer never
-  owes for fragments, and the uploader's exposure to aborted transfers is bounded by
-  `window`. An uploader MUST stop serving a session beyond `window` unpaid chunks.
+  2 s segments). As on iroh (NFX-07 §3), every upload request counts as one chunk when
+  it is admitted, whole or aborted, and the payer pays for every chunk it requested
+  and was not refused. Counting only whole deliveries would let a peer abort each
+  transfer at 99% and never owe anything. An uploader serves under NFX-07 §3's service
+  limit: `window` per account, and a global cap per `debt_ttl`. A refused upload request
+  is answered with pay/1 `refuse` on the data channel, so the requester can tell it from
+  an aborted transfer.
+- **Identity.** A mesh peer's id is self-chosen, so a ban on the mesh holds only until
+  the peer takes a new id. The global cap is what bounds an uploader's loss here, as on
+  every transport (NFX-07 §3).
   Licensed videos add the proof lock of NFX-08 §4.
 - **Upload gate.** Upstream p2p-media-loader v4 (Apache-2.0) has no hook that can
   approve or refuse an individual upload request, and no application message channel
@@ -112,15 +300,21 @@ mesh, and it is NFX-07's:
   serves and fetches for free (the M1 mesh). A paid peer MUST NOT upload beyond
   `window` to a peer that does not speak pay/1, unless it has chosen to serve free.
 - **Earnings.** Ecash a browser earns is written through to the user's NIP-60 wallet
-  (encrypted to the user's key, on the user's relays) as soon as it is `ack`ed, and
-  in licensed mode after `redeem` (NFX-09). Proofs MUST NOT be persisted in any
-  browser storage (`localStorage`, IndexedDB, Cache API, cookies). A closed tab
-  loses at most the earnings not yet written through.
+  (encrypted to the user's key, on the user's relays) as soon as the swap that claims it
+  is done (an ack follows that swap, NFX-07 §3), and in licensed mode after `redeem`
+  (NFX-09). Proofs MUST NOT be persisted in any browser storage (`localStorage`,
+  IndexedDB, Cache API, cookies). A payment earned has a record, written before its
+  swap (§3), so what a closed tab earned and had not written through is its
+  partition's to write, and lost only with a partition never opened again (§3). An
+  earning page's swaps derive their outputs from their records' seeds, so their late
+  outcomes (NFX-07 §3) are learnt, by that page or, once it closes, by another page of
+  its partition.
 
 ### 3.3 Licensed mode
 
 One `POST /v1/nfx/license` (NFX-08) per video per session; key kept in a Web Worker /
-module scope only, never `localStorage`.
+module scope only, never `localStorage`. The purchase moves value and is no swap, so §3's
+record rule, which is open mode's, does not cover it (§3).
 
 ## 4. Product mapping
 
@@ -161,3 +355,73 @@ NFX-05 byte formats.
   verified bytes; the swarm ID carries no p2p-media-loader protocol version. Evidence:
   `web/player/e2e-mesh.ts` (a real player, the embedded tracker and the Rust bridge, PASS
   3/3).
+- Draft 2026-09-24 (M2.0 audit): §3.2 counts every admitted upload request, not only
+  whole deliveries. The old rule let aborted transfers go unpaid without bound.
+- Draft 2026-09-24 (M2.0 second audit): §3.2 follows NFX-07 §3 as reworked. The service
+  limit is per peer across videos, plus the global cap. Refused requests are not owed,
+  and earnings are written through after the ack, which now follows the swap. Mesh
+  identities are self-chosen, so the global cap is the bound.
+- Draft 2026-09-24 (M2.0 fourth audit): §3.2 follows NFX-07 as revised. The window is
+  per account, and a refused upload request is answered with pay/1 `refuse`.
+- Draft 2026-09-24 (M2.0 sixth audit): §3.2 lists `refuse`, allows several pay sessions
+  on one account as NFX-07 does, and holds the data channel to NFX-07 §2's delivery rule.
+- Draft 2026-09-29 (M2.0 twenty-ninth audit,
+  `docs/nfx/reviews/2026-09-24-m2.0-twenty-ninth-audit.md`).
+  - §3: a page pays from the user's NIP-60 wallet, which other clients share, only with
+    proofs fresh from a swap of its own, as NFX-07 §3a now says of every client of a
+    shared wallet. Every payment a page makes or earns has a record, written before any
+    swap of it is sent: the first swap's inputs and a NUT-13 seed of the record's own in
+    the wallet, encrypted as its token events are and accepted by one of its relays; the
+    rest (the payee or payer, the sending time from which NFX-07's 180 s wait counts, the
+    relays, each swap's keyset and counters, what each swap came to) in the page's
+    storage partition, nothing there able to spend. What the swaps make stays in the
+    record until it is in the wallet. Each record has a Web Lock, which the page that
+    made it holds until the record ends; another page of the partition takes the record
+    up only once that page has closed, reads it again, learns what each swap did as
+    NFX-07 says (restoring its outputs, NUT-09, before calling any proof spent), and
+    writes what the record holds into the wallet. A partition never opened again loses
+    what its records hold, at most one payment per payee and the rest only from swaps
+    whose pages closed before writing it: a stated concession. NFX-07's client, a
+    watcher (§3a) or an origin's client (§4), is the partition: its pages keep its
+    standings in its storage and change them under a Web Lock, so a lying payee takes
+    one payment per name per partition: a stated concession. A page's mesh identity and
+    ledgers are its own, so a closed page's payment that awaits a seeder's quote is
+    settled by none, and the partition pays that seeder nothing more: a stated
+    concession. (Was: nothing said where a page keeps its standings, its proofs in
+    flight or what its outputs derive from, which pages share them, which page acts on
+    a payment in flight, or how a swap's outcome is learnt once its page closes.)
+  - §3.1 says how a browser pays an origin under NFX-07 §4, rule by rule. A paid request
+    is a `fetch` of `<base>/<sha256>` in `cors` mode, with no other header a preflight
+    must allow, that follows no redirect (a redirect is a refusal), sends no credentials
+    and is answered from no cache, the page's service worker's included; never an
+    `XMLHttpRequest`. The page pays only an origin that sends what NFX-07 §4 now says (a
+    preflight answered `204` allowing `X-NFX-Pay`, `Access-Control-Allow-Origin: *` on
+    every answer, `X-NFX-Price` and `X-NFX-Mints` exposed). No loader timeout or dropped
+    load stops a paid `fetch` before 180 s from its sending time; it fetches the whole
+    file, never a `Range` resume; and no retry or second load from that origin is paid
+    while it or its reclaim runs. A `GET` the browser sends after the sending time (a
+    slow preflight, a busy connection) comes late, as NFX-07 §4 concedes. A failed
+    `fetch` is a paid request with no final status, reclaimed 180 s after its sending
+    time, and a `402` the page cannot read names no price. (Was: the request hooks
+    attach the headers, which a browser could not send or read across origins; hls.js's
+    default loader follows a redirect with the token; the loaders' timeouts, aborts,
+    retries and `Range` resumes each broke a rule of NFX-07 §4.)
+  - §3.2: a payment earned has a record too (§3), so what a closed tab earned and had
+    not written through is its partition's to write (was: lost with the tab), and an
+    earning page's swaps derive their outputs from their records' seeds.
+  - §3: a page put in a back/forward cache has closed, for this section, from its
+    `pagehide`: the browser frees its locks as it unloads the page (Web Locks §2.6), and
+    another page may take its records up. Shown again, it holds none of the locks it
+    held: it lets go of each first, asks for each anew, and reads both parts of a record
+    again under the new lock before it acts. A page frozen in a background tab still
+    holds its locks. A page asks for no lock it holds.
+  - §3: the partition's id is made once, by the first page of the partition to pay or
+    earn, before it makes any record, under the Web Lock its standings are changed
+    under, so pages that open together make one id.
+  - §3: the record rule is open mode's. The two licensed-mode requests of a page that
+    pays or earns that move value and are no swaps, the licence purchase and an earning
+    page's `redeem`, have their records specified with licensed mode (NFX-08, NFX-09),
+    not here (was: nothing; the rule speaks only of swaps). §3.3 points here.
+  - §3: credit a page holds with a seeder is its ledger's, so its identity's: a seeder
+    that refuses everything takes at most half a page's window ceiling for each video from
+    each page (NFX-07 §3a, which now states that bound per identity).

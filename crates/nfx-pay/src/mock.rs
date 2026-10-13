@@ -1,0 +1,16117 @@
+//! A mock mint network and honest mock engines: an executable reading of NFX-07 §3 and §3a.
+//!
+//! Tokens look like `cashuBmock<hex>`, which no real Cashu wallet accepts. They hold
+//! power-of-two proofs, as a real mint issues them. The network tracks **proofs**, not
+//! token strings, so a re-encoded or combined token is still a double spend.
+//! - A swap is atomic: it claims every proof of a token, or none.
+//! - Swaps can be held (not processed), or processed with their responses held, and
+//!   released all at once or oldest first. Key requests can be held too.
+//! - The mint can be taken down.
+//! - The seeder's reads of swap state are answered in the poll that sends them, or on the
+//!   reader's next poll. Or every call the seeder's entries and sweeps send to the mint and
+//!   await (their reads, swaps, key requests and keyset listings) is answered from another
+//!   thread that wakes the caller a few milliseconds later, as a real mint's answer comes
+//!   back (`Answers::Woken` says which calls come back with another).
+//! - The seeder and the viewers keep time on the harness's clock, so debt ages, deadlines
+//!   pass and answers can be late. Moving the clock wakes whatever waits on it.
+//!
+//! No money and no cryptography are involved.
+//!
+//! Every defect the audits found in plausible engines can be planted with [`SeederFlaw`]
+//! or [`ViewerFlaw`]; `tests/mutants.rs` shows the adversary suite catches each one.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::{Future, poll_fn};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll, Wake, Waker};
+use std::time::Duration;
+
+use nfx_pay_wire::namespace::VideoAddr;
+use nfx_pay_wire::pay::{
+    Ack, Hello, MAX_INT, MAX_WINDOW, Message, ParseOptions, Pay, Quote, Rej, RejCode,
+};
+
+use crate::session::{
+    BadToken, EngineParams, Harness, MintEvent, PeerId, SeederEngine, SeederSession, Viewer,
+};
+
+/// Sessions one peer may hold open at once, across all videos.
+pub const MAX_OPEN_SESSIONS_PER_PEER: usize = 8;
+/// How long an unpaid chunk counts toward the global cap (NFX-07 §3: 1 h recommended).
+pub const DEBT_TTL: Duration = Duration::from_secs(3600);
+/// The shortest `debt_ttl` a seeder accepts (NFX-07 §3).
+pub const MIN_DEBT_TTL: Duration = Duration::from_secs(600);
+/// How long a never-paid account with no open session is kept (24 h recommended).
+pub const ACCOUNT_TTL: Duration = Duration::from_secs(24 * 3600);
+/// How long a ban lasts (24 h recommended).
+pub const BAN_TTL: Duration = Duration::from_secs(24 * 3600);
+/// The largest global cap a seeder accepts: beyond it the cap bounds nothing (NFX-07 §3).
+pub const MAX_GLOBAL_CAP: u64 = 1_000_000;
+/// The largest `window` the mock viewer accepts in a quote: the wire's own ceiling
+/// (NFX-07 §2).
+pub const WINDOW_CEILING: u64 = MAX_WINDOW;
+/// `mint-unavailable` answers in a row after which the viewer pays that seeder nothing
+/// more until a new session (NFX-07 §3a).
+pub const UNAVAILABLE_BUDGET: u32 = 3;
+/// The seeder answers every `pay` within this (NFX-07 §3).
+pub const SEEDER_DEADLINE: Duration = Duration::from_secs(60);
+/// How long a watcher waits for an answer before reclaiming (NFX-07 §3a): the `pay`'s
+/// delivery, the seeder's deadline and the answer's delivery, 60 s each.
+pub const ANSWER_WAIT: Duration = Duration::from_secs(180);
+/// The longest `debt_ttl` a seeder accepts (NFX-07 §3).
+pub const MAX_DEBT_TTL: Duration = Duration::from_secs(24 * 3600);
+/// The longest `account_ttl` and `ban_ttl` a seeder accepts (NFX-07 §3).
+pub const MAX_STATE_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
+/// The most proofs one payment may hold (NFX-07 §3).
+pub const MAX_PROOFS: usize = 64;
+/// Older keysets' ids start past this: none is ever the mint's active keyset's.
+const OLDER_KEYSETS: u64 = 1 << 32;
+/// Ids of keysets no mint ever had start past this ([`BadToken::UnknownKeyset`]).
+const UNKNOWN_KEYSETS: u64 = 1 << 48;
+/// Ids of keysets one mint alone started start past this ([`Harness::start_keyset_at`]).
+const OWN_KEYSETS: u64 = 1 << 56;
+
+/// Whether a mint whose active keyset is `active` lists keyset `k` (NUT-02): the active
+/// one, every one before it, and the older keysets the wallets hold, which predate it. A
+/// keyset it never had it does not list.
+fn lists(active: u64, k: u64) -> bool {
+    k <= active || (k > OLDER_KEYSETS && k < UNKNOWN_KEYSETS)
+}
+
+/// A mint's keyset listing (NUT-02), as it answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Listed {
+    /// Its active keyset ([`lists`] says which others it lists).
+    active: u64,
+    /// The keysets mints alone had started by then, its own among them, run to this id
+    /// ([`Harness::start_keyset_at`]).
+    own_upto: u64,
+    /// The `final_expiry` it lists for its active keyset, if any.
+    final_expiry: Option<u64>,
+}
+
+impl Listed {
+    /// Whether it names keyset `k`, which mint `owner` alone started (`None`: one every
+    /// mint shares), as the listing of the mint at `url`.
+    fn names(&self, url: &str, k: u64, owner: Option<&str>) -> bool {
+        match owner {
+            Some(m) => m == url && k <= self.own_upto,
+            None => lists(self.active, k),
+        }
+    }
+}
+
+/// Payment state is not trusted after a panic: a poisoned lock aborts the caller.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock()
+        .unwrap_or_else(|_| panic!("a poisoned lock: payment state is not trusted"))
+}
+
+/// The harness's clock, in whole seconds. Futures that wait on time register with it,
+/// and moving it wakes them.
+#[derive(Clone, Default)]
+pub struct Clock {
+    now: Arc<AtomicU64>,
+    waiting: Arc<Mutex<Vec<Waker>>>,
+}
+
+impl Clock {
+    fn now(&self) -> u64 {
+        self.now.load(Ordering::Relaxed)
+    }
+
+    fn watch(&self, waker: &Waker) {
+        lock(&self.waiting).push(waker.clone());
+    }
+
+    fn advance(&self, by: Duration) {
+        self.now.fetch_add(by.as_secs(), Ordering::Relaxed);
+        self.nudge();
+    }
+
+    /// Wake whatever waits on the clock, the time unchanged: a spurious wake
+    /// ([`Timing::wake_early`], [`Timing::spurious_wakes`]).
+    fn nudge(&self) {
+        let wake = std::mem::take(&mut *lock(&self.waiting));
+        for w in wake {
+            w.wake();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dleq {
+    Valid,
+    Invalid,
+    Missing,
+}
+
+/// A token as a seeder reads it. `locked` and `dleq` are the token's as a whole: a proof
+/// locked, and a proof lacking a DLEQ proof, else one whose DLEQ proof is invalid. Each
+/// proof's own is kept by the ledger, so a combined token keeps them.
+#[derive(Debug, Clone)]
+struct TokenInfo {
+    proofs: Vec<u64>,
+    mints: Vec<String>,
+    amount: u64,
+    unit: &'static str,
+    locked: bool,
+    dleq: Dleq,
+}
+
+/// Keys as a mint served them ([`MockNetwork::fetch_keys`]): they verify a DLEQ proof only
+/// if they are its own mint's and hold its keyset's keys, whatever the seeder holds them as.
+#[derive(Clone)]
+struct MintKeys {
+    /// The mint that served them.
+    mint: String,
+    /// The keysets whose keys they hold.
+    keysets: HashSet<u64>,
+}
+
+impl MintKeys {
+    /// Whether they verify every DLEQ proof of `info`, whose proofs name `named`. A proof
+    /// with none has nothing to verify: step 1 refuses it first.
+    fn verify(&self, info: &TokenInfo, named: &HashSet<u64>) -> bool {
+        info.dleq == Dleq::Missing
+            || (info.dleq == Dleq::Valid
+                && info.mints.iter().all(|m| *m == self.mint)
+                && named.is_subset(&self.keysets))
+    }
+}
+
+/// How a swap ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Swap {
+    /// Every proof is now the swapper's.
+    Claimed,
+    /// A proof was already claimed; nothing was claimed.
+    Spent,
+    /// The mint refuses the proofs (forged, or not a token: CDK 10001); nothing was
+    /// claimed.
+    Invalid,
+    /// The mint could not be reached: the request never got there, and nothing happened.
+    Unreachable,
+    /// The request reached the mint, and no answer came back (lost on the way): what
+    /// happened is unknown until a retry or a restore (NUT-09) shows it.
+    Lost,
+    /// The mint refused the request: its inputs are reserved by a request it is still
+    /// processing (NUT-07 `PENDING`; CDK's 11002 "token pending"). Nothing happened to
+    /// this request.
+    Pending,
+    /// The mint refused the request's outputs: their keyset is no longer active (CDK
+    /// 12002, after a rotation), or not one it knows (12001, which does not say whose
+    /// keyset). Nothing happened, and no request with those outputs can go through any
+    /// more; it is never the payer's fault.
+    OutputsRefused,
+    /// The mint refused the request because a keyset has expired (CDK 12003): its inputs'
+    /// or its outputs', with the same code and detail either way. Nothing happened to this
+    /// request; an inputs' expiry does not stop a request the mint reserved before it.
+    Expired,
+}
+
+/// Why a read of swap state gave no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadErr {
+    /// No answer came: the mint is down, or that endpoint is.
+    Unanswered,
+    /// Refused at once: more proofs or outputs than one request may cover (CDK's
+    /// `max_inputs` and `max_outputs`: 11014 for a check, 11015 for a restore).
+    TooMany,
+}
+
+/// A proof's state, as a NUT-07 check reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputState {
+    Unspent,
+    /// Reserved by a request the mint is still processing: it may yet go through, or be
+    /// rolled back.
+    Pending,
+    Spent,
+}
+
+/// What reading a swap's state shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Read {
+    /// Its outputs are signed.
+    Claimed,
+    /// Its outputs are unsigned and an input is spent: it can no longer go through.
+    Nothing,
+    /// Its outputs are unsigned and every input is unspent: the request may still be
+    /// processed, or its payer has the inputs back and has not spent them.
+    Unspent,
+    /// Anything else: an input pending, or a read unanswered.
+    Unknown,
+}
+
+/// How a wallet's reclaim of its own proofs ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reclaim {
+    /// Every proof was taken back.
+    All,
+    /// Some proof had already been claimed by someone else (the rest were taken back).
+    SomeSpent,
+    /// No answer came (the mint could not be reached, or the response was lost): try
+    /// again later.
+    Blocked,
+    /// The mint refused the reclaim: the proofs are reserved by a request it is still
+    /// processing (CDK 11002). Nothing was taken back yet.
+    Pending,
+    /// The mint refused the reclaim because the proofs' keyset expired (CDK 12003), and a
+    /// NUT-07 check shows every one unspent: lost to the expiry, not taken by anyone.
+    Expired,
+}
+
+type Done = Box<dyn FnOnce(Swap) + Send>;
+
+/// A swap's answer on its way back: the request, its outcome, its completion, and whether
+/// the outcome reaches a client (not one that gave up).
+type SwapAnswer = (u64, Swap, Done, bool);
+
+#[derive(Default)]
+struct Ledger {
+    tokens: HashMap<String, TokenInfo>,
+    claimed: HashSet<u64>,
+    forged: HashSet<u64>,
+    next: u64,
+    /// The seeder's swap requests are held on their way to the mint
+    /// ([`Harness::hold_swaps`]): its reads of swap state, third parties' claims and
+    /// watchers' reclaims are not.
+    hold: bool,
+    /// Hold only the seeder's next swap request.
+    hold_next: bool,
+    /// The responses to the seeder's swaps are held on their way back.
+    hold_responses: bool,
+    /// The seeder's key requests go unanswered ([`Harness::hold_key_fetches`]).
+    hold_keys: bool,
+    /// The mint's active keyset: the next begins at every rotation, and when the keyset
+    /// expires and the mint issues from another ([`Harness::expire_keyset`]).
+    active_keyset: u64,
+    /// The older keyset the wallets were funded in last ([`Harness::fund_older_keyset`]), and
+    /// how many there have been.
+    older_keyset: Option<u64>,
+    older_keysets: u64,
+    /// Keysets one mint alone started, and that mint ([`Harness::start_keyset_at`]).
+    own_keysets: HashMap<u64, String>,
+    /// The keyset each such mint issues from, the one it started last, and the
+    /// `final_expiry` it lists for it.
+    own_active: HashMap<String, u64>,
+    own_expiry: HashMap<String, Option<u64>>,
+    /// The keyset each proof issued names, which its DLEQ proof verifies against.
+    keyset_of: HashMap<u64, u64>,
+    /// Proofs whose DLEQ proof is missing or invalid (any other's is valid).
+    dleq_of: HashMap<u64, Dleq>,
+    /// Proofs locked to a spending condition.
+    locked: HashSet<u64>,
+    /// Keysets no mint ever had, named so far ([`BadToken::UnknownKeyset`]).
+    unknown_keysets: u64,
+    /// The mints that answer every request for keys 12001, their listings naming their
+    /// keysets as before ([`Harness::refuse_keys`]).
+    keys_refused: HashSet<String>,
+    down: bool,
+    dialled: HashSet<String>,
+    /// Swaps sent while held, with their output sets: not yet processed.
+    queued: Vec<(u64, String, u64, Done)>,
+    /// Swaps processed whose responses are held.
+    responses: Vec<(u64, Swap, Done)>,
+    /// Delivered outcomes, by submission.
+    answers: HashMap<u64, Swap>,
+    waiting: Vec<Waker>,
+    /// Swaps an acknowledge-first engine left for later ([`SeederFlaw::AckBeforeSwap`]).
+    deferred: Vec<(String, Done)>,
+    /// Process the next swap, and lose its response.
+    lose_swap: bool,
+    /// Process the next reclaim, and lose its response.
+    lose_reclaim: bool,
+    /// Restores go unanswered while swaps do not.
+    restore_down: bool,
+    /// The swapper's client gives up on the next swap at once (no answer), while the
+    /// request stays queued at the mint, to be processed at release with no answer.
+    time_out_next: bool,
+    /// Queued requests whose client gave up: processed at release, answered to no one.
+    gave_up: HashSet<u64>,
+    /// Those requests are processed right after the next read of a swap's state (a
+    /// NUT-07 check or a restore): between a seeder's two reads of it.
+    mid_read: bool,
+    /// Held responses are delivered right after the next read of a swap's state.
+    deliver_mid_read: bool,
+    /// The next swap's inputs are reserved (NUT-07 `PENDING`) and the request held.
+    reserve_next: bool,
+    /// The next request's inputs expire once the mint has reserved them
+    /// ([`MintEvent::ExpireInputKeysetOnceReserved`]).
+    expire_once_reserved: bool,
+    /// Proofs reserved by a request the mint is still processing.
+    reserved: HashSet<u64>,
+    /// NUT-07 checks go unanswered while swaps and restores do not.
+    state_down: bool,
+    /// Reads of swap state that reached the mint (NUT-07 checks and NUT-09 restores), one per
+    /// request, counted as each arrives.
+    reads: u64,
+    /// Key requests the seeder has sent, one per request, answered or held.
+    key_requests: u64,
+    /// Those of them that asked for a keyset listing (NUT-02).
+    listing_requests: u64,
+    /// Releases of held key requests so far: a request held before one was answered then.
+    key_releases: u64,
+    /// The most proofs or outputs one read may cover; more is refused at once.
+    read_limit: Option<usize>,
+    /// Reads wait for this many to reach the mint, at most this long in real time
+    /// ([`Harness::gather_state_reads`]).
+    gather: (usize, Duration),
+    /// Reads that have reached the mint while gathering.
+    gathered: usize,
+    /// Admissions that check and count in two steps meet between them: this many, at most
+    /// this long in real time ([`Harness::gather_admissions`]).
+    admit_gather: (usize, Duration),
+    /// Admissions that have met there.
+    admit_gathered: usize,
+    /// Seconds the clock moves between the next outcome's arrival and its settlement
+    /// ([`Harness::advance_during_next_land`]).
+    advance_during_land: u64,
+    /// Seconds a read left unanswered costs its client (its timeout).
+    read_timeout: u64,
+    /// Run during the next read of swap state (another learner, at the same time).
+    during_read: Option<Box<dyn FnOnce() + Send>>,
+    /// Output sets up to this id belong to a keyset rotated out: refused (0: none).
+    retired_outputs: u64,
+    /// Proofs and output sets up to this id belong to the mint's keyset that has expired
+    /// (0: none), proofs of older keysets excepted: a request spending such a proof, or with
+    /// such outputs, is refused (CDK 12003), and a restore does not show such outputs (CDK
+    /// skips an expired keyset's).
+    expired_upto: u64,
+    /// Proofs of an older keyset that has expired, while the mint's own is still current.
+    expired_inputs: HashSet<u64>,
+    /// The mint's active keyset has expired and stays active: proofs and output sets after
+    /// this id (its last rotation) belong to it, those it issued before its expiry included.
+    active_expired_since: Option<u64>,
+    /// Ids of keysets that expired while active, since rotated out.
+    expired_ranges: Vec<(u64, u64)>,
+    /// How the mint answers the seeder's calls.
+    answering: Answers,
+    /// When the seeders, honest, ask for keyset listings beyond what they must.
+    listings: Listings,
+    /// Calls answered from another thread whose caller has not been woken yet
+    /// ([`Harness::answers_under_way`]).
+    under_way: usize,
+    /// A panic raised on a thread of the harness's own that brings answers back or races a
+    /// release with the clock ([`Harness::race_release_with_clock`]), kept with where it was
+    /// raised, and raised again on the suite's thread as it next asks whether answers are
+    /// under way.
+    raised: Option<crate::adversary::Raised>,
+    /// How many such races the harness has run.
+    races: u64,
+    /// How the honest seeder and its mint take their time ([`Timing`]).
+    timing: Timing,
+    /// Swap outcomes the seeder has been handed and settles on tasks of its own
+    /// ([`Timing::spawn`]), not yet settled.
+    landing: usize,
+    /// Reads whose answers their readers have not taken yet ([`Harness::reads_out`]).
+    reads_out: usize,
+    /// How many answers have come back from another thread ([`Timing::jitter`]).
+    answered_later: u64,
+    /// The harness's clock, for the spurious wakes of [`Timing`].
+    clock: Option<Clock>,
+    /// Key requests and keyset listings answered from another thread ([`Answers::Woken`]),
+    /// by their handle: the answer once back, and who waits for it.
+    calls: HashMap<u64, Call>,
+    /// The handle of the last such call.
+    last_call: u64,
+    /// What happens just before the next swap request reaches the mint, in order.
+    before_swap: Vec<MintEvent>,
+    /// The output sets the mint signed, one per swap request and its retries (NUT-13):
+    /// what a restore (NUT-09) finds.
+    signed: HashSet<u64>,
+    /// Tokens the mint swapped, whatever the outputs ([`SeederFlaw::RestoreByToken`]).
+    swapped_tokens: HashSet<String>,
+    /// Proofs a watcher's own reclaims took back: its outputs, restorable.
+    reclaimed: HashMap<u64, u64>,
+    /// The `final_expiry` the mint lists for its active keyset (clock seconds), if any.
+    final_expiry: Option<u64>,
+    /// Sat the watchers' wallets hold in proofs of an older keyset, spent first
+    /// ([`Harness::fund_older_keyset`]).
+    older_balance: u64,
+    /// Proofs of older keysets: never the active one's.
+    older: HashSet<u64>,
+    /// Those of the older keyset the wallets were funded in last.
+    older_now: HashSet<u64>,
+    /// That older keyset has expired: every proof of it, those the wallets still hold
+    /// included ([`Harness::expire_older_keyset`]).
+    older_expired: bool,
+}
+
+impl Ledger {
+    /// The keyset listing of the mint at `url` as it answers now: which keysets it names
+    /// ([`Listed::names`]), and the `final_expiry` of its active keyset: the one it alone
+    /// started last, if any ([`Harness::start_keyset_at`]), else the one every mint shares.
+    fn listing_at(&self, url: &str) -> Listed {
+        Listed {
+            active: self.active_keyset,
+            own_upto: OWN_KEYSETS + self.own_keysets.len() as u64,
+            final_expiry: self
+                .own_expiry
+                .get(url)
+                .copied()
+                .unwrap_or(self.final_expiry),
+        }
+    }
+
+    /// The keyset of `proofs` expires, while the mint's own does not. Proofs of the older
+    /// keyset the wallets hold take the whole of it with them.
+    fn expire_inputs(&mut self, proofs: impl IntoIterator<Item = u64>) {
+        for p in proofs {
+            if self.older_now.contains(&p) {
+                self.expire_older();
+            }
+            self.expired_inputs.insert(p);
+        }
+    }
+
+    /// The older keyset expires: the proofs of it drawn so far, and those the wallets still
+    /// hold, as they draw them.
+    fn expire_older(&mut self) {
+        self.older_expired = true;
+        let drawn: Vec<u64> = self.older_now.iter().copied().collect();
+        self.expired_inputs.extend(drawn);
+    }
+
+    fn in_expired_keyset(&self, id: u64) -> bool {
+        (id <= self.expired_upto && !self.older.contains(&id))
+            || self
+                .active_expired_since
+                .is_some_and(|x| id > x && !self.older.contains(&id))
+            || (!self.older.contains(&id)
+                && self
+                    .expired_ranges
+                    .iter()
+                    .any(|(a, b)| (*a..=*b).contains(&id)))
+    }
+
+    fn proof_expired(&self, p: u64) -> bool {
+        self.in_expired_keyset(p) || self.expired_inputs.contains(&p)
+    }
+
+    fn dleq_of_proof(&self, p: u64) -> Dleq {
+        self.dleq_of.get(&p).copied().unwrap_or(Dleq::Valid)
+    }
+
+    fn outputs_expired(&self, outputs: u64) -> bool {
+        outputs != 0 && self.in_expired_keyset(outputs)
+    }
+}
+
+/// When an honest mock seeder asks a mint for its keyset listing (NUT-02): where a check
+/// needs one (NFX-07 §3), and, as it may, at its start. The suite must pass each.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Listings {
+    /// Only where a check needs one: step 3, for a keyset the listing it holds does not
+    /// name; the keyset rule, when the one it holds was asked for before the payment's
+    /// turn's second.
+    #[default]
+    OnDemand,
+    /// Every quoted mint's at its start too ([`MockHarness::with_listings_at_start`]).
+    AtStart,
+}
+
+/// How the mint answers the seeder's calls: its reads of swap state (NUT-07 checks and
+/// NUT-09 restores), its swaps, and its key requests and keyset listings (NUT-01, NUT-02).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Answers {
+    /// In the poll that sends the call.
+    #[default]
+    AtOnce,
+    /// A read on its reader's next poll, and every other call at once
+    /// ([`MockHarness::with_round_trip_reads`]).
+    NextPoll,
+    /// Every call an entry or a sweep sends to the mint and awaits (a read of swap state,
+    /// a swap, a key request, a keyset listing) from another thread, [`WOKEN_AFTER`] after
+    /// it reaches the mint, waking its caller ([`MockHarness::with_woken_answers`]). The
+    /// mint answers a call as it reaches it; its answer comes back by the wake. Two calls
+    /// the seeder sends as it takes another answer come back with that answer: the retry of
+    /// a swap whose response was lost, sent as the seeder takes the loss, and the completion
+    /// of a swap whose inputs stayed unspent past `account_ttl`, sent within a read. And a
+    /// swap the seeder's client gives up on ([`Harness::time_out_next_swap`]) is lost to it
+    /// at once.
+    Woken,
+}
+
+/// How long a call answered from another thread takes to come back: a few milliseconds,
+/// as a real mint's answer does.
+const WOKEN_AFTER: Duration = Duration::from_millis(2);
+
+/// Runs a future on a task of its own, on the runtime the engine was made in
+/// ([`Timing::spawn`]).
+pub type Spawner = Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>;
+
+/// Runs a thread's work with the context of the runtime the engine was made in entered
+/// ([`Timing::enter`]).
+pub type Enter = Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
+
+/// How an honest seeder and its mint take their time, beyond the harnesses' own
+/// ([`MockHarness::with_timing`]). Each is a way an honest engine or a real mint may
+/// behave, which NFX-07 leaves free, so the suite must pass every one: it judges progress by
+/// answers and settling, never by one poll or one turn, within the limits [`Harness`] gives.
+#[derive(Clone, Default)]
+pub struct Timing {
+    /// The mint answers every call from another thread ([`MockHarness::with_woken_answers`]);
+    /// otherwise each in the poll that sends it.
+    pub woken: bool,
+    /// How long such an answer takes to come back; `WOKEN_AFTER` if `None`. The suite must
+    /// pass with one of about ten milliseconds at most, the bound [`Harness`] puts on a
+    /// mint's answer: a longer one is outside the limits it gives.
+    pub answer_after: Option<Duration>,
+    /// Each answer takes a different time, from none to twice that, so that answers
+    /// overtake one another.
+    pub jitter: bool,
+    /// Key requests come back this much later again: keys come after a listing asked after
+    /// them.
+    pub keys_later: Option<Duration>,
+    /// A caller is woken once before its answer can be seen, then again once it can.
+    pub wake_early: bool,
+    /// Every answer wakes everything waiting at the mint or on the clock, not only its
+    /// caller.
+    pub spurious_wakes: bool,
+    /// The seeder settles each swap's outcome on a task of its own, spawned with this, a
+    /// turn of the runtime after the answer comes, never on the thread that brings it.
+    pub spawn: Option<Spawner>,
+    /// With `spawn`: the seeder's sweep runs on a task of its own, which the sweep awaits.
+    pub sweep_on_a_task: bool,
+    /// The seeder's entries take this many polls more at each step, waking themselves.
+    pub yields: u32,
+    /// Starts the tasks the seeder's entries go through (`tasks_in` and the three after
+    /// it), on the runtime the seeder was made in. One that spawns on the runtime whose
+    /// context the calling thread has entered needs `enter` too.
+    pub hop: Option<Spawner>,
+    /// With `hop`: each entry (a `hello`, a `pay`, a sweep) reaches the seeder through this
+    /// many such tasks, one after another.
+    pub tasks_in: u32,
+    /// With `hop`: each entry's answer comes back through this many such tasks.
+    pub tasks_out: u32,
+    /// With `hop`: the answer of a `pay` that waited comes back through one such task more.
+    pub task_after_a_wait: bool,
+    /// With `hop`: every wake of an entry is passed on to it by such a task.
+    pub wakes_through_a_task: bool,
+    /// The harness runs the threads it starts with this, the context of the seeder's
+    /// runtime entered there ([`Harness::spawn_thread`]): an entry polled on such a thread
+    /// can then spawn on that runtime as on its own thread.
+    pub enter: Option<Enter>,
+    /// With `spawn`: the seeder takes a closed connection on a task of its own, a turn of
+    /// the runtime after the drop, and stamps it with the time it takes it: a session's
+    /// close, and the drop of a `hello` or a `pay` not yet answered.
+    pub closes_on_a_task: bool,
+    /// With `spawn`: the seeder ages its state (bans, debt, accounts never paid) on a task
+    /// of its own that the clock wakes, a turn of the runtime after each move, not as each
+    /// entry arrives.
+    pub ages_on_a_task: bool,
+    /// The seeder holds every quoted mint's keys from its start (kept from an earlier run,
+    /// say), and asks each mint for its keyset listing then.
+    pub held_from_start: bool,
+}
+
+/// A read out ([`Harness::reads_out`]) while it lives.
+struct ReadOut(MockNetwork);
+
+impl ReadOut {
+    fn new(net: &MockNetwork) -> Self {
+        net.ledger().reads_out += 1;
+        Self(net.clone())
+    }
+}
+
+impl Drop for ReadOut {
+    fn drop(&mut self) {
+        self.0.ledger().reads_out -= 1;
+    }
+}
+
+/// A swap's outcome handed to a task of the seeder's own, not yet settled, while it lives
+/// (`Ledger::landing`). The task drops it as it ends; a task that panics, or is dropped
+/// unpolled with its runtime, drops it too, so the thread that brings a read back once the
+/// seeder has settled (`deliver_as_read`) is not left waiting for a count that never falls.
+struct Landing(MockNetwork);
+
+impl Landing {
+    fn begun(net: MockNetwork) -> Self {
+        net.ledger().landing += 1;
+        Self(net)
+    }
+}
+
+impl Drop for Landing {
+    fn drop(&mut self) {
+        self.0.ledger().landing -= 1;
+    }
+}
+
+/// A key request or keyset listing answered from another thread ([`Answers::Woken`]).
+#[derive(Default)]
+struct Call {
+    /// Its answer, once back.
+    answer: Option<Called>,
+    /// Whether the mint has it: sent, and not held ([`Harness::hold_key_fetches`]).
+    sent: bool,
+    /// Held ([`Harness::hold_key_fetches`]): the mint answers it at the release, from
+    /// another thread, whether or not its caller is polled then.
+    held: Option<Held>,
+    /// The wakers of those waiting for it.
+    waiters: Vec<Waker>,
+}
+
+/// A held key request or keyset listing, as the mint will answer it.
+#[derive(Clone)]
+enum Held {
+    /// A key request to the mint at this URL, for these keysets.
+    Keys(String, HashSet<u64>),
+    /// A keyset listing of the mint at this URL.
+    Listing(String),
+}
+
+/// What came back for a [`Call`].
+#[derive(Clone)]
+enum Called {
+    /// A key request's: the keys, or `None` for a keyset the mint does not know (12001).
+    Keys(Option<MintKeys>),
+    /// A keyset listing's.
+    Listing(Listed),
+}
+
+/// Every mock mint's ledger, shared.
+#[derive(Clone, Default)]
+pub struct MockNetwork(Arc<Mutex<Ledger>>);
+
+impl MockNetwork {
+    fn ledger(&self) -> MutexGuard<'_, Ledger> {
+        lock(&self.0)
+    }
+
+    fn mint_token(&self, info: TokenInfo) -> String {
+        let mut l = self.ledger();
+        l.next += 1;
+        let token = format!("cashuBmock{:016x}", l.next);
+        l.tokens.insert(token.clone(), info);
+        token
+    }
+
+    /// `n` fresh proofs of the mint at `mint`: of the keyset it alone started last, if any,
+    /// else of the active keyset every mint shares.
+    fn fresh_proofs(&self, mint: &str, n: usize) -> Vec<u64> {
+        let mut l = self.ledger();
+        let keyset = l.own_active.get(mint).copied().unwrap_or(l.active_keyset);
+        (0..n)
+            .map(|_| {
+                l.next += 1;
+                let id = l.next;
+                l.keyset_of.insert(id, keyset);
+                id
+            })
+            .collect()
+    }
+
+    /// The mint that alone started keyset `k`, if one did ([`Harness::start_keyset_at`]).
+    fn owner_of(&self, k: u64) -> Option<String> {
+        self.ledger().own_keysets.get(&k).cloned()
+    }
+
+    /// The mint's active keyset.
+    fn active_keyset(&self) -> u64 {
+        self.ledger().active_keyset
+    }
+
+    /// The keysets `proofs` name: their DLEQ proofs verify against those keysets' keys.
+    fn keysets_named(&self, proofs: &[u64]) -> HashSet<u64> {
+        let l = self.ledger();
+        proofs
+            .iter()
+            .map(|p| l.keyset_of.get(p).copied().unwrap_or(l.active_keyset))
+            .collect()
+    }
+
+    /// Fresh proofs of the mint at `mint` for `amount`: one per set bit, as a real mint
+    /// splits.
+    fn proofs_for(&self, mint: &str, amount: u64) -> Vec<u64> {
+        self.fresh_proofs(mint, amount.count_ones().max(1) as usize)
+    }
+
+    /// A fresh token worth `amount` sat from `mint`, of fresh proofs only: the wallets'
+    /// older ones ([`Harness::fund_older_keyset`]) fund the watchers' payments alone.
+    #[must_use]
+    pub fn issue(&self, mint: &str, amount: u64) -> String {
+        let proofs = self.proofs_for(mint, amount);
+        self.mint_token(TokenInfo {
+            proofs,
+            mints: vec![mint.to_owned()],
+            amount,
+            unit: "sat",
+            locked: false,
+            dleq: Dleq::Valid,
+        })
+    }
+
+    /// A fresh token worth `amount` sat from `mint` in one-sat proofs, as a wallet holding
+    /// only small proofs selects it ([`ViewerFlaw::PaysInUnitProofs`] and the like only).
+    fn unit_token(&self, mint: &str, amount: u64) -> String {
+        let n = usize::try_from(amount).map_or(usize::MAX, |n| n.max(1));
+        let proofs = self.fresh_proofs(mint, n.min(4 * MAX_PROOFS));
+        self.mint_token(TokenInfo {
+            proofs,
+            mints: vec![mint.to_owned()],
+            amount,
+            unit: "sat",
+            locked: false,
+            dleq: Dleq::Valid,
+        })
+    }
+
+    /// How many proofs `token` holds.
+    fn proof_count(&self, token: &str) -> usize {
+        self.read(token).map_or(0, |info| info.proofs.len())
+    }
+
+    /// A token worth `amount` sat from `mint`, as a wallet selects it: `old` proofs it
+    /// holds, then what the wallets hold of the older keyset ([`Harness::fund_older_keyset`]),
+    /// spent first, up to the amount, topped up with fresh proofs (CDK selects an inactive
+    /// keyset's proofs first). The mock does not weigh proofs one by one. With the sat it
+    /// drew of the older keyset.
+    fn draw(&self, mint: &str, amount: u64, old: &[u64]) -> (String, u64) {
+        let older = {
+            let mut l = self.ledger();
+            let older = l.older_balance.min(amount);
+            l.older_balance -= older;
+            older
+        };
+        let mut proofs = old.to_vec();
+        if older > 0 {
+            let drawn = self.proofs_for(mint, older);
+            let mut l = self.ledger();
+            let keyset = l.older_keyset.unwrap_or_default();
+            for p in &drawn {
+                l.keyset_of.insert(*p, keyset);
+            }
+            l.older.extend(drawn.iter().copied());
+            l.older_now.extend(drawn.iter().copied());
+            if l.older_expired {
+                l.expired_inputs.extend(drawn.iter().copied());
+            }
+            proofs.extend(drawn);
+        }
+        if older < amount || amount == 0 {
+            proofs.extend(self.proofs_for(mint, amount - older));
+        }
+        let token = self.mint_token(TokenInfo {
+            proofs,
+            mints: vec![mint.to_owned()],
+            amount,
+            unit: "sat",
+            locked: false,
+            dleq: Dleq::Valid,
+        });
+        (token, older)
+    }
+
+    /// The token, with its proofs' DLEQ proofs and locks as a whole.
+    fn read(&self, token: &str) -> Option<TokenInfo> {
+        let l = self.ledger();
+        let mut info = l.tokens.get(token).cloned()?;
+        let states: Vec<Dleq> = info.proofs.iter().map(|p| l.dleq_of_proof(*p)).collect();
+        info.dleq = if states.contains(&Dleq::Missing) {
+            Dleq::Missing
+        } else if states.contains(&Dleq::Invalid) {
+            Dleq::Invalid
+        } else {
+            Dleq::Valid
+        };
+        info.locked = info.proofs.iter().any(|p| l.locked.contains(p));
+        Some(info)
+    }
+
+    /// Proof `p`'s own DLEQ proof, and whether it is locked.
+    fn proof_state(&self, p: u64) -> (Dleq, bool) {
+        let l = self.ledger();
+        (l.dleq_of_proof(p), l.locked.contains(&p))
+    }
+
+    /// Each of `proofs` DLEQ proof `dleq`, and each locked if `locked`.
+    fn mark(&self, proofs: &[u64], dleq: Dleq, locked: bool) {
+        let mut l = self.ledger();
+        for p in proofs {
+            if dleq != Dleq::Valid {
+                l.dleq_of.insert(*p, dleq);
+            }
+            if locked {
+                l.locked.insert(*p);
+            }
+        }
+    }
+
+    /// Whether a read of swap state is a round trip, answered on a later poll of its reader.
+    fn round_trips(&self) -> bool {
+        self.ledger().answering != Answers::AtOnce
+    }
+
+    /// Whether every call to the mint is answered from another thread ([`Answers::Woken`]).
+    fn woken(&self) -> bool {
+        self.ledger().answering == Answers::Woken
+    }
+
+    /// How long an answer from another thread takes to come back, a key request's
+    /// (`keys`) or another's ([`Timing`]).
+    fn later(l: &mut Ledger, keys: bool) -> Duration {
+        let base = l.timing.answer_after.unwrap_or(WOKEN_AFTER);
+        let mut after = if l.timing.jitter {
+            l.answered_later += 1;
+            base * u32::try_from(l.answered_later * 7 % 5).unwrap_or(0) / 2
+        } else {
+            base
+        };
+        if keys {
+            after += l.timing.keys_later.unwrap_or_default();
+        }
+        after
+    }
+
+    /// Wake, the time unchanged, what waits on the clock and at the mint, its own waiters
+    /// as `waiters` (a spurious wake: [`Timing`]).
+    fn spurious(&self, waiters: &[Waker]) {
+        let (clock, waiting, calls) = {
+            let l = self.ledger();
+            let calls: Vec<Waker> = if l.timing.spurious_wakes {
+                l.calls
+                    .values()
+                    .flat_map(|c| c.waiters.iter().cloned())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let waiting = if l.timing.spurious_wakes {
+                l.waiting.clone()
+            } else {
+                Vec::new()
+            };
+            (l.clock.clone(), waiting, calls)
+        };
+        if let Some(c) = clock {
+            c.nudge();
+        }
+        for w in waiters.iter().chain(&waiting).chain(&calls) {
+            w.wake_by_ref();
+        }
+    }
+
+    /// Run `answer`, the engine's part of answers that come back on a thread of the
+    /// harness's own: a panic it raises is kept, with where it was raised, and raised again
+    /// on the suite's thread as it next asks whether answers are under way.
+    fn on_answer_thread(&self, answer: impl FnOnce()) {
+        if let Err(raised) = crate::adversary::keep_panic(answer) {
+            let mut l = self.ledger();
+            if l.raised.is_none() {
+                l.raised = Some(raised);
+            }
+        }
+    }
+
+    /// Whether a caller is woken before its answer can be seen ([`Timing::wake_early`]).
+    fn wakes_early(&self) -> bool {
+        self.ledger().timing.wake_early
+    }
+
+    /// Whether every answer wakes everything waiting ([`Timing::spurious_wakes`]).
+    fn wakes_all(&self) -> bool {
+        self.ledger().timing.spurious_wakes
+    }
+
+    /// A key request or keyset listing the mint has answered with `answer`, as call `call`:
+    /// its answer comes back from another thread [`WOKEN_AFTER`] from now, and wakes those
+    /// waiting for it.
+    fn call_back_later(&self, l: &mut Ledger, call: u64, answer: Called) {
+        l.calls.entry(call).or_default().sent = true;
+        l.under_way += 1;
+        let after = Self::later(l, matches!(answer, Called::Keys(_)));
+        let net = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            if net.wakes_early() {
+                let waiters = net.ledger().calls.get(&call).map(|c| c.waiters.clone());
+                net.spurious(&waiters.unwrap_or_default());
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let waiters = {
+                let mut l = net.ledger();
+                let c = l.calls.entry(call).or_default();
+                c.answer = Some(answer);
+                std::mem::take(&mut c.waiters)
+            };
+            wake_all(waiters);
+            if net.wakes_all() {
+                net.spurious(&[]);
+            }
+            net.ledger().under_way -= 1;
+        });
+    }
+
+    /// A new call's handle ([`Answers::Woken`]).
+    fn new_call(l: &mut Ledger) -> u64 {
+        l.last_call += 1;
+        l.last_call
+    }
+
+    /// A swap's answer: its completion run, and its outcome delivered unless its client gave
+    /// up (`deliver` false). Now; or, when every call is answered from another thread, kept
+    /// in `later` for [`MockNetwork::answer_swaps_later`].
+    fn answer_swap(&self, later: &mut Vec<SwapAnswer>, (id, outcome, done, deliver): SwapAnswer) {
+        if self.woken() {
+            later.push((id, outcome, done, deliver));
+            return;
+        }
+        done(outcome);
+        if deliver {
+            self.deliver(id, outcome);
+        }
+    }
+
+    /// The swap answers kept in `later`, in order, from another thread [`WOKEN_AFTER`] from
+    /// now: the mint processed each as it reached it, and its answer comes back by a wake.
+    fn answer_swaps_later(&self, later: Vec<SwapAnswer>) {
+        if later.is_empty() {
+            return;
+        }
+        let after = {
+            let mut l = self.ledger();
+            l.under_way += 1;
+            Self::later(&mut l, false)
+        };
+        let net = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            if net.wakes_early() {
+                net.spurious(&[]);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            net.on_answer_thread(|| {
+                for (id, outcome, done, deliver) in later {
+                    done(outcome);
+                    if deliver {
+                        net.deliver(id, outcome);
+                    }
+                }
+            });
+            if net.wakes_all() {
+                net.spurious(&[]);
+            }
+            net.ledger().under_way -= 1;
+        });
+    }
+
+    /// A read's round trip, from its sending: back on its reader's next poll, or once another
+    /// thread has answered it and woken its reader ([`Answers::Woken`]).
+    async fn round_trip(&self) {
+        self.round_trip_as(true, None).await;
+    }
+
+    /// The same, its reader woken as it comes back if `wakes` ([`SeederFlaw::ReadUnwoken`]
+    /// and the like otherwise); or, with `early`, by a task of the seeder's own started
+    /// with it, which wakes the reader before it lets it see the answer
+    /// ([`SeederFlaw::ReadWokenEarly`] and the like).
+    async fn round_trip_as(&self, wakes: bool, early: Option<Spawner>) {
+        // Out from its sending until its reader takes it, or drops it.
+        let _out = ReadOut::new(self);
+        if !self.woken() {
+            return next_poll().await;
+        }
+        // Whether it is back, and the waker of its reader's last poll.
+        let back = Arc::new(Mutex::new((false, None::<Waker>)));
+        let seen = Arc::new(AtomicBool::new(true));
+        let mut sent = false;
+        poll_fn(|cx| {
+            let mut b = lock(&back);
+            if b.0 && seen.load(Ordering::SeqCst) {
+                return Poll::Ready(());
+            }
+            b.1 = match &early {
+                Some(spawn) if wakes && !b.0 => {
+                    seen.store(false, Ordering::SeqCst);
+                    Some(Waker::from(Arc::new(EarlyWake {
+                        spawn: spawn.clone(),
+                        entry: cx.waker().clone(),
+                        seen: seen.clone(),
+                    })))
+                }
+                _ => wakes.then(|| cx.waker().clone()),
+            };
+            drop(b);
+            if !sent {
+                sent = true;
+                let after = {
+                    let mut l = self.ledger();
+                    l.under_way += 1;
+                    Self::later(&mut l, false)
+                };
+                let (net, back) = (self.clone(), back.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(after);
+                    if net.wakes_early() {
+                        let waker = lock(&back).1.clone();
+                        net.spurious(waker.as_slice());
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    let waker = {
+                        let mut b = lock(&back);
+                        b.0 = true;
+                        b.1.take()
+                    };
+                    if let Some(w) = waker {
+                        w.wake();
+                    }
+                    if net.wakes_all() {
+                        net.spurious(&[]);
+                    }
+                    net.ledger().under_way -= 1;
+                });
+            }
+            Poll::Pending
+        })
+        .await;
+    }
+
+    /// Deliver the responses held for the next read an entry makes
+    /// ([`Harness::deliver_responses_mid_read`]), if any, as that read reaches the mint: from
+    /// another thread a few milliseconds from now, and the read comes back a few
+    /// milliseconds after that, by a wake. So the seeder has taken them, on whatever task or
+    /// thread takes them, before its read goes on: and before the read's own time passes,
+    /// if the mint leaves it unanswered ([`Harness::unanswered_reads_take`]).
+    async fn deliver_as_read(&self) {
+        let held = {
+            let mut l = self.ledger();
+            if std::mem::take(&mut l.deliver_mid_read) {
+                std::mem::take(&mut l.responses)
+            } else {
+                return;
+            }
+        };
+        if held.is_empty() {
+            return;
+        }
+        let back = Arc::new(Mutex::new((false, None::<Waker>)));
+        let mut sent = false;
+        let mut held = Some(held);
+        poll_fn(|cx| {
+            let mut b = lock(&back);
+            if b.0 {
+                return Poll::Ready(());
+            }
+            b.1 = Some(cx.waker().clone());
+            drop(b);
+            if !sent {
+                sent = true;
+                self.ledger().under_way += 1;
+                let (net, back, held) = (self.clone(), back.clone(), held.take());
+                std::thread::spawn(move || {
+                    std::thread::sleep(WOKEN_AFTER);
+                    net.on_answer_thread(|| {
+                        for (id, outcome, done) in held.into_iter().flatten() {
+                            done(outcome);
+                            net.deliver(id, outcome);
+                        }
+                    });
+                    // The read comes back once the seeder has settled them, on whatever task.
+                    while net.ledger().landing > 0 {
+                        std::thread::sleep(Duration::from_micros(200));
+                    }
+                    std::thread::sleep(WOKEN_AFTER);
+                    let waker = {
+                        let mut b = lock(&back);
+                        b.0 = true;
+                        b.1.take()
+                    };
+                    if let Some(w) = waker {
+                        w.wake();
+                    }
+                    net.ledger().under_way -= 1;
+                });
+            }
+            Poll::Pending
+        })
+        .await;
+    }
+
+    /// Whether the mint at `url` refuses its keys now ([`Harness::refuse_keys`]).
+    fn refuses_keys(&self, url: &str) -> bool {
+        self.ledger().keys_refused.contains(url)
+    }
+
+    /// Fetch something (keys) from the mint at `url`, now.
+    fn dial(&self, url: &str) {
+        self.ledger().dialled.insert(url.to_owned());
+    }
+
+    /// Fetch the keys of `keysets` from the mint at `url` (`ask`: the request is sent now,
+    /// not one sent before and held): `None` while key requests are held, and then `waker`
+    /// is woken at their release. Else the keys it served: that mint's, of those keysets; or
+    /// `Some(None)`, a keyset it does not know (CDK 12001). When every call is answered from
+    /// another thread ([`Answers::Woken`]), the answer comes back by a wake: `None` until
+    /// then, the request under way as `call` (0: none yet), and `waker` woken as it does.
+    fn fetch_keys(
+        &self,
+        url: &str,
+        keysets: &HashSet<u64>,
+        ask: bool,
+        call: &mut u64,
+        waker: &Waker,
+    ) -> Option<Option<MintKeys>> {
+        let mut l = self.ledger();
+        if *call != 0 {
+            let id = std::mem::take(call);
+            let c = l.calls.entry(id).or_default();
+            let Some(Called::Keys(keys)) = c.answer.clone() else {
+                c.waiters.push(waker.clone());
+                *call = id;
+                return None;
+            };
+            l.calls.remove(&id);
+            return Some(keys);
+        }
+        if ask {
+            l.key_requests += 1;
+        }
+        if l.hold_keys && l.answering == Answers::Woken {
+            // Held at the mint, which answers it at the release.
+            *call = Self::new_call(&mut l);
+            let c = l.calls.entry(*call).or_default();
+            c.held = Some(Held::Keys(url.to_owned(), keysets.clone()));
+            c.waiters.push(waker.clone());
+            return None;
+        }
+        if l.hold_keys {
+            l.waiting.push(waker.clone());
+            return None;
+        }
+        let keys = Self::keys_of(&mut l, url, keysets);
+        if l.answering == Answers::Woken {
+            *call = Self::new_call(&mut l);
+            l.calls
+                .entry(*call)
+                .or_default()
+                .waiters
+                .push(waker.clone());
+            self.call_back_later(&mut l, *call, Called::Keys(keys));
+            return None;
+        }
+        Some(keys)
+    }
+
+    /// The mint at `url`'s answer to a request for the keys of `keysets`, now: that mint's,
+    /// of those keysets; or `None`, a keyset it does not know (CDK 12001), or any keyset
+    /// while it refuses its keys ([`Harness::refuse_keys`]).
+    fn keys_of(l: &mut Ledger, url: &str, keysets: &HashSet<u64>) -> Option<MintKeys> {
+        l.dialled.insert(url.to_owned());
+        let listing = l.listing_at(url);
+        let known = !l.keys_refused.contains(url)
+            && keysets.iter().all(|k| {
+                let owner = l.own_keysets.get(k).map(String::as_str);
+                listing.names(url, *k, owner)
+            });
+        known.then(|| MintKeys {
+            mint: url.to_owned(),
+            keysets: keysets.clone(),
+        })
+    }
+
+    /// Answer, from another thread, the key requests and keyset listings held at the mint
+    /// ([`Answers::Woken`]), as they stand now: at their release.
+    fn answer_held_calls(&self, l: &mut Ledger) {
+        let held: Vec<(u64, Held)> = l
+            .calls
+            .iter_mut()
+            .filter_map(|(id, c)| c.held.take().map(|h| (*id, h)))
+            .collect();
+        let mut held = held;
+        held.sort_by_key(|(id, _)| *id);
+        for (id, h) in held {
+            let answer = match h {
+                Held::Keys(url, keysets) => Called::Keys(Self::keys_of(l, &url, &keysets)),
+                Held::Listing(url) => Called::Listing(l.listing_at(&url)),
+            };
+            self.call_back_later(l, id, answer);
+        }
+    }
+
+    /// Ask the mint at `url` for its keyset listing (NUT-02), now: the request's place
+    /// among the releases of held key requests, its handle when every call is answered from
+    /// another thread (0 otherwise), and the answer, as [`MockNetwork::listed`] gives it.
+    fn list_keysets(&self, url: &str, waker: &Waker) -> (u64, u64, Option<Listed>) {
+        let (released, call) = {
+            let mut l = self.ledger();
+            l.key_requests += 1;
+            l.listing_requests += 1;
+            l.dialled.insert(url.to_owned());
+            let call = if l.answering == Answers::Woken {
+                Self::new_call(&mut l)
+            } else {
+                0
+            };
+            (l.key_releases, call)
+        };
+        (released, call, self.listed(url, released, call, waker))
+    }
+
+    /// The answer to a keyset listing of the mint at `url` asked for when `released`
+    /// releases of held key requests had been made: `None` while key requests are held and
+    /// none has been made since, and then `waker` is woken at the next. Else the listing as
+    /// the mint answers it then. A listing answered from another thread (`call` not 0)
+    /// reaches the mint once key requests are not held, and its answer comes back by a wake:
+    /// `None` until then, and `waker` woken as it does.
+    fn listed(&self, url: &str, released: u64, call: u64, waker: &Waker) -> Option<Listed> {
+        let mut l = self.ledger();
+        if call != 0
+            && let Some(c) = l.calls.get_mut(&call)
+        {
+            if let Some(Called::Listing(answer)) = &c.answer {
+                return Some(*answer);
+            }
+            if c.sent || c.held.is_some() {
+                c.waiters.push(waker.clone());
+                return None;
+            }
+        }
+        if l.hold_keys && l.key_releases == released && call != 0 {
+            // Held at the mint, which answers it at the release.
+            let c = l.calls.entry(call).or_default();
+            c.held = Some(Held::Listing(url.to_owned()));
+            c.waiters.push(waker.clone());
+            return None;
+        }
+        if l.hold_keys && l.key_releases == released {
+            l.waiting.push(waker.clone());
+            return None;
+        }
+        if call != 0 {
+            let answer = l.listing_at(url);
+            l.calls.entry(call).or_default().waiters.push(waker.clone());
+            self.call_back_later(&mut l, call, Called::Listing(answer));
+            return None;
+        }
+        Some(l.listing_at(url))
+    }
+
+    /// Swap every proof of `token` at its mint, atomically, now.
+    #[must_use]
+    pub fn swap_now(&self, token: &str) -> Swap {
+        self.swap_for(token, 0)
+    }
+
+    /// The same, to the output set `outputs` (0: none a restore can find).
+    fn swap_for(&self, token: &str, outputs: u64) -> Swap {
+        self.swap_checked(token, outputs, true)
+    }
+
+    /// A request the mint held, processed now. One whose inputs it reserved before holding
+    /// it passed its input checks then: a keyset expiring since does not stop it, since CDK
+    /// checks only the outputs' keyset when it signs.
+    fn process(&self, token: &str, outputs: u64) -> Swap {
+        let reserved = {
+            let l = self.ledger();
+            l.tokens.get(token).is_some_and(|i| {
+                !i.proofs.is_empty() && i.proofs.iter().all(|p| l.reserved.contains(p))
+            })
+        };
+        self.unreserve(token);
+        self.swap_checked(token, outputs, !reserved)
+    }
+
+    /// A swap, its inputs' keyset expiry checked unless `check_inputs` is false (a request
+    /// whose inputs the mint reserved before).
+    fn swap_checked(&self, token: &str, outputs: u64, check_inputs: bool) -> Swap {
+        let mut l = self.ledger();
+        let Some(info) = l.tokens.get(token).cloned() else {
+            return Swap::Invalid;
+        };
+        for m in &info.mints {
+            l.dialled.insert(m.clone());
+        }
+        if l.down {
+            return Swap::Unreachable;
+        }
+        // CDK checks the inputs first, then the outputs: an expired keyset is 12003 either
+        // way. A reserved request passed its input checks; its outputs are checked again
+        // when it signs.
+        if check_inputs && info.proofs.iter().any(|p| l.proof_expired(*p)) {
+            return Swap::Expired;
+        }
+        if l.outputs_expired(outputs) {
+            return Swap::Expired;
+        }
+        if outputs != 0 && outputs <= l.retired_outputs {
+            return Swap::OutputsRefused;
+        }
+        if info.proofs.iter().any(|p| l.reserved.contains(p)) {
+            return Swap::Pending;
+        }
+        if info.proofs.iter().any(|p| l.forged.contains(p)) {
+            return Swap::Invalid;
+        }
+        if info.proofs.iter().any(|p| l.claimed.contains(p)) {
+            return Swap::Spent;
+        }
+        l.claimed.extend(info.proofs);
+        if outputs != 0 {
+            l.signed.insert(outputs);
+        }
+        l.swapped_tokens.insert(token.to_owned());
+        Swap::Claimed
+    }
+
+    /// What the harness asked to happen before the next swap request, in order.
+    fn before_swap(&self, token: &str) {
+        let events = std::mem::take(&mut self.ledger().before_swap);
+        for event in events {
+            match event {
+                MintEvent::Down => self.ledger().down = true,
+                MintEvent::RestoresDown => self.ledger().restore_down = true,
+                MintEvent::RotateKeyset => {
+                    let mut l = self.ledger();
+                    l.retired_outputs = l.next;
+                    l.active_keyset += 1;
+                }
+                MintEvent::ExpireKeyset => {
+                    let mut l = self.ledger();
+                    l.expired_upto = l.next;
+                    l.active_keyset += 1;
+                }
+                MintEvent::ExpireInputKeysetOnceReserved => {
+                    self.ledger().expire_once_reserved = true;
+                }
+                MintEvent::ExpireInputKeyset => {
+                    let mut l = self.ledger();
+                    if let Some(i) = l.tokens.get(token).cloned() {
+                        l.expire_inputs(i.proofs);
+                    }
+                }
+                MintEvent::ProcessTimedOut | MintEvent::ReserveTimedOut => self.given_up(event),
+            }
+        }
+    }
+
+    /// The requests whose client gave up are processed, or start processing (their
+    /// inputs reserved).
+    fn given_up(&self, event: MintEvent) {
+        let given_up = {
+            let mut l = self.ledger();
+            let (given_up, rest) = std::mem::take(&mut l.queued)
+                .into_iter()
+                .partition::<Vec<_>, _>(|q| l.gave_up.contains(&q.0));
+            if event == MintEvent::ReserveTimedOut {
+                for q in &given_up {
+                    if let Some(i) = l.tokens.get(&q.1).cloned() {
+                        l.reserved.extend(i.proofs);
+                    }
+                }
+                l.queued = rest.into_iter().chain(given_up).collect();
+                return;
+            }
+            l.queued = rest;
+            for q in &given_up {
+                l.gave_up.remove(&q.0);
+            }
+            given_up
+        };
+        for (_, token, outputs, done) in given_up {
+            done(self.process(&token, outputs));
+        }
+    }
+
+    /// A swap sent again by a swapper that waits for it here and nowhere else (a seeder's
+    /// completion): no answer in time (held, given up, lost, or its response held) is
+    /// `Lost`, while the request itself stays at the mint.
+    fn resend(&self, token: &str, outputs: u64) -> Swap {
+        self.before_swap(token);
+        let waits = {
+            let mut l = self.ledger();
+            l.next += 1;
+            let id = l.next;
+            let expire_after = std::mem::take(&mut l.expire_once_reserved);
+            let mut reserve = std::mem::take(&mut l.reserve_next);
+            if reserve && let Some(i) = l.tokens.get(token).cloned() {
+                if Self::refused_expired(&l, &i.proofs, outputs) {
+                    reserve = false; // refused (12003) before anything is reserved
+                } else {
+                    l.reserved.extend(i.proofs.iter().copied());
+                    if expire_after {
+                        l.expire_inputs(i.proofs);
+                    }
+                }
+            }
+            let held = reserve || std::mem::take(&mut l.time_out_next) || l.hold;
+            let held = held || std::mem::take(&mut l.hold_next);
+            if held {
+                l.queued
+                    .push((id, token.to_owned(), outputs, Box::new(|_| {})));
+                l.gave_up.insert(id);
+            }
+            held
+        };
+        if waits {
+            return Swap::Lost;
+        }
+        let outcome = self.lose(self.swap_for(token, outputs));
+        if self.ledger().hold_responses {
+            return Swap::Lost; // processed; its response held, and answered to no one
+        }
+        outcome
+    }
+
+    /// An admission between its checks and its count: wait, in real time, for the others
+    /// [`Harness::gather_admissions`] asks for.
+    fn meet_admissions(&self) {
+        let (n, wait) = {
+            let mut l = self.ledger();
+            l.admit_gathered += 1;
+            l.admit_gather
+        };
+        let start = std::time::Instant::now();
+        while n > 0 && self.ledger().admit_gathered < n && start.elapsed() < wait {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Whether the mint refuses a request of `proofs` to `outputs` because a keyset has
+    /// expired (12003), as it checks before reserving anything.
+    fn refused_expired(l: &Ledger, proofs: &[u64], outputs: u64) -> bool {
+        proofs.iter().any(|p| l.proof_expired(*p)) || l.outputs_expired(outputs)
+    }
+
+    /// A fresh output set's id, unique across every swapper sharing this mint.
+    fn fresh_outputs(&self) -> u64 {
+        let mut l = self.ledger();
+        l.next += 1;
+        l.next
+    }
+
+    /// How many proofs `token` holds: what one of its swaps' reads covers.
+    fn proofs_in(&self, token: &str) -> usize {
+        self.ledger()
+            .tokens
+            .get(token)
+            .map_or(1, |i| i.proofs.len())
+    }
+
+    /// Serve one read of `size` proofs or outputs: `ReadErr` if unanswered (`down`) or too
+    /// large for one request.
+    fn serve_read<T>(
+        &self,
+        size: usize,
+        down: impl Fn(&Ledger) -> bool,
+        answer: impl FnOnce(&Ledger) -> T,
+    ) -> Result<T, ReadErr> {
+        let wait = {
+            let mut l = self.ledger();
+            l.gathered += 1;
+            l.reads += 1;
+            l.gather.1
+        };
+        // Until enough have met, or the gathering ends ([`Harness::gather_state_reads`]).
+        let start = std::time::Instant::now();
+        while start.elapsed() < wait && {
+            let l = self.ledger();
+            l.gathered < l.gather.0
+        } {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let read = {
+            let l = self.ledger();
+            if down(&l) {
+                Err(ReadErr::Unanswered)
+            } else if l.read_limit.is_some_and(|max| size > max) {
+                Err(ReadErr::TooMany)
+            } else {
+                Ok(answer(&l))
+            }
+        };
+        self.after_read();
+        read
+    }
+
+    /// NUT-09 restore of the output set `outputs` (`size` outputs): whether the mint signed
+    /// it, that is processed that swap, or `None` without an answer.
+    fn restore_swap(&self, outputs: u64, size: usize) -> Option<bool> {
+        self.restore_swaps(&[outputs], &[size]).ok().map(|s| s[0])
+    }
+
+    /// NUT-09 restore of several output sets in one request.
+    fn restore_swaps(&self, outputs: &[u64], sizes: &[usize]) -> Result<Vec<bool>, ReadErr> {
+        self.serve_read(
+            sizes.iter().sum(),
+            |l| l.down || l.restore_down,
+            |l| {
+                outputs
+                    .iter()
+                    .map(|o| l.signed.contains(o) && !l.outputs_expired(*o))
+                    .collect()
+            },
+        )
+    }
+
+    /// The `final_expiry` the mint lists for its active keyset (`/v1/keysets`, NUT-02).
+    fn keyset_final_expiry(&self) -> Option<u64> {
+        self.ledger().final_expiry
+    }
+
+    /// How many of `token`'s proofs the mint lists under an expired keyset, and how many
+    /// not (`/v1/keysets`, NUT-02 `final_expiry`).
+    fn proofs_listing(&self, token: &str) -> (usize, usize) {
+        let l = self.ledger();
+        l.tokens.get(token).map_or((0, 0), |i| {
+            let expired = i.proofs.iter().filter(|p| l.proof_expired(**p)).count();
+            (expired, i.proofs.len() - expired)
+        })
+    }
+
+    /// Those of `token`'s proofs the mint lists under an expired keyset.
+    fn proofs_listed_expired(&self, token: &str) -> Vec<u64> {
+        let l = self.ledger();
+        l.tokens.get(token).map_or_else(Vec::new, |i| {
+            i.proofs
+                .iter()
+                .copied()
+                .filter(|p| l.proof_expired(*p))
+                .collect()
+        })
+    }
+
+    /// Whether the mint's active keyset, which a reclaim's outputs come from, has expired.
+    fn active_expired(&self) -> bool {
+        let l = self.ledger();
+        l.outputs_expired(l.next + 1)
+    }
+
+    /// A wallet taking back those of `token`'s proofs whose keyset is not expired, in a
+    /// reclaim of their own: `Expired` when it has them all (the rest lost to the expiry),
+    /// counting those its own earlier reclaim took back (restorable), which it does not
+    /// send again.
+    fn reclaim_unexpired(&self, token: &str) -> Reclaim {
+        let mut l = self.ledger();
+        if l.down {
+            return Reclaim::Blocked;
+        }
+        let Some(info) = l.tokens.get(token).cloned() else {
+            return Reclaim::SomeSpent;
+        };
+        let good: Vec<u64> = info
+            .proofs
+            .iter()
+            .copied()
+            .filter(|p| !l.proof_expired(*p))
+            .collect();
+        if good.iter().any(|p| l.reserved.contains(p)) {
+            return Reclaim::Pending;
+        }
+        let back = good
+            .iter()
+            .filter(|p| l.reclaimed.get(p).is_some_and(|o| !l.outputs_expired(*o)))
+            .count();
+        let fresh: Vec<u64> = good
+            .iter()
+            .copied()
+            .filter(|p| !l.claimed.contains(p) && !l.forged.contains(p))
+            .collect();
+        let all = fresh.len() + back == good.len();
+        if fresh.is_empty() {
+            return if all {
+                Reclaim::Expired
+            } else {
+                Reclaim::SomeSpent
+            };
+        }
+        if l.outputs_expired(l.next + 1) {
+            return Reclaim::Blocked; // its outputs' keyset expired too: later
+        }
+        l.next += 1;
+        let outputs = l.next;
+        l.claimed.extend(fresh.iter().copied());
+        l.reclaimed.extend(fresh.iter().map(|p| (*p, outputs)));
+        if l.lose_reclaim {
+            l.lose_reclaim = false;
+            return Reclaim::Blocked;
+        }
+        if all {
+            Reclaim::Expired
+        } else {
+            Reclaim::SomeSpent
+        }
+    }
+
+    /// Whether the keyset of the output set `outputs` has expired: the mint's own state,
+    /// which only a planted flaw consults.
+    fn outputs_expired(&self, outputs: u64) -> bool {
+        self.ledger().outputs_expired(outputs)
+    }
+
+    /// The mistake of restoring by token: any swap of these proofs counts as this one.
+    fn restore_by_token(&self, token: &str) -> Option<bool> {
+        let size = self.proofs_in(token);
+        self.restore_by_tokens(&[token.to_owned()], &[size])
+            .ok()
+            .map(|s| s[0])
+    }
+
+    fn restore_by_tokens(&self, tokens: &[String], sizes: &[usize]) -> Result<Vec<bool>, ReadErr> {
+        self.serve_read(
+            sizes.iter().sum(),
+            |l| l.down || l.restore_down,
+            |l| {
+                tokens
+                    .iter()
+                    .map(|t| l.swapped_tokens.contains(t))
+                    .collect()
+            },
+        )
+    }
+
+    /// NUT-07 check of several tokens' proofs in one request: spent if any proof is,
+    /// else pending if any proof is reserved, else unspent.
+    fn input_states(&self, tokens: &[String]) -> Result<Vec<InputState>, ReadErr> {
+        let size = tokens.iter().map(|t| self.proofs_in(t)).sum();
+        self.serve_read(
+            size,
+            |l| l.down || l.state_down,
+            |l| {
+                tokens
+                    .iter()
+                    .map(|t| {
+                        let proofs = l.tokens.get(t).map_or(&[][..], |i| &i.proofs[..]);
+                        if proofs.iter().any(|p| l.claimed.contains(p)) {
+                            InputState::Spent
+                        } else if proofs.iter().any(|p| l.reserved.contains(p)) {
+                            InputState::Pending
+                        } else {
+                            InputState::Unspent
+                        }
+                    })
+                    .collect()
+            },
+        )
+    }
+
+    /// Whether any of `token`'s proofs is reserved: what a NUT-07 check shows pending
+    /// beside a spent one ([`SeederFlaw::SpentBesidePendingUnknown`] only).
+    fn any_reserved(&self, token: &str) -> bool {
+        let l = self.ledger();
+        l.tokens
+            .get(token)
+            .is_some_and(|i| i.proofs.iter().any(|p| l.reserved.contains(p)))
+    }
+
+    /// The mint gives `token`'s reserved proofs back to processing: done before it
+    /// processes the request that reserved them.
+    fn unreserve(&self, token: &str) {
+        let mut l = self.ledger();
+        if let Some(i) = l.tokens.get(token).cloned() {
+            for p in &i.proofs {
+                l.reserved.remove(p);
+            }
+        }
+    }
+
+    /// The mint abandons every request that reserved inputs (CDK's recovery at startup):
+    /// the inputs are unspent again, and those requests are never processed. A client
+    /// still waiting for one gets no answer.
+    fn roll_back_reserved(&self) {
+        let dropped = {
+            let mut l = self.ledger();
+            let reserved = std::mem::take(&mut l.reserved);
+            let queued = std::mem::take(&mut l.queued);
+            let (dropped, kept): (Vec<_>, Vec<_>) = queued.into_iter().partition(|q| {
+                l.tokens
+                    .get(&q.1)
+                    .is_some_and(|i| i.proofs.iter().any(|p| reserved.contains(p)))
+            });
+            l.queued = kept;
+            dropped
+                .into_iter()
+                .filter(|q| !l.gave_up.remove(&q.0))
+                .collect::<Vec<_>>()
+        };
+        let mut later = Vec::new();
+        for (id, _, _, done) in dropped {
+            self.answer_swap(&mut later, (id, Swap::Lost, done, true));
+        }
+        self.answer_swaps_later(later);
+    }
+
+    /// After a read of a swap's state: process the requests whose client gave up, if the
+    /// harness asked for that now. Their completions answer no one, so nothing re-enters
+    /// the engine that is reading.
+    fn after_read(&self) {
+        let during = self.ledger().during_read.take();
+        if let Some(f) = during {
+            f();
+        }
+        let held = {
+            let mut l = self.ledger();
+            if std::mem::take(&mut l.deliver_mid_read) {
+                std::mem::take(&mut l.responses)
+            } else {
+                Vec::new()
+            }
+        };
+        let mut later = Vec::new();
+        for (id, outcome, done) in held {
+            self.answer_swap(&mut later, (id, outcome, done, true));
+        }
+        if !later.is_empty() {
+            // They land while the read is out, from another thread: the read goes on once
+            // they have.
+            let net = self.clone();
+            let landed = std::thread::spawn(move || {
+                crate::adversary::keep_panic(|| {
+                    for (id, outcome, done, deliver) in later {
+                        done(outcome);
+                        if deliver {
+                            net.deliver(id, outcome);
+                        }
+                    }
+                })
+            })
+            .join();
+            crate::adversary::rejoin(landed);
+        }
+        let now = {
+            let mut l = self.ledger();
+            if !std::mem::take(&mut l.mid_read) {
+                return;
+            }
+            let (now, rest) = std::mem::take(&mut l.queued)
+                .into_iter()
+                .partition::<Vec<_>, _>(|q| l.gave_up.contains(&q.0));
+            l.queued = rest;
+            for q in &now {
+                l.gave_up.remove(&q.0);
+            }
+            now
+        };
+        for (_, token, outputs, done) in now {
+            done(self.process(&token, outputs));
+        }
+    }
+
+    /// A response the harness loses: only a request that reached the mint has one.
+    fn lose(&self, outcome: Swap) -> Swap {
+        let mut l = self.ledger();
+        if l.lose_swap && outcome != Swap::Unreachable {
+            l.lose_swap = false;
+            return Swap::Lost;
+        }
+        outcome
+    }
+
+    /// NUT-09 restore of a watcher's reclaim outputs: whether its own reclaims took back
+    /// every proof of `token` (or, with `any`, the mistake: some of them), or `None` while
+    /// the mint cannot be reached.
+    fn restore_reclaim(&self, token: &str, any: bool) -> Option<bool> {
+        let l = self.ledger();
+        if l.down || l.restore_down {
+            return None;
+        }
+        // Its outputs, unless their keyset has expired: a restore no longer shows them then.
+        let mine = |p: &u64| l.reclaimed.get(p).is_some_and(|o| !l.outputs_expired(*o));
+        Some(l.tokens.get(token).is_some_and(|i| {
+            if any {
+                i.proofs.iter().any(mine)
+            } else {
+                i.proofs.iter().all(mine)
+            }
+        }))
+    }
+
+    /// NUT-09 restore of a watcher's reclaim outputs, for a token some of whose proofs a
+    /// NUT-07 check found spent: whether every spent one is among them (its own reclaims'),
+    /// or `None` while the mint cannot be reached.
+    fn restore_spent_own(&self, token: &str) -> Option<bool> {
+        let l = self.ledger();
+        if l.down || l.restore_down {
+            return None;
+        }
+        let mine = |p: &u64| l.reclaimed.get(p).is_some_and(|o| !l.outputs_expired(*o));
+        Some(
+            l.tokens
+                .get(token)
+                .is_some_and(|i| i.proofs.iter().filter(|p| l.claimed.contains(p)).all(mine)),
+        )
+    }
+
+    /// Whether a third party's swap of proof `p` alone goes through: unclaimed, and not
+    /// reserved (11002), of an expired keyset (12003) or invalid (forged).
+    fn claimable(l: &Ledger, p: u64) -> bool {
+        !l.claimed.contains(&p)
+            && !l.forged.contains(&p)
+            && !l.reserved.contains(&p)
+            && !l.proof_expired(p)
+    }
+
+    /// A third party claiming the first unclaimed proof of `token`, in a swap of it alone:
+    /// whether it got it.
+    fn steal_one(&self, token: &str) -> bool {
+        let mut l = self.ledger();
+        let Some(info) = l.tokens.get(token).cloned() else {
+            return false;
+        };
+        let Some(p) = info.proofs.iter().copied().find(|p| !l.claimed.contains(p)) else {
+            return false;
+        };
+        if !Self::claimable(&l, p) {
+            return false;
+        }
+        l.claimed.insert(p);
+        true
+    }
+
+    /// A third party's request of `token`'s unclaimed proofs (a melt, say) that the mint
+    /// reserves and never finishes, until it rolls back what it reserved: whether it
+    /// reserved them. Refused whole if any is reserved already, of an expired keyset or
+    /// invalid.
+    fn reserve_rest(&self, token: &str) -> bool {
+        let mut l = self.ledger();
+        let Some(info) = l.tokens.get(token).cloned() else {
+            return false;
+        };
+        let rest: Vec<u64> = info
+            .proofs
+            .into_iter()
+            .filter(|p| !l.claimed.contains(p))
+            .collect();
+        if rest.is_empty() || rest.iter().any(|p| !Self::claimable(&l, *p)) {
+            return false;
+        }
+        l.reserved.extend(rest);
+        true
+    }
+
+    /// The wallets drop the proofs they hold that the mint lists expired: those of the older
+    /// keyset, once it has expired.
+    fn drop_expired_held(&self) {
+        let mut l = self.ledger();
+        if l.older_expired {
+            l.older_balance = 0;
+        }
+    }
+
+    /// A wallet keeps the `sat` of the older keyset it drew and did not pay with, unless the
+    /// mint lists that keyset expired: then they are dropped with the rest of it.
+    fn put_back(&self, sat: u64) {
+        let mut l = self.ledger();
+        if !l.older_expired {
+            l.older_balance += sat;
+        }
+    }
+
+    /// The wallets drop every proof they hold of the older keyset, good or not
+    /// ([`ViewerFlaw::DropsHeldOlderOnAnyExpired`] only).
+    fn drop_older_held(&self) {
+        self.ledger().older_balance = 0;
+    }
+
+    /// Send a swap, as an engine does: `done` runs with the outcome when the mint answers,
+    /// whether or not anyone is still waiting for it. Returns a handle for
+    /// [`MockNetwork::try_answer`].
+    fn submit(&self, token: &str, outputs: u64, done: Done) -> u64 {
+        self.before_swap(token);
+        let id = {
+            let mut l = self.ledger();
+            l.next += 1;
+            let id = l.next;
+            let expire_after = std::mem::take(&mut l.expire_once_reserved);
+            if std::mem::take(&mut l.reserve_next)
+                && let Some(i) = l.tokens.get(token).cloned()
+                && !Self::refused_expired(&l, &i.proofs, outputs)
+            {
+                // Held after the mint reserved the inputs, as CDK does before it signs, and
+                // only once their keysets and the outputs' have passed its checks.
+                l.reserved.extend(i.proofs.iter().copied());
+                if expire_after {
+                    l.expire_inputs(i.proofs);
+                }
+                if !l.time_out_next {
+                    l.queued.push((id, token.to_owned(), outputs, done));
+                    return id;
+                }
+            }
+            if l.time_out_next {
+                l.time_out_next = false;
+                l.queued
+                    .push((id, token.to_owned(), outputs, Box::new(|_| {})));
+                l.gave_up.insert(id);
+                drop(l);
+                done(Swap::Lost);
+                self.deliver(id, Swap::Lost);
+                return id;
+            }
+            if l.hold || l.hold_next {
+                l.hold_next = false;
+                l.queued.push((id, token.to_owned(), outputs, done));
+                return id;
+            }
+            id
+        };
+        let outcome = self.lose(self.swap_for(token, outputs));
+        {
+            let mut l = self.ledger();
+            if l.hold_responses {
+                l.responses.push((id, outcome, done));
+                return id;
+            }
+        }
+        let mut later = Vec::new();
+        self.answer_swap(&mut later, (id, outcome, done, true));
+        self.answer_swaps_later(later);
+        id
+    }
+
+    fn deliver(&self, id: u64, outcome: Swap) {
+        let wake = {
+            let mut l = self.ledger();
+            l.answers.insert(id, outcome);
+            std::mem::take(&mut l.waiting)
+        };
+        for w in wake {
+            w.wake();
+        }
+    }
+
+    /// A submitted swap's answer, if it has come; otherwise `waker` is woken when one does.
+    fn try_answer(&self, id: u64, waker: &Waker) -> Option<Swap> {
+        let mut l = self.ledger();
+        let a = l.answers.remove(&id);
+        if a.is_none() {
+            l.waiting.push(waker.clone());
+        }
+        a
+    }
+
+    /// Run `then` with the swap's outcome now, or at release while swaps are held.
+    fn swap_later(&self, token: &str, then: Done) {
+        let mut l = self.ledger();
+        if l.hold {
+            l.deferred.push((token.to_owned(), then));
+            return;
+        }
+        drop(l);
+        then(self.swap_now(token));
+    }
+
+    /// A wallet taking back its own proofs: NUT-07 state check, then a swap of the
+    /// unspent ones. It honours outages. `true` with the outcome: the mint refused it
+    /// because a keyset expired (12003), and the outcome is the NUT-07 check's.
+    /// `check_down_unspent`: the flaw of reading an unanswered NUT-07 check after a 12003
+    /// as every input unspent.
+    fn reclaim_as(&self, token: &str, check_down_unspent: bool) -> (Reclaim, bool) {
+        let mut l = self.ledger();
+        if l.down {
+            return (Reclaim::Blocked, false);
+        }
+        // Its NUT-07 check unanswered: nothing is decided, and nothing is sent.
+        if l.state_down && !check_down_unspent {
+            return (Reclaim::Blocked, false);
+        }
+        let Some(info) = l.tokens.get(token).cloned() else {
+            return (Reclaim::SomeSpent, false);
+        };
+        // Refused because a keyset expired (12003, before any other check): the proofs', or
+        // the reclaim's outputs' (the mint's active keyset); a NUT-07 check then says what
+        // happened to the proofs.
+        if info.proofs.iter().any(|p| l.proof_expired(*p)) || l.outputs_expired(l.next + 1) {
+            let checked = if l.state_down {
+                Reclaim::Expired // the flaw: an unanswered check read as every input unspent
+            } else if info.proofs.iter().any(|p| l.claimed.contains(p)) {
+                Reclaim::SomeSpent
+            } else if info.proofs.iter().any(|p| l.reserved.contains(p)) {
+                Reclaim::Pending
+            } else {
+                Reclaim::Expired
+            };
+            return (checked, true);
+        }
+        if info.proofs.iter().any(|p| l.reserved.contains(p)) {
+            return (Reclaim::Pending, false);
+        }
+        let fresh: Vec<u64> = info
+            .proofs
+            .iter()
+            .copied()
+            .filter(|p| !l.claimed.contains(p) && !l.forged.contains(p))
+            .collect();
+        let all = fresh.len() == info.proofs.len();
+        l.claimed.extend(fresh.iter().copied());
+        l.next += 1;
+        let outputs = l.next; // the reclaim's own outputs (NUT-13), restorable
+        l.reclaimed.extend(fresh.iter().map(|p| (*p, outputs)));
+        if l.lose_reclaim {
+            l.lose_reclaim = false;
+            return (Reclaim::Blocked, false);
+        }
+        if all {
+            (Reclaim::All, false)
+        } else {
+            (Reclaim::SomeSpent, false)
+        }
+    }
+
+    /// A third party claiming whatever is unclaimed, outages aside, in swaps at the mint:
+    /// never a proof the mint holds reserved or lists expired. Whether it got any.
+    fn steal(&self, token: &str) -> bool {
+        let mut l = self.ledger();
+        let Some(info) = l.tokens.get(token).cloned() else {
+            return false;
+        };
+        let fresh: Vec<u64> = info
+            .proofs
+            .iter()
+            .copied()
+            .filter(|p| Self::claimable(&l, *p))
+            .collect();
+        let any = !fresh.is_empty();
+        l.claimed.extend(fresh);
+        any
+    }
+
+    fn claim_first(&self, token: &str) {
+        let mut l = self.ledger();
+        if let Some(p) = l.tokens.get(token).and_then(|i| i.proofs.first().copied()) {
+            l.claimed.insert(p);
+        }
+    }
+
+    /// The mistake of checking only the last proof's state (a flag overwritten in a
+    /// loop) and then claiming every unclaimed proof.
+    fn swap_checking_last_only(&self, token: &str) -> Swap {
+        let mut l = self.ledger();
+        let Some(info) = l.tokens.get(token).cloned() else {
+            return Swap::Invalid;
+        };
+        if info.proofs.last().is_some_and(|p| l.claimed.contains(p)) {
+            return Swap::Spent;
+        }
+        let fresh: Vec<u64> = info
+            .proofs
+            .iter()
+            .copied()
+            .filter(|p| !l.claimed.contains(p))
+            .collect();
+        l.claimed.extend(fresh);
+        Swap::Claimed
+    }
+
+    #[must_use]
+    pub fn claimed_any(&self, token: &str) -> bool {
+        let l = self.ledger();
+        l.tokens
+            .get(token)
+            .is_some_and(|i| i.proofs.iter().any(|p| l.claimed.contains(p)))
+    }
+
+    #[must_use]
+    pub fn claimed_all(&self, token: &str) -> bool {
+        let l = self.ledger();
+        l.tokens
+            .get(token)
+            .is_some_and(|i| i.proofs.iter().all(|p| l.claimed.contains(p)))
+    }
+
+    /// Run the oldest held swap, or deliver the oldest held response; hold the rest.
+    fn release_oldest(&self) {
+        let (queued, response) = {
+            let mut l = self.ledger();
+            if l.queued.is_empty() {
+                let r = (!l.responses.is_empty()).then(|| l.responses.remove(0));
+                (None, r)
+            } else {
+                (Some(l.queued.remove(0)), None)
+            }
+        };
+        let mut later = Vec::new();
+        if let Some((id, token, outputs, done)) = queued {
+            let outcome = self.lose(self.process(&token, outputs));
+            let deliver = !self.ledger().gave_up.remove(&id);
+            self.answer_swap(&mut later, (id, outcome, done, deliver));
+        }
+        if let Some((id, outcome, done)) = response {
+            self.answer_swap(&mut later, (id, outcome, done, true));
+        }
+        self.answer_swaps_later(later);
+    }
+
+    fn release(&self) {
+        let (queued, responses, deferred, waiting) = {
+            let mut l = self.ledger();
+            l.hold = false;
+            l.hold_next = false;
+            l.hold_responses = false;
+            l.hold_keys = false;
+            l.key_releases += 1;
+            self.answer_held_calls(&mut l);
+            (
+                std::mem::take(&mut l.queued),
+                std::mem::take(&mut l.responses),
+                std::mem::take(&mut l.deferred),
+                std::mem::take(&mut l.waiting),
+            )
+        };
+        for w in waiting {
+            w.wake();
+        }
+        let mut later = Vec::new();
+        for (id, token, outputs, done) in queued {
+            let outcome = self.lose(self.process(&token, outputs));
+            let deliver = !self.ledger().gave_up.remove(&id);
+            self.answer_swap(&mut later, (id, outcome, done, deliver));
+        }
+        for (id, outcome, done) in responses {
+            self.answer_swap(&mut later, (id, outcome, done, true));
+        }
+        self.answer_swaps_later(later);
+        for (token, then) in deferred {
+            then(self.swap_now(&token));
+        }
+    }
+}
+
+/// A defect planted in a mock engine, to prove the adversary suite catches it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeederFlaw {
+    AcceptsOverpay,
+    AcceptsForeignMint,
+    PrefixMint,
+    /// Verifies DLEQs by fetching keys from the token's own mint, before the mint check.
+    DleqAtTokenMint,
+    AcceptsBadTokens,
+    NoDleqAccepted,
+    TooManyProofsAccepted,
+    InvalidNoBan,
+    NoBanOnSpent,
+    SpentCheckLastProof,
+    /// Checks proof states and swaps only the unspent ones, crediting the whole token.
+    SwapsUnspentSubset,
+    WindowOffByOne,
+    /// Counts the window across the peer's videos (the rule before the fourth audit).
+    WindowAcrossVideos,
+    ClaimsBeforeChecking,
+    IgnoresStale,
+    /// A `bad-mint` or `overpaid` refusal credits the claim anyway.
+    RefusalCredits,
+    /// An `underpaid` or `overpaid` refusal moves the watermark to `upto_chunk`.
+    RefusalAdvancesAcked,
+    /// A refusal claims the token's first proof.
+    ClaimsOnRefusal,
+    WrappingMul,
+    PayIgnoresBan,
+    /// Checks the ban when a payment arrives, not when its turn comes.
+    BanCheckedBeforeTurn,
+    AdmitIgnoresBan,
+    BanPerVideo,
+    FreshWindowPerHello,
+    QuoteForgetsAccount,
+    /// Quotes without waiting for a payment in progress.
+    QuoteWithoutTurn,
+    /// Creates an account on `hello`.
+    HelloCreatesAccount,
+    /// Does not count waiting hellos toward the session cap.
+    HelloWaitUncapped,
+    /// A hello dropped while it waits keeps counting toward the session cap.
+    HelloWaitLeaksOnDrop,
+    /// Quotes `spent_total` summed across the peer's videos.
+    QuoteSpentPeerWide,
+    /// Quotes `served` summed across the peer's videos.
+    QuoteServedPeerWide,
+    /// Acks `spent_total` summed across the peer's videos.
+    AckSpentPeerWide,
+    SessionIdAnyPeer,
+    SessionCapOffByOne,
+    /// Counts every session ever opened, not the open ones.
+    SessionCapLifetime,
+    /// Caps open sessions per (peer, video), not per peer.
+    SessionCapPerVideo,
+    HelloAnyVideo,
+    CountsDistinctFiles,
+    AdmitsForeignChunks,
+    /// Treats a chunk as covered if any of the peer's accounts has credit.
+    CoveredPeerWide,
+    NoGlobalCap,
+    GlobalCapGt,
+    /// Nets every account's credit against every other's debt.
+    GlobalCapNetsCredit,
+    /// Keys the global count by (peer, chunk), so a peer's videos collide.
+    LiveKeyedByPeer,
+    BanForgetsDebt,
+    /// Tests the global cap before the chunk's own pre-payment.
+    CapBeforeCredit,
+    /// Logs covered admissions as debt.
+    CoveredLoggedAsDebt,
+    DebtNeverAges,
+    /// Ages debt after one second (a unit mix-up).
+    AgeTtlOneSecond,
+    /// Lets ageing free the peer's own window too.
+    PeerDebtAges,
+    /// Keeps the cap as a counter that both ageing and payment decrement, so a chunk
+    /// paid and then aged (or aged and then paid) is freed twice; saturating.
+    CountFreedTwice,
+    /// The same, wrapping below zero (a release build without overflow checks).
+    CountFreedTwiceWrapping,
+    /// Keeps paid chunks in the global count.
+    PaidDebtStaysCounted,
+    /// Frees all of the account's debt on any payment, not just what it covers.
+    CreditFreesAllDebt,
+    /// Frees the debt it saw when it checked the payment, not what the swap covers.
+    CreditFromSnapshot,
+    /// Forgets accounts that have paid.
+    ForgetsPaidAccounts,
+    /// Never forgets an account.
+    NeverForgets,
+    /// Forgets never-paid accounts with a session open.
+    ForgetsOpenAccounts,
+    /// Forgets after `debt_ttl`, not `account_ttl`.
+    ForgetsAtDebtTtl,
+    /// Counts an account idle from its last admission, not its last session's close.
+    ForgetsFromLastAdmission,
+    /// Forgets accounts never served, not accounts never paid: a paid-ahead one is lost.
+    ForgetsUnserved,
+    /// Counts an account's sessions as closed when the first of them closes.
+    ForgetsOnFirstClose,
+    /// Keeps a closed session's id.
+    SessionIdLeaks,
+    /// Keeps the record of a payment dropped mid-swap after its swap lands.
+    LandKeepsFinished,
+    /// Forgets a peer's accounts when its ban expires.
+    BanExpiryResetsAccounts,
+    /// Records a ban for a peer with no account.
+    BansWithoutAccount,
+    /// Bans only a peer with an account on the offending video, not on any video.
+    BanNeedsThisAccount,
+    /// Bans a peer with an account on the offending video, or a paid one elsewhere.
+    BanNeedsPaidOrThis,
+    /// Checks a hello's ban only before it waits for the account's turn.
+    HelloNoBanRecheck,
+    /// Leaves an empty waiter list behind for every account that ever had one.
+    WaitingKeptEmpty,
+    /// Ages debt out of the global count but never trims its log.
+    DebtLogUntrimmed,
+    /// Accepts any `debt_ttl`, `account_ttl` or `ban_ttl` above the minimums.
+    NoTtlCeiling,
+    /// Validates mint URLs as a test deployment's writer would (loopback http allowed).
+    ValidateAllowsLoopback,
+    /// Keeps bans for ever.
+    BansNeverExpire,
+    /// Lets a ban expire after `debt_ttl`, not `ban_ttl`.
+    BanExpiresEarly,
+    /// Skips the configuration checks.
+    NoValidate,
+    /// Refuses `account_ttl` equal to `debt_ttl`, which NFX-07 allows.
+    EqualTtlRefused,
+    /// Accepts a global cap above the ceiling.
+    NoCapCeiling,
+    /// Accepts a `ban_ttl` below `debt_ttl`.
+    NoBanTtlCheck,
+    /// Acknowledges first and swaps later (the design the second audit retired).
+    AckBeforeSwap,
+    /// Claims, then credits only if the `pay` future is still alive to see the answer.
+    ClaimThenAwaitCredit,
+    /// Waits for the mint forever: no 60 s deadline.
+    NoDeadline,
+    /// Counts the deadline from the swap's sending, not the payment's arrival.
+    DeadlineFromSwap,
+    /// Waits for keys without registering with the clock.
+    FetchNoClockWatch,
+    /// Sends the swap after the payment's deadline, if nothing marked it abandoned.
+    SendIgnoresDeadline,
+    /// Checks the watermark and the amount only before the key fetch, not again as the
+    /// swap is sent.
+    NoRecheckAtSend,
+    /// Re-checks only the watermark as the swap is sent, not the amount.
+    RecheckStaleOnly,
+    /// Answers `mint-unavailable` at the deadline even when the outcome is already known.
+    DeadlineBeatsSettled,
+    /// Treats a swap as late only once something has marked it abandoned, not by the
+    /// clock, so a dropped `pay` is never abandoned.
+    LateByFlagOnly,
+    /// Bans on a late `spent` from a swap it had abandoned.
+    LateOutcomeBans,
+    /// Does not credit a late claim from a swap it had abandoned.
+    LateClaimNotCredited,
+    /// Credits a late claim but leaves its chunks in the global count.
+    LateClaimKeepsDebt,
+    /// Frees, for a late claim, only the debt seen when the payment was checked.
+    LateCreditFromSnapshot,
+    /// Answers a swap that got no answer at once, without a retry.
+    NoRetry,
+    /// Takes a retry's `spent` for a double spend, and bans on it.
+    RetryBansOnSpent,
+    /// Never learns the outcome of a swap that got no answer.
+    NeverRestores,
+    /// Restores by token: any earlier swap of the same proofs counts as this one.
+    RestoreByToken,
+    /// Takes a retry's `spent` for its own first attempt, without a restore.
+    RetrySpentIsOwn,
+    /// Keeps an unknown outcome to learn only while its payment is in time.
+    UnknownOnlyInTime,
+    /// Keeps an unknown outcome to learn only while its `pay` is awaited.
+    UnknownOnlyWhileAwaited,
+    /// Learns unknown outcomes only when a `hello` comes.
+    LearnOnHelloOnly,
+    /// Keeps swapping an account's payments while one has an unknown outcome.
+    UnknownUnbounded,
+    /// Refuses a token of exactly 64 proofs.
+    ProofCapOffByOne,
+    /// Counts only lost answers as unknown, not a swap still unanswered in flight.
+    InFlightNotUnknown,
+    /// Refuses every account's payments while any account has an unknown swap.
+    UnknownGlobal,
+    /// Refuses a peer's payments on every video while one account has an unknown swap.
+    UnknownPeerWide,
+    /// Takes a retry's `spent`, with its restore unanswered, as not its own.
+    RetrySpentRestoreDownKnown,
+    /// Forgets an account holding a swap of unknown outcome.
+    ForgetsUnknownAccount,
+    /// Credits a late claim only to an account that already exists.
+    LateCreditNeedsAccount,
+    /// Takes unsigned outputs as nothing, whether or not an input is spent.
+    NotSignedFinal,
+    /// Never takes unsigned outputs as nothing, even with an input spent.
+    NotSignedStaysUnknown,
+    /// Leaves a swap abandoned in flight unknown until its answer comes, whatever a
+    /// NUT-07 check and a restore could show.
+    InFlightNeverDecided,
+    /// Refuses every account's payments while any account has a swap in flight.
+    InFlightGlobal,
+    /// Refuses a peer's payments on every video while one of its swaps is in flight.
+    InFlightPeerWide,
+    /// Applies the one-unknown bound only to a key that has an account.
+    UnknownNeedsAccount,
+    /// Counts a swap in flight only once its `pay` future has answered.
+    InFlightFinishedOnly,
+    /// Credits no late claim to a peer banned since.
+    LateClaimSkipsBanned,
+    /// Takes a lost answer as unknown even once its payment's outcome was decided, so a
+    /// claim a restore showed is learnt, and credited, again.
+    DecidedLostRelearnt,
+    /// Restores a swap's outputs before checking its inputs, so a swap processed between
+    /// the two reads looks like one that can no longer go through.
+    RestoreBeforeInputs,
+    /// Drops a decided payment's record but leaves the account's turn held by it.
+    DecidedKeepsTurn,
+    /// Takes an unanswered NUT-07 check as "an input spent".
+    StateDownIsSpent,
+    /// Takes a pending input (reserved by a request the mint is processing) as spent.
+    PendingIsSpent,
+    /// Takes a retry refused as pending as "nothing happened", not as unknown.
+    RetryPendingKnown,
+    /// Takes a first attempt refused as pending for a double spend, and bans.
+    PendingBans,
+    /// Stops learning lost answers at the first one still unknown.
+    LearnStopsAtFirstUnknown,
+    /// Leaves swaps abandoned in flight unread while any lost answer is still unknown.
+    InFlightWaitsForUnknown,
+    /// Stops learning swaps abandoned in flight at the first one still unknown.
+    InFlightStopsAtFirstUnknown,
+    /// Applies a read's decision without checking whether the swap's answer landed while
+    /// it read, so a claim is credited twice.
+    NoRecheckAfterRead,
+    /// A decided swap releases whatever turn its account holds, not only its own.
+    DecidedFreesAnyTurn,
+    /// Releases a decided swap's turn without waking, or clearing, what waits for it.
+    DecidedLeavesWaiters,
+    /// Reads each undecided swap with its own two requests, not all of them in one batch.
+    ReadsPerSwap,
+    /// Keeps an undecided swap whose inputs stay unspent forever.
+    UndecidedNeverExpires,
+    /// Keeps a swap abandoned in flight whose inputs stay unspent forever.
+    FlightNeverExpires,
+    /// Drops an undecided swap whose inputs stay unspent, instead of completing it.
+    ExpiryDrops,
+    /// Takes a read the mint refuses as too large for the whole batch, never splitting it.
+    NoSplitOnLimit,
+    /// Reads every account's unknown swaps at any account's entry.
+    ReadsOtherAccounts,
+    /// Credits a lost answer's claim without checking that another learner has not
+    /// credited it already.
+    LostNoRecheck,
+    /// Records a first attempt refused as pending as a swap of unknown outcome.
+    PendingFirstUnknown,
+    /// Completes a swap with fresh outputs, not its own.
+    CompleteFreshOutputs,
+    /// Takes a completion answered `spent` as nothing, without a restore.
+    CompleteSpentIsNothing,
+    /// Takes a completion refused as pending as nothing.
+    CompletePendingIsNothing,
+    /// Leaves a swap whose completion's outputs are refused for good unknown forever.
+    CompleteRefusedStaysUnknown,
+    /// Leaves a swap whose completion is refused as invalid unknown forever.
+    CompleteInvalidStaysUnknown,
+    /// Splits a read the mint left unanswered, as if it had refused it as too large.
+    SplitOnUnanswered,
+    /// Joins a split read's answers in the order they came back, not the swaps' order.
+    SplitMisaligned,
+    /// A `hello` reads every account's unknown swaps.
+    HelloReadsAll,
+    /// An account's own entries read every unknown swap of its peer, on any video.
+    ScopeByPeer,
+    /// An account's own entries read its swaps at every entry, however often, even a
+    /// flood of hellos or of payments sending one token again.
+    OwnReadsUnbounded,
+    /// Takes a retry whose outputs the mint refuses for good as "nothing happened",
+    /// without a restore.
+    RetryRefusedIsKnown,
+    /// A payment's own reads and completions run past its deadline.
+    OwnReadsIgnoreDeadline,
+    /// A payment of new proofs always reads afresh, however many reads that second.
+    OwnReadsPerProofs,
+    /// Reuses a read made for the same peer's other account.
+    ReuseByPeer,
+    /// Settles a completion that got no answer by a restore, as if it had been refused.
+    CompleteLostByRestore,
+    /// Bans on a completion refused as invalid.
+    CompleteInvalidBans,
+    /// Takes a completion that never reached the mint as nothing.
+    CompleteUnreachableNothing,
+    /// Takes a completion answered `spent` whose restore goes unanswered as nothing.
+    CompleteRestoreDownNothing,
+    /// Takes a retry refused for good whose restore goes unanswered as nothing.
+    RetryRefusedRestoreDownKnown,
+    /// Takes a retry refused for good as a claim.
+    RetryRefusedIsClaim,
+    /// Takes a retry that got no answer as nothing.
+    RetryLostIsNothing,
+    /// Bans on a first attempt whose outputs the mint refuses (the seeder's stale keyset).
+    FirstRefusedBans,
+    /// Records a first attempt whose outputs the mint refuses as a swap of unknown outcome.
+    FirstRefusedUnknown,
+    /// A payment's reads get their own 60 s, from when they start, not from its arrival.
+    ReadDeadlineFromRead,
+    /// A payment's completion is sent, and waited for, past its deadline.
+    CompleteIgnoresDeadline,
+    /// Checks the watermark again before the payment's own read, not after it: a late claim
+    /// that read learns is not looked at.
+    RecheckBeforeRead,
+    /// A payment reads its account's unknown swaps before its key fetch and DLEQ check.
+    ReadsBeforeKeyFetch,
+    /// A payment reads its account's unknown swaps before its amount check.
+    ReadsBeforeAmount,
+    /// Never prunes the record of an account's reads.
+    OwnReadsNeverPruned,
+    /// Adds a read to the record of the second it began in, not the one it is made in.
+    NoSecondReset,
+    /// A `hello` checks for a read to reuse, awaits its own read, and records it only
+    /// then: two at once both read.
+    HelloAwaitsRead,
+    /// A `hello` reads before it waits for the payment in progress.
+    HelloReadsBeforeTurn,
+    /// Settles a retry refused as invalid by a restore, as a completion is: no ban.
+    RetryInvalidByRestore,
+    /// Settles a retry refused because a keyset expired by a restore at once, even while an
+    /// input is pending.
+    RetryExpiredAtOnce,
+    /// Settles a completion refused because a keyset expired by a restore at once, even
+    /// while an input is pending.
+    CompleteExpiredAtOnce,
+    /// Bans on a first attempt refused because a keyset expired.
+    FirstExpiredBans,
+    /// Records a first attempt refused because a keyset expired as a swap of unknown
+    /// outcome.
+    FirstExpiredUnknown,
+    /// Takes an unanswered NUT-07 check of a retry refused because a keyset expired as no
+    /// input pending, and settles it by restore.
+    ExpiredRestoreOnStateDown,
+    /// Takes an unanswered restore of a retry refused because a keyset expired as nothing.
+    ExpiredRestoreDownKnown,
+    /// Never settles a retry refused because a keyset expired: it stays unknown.
+    RetryExpiredStaysUnknown,
+    /// A retry's restore, unanswered, is waited for past the payment's deadline.
+    RetryRestoreUncapped,
+    /// A completion's restore, unanswered, is waited for past the payment's deadline.
+    CompleteRestoreUncapped,
+    /// A payment's reads get 60 s from when its turn comes, not from its arrival.
+    ReadDeadlineFromTurn,
+    /// An entry reusing a read still under way answers without waiting for its result.
+    ReuseWithoutWaiting,
+    /// An entry reusing a read still under way waits for it one poll only.
+    ReuseWaitsOnePoll,
+    /// An entry reusing a read waits while any read of its account is under way, whatever
+    /// the second (the eighteenth rework's wait): it can outlive its deadline.
+    WaitsWhileReading,
+    /// Takes a read abandoned before it was back as a result to reuse, so the entries
+    /// waiting for it answer without one.
+    AbandonedReadReused,
+    /// A read abandoned before it is back gives its place in the second back (the
+    /// nineteenth rework's), so dropped entries send reads without bound.
+    AbandonedFreesItsPlace,
+    /// An entry waiting for a read whose second ends first answers without reading.
+    SecondEndReturns,
+    /// Reuses a read whatever it covered: one sent before a swap became unknown serves an
+    /// entry after it, whose quote then misses that swap's claim.
+    ReuseByCoverageBlind,
+    /// A payment waits while any read of its account is under way, whatever the second.
+    PayWaitsForRead,
+    /// A payment whose second's two reads were spent without a result answers at once,
+    /// instead of reading in the next second.
+    PayNextSecondReturns,
+    /// Past two reads a second, an entry reads again rather than wait for one under way.
+    PastTwoReadsAgain,
+    /// Checks the second's reads, and takes its read's place only once the read is sent
+    /// (the twenty-first rework's): entries on other threads checking meanwhile all read.
+    PlaceTakenAfterCheck,
+    /// Sends, and records, a read at or past its entry's deadline: nothing reaches the mint
+    /// then, yet a later entry reuses it as a read of the account's swaps.
+    ReadsPastDeadline,
+    /// Fixes what a read covers when it comes back, not when it is sent: a swap that became
+    /// unknown while it was under way counts as read.
+    CoverageFixedAtBack,
+    /// A payment is served by a read whatever it covered.
+    PayReuseCoverageBlind,
+    /// Past two reads a second, a read serves whatever it covered.
+    PastTwoCoverageBlind,
+    /// A payment's own proofs' read serves it whatever it covered.
+    OwnProofsCoverageBlind,
+    /// A read covers only swaps whose answer was lost, not swaps abandoned in flight.
+    CoversLostOnly,
+    /// A `hello` that waited for a payment reuses a read sent before its wait ended (the
+    /// payment's own), and quotes without a claim that landed meanwhile.
+    WaitedHelloReusesEarlierRead,
+    /// A waited `hello` takes its floor from the account's latest free at each look (the
+    /// twenty-second rework's): a later free moves it, and it stops sharing a read sent
+    /// after its own wait ended.
+    FloorAtLatestFree,
+    /// A waited `hello` takes its floor as the reads sent by its first look (the twenty-second
+    /// rework's first form): hellos woken by one payment cannot share a read.
+    FloorAtLook,
+    /// Notes a freed turn's floor only at the second's first free: a hello that waited for a
+    /// later payment is served by that payment's own read.
+    FloorFirstFreeOnly,
+    /// Past two reads a second, a waited `hello` is served by any read, its floor ignored.
+    FloorIgnoredPastTwo,
+    /// A waited `hello` counts only the reads after its floor toward the second's two.
+    WaitedCountsAfterFloor,
+    /// A read's place covers nothing until its requests are back: an entry on another
+    /// thread meanwhile reads again rather than share it.
+    CoversSetAfterSend,
+    /// Judges an entry's time left once, at its first look: a payment that waits into its
+    /// deadline sends, and records, a read there.
+    InTimeOnce,
+    /// A late claim frees every unpaid chunk of its account from the global count, not only
+    /// those it covers.
+    LateCreditFreesAll,
+    /// Completes a swap left unknown `debt_ttl` after it became unknown, not `account_ttl`:
+    /// its payer's time to take the proofs back is cut short.
+    CompletesAtDebtTtl,
+    /// Takes signed outputs for a claim only when the NUT-07 check answered.
+    SignedNeedsStates,
+    /// Takes a completion refused for good (its outputs' keyset rotated out) as nothing,
+    /// without the restore that would show a first request's claim.
+    CompleteRefusedIsNothing,
+    /// Bans on a double spend only a peer with an account that was served, not one whose only
+    /// account is pre-paid.
+    BanNeedsServed,
+    /// Wakes only the first entry waiting for a freed turn, and drops the others' wakers.
+    WakesOneDropsRest,
+    /// A payment refused before its swap keeps its account's turn until its deadline.
+    RefusalKeepsTurn,
+    /// Decides whether an outcome landed in time from a clock read before its settlement,
+    /// ignoring the payment's abandonment meanwhile.
+    LandStaleClock,
+    /// Admits in two steps, the checks and the count under separate locks.
+    AdmitSplitLock,
+    /// Retries a swap whose answer was lost at its payment's deadline too, not only before.
+    RetryAtDeadline,
+    /// Checks a `hello`'s session id only as it arrives, not again after its wait: two
+    /// hellos of one id that waited together both open.
+    HelloNoSessionRecheck,
+    /// Gives every `hello` a floor, not only one that waited: a hello that did not wait
+    /// reads again rather than reuse the second's read.
+    FloorWithoutWait,
+    /// Swaps to outputs of a keyset that expires sooner than twice `account_ttl` away.
+    IgnoresKeysetExpiry,
+    /// Measures the outputs' keyset margin by `ban_ttl`, not `account_ttl`.
+    KeysetMarginBanTtl,
+    /// Refuses a keyset exactly twice `account_ttl` away too.
+    KeysetMarginInclusive,
+    /// Measures the outputs' keyset margin by the longer of `account_ttl` and `ban_ttl`.
+    KeysetMarginMaxTtl,
+    /// Applies the outputs' keyset rule after the payment's own read, not before it.
+    KeysetAfterRead,
+    /// Applies the outputs' keyset rule before every other check.
+    KeysetFirst,
+    /// The eighteenth rework's rule: a swap whose outputs' keyset has expired is decided by
+    /// its inputs alone, spent being the claim (so a reclaim or a double spend is credited).
+    ExpiredSpentIsClaim,
+    /// A retry's resend, unanswered, is waited for past the payment's deadline.
+    RetryResendUncapped,
+    /// The NUT-07 check settling a 12003, unanswered, is waited for past the deadline.
+    ExpiredStateUncapped,
+    /// Never takes over a turn held past its deadline.
+    NoTakeover,
+    /// Lets hellos take over a turn held past its deadline, but not payments.
+    PayNoTakeover,
+    /// Takes over a turn only a second after its deadline.
+    TakeoverAt61,
+    /// Waits for a turn without registering with the clock.
+    TurnNoClockWatch,
+    /// A settling payment releases whatever turn the account holds, not only its own.
+    StaleTurnFrees,
+    OutageBans,
+    OutageCredits,
+    SpentTotalCountsRefused,
+    SpentTotalPerSession,
+    /// Handles one account's payments concurrently.
+    ConcurrentPays,
+    /// A waited `hello` notes its floor as it starts to wait (its arrival), not
+    /// as it finds the turn free: a read the payment sent during the wait serves it.
+    FloorAtArrival,
+    /// A waited `hello`'s floor noted in one second is applied to a later
+    /// second's reads too.
+    FloorAcrossSeconds,
+    /// `take_place` starts a new second's reads but keeps the old `freed`.
+    FreedKeptAtNewSecond,
+    /// An entry waits for a read under way that serves it whatever its time
+    /// left: its wait ends with the second, not at its deadline.
+    WaitReadPastDeadline,
+    /// An entry whose second's two are spent waits for the next second whatever
+    /// its time left.
+    NextSecondPastDeadline,
+    /// A read's guard marks its place by index alone, whatever the second.
+    ReadingIgnoresSecond,
+    /// A read is counted in the second its entry first looked, not the one it
+    /// is sent in.
+    CountedAtFirstLook,
+    /// An entry waits for any read of its account under way, serving it or not.
+    WaitsForAnyUnderWay,
+    /// A payment is served by any read, as a hello is.
+    PayServedByAnyRead,
+    /// A `hello` waits only for the payment holding the turn as it arrives: once that one
+    /// has left it, the `hello` goes on, whatever payment holds the turn by then.
+    HelloWaitsForFirstOnly,
+    /// Notes a turn held past its payment's deadline as freed when it is taken over or
+    /// released, not at the deadline: a read sent in between serves no `hello` behind it.
+    FreedAfterDeadline,
+    /// A waited `hello` takes its floor at the first freeing it sees (a new payment holding
+    /// the turn), not at the last before it finds the turn free: that payment's own read
+    /// serves it.
+    FloorAtFirstWake,
+    /// A `hello` behind several payments quotes the account as it stood when the payment it
+    /// first waited for left the turn.
+    QuoteAtFirstWake,
+    /// A waiting `hello` stops counting toward the session cap once the payment it first
+    /// waited for has left the turn, though it waits on behind the next.
+    HelloUncountedAfterFirst,
+    /// A waited `hello`'s floor is applied to reads that are back, not to reads under way:
+    /// it waits for a read sent before its wait ended.
+    FloorIgnoredForUnderWay,
+    /// A `hello` waits for any read of its account under way, serving it or not.
+    HelloWaitsForAnyUnderWay,
+    /// A payment's read is counted in the second the payment first looked, not the one it
+    /// is sent in.
+    PayCountedAtFirstLook,
+    /// An entry at or past its deadline takes a read's place, and abandons it, before it
+    /// finds it may send nothing: a read never sent is counted.
+    PlaceTakenPastDeadline,
+    /// A payment waiting for its account's turn is answered only once it takes the turn,
+    /// not at its own deadline.
+    TurnWaitPastDeadline,
+    /// Counts the deadline to which a payment holds the turn from when it took the turn,
+    /// not from its arrival.
+    HolderDeadlineFromTurn,
+    /// Notes a turn held past its payment's deadline as freed when an entry takes it over,
+    /// not at the deadline.
+    TakeoverFreedAfterDeadline,
+    /// Notes a turn held past its payment's deadline, with no swap sent, as freed when that
+    /// payment is answered or dropped, not at the deadline.
+    ReleaseFreedAfterDeadline,
+    /// Notes a turn held past its payment's deadline, its swap in flight, as freed when
+    /// that payment is answered `mint-unavailable`, not at the deadline.
+    AnswerFreedAfterDeadline,
+    /// Notes a turn held past its payment's deadline as freed when that payment's swap
+    /// lands, not at the deadline.
+    LandFreedAfterDeadline,
+    /// Takes a turn freed in the second before its payment's deadline as freed at the
+    /// deadline: a read sent earlier in that second serves the `hello` behind it.
+    DeadlineSecondEarly,
+    /// Takes a turn freed in its payment's deadline second as freed then, not at the
+    /// deadline: a read sent earlier in that second serves no `hello` behind it.
+    DeadlineSecondLate,
+    /// A swap learnt as nothing, its answer lost or abandoned in flight, frees its account's
+    /// chunks up to the payment from the global count, though nothing was paid for them.
+    LateNothingFreesDebt,
+    /// A payment checks its peer's ban without first expiring the bans past `ban_ttl`.
+    PayBanNotAged,
+    /// Refuses a request for a file of another video, or of none, but logs it in the global
+    /// count as an unpaid chunk.
+    ForeignAdmitCounts,
+    /// Refuses a banned peer's request, but counts it as an unpaid chunk, to its account and
+    /// in the global count.
+    BannedAdmitCounts,
+    /// A payment refused while its account's earlier swap is unknown drops the account's
+    /// chunks from the log that ages them: they stay in the global count for good.
+    PayDropsDebtLog,
+    /// A swap abandoned in flight and learnt as nothing frees its account's chunks up to the
+    /// payment from the global count; one whose answer was lost frees none.
+    NothingInFlightFreesDebt,
+    /// Refuses a banned peer's request, but counts it to its account (its window and its
+    /// `served`), not to the global count.
+    BannedAdmitCountsToAccount,
+    /// A swap learnt as nothing by its account's own `hello` or payment frees the account's
+    /// chunks up to the payment from the global count; one the sweep learns frees none.
+    OwnNothingFreesDebt,
+    /// A swap learnt as nothing by a payment of its account frees the account's chunks up
+    /// to the payment from the global count; one a `hello` or the sweep learns frees none.
+    PayNothingFreesDebt,
+    /// A swap abandoned in flight and learnt as nothing by its account's own `hello` or
+    /// payment frees the account's chunks up to the payment from the global count; one
+    /// whose answer was lost, or that the sweep learns, frees none.
+    OwnNothingInFlightFreesDebt,
+    /// A swap abandoned in flight and learnt as nothing by a payment of its account frees
+    /// the account's chunks up to the payment from the global count; one whose answer was
+    /// lost, or that a `hello` or the sweep learns, frees none.
+    PayNothingInFlightFreesDebt,
+    /// A request checks its peer's ban without first expiring the bans past `ban_ttl`.
+    AdmitBanNotAged,
+    /// A session's `banned` answers without first expiring the bans past `ban_ttl`.
+    BannedNotAged,
+    /// A `hello` that took a turn over from a payment past its deadline reads nothing: its
+    /// quote misses a claim that reached the mint before that deadline.
+    HelloTakeoverSkipsRead,
+    /// A payment that took a turn over from a payment past its deadline does not read the
+    /// abandoned swap: while that outcome is unknown, it is answered at once.
+    PayTakeoverSkipsRead,
+    /// A payment that took a turn over from a payment past its deadline skips the ban
+    /// check: a banned peer's payment is swapped.
+    PayTakeoverSkipsBan,
+    /// A `hello` that took a turn over from a payment past its deadline skips the ban check
+    /// after its wait: a peer banned while it waited opens a session.
+    HelloTakeoverSkipsBanRecheck,
+    /// Uses keys it finds at or after the payment's deadline: its DLEQ and amount are
+    /// judged late, and their refusal is the answer.
+    LateKeysUsed,
+    /// Reads the watermark again as the swap is sent before judging the payment's deadline:
+    /// past it, the payment is refused `stale` or by amount on what was learnt late.
+    RecheckPastDeadline,
+    /// Takes an outcome settled in its payment's deadline second as in time: it is the
+    /// answer, and a spent one bans.
+    LandInTimeAtDeadline,
+    /// A `hello` that finds its account's turn held past a payment's deadline, and takes it
+    /// over, is taken as having waited: no read sent earlier in that second serves it.
+    LateArrivalWaited,
+    /// A retry answered `spent` whose restore finds its outputs unsigned leaves the swap
+    /// unknown: the account's payments are refused until a read decides it.
+    RetrySpentUnsignedStaysUnknown,
+    /// Checks a payment's watermark before its peer's ban: a banned peer's stale payment is
+    /// refused `stale`.
+    StaleBeforeBan,
+    /// Checks a payment's structure before its peer's ban: a banned peer's unreadable or
+    /// malformed token is refused `bad-token`.
+    StructureBeforeBan,
+    /// A payment dropped before its swap is sent (its connection closed) holds its
+    /// account's turn to its deadline: only an answer or the deadline frees it.
+    DropHoldsTurn,
+    /// Uses keys it finds in the payment's deadline second, as in time: its DLEQ and amount
+    /// are judged, and their refusal is the answer.
+    KeysInDeadlineSecondUsed,
+    /// A retry refused for good whose restore finds its outputs unsigned leaves the swap
+    /// unknown: the account's payments are refused until a read decides it.
+    RetryRefusedUnsignedStaysUnknown,
+    /// A retry refused because a keyset expired (12003), no input pending, whose restore
+    /// finds its outputs unsigned leaves the swap unknown.
+    RetryExpiredUnsignedStaysUnknown,
+    /// A `hello` checks its peer's ban after its wait, before its reads, and not as it
+    /// answers: a peer banned while it reads opens a session.
+    HelloBanCheckBeforeRead,
+    /// Checks a payment's peer's ban last, after its watermark, structure, mint, DLEQ and
+    /// amount: a banned peer's payment is refused for any of those first.
+    BanCheckedLast,
+    /// A `hello` checks its peer's ban only as it answers, not as it arrives: a banned
+    /// peer's `hello` waits for its account's turn, and reads, before it is refused.
+    HelloBanNotAtArrival,
+    /// A payment that took a turn over from a payment past its deadline reads the abandoned
+    /// swap as its turn comes, before its ban and its other checks: a banned peer's payment
+    /// costs the mint reads.
+    TakeoverReadsBeforeChecks,
+    /// A payment that took a turn over from a payment past its deadline reads the abandoned
+    /// swap after its ban check, before its watermark and its other checks: a payment it
+    /// then refuses costs the mint reads.
+    TakeoverReadsBeforeStale,
+    /// A payment that took a turn over from a payment past its deadline reads the abandoned
+    /// swap once its keys come, before its DLEQ and amount checks: a payment it then
+    /// refuses costs the mint reads.
+    TakeoverReadsBeforeAmount,
+    /// A payment that took a turn over from a payment past its deadline skips the watermark
+    /// check: one for chunks already paid is refused by its amount, not `stale`.
+    TakeoverStaleSkipped,
+    /// A payment that took a turn over from a payment past its deadline checks its peer's
+    /// ban without first expiring the bans past `ban_ttl`: a ban that lapsed while nothing
+    /// came from the peer refuses it.
+    TakeoverBanNotAged,
+    /// A payment dropped once its swap is sent (its connection closed) is abandoned: its
+    /// outcome, however soon it comes, is settled as late, and a spent one bans nobody.
+    DropAbandonsInFlight,
+    /// A payment that took a turn over from a payment past its deadline reads without its
+    /// deadline: an unanswered read keeps it past its deadline.
+    TakeoverReadsWithoutDeadline,
+    /// A `hello` checks its peer's ban again as it answers only if it waited: one that read
+    /// at once, its peer banned during that read, opens a session.
+    HelloRecheckOnlyAfterWait,
+    /// Marks a payment's swap sent before it judges the deadline: a payment answered at its
+    /// deadline without a swap leaves an unknown one behind, and its account's next payment
+    /// is refused.
+    SentBeforeExpiry,
+    /// Reads a swap whose NUT-07 check shows an input spent beside others pending as
+    /// pending: it stays unknown, where outputs unsigned with an input spent are nothing.
+    SpentBesidePendingUnknown,
+    /// Creates an empty account for a peer whose payment it refuses by its mint or its
+    /// amount: a free identity's refused payment is kept, and its double spend then bans.
+    RefusalCreatesAccount,
+    /// Takes a product above 2^53-1 as due, where it fits in 64 bits: a token paying it
+    /// exactly is not `underpaid` (the `spent_total` bound then refuses it `overpaid`).
+    NoMaxIntFilter,
+    /// Creates an empty account for a peer whose token it refuses as unreadable or of the
+    /// wrong shape.
+    BadTokenCreatesAccount,
+    /// Creates an empty account for a peer whose token it refuses for an invalid DLEQ.
+    BadDleqCreatesAccount,
+    /// Creates an empty account for a peer whose proofs the mint refuses as invalid, and
+    /// so bans a peer that has none.
+    InvalidCreatesAccount,
+    /// Takes a product of exactly 2^53-1 as beyond the bound: `underpaid`.
+    ExactMaxIntUnderpaid,
+    /// Checks the face value before the mint: a foreign token of the wrong amount is
+    /// `underpaid` or `overpaid`, not `bad-mint`.
+    AmountBeforeMint,
+    /// Checks the face value before the DLEQs: a token with an invalid DLEQ and the wrong
+    /// amount is `underpaid` or `overpaid`, not `bad-token`.
+    AmountBeforeDleq,
+    /// Counts a `hello` it refuses `unknown-video` toward the peer's session cap, for good.
+    UnknownVideoCounted,
+    /// Counts a `hello` it refuses for naming an open session's id toward the peer's
+    /// session cap, for good.
+    OpenIdRefusalCounted,
+    /// Counts a `hello` it refuses `banned` after its wait toward the peer's session cap,
+    /// for good.
+    BannedHelloCounted,
+    /// Leaves the session id of a `hello` it refuses `banned` after its wait open.
+    BannedHelloKeepsId,
+    /// Takes a session id as open only on its own video: a `hello` for another video may
+    /// name an open session's id.
+    SessionIdPerVideo,
+    /// Answers a banned peer's `hello` for a video it does not serve `unknown-video`.
+    UnknownVideoBeforeBan,
+    /// Answers a banned peer's `hello` naming an open session's id `bad-session`.
+    SessionIdBeforeBan,
+    /// Answers a banned peer's `hello` past its session cap `bad-session`.
+    CapBeforeBan,
+    /// Creates an empty account for a banned peer's refused request, on a video it has
+    /// none on.
+    BannedAdmitCreatesAccount,
+    /// Creates an empty account for a banned peer's refused payment, on a video it has
+    /// none on.
+    BannedPayCreatesAccount,
+    /// Creates an empty account for a peer with none whose request the full global cap
+    /// refuses.
+    CapRefusalCreatesAccount,
+    /// Creates an empty account for a peer with none whose request for another video's
+    /// file it refuses.
+    ForeignCreatesAccount,
+    /// A payment frees from the global count the chunks up to it of the peer's other
+    /// accounts too.
+    CreditFreesPeerDebt,
+    /// Creates an empty account for a peer with none whose payment it refuses
+    /// `mint-unavailable` because the mint's keys did not come in time.
+    NoKeysCreatesAccount,
+    /// Creates an empty account for a peer with none whose swap never reached the mint.
+    UnreachableCreatesAccount,
+    /// Creates an empty account for a peer with none whose swap the mint refused as
+    /// pending.
+    PendingCreatesAccount,
+    /// Creates an empty account for a peer with none whose first swap the mint refused for
+    /// its outputs' keyset, rotated out.
+    OutputsRefusedCreatesAccount,
+    /// Creates an empty account for a peer with none whose first swap the mint refused
+    /// because a keyset expired.
+    ExpiredCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment it refuses because the
+    /// mint's keyset expires too soon to swap to.
+    KeysetCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment's turn did not come by
+    /// its deadline.
+    TurnTimeoutCreatesAccount,
+    /// Creates an empty account for a peer with none as soon as its swap's answer is lost,
+    /// before the outcome is learnt: one learnt as nothing leaves it behind.
+    LostCreatesAccount,
+    /// Creates an empty account for a peer with none whose swap, abandoned at the deadline,
+    /// is learnt late as nothing.
+    LateNothingCreatesAccount,
+    /// Counts a `hello` it refuses after its wait, its session id opened meanwhile, toward
+    /// the peer's session cap, for good.
+    RecheckIdCounted,
+    /// Gives the session id of a `hello` it refuses after its wait, the id opened
+    /// meanwhile, to that `hello`'s peer: the id stays open once its holder closes.
+    RecheckIdTakesId,
+    /// Creates an empty account for a peer with none whose `hello` it refuses after its
+    /// wait, its session id opened meanwhile.
+    RecheckIdCreatesAccount,
+    /// After a `hello`'s wait, checks its session id before the ban: a banned peer's
+    /// `hello` whose id was opened meanwhile is refused `bad-session`.
+    RecheckIdBeforeBan,
+    /// A `hello` for a video it does not serve checks the peer's ban without first
+    /// expiring the bans past `ban_ttl`.
+    UnknownVideoBanNotAged,
+    /// Accepts a `debt_ttl` one second past 24 h.
+    DebtTtlCeilingOffByOne,
+    /// Acknowledges a payment that takes its account's `spent_total` past 2^53-1, which
+    /// pay/1 cannot write.
+    SpentTotalUnbounded,
+    /// Refuses a payment that takes its account's `spent_total` to exactly 2^53-1.
+    SpentTotalBoundOffByOne,
+    /// Refuses a payment that would take its account's `spent_total` past 2^53-1 as
+    /// `underpaid`.
+    SpentTotalUnderpaid,
+    /// Checks the `spent_total` bound before the face value: a short token that would
+    /// take it past 2^53-1 is `overpaid`, not `underpaid`.
+    SpentTotalBeforeAmount,
+    /// Bounds the sum of the peer's `spent_total` over all its accounts, not each
+    /// account's own.
+    SpentTotalPeerWide,
+    /// Creates an empty account for a peer with none whose payment's deadline passed before
+    /// its swap was sent.
+    UnsentCreatesAccount,
+    /// A payment whose turn comes in its own deadline's second takes it, and runs its
+    /// checks then: a refusal they reach is its answer.
+    TurnAtDeadlineSecond,
+    /// Creates an empty account for a peer whose `hello` it refuses `banned` as it
+    /// answers, on a video the peer has none on.
+    BannedHelloCreatesAccount,
+    /// A payment dropped before its swap is sent frees the turn, and wakes none of what
+    /// waits for it.
+    DropWakesNone,
+    /// A payment dropped before its swap is sent frees its account's turn, whoever holds
+    /// it.
+    DropFreesAnyTurn,
+    /// A `hello` that took a dead turn over keeps its place under the session cap once it
+    /// is answered.
+    TakeoverHelloStaysCounted,
+    /// Creates an empty account for a peer with none whose payment is dropped before its
+    /// swap is sent.
+    DropCreatesAccount,
+    /// Creates an empty account for a peer with none whose `hello` takes a dead turn over.
+    HelloTakeoverCreatesAccount,
+    /// A `hello` checks its session id again as it answers only if it waited for a payment:
+    /// one that read without waiting opens an id opened while it read.
+    IdRecheckOnlyAfterWait,
+    /// A payment refused before its swap is sent frees the turn, and wakes none of what
+    /// waits for it.
+    RefusalWakesNone,
+    /// A payment answered at its deadline while it waits for the turn frees its account's
+    /// turn, whoever holds it.
+    TimeoutFreesAnyTurn,
+    /// A payment dropped before its swap is sent frees the turn without noting the reads of
+    /// that second sent by then: one sent before the drop serves a `hello` that waited.
+    DropFreesWithoutFloor,
+    /// Frees an account's turn, however it is freed, without noting the reads of that second
+    /// sent by then: one sent before a `hello`'s wait ended serves it.
+    FreeTurnNoFloor,
+    /// A payment refused `stale` keeps its account's turn to its deadline.
+    StaleKeepsTurn,
+    /// A payment refused `banned` keeps its account's turn to its deadline.
+    BannedKeepsTurn,
+    /// A payment dropped while it waits for the turn drops the wakers of what waits with it:
+    /// none is woken when the turn is freed.
+    WaitingDropForgetsWaiters,
+    /// A payment answered at its deadline while it waits for the turn drops the wakers of
+    /// what waits with it: none is woken when the turn is freed.
+    TimeoutForgetsWaiters,
+    /// Counts a `hello` waiting for a payment toward its peer's session cap on its own video
+    /// alone.
+    WaitingCountedPerVideo,
+    /// Counts every peer's waiting `hello`s toward each peer's session cap.
+    WaitingCountedAcrossPeers,
+    /// A `hello` checks the ban again as it answers without first expiring the bans past
+    /// `ban_ttl`.
+    HelloRecheckBanNotAged,
+    /// Creates an empty account for a peer with none whose payment is dropped while it
+    /// waits for another payment's turn.
+    WaitingDropCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment is dropped during its
+    /// read of the account's unknown swaps.
+    DropInReadCreatesAccount,
+    /// Creates an empty account for a peer with none whose `hello`, arriving past a
+    /// payment's deadline, takes its dead turn over.
+    LateHelloTakeoverCreatesAccount,
+    /// Creates an empty account for a peer whose `hello`, having waited for no payment, it
+    /// refuses `banned` as it answers, on a video the peer has none on.
+    UnwaitedBannedHelloCreatesAccount,
+    /// Creates an empty account for a peer with none whose `hello`, having waited for no
+    /// payment, it refuses as it answers, its session id opened while it read.
+    UnwaitedRecheckIdCreatesAccount,
+    /// A payment refused `overpaid` frees the turn, and wakes none of what waits for it.
+    OverpaidWakesNone,
+    /// A payment refused `bad-token` for an invalid DLEQ frees the turn, and wakes none of
+    /// what waits for it.
+    BadDleqWakesNone,
+    /// A payment refused `mint-unavailable` for a keyset too near its expiry frees the
+    /// turn, and wakes none of what waits for it.
+    KeysetWakesNone,
+    /// A payment refused `mint-unavailable` while an earlier swap's outcome is unknown frees
+    /// the turn, and wakes none of what waits for it.
+    UnknownOutcomeWakesNone,
+    /// A payment refused as its account's watermark is read again, before its swap is sent,
+    /// frees the turn, and wakes none of what waits for it.
+    RecheckWakesNone,
+    /// A payment refused as its account's watermark is read again, before its swap is sent,
+    /// keeps its account's turn to its deadline.
+    RecheckKeepsTurn,
+    /// A payment dropped during its read of its account's unknown swaps frees the turn, and
+    /// wakes none of what waits for it.
+    DropInReadWakesNone,
+    /// A payment dropped during its read of its account's unknown swaps frees the turn
+    /// without noting the reads of that second sent by then: one sent before the drop serves
+    /// a `hello` that waited.
+    DropInReadNoFloor,
+    /// Creates an empty account for a peer with none whose `hello` is dropped while it waits
+    /// for a payment.
+    WaitingHelloDropCreatesAccount,
+    /// Creates an empty account for a peer with none whose `hello` is dropped during its
+    /// read of the account's unknown swaps.
+    HelloDropInReadCreatesAccount,
+    /// Keeps a `hello` dropped during its read counted toward its peer's session cap, for
+    /// good.
+    HelloDropInReadCounted,
+    /// A `hello` that comes past a payment's deadline, the turn still held, waits instead
+    /// of taking the turn over at once: it takes it over only once something wakes it.
+    NoTakeoverAtArrival,
+    /// Creates an empty account for a peer whose `hello`, having taken a dead turn over, it
+    /// refuses `banned` as it answers, on a video the peer has none on.
+    TakeoverBannedHelloCreatesAccount,
+    /// A `hello` that waited for no payment checks the ban again as it answers without first
+    /// expiring the bans past `ban_ttl`.
+    UnwaitedRecheckBanNotAged,
+    /// A `hello` that waited for no payment checks its session id again before the ban as
+    /// it answers: a banned peer's `hello` whose id was opened while it read is refused
+    /// `bad-session`.
+    UnwaitedRecheckIdBeforeBan,
+    /// Creates an empty account for a peer with none whose `hello`, having taken a dead turn
+    /// over, it refuses as it answers, its session id opened while it waited.
+    TakeoverRecheckIdCreatesAccount,
+    /// Counts a `hello` it refuses as it answers, having taken a dead turn over, its session
+    /// id opened while it waited, toward the peer's session cap, for good.
+    TakeoverRecheckIdCounted,
+    /// Gives the session id of a `hello` it refuses as it answers, having taken a dead turn
+    /// over, the id opened while it waited, to that `hello`'s peer: the id stays open once
+    /// its holder closes.
+    TakeoverRecheckIdTakesId,
+    /// A `hello` that took a dead turn over checks its session id again before the ban as it
+    /// answers: a banned peer's `hello` whose id was opened while it waited is refused
+    /// `bad-session`.
+    TakeoverRecheckIdBeforeBan,
+    /// A payment that took a dead turn over, dropped before its swap is sent, holds the turn
+    /// to its deadline.
+    TakeoverDropHoldsTurn,
+    /// A payment that took a dead turn over, dropped before its swap is sent, frees the
+    /// turn, and wakes none of what waits for it.
+    TakeoverDropWakesNone,
+    /// A payment that took a dead turn over, refused, keeps the turn to its deadline.
+    TakeoverRefusalKeepsTurn,
+    /// A payment that took a dead turn over, refused, frees the turn, and wakes none of what
+    /// waits for it.
+    TakeoverRefusalWakesNone,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead turn
+    /// over, is dropped before its swap is sent.
+    TakeoverPayDropCreatesAccount,
+    /// Keeps a `hello` that waited for a payment, dropped during its read, counted toward its
+    /// peer's session cap, for good.
+    WaitedHelloDropInReadCounted,
+    /// Creates an empty account for a peer with none whose `hello`, having waited for a
+    /// payment, is dropped during its read.
+    WaitedHelloDropInReadCreatesAccount,
+    /// Keeps a `hello` that took a dead turn over, dropped during its read, counted toward
+    /// its peer's session cap, for good.
+    TakeoverHelloDropInReadCounted,
+    /// Creates an empty account for a peer with none whose `hello`, having taken a dead turn
+    /// over, is dropped during its read.
+    TakeoverHelloDropInReadCreatesAccount,
+    /// Takes a turn that comes in its payment's deadline second, and runs the structure
+    /// check there: an unreadable or ill-shaped token is refused `bad-token`, not answered
+    /// `mint-unavailable`.
+    TurnAtDeadlineSecondStructure,
+    /// Creates an empty account for a peer with none whose payment waited for the turn, took
+    /// it, and is dropped holding it, before its swap is sent.
+    WaitedPayDropCreatesAccount,
+    /// A payment that waited for the turn and took it, dropped before its swap is sent, frees
+    /// the turn, and wakes none of what waits for it.
+    WaitedPayDropWakesNone,
+    /// A payment that waited for the turn and took it, dropped before its swap is sent, frees
+    /// the turn without noting the reads of that second sent by then: one sent before the
+    /// drop serves a `hello` that waited.
+    WaitedPayDropNoFloor,
+    /// A payment refused before its own read frees the turn without noting the reads of that
+    /// second sent by then: one sent before the refusal serves a `hello` that waited.
+    UnreadRefusalNoFloor,
+    /// A payment that took a dead turn over, refused, frees the turn without noting the reads
+    /// of that second sent by then: its own read serves a `hello` that waited for it.
+    TakeoverRefusalNoFloor,
+    /// A `hello` that waited for a payment it did not take the turn over from checks the ban
+    /// again as it answers without first expiring the bans past `ban_ttl`.
+    WaitedRecheckBanNotAged,
+    /// Checks a token of one quoted mint against the keys it cached for another: an honest
+    /// token's DLEQs fail there, and it is refused `bad-token`.
+    KeysOfAnyMint,
+    /// Keeps a mint's keys once fetched, whatever keysets the mint starts since: a token of
+    /// a new keyset is checked against another keyset's keys, and refused `bad-token`.
+    KeysKeptAcrossRotation,
+    /// A payment that waited for the turn and took it, refused, frees the turn, and wakes
+    /// none of what waits for it.
+    WaitedRefusalWakesNone,
+    /// A payment that waited for the turn and took it, refused, keeps the turn to its
+    /// deadline.
+    WaitedRefusalKeepsTurn,
+    /// A payment that waited for the turn and took it, refused, frees the turn without
+    /// noting the reads of that second sent by then: one sent before the refusal serves a
+    /// `hello` that waited.
+    WaitedRefusalNoFloor,
+    /// Creates an empty account for a peer with none whose payment, having waited for the
+    /// turn and taken it, it refuses before its swap (any code but `mint-unavailable`).
+    WaitedRefusalCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead turn
+    /// over, it refuses before its swap (any code but `mint-unavailable`).
+    TakeoverRefusalCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for the
+    /// turn and taken it, got no keys by its deadline.
+    WaitedNoKeysCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for the
+    /// turn and taken it, has not sent its swap by its deadline.
+    WaitedUnsentCreatesAccount,
+    /// A payment refused after its own read frees the turn without noting the reads of that
+    /// second sent by then: its own read serves a `hello` that waited for it.
+    ReadRefusalNoFloor,
+    /// A payment that waited for the turn and took it, refused after its own read, frees the
+    /// turn without noting the reads of that second sent by then: its own read serves a
+    /// `hello` that waited for it.
+    WaitedReadRefusalNoFloor,
+    /// Fetches the keys of the keyset its token's first proof names alone, and checks every
+    /// proof against the keys it holds: a token of two keysets, the second's keys not held,
+    /// is refused `bad-token`.
+    KeysOfFirstProofOnly,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead turn
+    /// over, got no keys by its deadline.
+    TakeoverNoKeysCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead turn
+    /// over, is refused as an earlier payment's outcome is not known yet.
+    TakeoverUnknownRefusalCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for the
+    /// turn and taken it, is refused as an earlier payment's outcome is not known yet.
+    WaitedUnknownRefusalCreatesAccount,
+    /// Fetches the keys of its quoted mints' active keysets alone, and takes the proofs of
+    /// an older keyset it holds no keys for as they are: their DLEQs are not checked.
+    UnfetchedKeysetTrusted,
+    /// Uses the keys it holds for a mint once they are of any keyset the token's proofs
+    /// name: a token of two keysets, one's keys not held, is checked against the other's,
+    /// and refused `bad-token`.
+    KeysOfAnyNamedKeyset,
+    /// A payment that took a dead turn over, dropped before its swap is sent, frees the
+    /// turn and wakes the first of what waits for it alone.
+    TakeoverDropWakesOne,
+    /// Creates an empty account for a peer with none whose payment, having waited for the
+    /// turn and taken it, is dropped during its read of the account's unknown swaps.
+    WaitedDropInReadCreatesAccount,
+    /// A payment that waited for the turn and took it, dropped during its read, frees the
+    /// turn and wakes none of what waits for it.
+    WaitedDropInReadWakesNone,
+    /// A payment that waited for the turn and took it, dropped during its read, frees the
+    /// turn without noting the reads of that second sent by then: one sent before the drop
+    /// serves a `hello` that waited for it.
+    WaitedDropInReadNoFloor,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead
+    /// turn over, is dropped during its read of the account's unknown swaps.
+    TakeoverDropInReadCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for the
+    /// turn and taken it, is refused `banned`.
+    WaitedBannedPayCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead
+    /// turn over, is refused `banned`.
+    TakeoverBannedPayCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for the
+    /// turn and taken it, is refused `bad-mint`.
+    WaitedBadMintCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for the
+    /// turn and taken it, is refused `overpaid`.
+    WaitedOverpaidCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead
+    /// turn over, is refused `bad-token` for an invalid DLEQ.
+    TakeoverBadDleqCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for the
+    /// turn and taken it, is refused as the mint's keyset expires too soon to swap to.
+    WaitedKeysetTooSoonCreatesAccount,
+    /// A payment that waited for the turn and took it, refused as an earlier payment's
+    /// outcome is not known yet, frees the turn, and wakes none of what waits for it.
+    WaitedUnknownRefusalWakesNone,
+    /// A payment that waited for the turn and took it, refused as the mint's keyset expires
+    /// too soon to swap to, frees the turn, and wakes none of what waits for it.
+    WaitedKeysetWakesNone,
+    /// A payment that took a dead turn over, refused `overpaid`, frees the turn, and wakes
+    /// none of what waits for it.
+    TakeoverOverpaidWakesNone,
+    /// A payment that waited for the turn and took it, refused `stale`, keeps the turn to its
+    /// deadline.
+    WaitedStaleKeepsTurn,
+    /// A payment refused `overpaid` frees the turn without noting the reads of that second
+    /// sent by then: one sent before the refusal serves a `hello` that waited.
+    OverpaidNoFloor,
+    /// A payment refused `bad-token` for an invalid DLEQ frees the turn without noting the
+    /// reads of that second sent by then: one sent before the refusal serves a `hello` that
+    /// waited.
+    BadDleqNoFloor,
+    /// A payment refused as the mint's keyset expires too soon to swap to frees the turn
+    /// without noting the reads of that second sent by then: one sent before the refusal
+    /// serves a `hello` that waited.
+    KeysetRefusalNoFloor,
+    /// A payment refused `stale` frees the turn without noting the reads of that second sent
+    /// by then: one sent before the refusal serves a `hello` that waited.
+    StaleRefusalNoFloor,
+    /// A payment refused `banned` frees the turn without noting the reads of that second
+    /// sent by then: one sent before the refusal serves a `hello` that waited.
+    BannedRefusalNoFloor,
+    /// An entry that finds its second's two reads spent waits for the next second without
+    /// asking to be woken then: nothing polls it again when the clock moves.
+    NextSecondUnwoken,
+    /// An entry waiting for a read under way that would serve it is woken when a read comes
+    /// back or is abandoned, and not as the clock moves: a read that stalls keeps it waiting
+    /// past its second.
+    ReadWaitUnwokenByClock,
+    /// A payment that finds its second's two reads spent waits for the next second without
+    /// asking to be woken then: nothing polls it again when the clock moves. A `hello` is
+    /// woken.
+    PayNextSecondUnwoken,
+    /// A payment waiting for a read under way that would serve it is woken when a read comes
+    /// back or is abandoned, and not as the clock moves: a read that stalls keeps it waiting
+    /// past its second, and past its deadline. A `hello` is woken.
+    PayReadWaitUnwokenByClock,
+    /// A payment waits for its account's turn without registering with the clock: a turn
+    /// held past its deadline is taken over only once something else wakes the payment. A
+    /// `hello` registers.
+    PayTurnNoClockWatch,
+    /// A payment waiting for a read under way that would serve it is woken as the clock
+    /// moves or a read is abandoned, and not when one comes back: it waits out the second,
+    /// and then reads again instead of taking that read's result. A `hello` is woken.
+    PayReadWaitUnwokenByReturn,
+    /// An entry waiting for a read under way that would serve it is woken as the clock
+    /// moves or a read comes back, and not when one is abandoned: once its reader is
+    /// dropped, it waits out the second instead of reading at once.
+    ReadWaitUnwokenByAbandon,
+    /// Asks the mint for a keyset's keys at every payment, whatever keys it holds: each
+    /// costs the mint a request, a forged one refused at its DLEQ included.
+    KeysNeverCached,
+    /// Asks the mint for the keys of any keyset a proof names that it does not hold, without
+    /// its keyset listing: a keyset the mint never had costs a request at every payment,
+    /// answered 12001.
+    UnlistedKeysFetched,
+    /// Asks the mint for its keyset listing again at every payment naming a keyset the
+    /// listing does not, however recently it asked: a request per payment.
+    ListingEveryPayment,
+    /// Refuses a keyset its listing does not name, the listing asked for this second before
+    /// the payment arrived: a keyset the mint started since is refused `bad-token`.
+    ListingTrustedFromBeforeArrival,
+    /// A payment waiting for the next second to ask for the keyset listing again does not
+    /// ask to be woken then: nothing polls it again when the clock moves.
+    ListingWaitUnwoken,
+    /// Refuses a payment `bad-token` for a keyset the mint does not list by a listing that
+    /// came at or past the payment's deadline: a check reached late.
+    LateListingUsed,
+    /// Asks the mint for its keyset listing again only two seconds after it last did: a
+    /// payment of a keyset the mint started waits a second longer than it may.
+    ListingAskedEveryOtherSecond,
+    /// Drops the keys it holds of a mint whenever it asks for that mint's keyset listing
+    /// again: the next payment asks the mint for keys it held.
+    KeysDroppedWithListing,
+    /// Asks for the keyset listing at most once a second for each keyset a payment names,
+    /// not for each mint: a token naming a fresh keyset the mint never had costs the mint a
+    /// request each.
+    ListingRateLimitedPerKeyset,
+    /// Verifies the DLEQ proof of a token's last proof alone: an earlier proof's invalid one
+    /// passes.
+    DleqOfLastProofOnly,
+    /// Refuses a token lacking a DLEQ proof only when its last proof lacks one.
+    MissingDleqOfLastProofOnly,
+    /// Refuses a token holding locked proofs only when its last proof is locked.
+    LockOfLastProofOnly,
+    /// Answers a payment naming a keyset the mint does not list `mint-unavailable`, as if
+    /// the mint could not be reached.
+    UnlistedKeysetUnavailable,
+    /// Bans the peer whose payment names a keyset the mint does not list.
+    UnlistedKeysetBans,
+    /// Verifies the DLEQ proof of a token's first proof alone: a later proof's invalid one
+    /// passes.
+    DleqOfFirstProofOnly,
+    /// Refuses a token lacking a DLEQ proof only when its first proof lacks one.
+    MissingDleqOfFirstProofOnly,
+    /// Refuses a token holding locked proofs only when its first proof is locked.
+    LockOfFirstProofOnly,
+    /// A payment that takes a dead turn over in its own deadline's second runs its structure
+    /// and mint checks, and is refused by them: `bad-token` or `bad-mint`, not
+    /// `mint-unavailable`.
+    TakeoverAtDeadlineSecondStructure,
+    /// A payment whose turn is freed in its own deadline's second, by the payment ahead of
+    /// it dropped, answered or settled, checks its ban and the watermark, and is refused by
+    /// them: `banned` or `stale`, not `mint-unavailable`.
+    FreedAtDeadlineSecondBanStale,
+    /// A payment waiting for its account's turn registers with the clock on its first wait
+    /// only: once a clock move has woken it and it waits on, the deadline of a turn held
+    /// past it no longer wakes it.
+    PayTurnWatchOnce,
+    /// A `hello` that took a dead turn over as it arrived checks the ban again as it
+    /// answers with the bans as they stood then, unaged: a ban that lapsed during its read
+    /// refuses it.
+    LateTakeoverRecheckBanNotAged,
+    /// A `hello` that took a dead turn over as it arrived, its session id opened meanwhile
+    /// and its peer banned, is refused `bad-session`: the id is checked again before the
+    /// ban.
+    LateTakeoverRecheckIdBeforeBan,
+    /// Creates an empty account for a peer with none whose `hello`, having taken a dead turn
+    /// over as it arrived, is refused `banned` as it answers.
+    LateTakeoverBannedHelloCreatesAccount,
+    /// Creates an empty account for a peer with none whose `hello`, having taken a dead turn
+    /// over as it arrived, is refused `bad-session` as it answers.
+    LateTakeoverRecheckIdCreatesAccount,
+    /// A `hello` that took a dead turn over as it arrived, refused `bad-session` as it
+    /// answers, keeps a place under its peer's session cap.
+    LateTakeoverRecheckIdCounted,
+    /// A `hello` that took a dead turn over as it arrived, refused `bad-session` as it
+    /// answers, takes the session id for its own account.
+    LateTakeoverRecheckIdTakesId,
+    /// A `hello` that took a dead turn over as it arrived, refused `banned` as it answers,
+    /// keeps a place under its peer's session cap.
+    LateTakeoverBannedHelloCounted,
+    /// A `hello` that took a dead turn over as it arrived, refused `banned` as it answers,
+    /// keeps its session id open.
+    LateTakeoverBannedHelloKeepsId,
+    /// Creates an empty account for a peer with none whose payment, having found its
+    /// account's turn free, is refused `stale`.
+    UnwaitedStaleCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having found its
+    /// account's turn free, is refused `bad-token` for a keyset the mint does not list.
+    UnwaitedUnlistedKeysetCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for its
+    /// account's turn and taken it, is refused `stale`.
+    WaitedStaleCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for its
+    /// account's turn and taken it, is refused `bad-token` for its token's shape (step 1).
+    WaitedShapeCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for its
+    /// account's turn and taken it, is refused `bad-token` for a keyset the mint does not
+    /// list.
+    WaitedUnlistedKeysetCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `banned`.
+    WaitedTakeoverBannedCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `stale`.
+    WaitedTakeoverStaleCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `bad-token` for an unreadable token.
+    WaitedTakeoverUnreadableCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `bad-token` for its token's shape (step 1).
+    WaitedTakeoverShapeCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `bad-mint`.
+    WaitedTakeoverBadMintCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `bad-token` for a keyset the mint does not
+    /// list.
+    WaitedTakeoverUnlistedKeysetCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `mint-unavailable`, its keys not come by its
+    /// deadline.
+    WaitedTakeoverNoKeysCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `bad-token` for an invalid DLEQ proof.
+    WaitedTakeoverBadDleqCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `underpaid`.
+    WaitedTakeoverUnderpaidCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `overpaid`.
+    WaitedTakeoverOverpaidCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `mint-unavailable` by the keyset rule.
+    WaitedTakeoverKeysetCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `mint-unavailable` while an earlier swap is
+    /// unknown.
+    WaitedTakeoverUnknownRefusalCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `mint-unavailable`, its swap not sent by its
+    /// deadline.
+    WaitedTakeoverUnsentCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead
+    /// turn over as it arrived, is refused `stale`.
+    LateTakeoverStaleCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead
+    /// turn over as it arrived, is refused `bad-token` for its token's shape (step 1).
+    LateTakeoverShapeCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead
+    /// turn over as it arrived, is refused `bad-token` for a keyset the mint does not list.
+    LateTakeoverUnlistedKeysetCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead
+    /// turn over as it arrived, is refused `mint-unavailable`, its swap not sent by its
+    /// deadline.
+    LateTakeoverUnsentCreatesAccount,
+    /// A payment that found its account's turn free, refused `bad-token` for a keyset the
+    /// mint does not list, keeps its account's turn.
+    UnwaitedUnlistedKeysetKeepsTurn,
+    /// A payment that found its account's turn free, refused `overpaid` as its read learnt
+    /// a claim, keeps its account's turn.
+    UnwaitedRecheckOverpaidKeepsTurn,
+    /// A payment that waited for its account's turn and took it, refused `bad-token` for
+    /// its token's shape (step 1), keeps its account's turn.
+    WaitedShapeKeepsTurn,
+    /// A payment that waited for its account's turn and took it, refused `bad-token` for a
+    /// keyset the mint does not list, keeps its account's turn.
+    WaitedUnlistedKeysetKeepsTurn,
+    /// A payment that waited for its account's turn and took it, refused `stale` as its
+    /// read learnt a claim, keeps its account's turn.
+    WaitedRecheckStaleKeepsTurn,
+    /// A payment that waited for its account's turn and took it, refused `overpaid` as its
+    /// read learnt a claim, keeps its account's turn.
+    WaitedRecheckOverpaidKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `banned`, keeps its
+    /// account's turn.
+    WaitedTakeoverBannedKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `stale`, keeps its
+    /// account's turn.
+    WaitedTakeoverStaleKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token` for an
+    /// unreadable token, keeps its account's turn.
+    WaitedTakeoverUnreadableKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token` for its
+    /// token's shape (step 1), keeps its account's turn.
+    WaitedTakeoverShapeKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `bad-mint`, keeps
+    /// its account's turn.
+    WaitedTakeoverBadMintKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token` for a
+    /// keyset the mint does not list, keeps its account's turn.
+    WaitedTakeoverUnlistedKeysetKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `mint-unavailable`,
+    /// its keys not come by its deadline, keeps its account's turn.
+    WaitedTakeoverNoKeysKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token` for an
+    /// invalid DLEQ proof, keeps its account's turn.
+    WaitedTakeoverBadDleqKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `underpaid`, keeps
+    /// its account's turn.
+    WaitedTakeoverUnderpaidKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `overpaid`, keeps
+    /// its account's turn.
+    WaitedTakeoverOverpaidKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `mint-unavailable`
+    /// by the keyset rule, keeps its account's turn.
+    WaitedTakeoverKeysetKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `mint-unavailable`
+    /// while an earlier swap is unknown, keeps its account's turn.
+    WaitedTakeoverUnknownRefusalKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `stale` as its read
+    /// learnt a claim, keeps its account's turn.
+    WaitedTakeoverRecheckStaleKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `overpaid` as its
+    /// read learnt a claim, keeps its account's turn.
+    WaitedTakeoverRecheckOverpaidKeepsTurn,
+    /// A payment that took a dead turn over as it arrived, refused `bad-token` for its
+    /// token's shape (step 1), keeps its account's turn.
+    LateTakeoverShapeKeepsTurn,
+    /// A payment that took a dead turn over as it arrived, refused `bad-token` for a keyset
+    /// the mint does not list, keeps its account's turn.
+    LateTakeoverUnlistedKeysetKeepsTurn,
+    /// A payment that took a dead turn over as it arrived, refused `stale` as its read
+    /// learnt a claim, keeps its account's turn.
+    LateTakeoverRecheckStaleKeepsTurn,
+    /// A payment that took a dead turn over as it arrived, refused `overpaid` as its read
+    /// learnt a claim, keeps its account's turn.
+    LateTakeoverRecheckOverpaidKeepsTurn,
+    /// A payment that found its account's turn free, refused `bad-token` for a keyset the
+    /// mint does not list, frees its account's turn and wakes nothing waiting for it.
+    UnwaitedUnlistedKeysetWakesNone,
+    /// A payment that found its account's turn free, refused `overpaid` as its read learnt
+    /// a claim, frees its account's turn and wakes nothing waiting for it.
+    UnwaitedRecheckOverpaidWakesNone,
+    /// A payment that waited for its account's turn and took it, refused `bad-token` for a
+    /// keyset the mint does not list, frees its account's turn and wakes nothing waiting
+    /// for it.
+    WaitedUnlistedKeysetWakesNone,
+    /// A payment that waited for its account's turn and took it, refused `stale` as its
+    /// read learnt a claim, frees its account's turn and wakes nothing waiting for it.
+    WaitedRecheckStaleWakesNone,
+    /// A payment that waited for its account's turn and took it, refused `overpaid` as its
+    /// read learnt a claim, frees its account's turn and wakes nothing waiting for it.
+    WaitedRecheckOverpaidWakesNone,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token` for a
+    /// keyset the mint does not list, frees its account's turn and wakes nothing waiting
+    /// for it.
+    WaitedTakeoverUnlistedKeysetWakesNone,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token` for an
+    /// invalid DLEQ proof, frees its account's turn and wakes nothing waiting for it.
+    WaitedTakeoverBadDleqWakesNone,
+    /// A payment that waited for a dead turn and took it over, refused `underpaid`, frees
+    /// its account's turn and wakes nothing waiting for it.
+    WaitedTakeoverUnderpaidWakesNone,
+    /// A payment that waited for a dead turn and took it over, refused `overpaid`, frees
+    /// its account's turn and wakes nothing waiting for it.
+    WaitedTakeoverOverpaidWakesNone,
+    /// A payment that waited for a dead turn and took it over, refused `mint-unavailable`
+    /// by the keyset rule, frees its account's turn and wakes nothing waiting for it.
+    WaitedTakeoverKeysetWakesNone,
+    /// A payment that waited for a dead turn and took it over, refused `mint-unavailable`
+    /// while an earlier swap is unknown, frees its account's turn and wakes nothing waiting
+    /// for it.
+    WaitedTakeoverUnknownRefusalWakesNone,
+    /// A payment that took a dead turn over as it arrived, refused `bad-token` for a keyset
+    /// the mint does not list, frees its account's turn and wakes nothing waiting for it.
+    LateTakeoverUnlistedKeysetWakesNone,
+    /// A payment that found its account's turn free, refused `banned`, frees its account's
+    /// turn without noting the floor: a read sent before then serves a `hello` that waited.
+    UnwaitedBannedNoFloor,
+    /// A payment that found its account's turn free, refused `stale`, frees its account's
+    /// turn without noting the floor: a read sent before then serves a `hello` that waited.
+    UnwaitedStaleNoFloor,
+    /// A payment that found its account's turn free, refused `bad-token` for an unreadable
+    /// token, frees its account's turn without noting the floor: a read sent before then
+    /// serves a `hello` that waited.
+    UnwaitedUnreadableNoFloor,
+    /// A payment that found its account's turn free, refused `bad-token` for its token's
+    /// shape (step 1), frees its account's turn without noting the floor: a read sent
+    /// before then serves a `hello` that waited.
+    UnwaitedShapeNoFloor,
+    /// A payment that found its account's turn free, refused `bad-mint`, frees its
+    /// account's turn without noting the floor: a read sent before then serves a `hello`
+    /// that waited.
+    UnwaitedBadMintNoFloor,
+    /// A payment that found its account's turn free, refused `bad-token` for a keyset the
+    /// mint does not list, frees its account's turn without noting the floor: a read sent
+    /// before then serves a `hello` that waited.
+    UnwaitedUnlistedKeysetNoFloor,
+    /// A payment that found its account's turn free, refused `bad-token` for an invalid
+    /// DLEQ proof, frees its account's turn without noting the floor: a read sent before
+    /// then serves a `hello` that waited.
+    UnwaitedBadDleqNoFloor,
+    /// A payment that found its account's turn free, refused `overpaid`, frees its
+    /// account's turn without noting the floor: a read sent before then serves a `hello`
+    /// that waited.
+    UnwaitedOverpaidNoFloor,
+    /// A payment that found its account's turn free, refused `mint-unavailable` by the
+    /// keyset rule, frees its account's turn without noting the floor: a read sent before
+    /// then serves a `hello` that waited.
+    UnwaitedKeysetNoFloor,
+    /// A payment that waited for its account's turn and took it, refused `bad-token` for
+    /// its token's shape (step 1), frees its account's turn without noting the floor: a
+    /// read sent before then serves a `hello` that waited.
+    WaitedShapeNoFloor,
+    /// A payment that waited for its account's turn and took it, refused `bad-token` for a
+    /// keyset the mint does not list, frees its account's turn without noting the floor: a
+    /// read sent before then serves a `hello` that waited.
+    WaitedUnlistedKeysetNoFloor,
+    /// A payment that waited for a dead turn and took it over, refused `mint-unavailable`
+    /// while an earlier swap is unknown, frees its account's turn without noting the floor:
+    /// a read sent before then serves a `hello` that waited.
+    WaitedTakeoverUnknownRefusalNoFloor,
+    /// A payment that found its account's turn free, refused `bad-token` for a keyset the
+    /// mint does not list, bans its peer.
+    UnwaitedUnlistedKeysetBans,
+    /// A payment that found its account's turn free, refused `overpaid` as its read learnt
+    /// a claim, bans its peer.
+    UnwaitedRecheckOverpaidBans,
+    /// A payment that waited for its account's turn and took it, refused `bad-token` for
+    /// its token's shape (step 1), bans its peer.
+    WaitedShapeBans,
+    /// A payment that waited for its account's turn and took it, refused `bad-token` for a
+    /// keyset the mint does not list, bans its peer.
+    WaitedUnlistedKeysetBans,
+    /// A payment that waited for its account's turn and took it, refused
+    /// `mint-unavailable`, its keys not come by its deadline, bans its peer.
+    WaitedNoKeysBans,
+    /// A payment that waited for its account's turn and took it, refused `stale` as its
+    /// read learnt a claim, bans its peer.
+    WaitedRecheckStaleBans,
+    /// A payment that waited for its account's turn and took it, refused `overpaid` as its
+    /// read learnt a claim, bans its peer.
+    WaitedRecheckOverpaidBans,
+    /// A payment that waited for its account's turn and took it, refused
+    /// `mint-unavailable`, its swap not sent by its deadline, bans its peer.
+    WaitedUnsentBans,
+    /// A payment that waited for a dead turn and took it over, refused `stale`, bans its
+    /// peer.
+    WaitedTakeoverStaleBans,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token` for an
+    /// unreadable token, bans its peer.
+    WaitedTakeoverUnreadableBans,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token` for its
+    /// token's shape (step 1), bans its peer.
+    WaitedTakeoverShapeBans,
+    /// A payment that waited for a dead turn and took it over, refused `bad-mint`, bans its
+    /// peer.
+    WaitedTakeoverBadMintBans,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token` for a
+    /// keyset the mint does not list, bans its peer.
+    WaitedTakeoverUnlistedKeysetBans,
+    /// A payment that waited for a dead turn and took it over, refused `mint-unavailable`,
+    /// its keys not come by its deadline, bans its peer.
+    WaitedTakeoverNoKeysBans,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token` for an
+    /// invalid DLEQ proof, bans its peer.
+    WaitedTakeoverBadDleqBans,
+    /// A payment that waited for a dead turn and took it over, refused `underpaid`, bans
+    /// its peer.
+    WaitedTakeoverUnderpaidBans,
+    /// A payment that waited for a dead turn and took it over, refused `overpaid`, bans its
+    /// peer.
+    WaitedTakeoverOverpaidBans,
+    /// A payment that waited for a dead turn and took it over, refused `mint-unavailable`
+    /// by the keyset rule, bans its peer.
+    WaitedTakeoverKeysetBans,
+    /// A payment that waited for a dead turn and took it over, refused `mint-unavailable`
+    /// while an earlier swap is unknown, bans its peer.
+    WaitedTakeoverUnknownRefusalBans,
+    /// A payment that waited for a dead turn and took it over, refused `stale` as its read
+    /// learnt a claim, bans its peer.
+    WaitedTakeoverRecheckStaleBans,
+    /// A payment that waited for a dead turn and took it over, refused `overpaid` as its
+    /// read learnt a claim, bans its peer.
+    WaitedTakeoverRecheckOverpaidBans,
+    /// A payment that waited for a dead turn and took it over, refused `mint-unavailable`,
+    /// its swap not sent by its deadline, bans its peer.
+    WaitedTakeoverUnsentBans,
+    /// A payment that took a dead turn over as it arrived, refused `bad-token` for its
+    /// token's shape (step 1), bans its peer.
+    LateTakeoverShapeBans,
+    /// A payment that took a dead turn over as it arrived, refused `bad-token` for a keyset
+    /// the mint does not list, bans its peer.
+    LateTakeoverUnlistedKeysetBans,
+    /// A payment that took a dead turn over as it arrived, refused `mint-unavailable`, its
+    /// keys not come by its deadline, bans its peer.
+    LateTakeoverNoKeysBans,
+    /// A payment that took a dead turn over as it arrived, refused `stale` as its read
+    /// learnt a claim, bans its peer.
+    LateTakeoverRecheckStaleBans,
+    /// A payment that took a dead turn over as it arrived, refused `overpaid` as its read
+    /// learnt a claim, bans its peer.
+    LateTakeoverRecheckOverpaidBans,
+    /// A payment that took a dead turn over as it arrived, refused `mint-unavailable`, its
+    /// swap not sent by its deadline, bans its peer.
+    LateTakeoverUnsentBans,
+    /// Creates an empty account for a peer with none whose payment, having found its
+    /// account's turn free, is dropped while it waits for the next second's keyset listing.
+    UnwaitedDropAwaitingListingCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for its
+    /// account's turn and taken it, is dropped while it waits for the next second's keyset
+    /// listing.
+    WaitedDropAwaitingListingCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is dropped while it waits for keys.
+    WaitedTakeoverDropAwaitingKeysCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is dropped during its read.
+    WaitedTakeoverDropInReadCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead
+    /// turn over as it arrived, is dropped while it waits for the next second's keyset
+    /// listing.
+    LateTakeoverDropAwaitingListingCreatesAccount,
+    /// A payment that found its account's turn free, dropped while it waits for the next
+    /// second's keyset listing, keeps its account's turn.
+    UnwaitedDropAwaitingListingKeepsTurn,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for
+    /// the next second's keyset listing, keeps its account's turn.
+    WaitedDropAwaitingListingKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, dropped while it waits for
+    /// keys, keeps its account's turn.
+    WaitedTakeoverDropAwaitingKeysKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, dropped during its read,
+    /// keeps its account's turn.
+    WaitedTakeoverDropInReadKeepsTurn,
+    /// A payment that took a dead turn over as it arrived, dropped while it waits for the
+    /// next second's keyset listing, keeps its account's turn.
+    LateTakeoverDropAwaitingListingKeepsTurn,
+    /// A payment that found its account's turn free, dropped while it waits for the next
+    /// second's keyset listing, frees its account's turn and wakes nothing waiting for it.
+    UnwaitedDropAwaitingListingWakesNone,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for
+    /// the next second's keyset listing, frees its account's turn and wakes nothing waiting
+    /// for it.
+    WaitedDropAwaitingListingWakesNone,
+    /// A payment that waited for a dead turn and took it over, dropped while it waits for
+    /// keys, frees its account's turn and wakes nothing waiting for it.
+    WaitedTakeoverDropAwaitingKeysWakesNone,
+    /// A payment that waited for a dead turn and took it over, dropped during its read,
+    /// frees its account's turn and wakes nothing waiting for it.
+    WaitedTakeoverDropInReadWakesNone,
+    /// A payment that took a dead turn over as it arrived, dropped while it waits for the
+    /// next second's keyset listing, frees its account's turn and wakes nothing waiting for
+    /// it.
+    LateTakeoverDropAwaitingListingWakesNone,
+    /// A payment that took a dead turn over as it arrived, dropped during its read, frees
+    /// its account's turn and wakes nothing waiting for it.
+    LateTakeoverDropInReadWakesNone,
+    /// A payment that found its account's turn free, dropped while it waits for the next
+    /// second's keyset listing, frees its account's turn without noting the floor: a read
+    /// sent before then serves a `hello` that waited.
+    UnwaitedDropAwaitingListingNoFloor,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for
+    /// the next second's keyset listing, frees its account's turn without noting the floor:
+    /// a read sent before then serves a `hello` that waited.
+    WaitedDropAwaitingListingNoFloor,
+    /// A payment that took a dead turn over as it arrived reads its account's unknown swaps
+    /// before its ban is checked: one refused there costs the mint a read.
+    LateTakeoverReadsBeforeBan,
+    /// A payment that took a dead turn over as it arrived reads its account's unknown swaps
+    /// before the watermark is checked: one refused there costs the mint a read.
+    LateTakeoverReadsBeforeStale,
+    /// A payment that took a dead turn over as it arrived reads its account's unknown swaps
+    /// before its token's structure is checked (step 1): one refused there costs the mint a
+    /// read.
+    LateTakeoverReadsBeforeStructure,
+    /// A payment that took a dead turn over as it arrived reads its account's unknown swaps
+    /// before its mint is checked: one refused there costs the mint a read.
+    LateTakeoverReadsBeforeMint,
+    /// A payment that took a dead turn over as it arrived reads its account's unknown swaps
+    /// before it fetches its keys: one refused there costs the mint a read.
+    LateTakeoverReadsBeforeKeyFetch,
+    /// A payment that waited for its account's turn and took it reads its account's unknown
+    /// swaps before its DLEQ proofs are checked: one refused there costs the mint a read.
+    WaitedReadsBeforeDleq,
+    /// A payment that waited for its account's turn and took it reads its account's unknown
+    /// swaps before its amount is checked: one refused there costs the mint a read.
+    WaitedReadsBeforeAmount,
+    /// A payment that waited for its account's turn and took it checks the keyset to swap
+    /// to after its read: one the keyset rule refuses costs the mint a read.
+    WaitedKeysetAfterRead,
+    /// A payment that waited for its account's turn and took it checks the watermark before
+    /// its ban: a banned peer's payment for no chunk is refused `stale`, not `banned`.
+    WaitedStaleBeforeBan,
+    /// A payment that waited for a dead turn and took it over checks the watermark before
+    /// its ban: a banned peer's payment for no chunk is refused `stale`, not `banned`.
+    WaitedTakeoverStaleBeforeBan,
+    /// A payment that took a dead turn over as it arrived checks the watermark before its
+    /// ban: a banned peer's payment for no chunk is refused `stale`, not `banned`.
+    LateTakeoverStaleBeforeBan,
+    /// A payment that waited for its account's turn and took it checks its token's
+    /// structure before its ban: a banned peer's unreadable token is refused `bad-token`,
+    /// not `banned`.
+    WaitedStructureBeforeBan,
+    /// A payment that took a dead turn over as it arrived checks its token's structure
+    /// before its ban: a banned peer's unreadable token is refused `bad-token`, not
+    /// `banned`.
+    LateTakeoverStructureBeforeBan,
+    /// A payment that waited for a dead turn and took it over checks its token's structure
+    /// before its ban: a banned peer's unreadable token is refused `bad-token`, not
+    /// `banned`.
+    WaitedTakeoverStructureBeforeBan,
+    /// A payment that found its account's turn free checks its token's structure before the
+    /// watermark: an unreadable token for no chunk is refused `bad-token`, not `stale`.
+    UnwaitedStructureBeforeStale,
+    /// A payment that waited for its account's turn and took it checks its token's
+    /// structure before the watermark: an unreadable token for no chunk is refused
+    /// `bad-token`, not `stale`.
+    WaitedStructureBeforeStale,
+    /// A payment that waited for its account's turn and took it checks the keyset to swap
+    /// to before its amount: a token short of its chunks, the keyset too near its expiry,
+    /// is refused `mint-unavailable`, not `underpaid`.
+    WaitedKeysetBeforeAmount,
+    /// A payment that waited for its account's turn and took it dials its token's own mint
+    /// before the mint check: a foreign mint is asked for its keys.
+    WaitedTokenMintDialled,
+    /// A payment that waited for a dead turn and took it over checks its token's structure
+    /// before the watermark: an unreadable token for no chunk is refused `bad-token`, not
+    /// `stale`.
+    WaitedTakeoverStructureBeforeStale,
+    /// A payment that waited for a dead turn and took it over checks its amount before its
+    /// mint: a foreign mint's token short of its chunks is refused `underpaid`, not
+    /// `bad-mint`.
+    WaitedTakeoverAmountBeforeMint,
+    /// A payment that waited for a dead turn and took it over checks its amount before it
+    /// fetches its keys: a token short of its chunks is refused `underpaid` before its DLEQ
+    /// proofs, its keys or its keysets are checked.
+    WaitedTakeoverAmountBeforeKeys,
+    /// A payment that waited for a dead turn and took it over checks the keyset to swap to
+    /// before its amount: a token short of its chunks, the keyset too near its expiry, is
+    /// refused `mint-unavailable`, not `underpaid`.
+    WaitedTakeoverKeysetBeforeAmount,
+    /// A payment that waited for a dead turn and took it over dials its token's own mint
+    /// before the mint check: a foreign mint is asked for its keys.
+    WaitedTakeoverTokenMintDialled,
+    /// A payment that took a dead turn over as it arrived checks its token's structure
+    /// before the watermark: an unreadable token for no chunk is refused `bad-token`, not
+    /// `stale`.
+    LateTakeoverStructureBeforeStale,
+    /// A payment that took a dead turn over as it arrived checks the keyset to swap to
+    /// before its amount: a token short of its chunks, the keyset too near its expiry, is
+    /// refused `mint-unavailable`, not `underpaid`.
+    LateTakeoverKeysetBeforeAmount,
+    /// A payment that took a dead turn over as it arrived dials its token's own mint before
+    /// the mint check: a foreign mint is asked for its keys.
+    LateTakeoverTokenMintDialled,
+    /// A payment that took a dead turn over as it arrived reads its account's unknown swaps
+    /// before its DLEQ proofs are checked: one refused there costs the mint a read.
+    LateTakeoverReadsBeforeDleq,
+    /// A payment that took a dead turn over as it arrived reads its account's unknown swaps
+    /// before its amount is checked: one refused there costs the mint a read.
+    LateTakeoverReadsBeforeAmount,
+    /// A payment that waited for a dead turn and took it over checks the keyset to swap to
+    /// after its read: one the keyset rule refuses costs the mint a read.
+    WaitedTakeoverKeysetAfterRead,
+    /// A payment that took a dead turn over as it arrived checks the keyset to swap to
+    /// after its read: one the keyset rule refuses costs the mint a read.
+    LateTakeoverKeysetAfterRead,
+    /// Asks its mints for keyset listings at step 3 at most once a second for all of them
+    /// together: a payment at one mint, its listing naming not a keyset of the payment's,
+    /// waits for the next second once another mint was asked in this one.
+    ListingBoundPerSeeder,
+    /// Judges a payment's keysets at step 3 by whichever mint's listing was asked for last:
+    /// one asked of another mint after the payment arrived refuses a keyset of its own
+    /// mint's `bad-token`.
+    ListingJudgesOtherMints,
+    /// Asks its mints for the keyset rule's listing at most once a second for all of them
+    /// together: a payment at one mint waits for the next second once another mint was
+    /// asked in this one.
+    KeysetListingBoundPerSeeder,
+    /// Judges the keyset rule by the listing asked for last of any of its mints, in the
+    /// payment's turn's second or later: another mint's `final_expiry` refuses it.
+    KeysetListingOfOtherMints,
+    /// Asks for the keyset rule's listing at every payment that reaches it, though one was
+    /// asked for in its turn's second.
+    KeysetListingEverySwap,
+    /// Waits for the keyset rule's listing without asking to be woken by its answer: a
+    /// payment on a task of its own is woken only by the clock.
+    KeysetListingWaitUnwoken,
+    /// Waits for the keyset rule's listing without watching the clock: a payment on a task
+    /// of its own is not woken at its deadline.
+    KeysetListingNoClockWatch,
+    /// Settles a swap's outcome without waking the payment that awaits it: a payment on a
+    /// task of its own is polled again only when something else wakes it.
+    OutcomeUnwoken,
+    /// Asks for keys without asking to be woken by their answer: where the mint answers
+    /// from another thread, a payment on a task of its own is woken only by the clock.
+    KeysUnwoken,
+    /// Asks for a keyset listing at step 3 without asking to be woken by its answer.
+    ListingUnwoken,
+    /// Sends a read of swap state without asking to be woken as it comes back: an entry on
+    /// a task of its own is polled again only when something else wakes it.
+    ReadUnwoken,
+    /// Settles a swap's outcome only as the payment that sent it is next polled, not as it
+    /// comes: one whose connection closed is never settled.
+    OutcomeLandsOnPoll,
+    /// Takes a payment's being polled again, its keys not come, as the mint not answering:
+    /// a spurious wake, or a clock move, and it gives up `mint-unavailable`.
+    KeysGiveUpOnWake,
+    /// Trusts at step 3 only a listing it asked for itself, or one asked for in a later
+    /// second than the payment arrived: one another entry asked for in that second, after
+    /// it arrived, judges nothing, and it waits for the next second's or asks again.
+    ListingFromArrivalSecondDistrusted,
+    /// Trusts at step 3 only a listing it asked for itself: one another entry asked for
+    /// after the payment arrived judges nothing, and it waits for the next second's or asks
+    /// again.
+    OthersListingsDistrusted,
+    /// Asks a payment's mint for its keyset listing at step 3 whenever none was asked for
+    /// in this second, whether a check needs one or not: a payment refused there costs the
+    /// mint a listing.
+    ListingAskedUnneeded,
+    /// Creates an empty account for a peer with none whose payment, having found its
+    /// account's turn free, is refused `mint-unavailable`, the keyset listing its keyset
+    /// rule judges by not come by its deadline.
+    UnwaitedNoKeysetListingCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for its
+    /// account's turn and taken it, is refused `mint-unavailable`, the keyset listing its
+    /// keyset rule judges by not come by its deadline.
+    WaitedNoKeysetListingCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is refused `mint-unavailable`, the keyset listing its
+    /// keyset rule judges by not come by its deadline.
+    WaitedTakeoverNoKeysetListingCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead
+    /// turn over as it arrived, is refused `mint-unavailable`, the keyset listing its
+    /// keyset rule judges by not come by its deadline.
+    LateTakeoverNoKeysetListingCreatesAccount,
+    /// A payment that found its account's turn free, refused `mint-unavailable`, the keyset
+    /// listing its keyset rule judges by not come by its deadline, keeps its account's
+    /// turn.
+    UnwaitedNoKeysetListingKeepsTurn,
+    /// A payment that waited for its account's turn and took it, refused
+    /// `mint-unavailable`, the keyset listing its keyset rule judges by not come by its
+    /// deadline, keeps its account's turn.
+    WaitedNoKeysetListingKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `mint-unavailable`,
+    /// the keyset listing its keyset rule judges by not come by its deadline, keeps its
+    /// account's turn.
+    WaitedTakeoverNoKeysetListingKeepsTurn,
+    /// A payment that took a dead turn over as it arrived, refused `mint-unavailable`, the
+    /// keyset listing its keyset rule judges by not come by its deadline, keeps its
+    /// account's turn.
+    LateTakeoverNoKeysetListingKeepsTurn,
+    /// A payment that found its account's turn free, refused `mint-unavailable`, the keyset
+    /// listing its keyset rule judges by not come by its deadline, bans its peer.
+    UnwaitedNoKeysetListingBans,
+    /// A payment that waited for its account's turn and took it, refused
+    /// `mint-unavailable`, the keyset listing its keyset rule judges by not come by its
+    /// deadline, bans its peer.
+    WaitedNoKeysetListingBans,
+    /// A payment that waited for a dead turn and took it over, refused `mint-unavailable`,
+    /// the keyset listing its keyset rule judges by not come by its deadline, bans its
+    /// peer.
+    WaitedTakeoverNoKeysetListingBans,
+    /// A payment that took a dead turn over as it arrived, refused `mint-unavailable`, the
+    /// keyset listing its keyset rule judges by not come by its deadline, bans its peer.
+    LateTakeoverNoKeysetListingBans,
+    /// Creates an empty account for a peer with none whose payment, having found its
+    /// account's turn free, is dropped while it waits for the keyset listing its keyset
+    /// rule judges by.
+    UnwaitedDropAwaitingKeysetListingCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for its
+    /// account's turn and taken it, is dropped while it waits for the keyset listing its
+    /// keyset rule judges by.
+    WaitedDropAwaitingKeysetListingCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a
+    /// dead turn and taken it over, is dropped while it waits for the keyset listing its
+    /// keyset rule judges by.
+    WaitedTakeoverDropAwaitingKeysetListingCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead
+    /// turn over as it arrived, is dropped while it waits for the keyset listing its keyset
+    /// rule judges by.
+    LateTakeoverDropAwaitingKeysetListingCreatesAccount,
+    /// A payment that found its account's turn free, dropped while it waits for the keyset
+    /// listing its keyset rule judges by, keeps its account's turn.
+    UnwaitedDropAwaitingKeysetListingKeepsTurn,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for
+    /// the keyset listing its keyset rule judges by, keeps its account's turn.
+    WaitedDropAwaitingKeysetListingKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, dropped while it waits for
+    /// the keyset listing its keyset rule judges by, keeps its account's turn.
+    WaitedTakeoverDropAwaitingKeysetListingKeepsTurn,
+    /// A payment that took a dead turn over as it arrived, dropped while it waits for the
+    /// keyset listing its keyset rule judges by, keeps its account's turn.
+    LateTakeoverDropAwaitingKeysetListingKeepsTurn,
+    /// A payment that found its account's turn free, dropped while it waits for the keyset
+    /// listing its keyset rule judges by, frees its account's turn and wakes nothing
+    /// waiting for it.
+    UnwaitedDropAwaitingKeysetListingWakesNone,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for
+    /// the keyset listing its keyset rule judges by, frees its account's turn and wakes
+    /// nothing waiting for it.
+    WaitedDropAwaitingKeysetListingWakesNone,
+    /// A payment that waited for a dead turn and took it over, dropped while it waits for
+    /// the keyset listing its keyset rule judges by, frees its account's turn and wakes
+    /// nothing waiting for it.
+    WaitedTakeoverDropAwaitingKeysetListingWakesNone,
+    /// A payment that took a dead turn over as it arrived, dropped while it waits for the
+    /// keyset listing its keyset rule judges by, frees its account's turn and wakes nothing
+    /// waiting for it.
+    LateTakeoverDropAwaitingKeysetListingWakesNone,
+    /// A payment that found its account's turn free, dropped while it waits for the keyset
+    /// listing its keyset rule judges by, frees its account's turn without noting the
+    /// floor: a read sent before then serves a `hello` that waited.
+    UnwaitedDropAwaitingKeysetListingNoFloor,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for
+    /// the keyset listing its keyset rule judges by, frees its account's turn without
+    /// noting the floor: a read sent before then serves a `hello` that waited.
+    WaitedDropAwaitingKeysetListingNoFloor,
+    /// Asks for the keyset rule's listing as soon as the mint check passes, before the
+    /// payment's other checks: one refused by them costs the mint a listing.
+    KeysetListingBeforeChecks,
+    /// Waits for the keyset rule's listing until a second past the payment's deadline: in
+    /// the deadline's second it is not answered.
+    KeysetListingWaitPastDeadline,
+    /// Watches the clock once while it waits for the keyset rule's listing: woken by the
+    /// clock before its deadline, it is not woken at it.
+    KeysetListingWatchOnce,
+    /// Asks for the keyset rule's listing again in every later second while the one it asked
+    /// for is held.
+    KeysetListingAskedWhileHeld,
+    /// Refuses a payment whose keyset rule's listing has not come by its deadline
+    /// `bad-token`, not `mint-unavailable`.
+    NoKeysetListingBadToken,
+    /// Takes a keyset listing whose answer was held as listing no `final_expiry`: the
+    /// keyset rule swaps to a keyset that expires too soon.
+    HeldListingExpiryDropped,
+    /// Asks for the keyset rule's listing again when the one of this second is held: two
+    /// listings in a second.
+    HeldListingAskedAgain,
+    /// Leaves the keyset rule's listings out of its count of listings asked for: a payment
+    /// that arrived before one is not judged by it at step 3, and waits for the next
+    /// second's.
+    KeysetListingUncounted,
+    /// Keeps the keyset rule's listings apart from step 3's: each asks for its own, two in
+    /// a second.
+    KeysetListingOwnCache,
+    /// Asks for the keyset rule's listing though the payment's step 3 asked for one in this
+    /// second: two in a second.
+    KeysetListingAfterStep3Asked,
+    /// Takes a keyset listing whose answer is held as listing no `final_expiry`: a payment
+    /// that finds it held swaps without waiting for it.
+    HeldListingJudgedUnlisted,
+    /// Takes its keyset listing as good for the second it was asked in only: a payment whose
+    /// keys it does not hold asks for the listing again, though the one it holds names
+    /// their keyset.
+    ListingAskedEachSecond,
+    /// Judges the keyset rule by the mint's `final_expiry` as it stands, with no listing
+    /// asked for.
+    KeysetRuleWithoutListing,
+    /// Judges the keyset rule's margin from the second the payment's turn came, not as it
+    /// judges: a keyset that expires too soon once its listing came is swapped to.
+    KeysetHorizonFromTurn,
+    /// Keeps one keyset listing for all its mints, and one bound: a payment at one mint is
+    /// judged by, or waits for, another mint's.
+    ListingOneForAllMints,
+    /// Takes a keyset that any of its mints' listings names as listed by the payment's mint:
+    /// a payment naming a keyset another mint alone started makes it ask the payment's mint
+    /// for that keyset's keys.
+    KeysetNamedByAnyMintsListing,
+    /// Trusts a listing whose held answer it waited for, though asked for before the
+    /// payment arrived: a keyset it does not name is `bad-token` at once, with no listing
+    /// asked for again and no wait for the next second's.
+    HeldListingTrustedFromBeforeArrival,
+    /// Takes a payment as arriving when its turn comes, at step 3: a listing another entry
+    /// asked for while it waited for its turn judges nothing, and it waits for the next
+    /// second's or asks again.
+    ListingArrivalAtTurn,
+    /// Judges the keyset rule's margin from the second its listing was asked for, not as it
+    /// judges: a keyset that expires too soon once a held listing came is swapped to.
+    KeysetHorizonFromListing,
+    /// A payment that waited for a dead turn and took it over judges the keyset rule by the
+    /// listing the seeder holds, whenever it was asked for.
+    WaitedTakeoverKeysetListingStale,
+    /// A payment that waited for a dead turn and took it over judges the keyset rule by a
+    /// listing asked for since it arrived, not since its turn came: one asked for while it
+    /// waited serves.
+    WaitedTakeoverKeysetListingFromArrival,
+    /// A payment that found its account's turn free judges the keyset rule by a listing
+    /// asked for in the second it judges, not its turn's: one whose keys came seconds after
+    /// its turn asks the mint for a listing it holds.
+    UnwaitedKeysetListingOfJudgingSecond,
+    /// A payment that waited for its account's turn and took it judges the keyset rule by a
+    /// listing asked for in the second it judges, not its turn's: one whose keys came
+    /// seconds after its turn asks the mint for a listing it holds.
+    WaitedKeysetListingOfJudgingSecond,
+    /// A payment that waited for a dead turn and took it over judges the keyset rule by a
+    /// listing asked for in the second it judges, not its turn's: one whose keys came
+    /// seconds after its turn asks the mint for a listing it holds.
+    WaitedTakeoverKeysetListingOfJudgingSecond,
+    /// A payment that took a dead turn over as it arrived judges the keyset rule by a
+    /// listing asked for in the second it judges, not its turn's: one whose keys came
+    /// seconds after its turn asks the mint for a listing it holds.
+    LateTakeoverKeysetListingOfJudgingSecond,
+    /// A payment that found its account's turn free, the listing the seeder holds asked for
+    /// before its turn's second and its answer held, waits for that one for its keyset rule,
+    /// and judges by it, rather than ask for one of its turn's second.
+    UnwaitedStaleHeldListingAwaited,
+    /// A payment that waited for its account's turn and took it, the listing the seeder
+    /// holds asked for before its turn's second and its answer held, waits for that one for
+    /// its keyset rule, and judges by it, rather than ask for one of its turn's second.
+    WaitedStaleHeldListingAwaited,
+    /// A payment that waited for a dead turn and took it over, the listing the seeder holds
+    /// asked for before its turn's second and its answer held, waits for that one for its
+    /// keyset rule, and judges by it, rather than ask for one of its turn's second.
+    WaitedTakeoverStaleHeldListingAwaited,
+    /// A payment that took a dead turn over as it arrived, the listing the seeder holds
+    /// asked for before its turn's second and its answer held, waits for that one for its
+    /// keyset rule, and judges by it, rather than ask for one of its turn's second.
+    LateTakeoverStaleHeldListingAwaited,
+    /// Refuses `unknown-video` to a peer with an account on a video it no longer serves: a
+    /// payment there that credited late, awaiting the quote that shows it, is never
+    /// settled, and the watcher pays the seeder nothing on any video.
+    DroppedVideoRefusesAccounts,
+    /// Answers a `hello` for a video it no longer serves from any peer, one with no account
+    /// there included, where it refuses it `unknown-video`.
+    DroppedVideoQuotesAnyone,
+    /// Still admits requests for a video it no longer serves, counting chunks it does not
+    /// serve.
+    DroppedVideoAdmits,
+    /// Refuses `unknown-video` to a peer whose only record on a video it no longer serves is
+    /// a swap whose outcome is unknown: a pre-payment there that credited late is never
+    /// shown to its watcher.
+    DroppedVideoIgnoresUnknownSwap,
+    /// Refuses a banned peer's `hello` for a video it no longer serves `unknown-video`, where
+    /// it refuses it `banned`.
+    DroppedVideoBanUnchecked,
+    /// Refuses the `hello` of a peer whose ban has expired, for a video it no longer serves,
+    /// as banned: it does not age the bans first.
+    DroppedVideoBanNotAged,
+    /// Refuses a `pay` on the session of a video it no longer serves `unknown-video`, which
+    /// stops the watcher, where it verifies it as any other.
+    DroppedVideoRefusesPay,
+    /// Admits a peer's pre-paid chunks of a video it no longer serves, which it has no file
+    /// of.
+    DroppedVideoAdmitsPrepaid,
+    /// Answers a `hello` for a video it no longer serves outside the per-peer cap on open
+    /// sessions.
+    DroppedVideoSkipsSessionCap,
+    /// Answers a `hello` for a video it no longer serves without waiting for a payment in
+    /// progress on its account: its quote misses that payment.
+    DroppedVideoHelloNoWait,
+    /// Answers a `hello` for a video it no longer serves from a peer with an account on its
+    /// other video only, where it refuses it `unknown-video`.
+    DroppedVideoAnyAccount,
+    /// Answers a `hello` for a video it no longer serves under an open session's id, where it
+    /// refuses it `bad-session`.
+    DroppedVideoSkipsIdCheck,
+    /// Does not check the peer's ban again as it answers a `hello` for a video it no longer
+    /// serves: a peer banned while the `hello` waited or read is quoted.
+    DroppedVideoNoBanRecheck,
+    /// Does not check the session id again as it answers a `hello` for a video it no longer
+    /// serves: one opened by another peer while the `hello` waited or read is opened twice.
+    DroppedVideoNoIdRecheck,
+    /// Checks the peer's ban again as it answers a `hello` for a video it no longer serves
+    /// without ageing the bans first: a ban that lapsed while the `hello` waited refuses it.
+    DroppedVideoRecheckBanNotAged,
+    /// Does not check the peer's ban again as it answers a `hello` for a video it no longer
+    /// serves that waited for no payment: a peer banned while it read is quoted.
+    DroppedVideoUnwaitedNoBanRecheck,
+    /// Does not check the session id again as it answers a `hello` for a video it no longer
+    /// serves that waited for no payment: one opened by another peer while it read is
+    /// opened twice.
+    DroppedVideoUnwaitedNoIdRecheck,
+    /// Does not count a peer's waiting `hello`s toward its cap on open sessions when a
+    /// `hello` for a video it no longer serves arrives.
+    DroppedVideoWaitUncapped,
+    /// Does not check the peer's ban again as it answers a `hello` for a video it no longer
+    /// serves that took a dead turn over: a peer banned while it waited is quoted.
+    DroppedVideoTakeoverNoBanRecheck,
+    /// Reads a `hello`'s account before its wait, not after, for a video it no longer
+    /// serves: its quote misses a claim that reached the mint while it waited.
+    DroppedVideoReadsBeforeTurn,
+    /// Still admits requests on a session that was open when it stopped serving the video.
+    DroppedVideoOpenSessionAdmits,
+    /// Does not ban the peer whose payment on a video it no longer serves is refused
+    /// `spent`.
+    DroppedVideoSpentNoBan,
+    /// Takes a payment short of the chunks it claims on a video it no longer serves.
+    DroppedVideoAcceptsUnderpaid,
+    /// Takes a payment of more than the chunks it claims on a video it no longer serves.
+    DroppedVideoAcceptsOverpaid,
+    /// Judges a `hello` for a video it no longer serves again as it answers: a peer whose
+    /// only record there, a swap of unknown outcome, its read learnt as nothing is refused
+    /// `unknown-video`.
+    DroppedVideoRechecksAccount,
+    /// Creates an account as it answers a `hello` for a video it no longer serves.
+    DroppedVideoHelloCreatesAccount,
+    /// Answers the `hello` of a peer with no account on a video it no longer serves whose
+    /// first payment there is still in progress, where it refuses it `unknown-video`.
+    DroppedVideoCountsPaymentInProgress,
+    /// Checks the peer's ban again as it answers a `hello` for a video it no longer serves
+    /// that waited for no payment without ageing the bans first: a ban that lapsed during
+    /// its read refuses it.
+    DroppedVideoUnwaitedRecheckBanNotAged,
+    /// As it answers a `hello` for a video it no longer serves that waited for no payment,
+    /// checks its session id before its peer's ban: a banned peer under an open id is
+    /// refused `bad-session`.
+    DroppedVideoUnwaitedRecheckIdBeforeBan,
+    /// As it answers a `hello` for a video it no longer serves that waited for a payment
+    /// and took the turn, checks its session id before its peer's ban: a banned peer under
+    /// an open id is refused `bad-session`.
+    DroppedVideoWaitedRecheckIdBeforeBan,
+    /// Does not read the account's unknown swaps for a `hello` for a video it no longer
+    /// serves that waited for a dead turn and took it over: its quote misses a claim that
+    /// reached the mint.
+    DroppedVideoWaitedTakeoverSkipsRead,
+    /// Checks the peer's ban again as it answers a `hello` for a video it no longer serves
+    /// that waited for a dead turn and took it over without ageing the bans first: a ban
+    /// that lapsed during its read refuses it.
+    DroppedVideoWaitedTakeoverRecheckBanNotAged,
+    /// Does not check the session id again as it answers a `hello` for a video it no longer
+    /// serves that waited for a dead turn and took it over: one opened by another peer
+    /// during its read is opened twice.
+    DroppedVideoWaitedTakeoverNoIdRecheck,
+    /// As it answers a `hello` for a video it no longer serves that waited for a dead turn
+    /// and took it over, checks its session id before its peer's ban: a banned peer under
+    /// an open id is refused `bad-session`.
+    DroppedVideoWaitedTakeoverRecheckIdBeforeBan,
+    /// Does not read the account's unknown swaps for a `hello` for a video it no longer
+    /// serves that took a dead turn over as it arrived: its quote misses a claim that
+    /// reached the mint.
+    DroppedVideoLateTakeoverSkipsRead,
+    /// Does not check the peer's ban again as it answers a `hello` for a video it no longer
+    /// serves that took a dead turn over as it arrived: a peer banned during its read is
+    /// quoted.
+    DroppedVideoLateTakeoverNoBanRecheck,
+    /// Checks the peer's ban again as it answers a `hello` for a video it no longer serves
+    /// that took a dead turn over as it arrived without ageing the bans first: a ban that
+    /// lapsed during its read refuses it.
+    DroppedVideoLateTakeoverRecheckBanNotAged,
+    /// Does not check the session id again as it answers a `hello` for a video it no longer
+    /// serves that took a dead turn over as it arrived: one opened by another peer during
+    /// its read is opened twice.
+    DroppedVideoLateTakeoverNoIdRecheck,
+    /// As it answers a `hello` for a video it no longer serves that took a dead turn over
+    /// as it arrived, checks its session id before its peer's ban: a banned peer under an
+    /// open id is refused `bad-session`.
+    DroppedVideoLateTakeoverRecheckIdBeforeBan,
+    /// Takes a payment's turn that comes later than its deadline's second as come in time:
+    /// only in that second itself is the turn late, and past it the payment's checks run.
+    TurnPastDeadlineSecondTaken,
+    /// Checks the ban and the watermark of a payment whose turn has not come by its
+    /// deadline, another payment holding it: it is refused `banned` or `stale`, where it
+    /// runs no check.
+    TurnNeverComeBanStale,
+    /// Checks the structure and the mint of a payment whose turn has not come by its
+    /// deadline, another payment holding it: it is refused `bad-token` or `bad-mint`, where
+    /// it runs no check.
+    TurnNeverComeStructureMint,
+    /// Verifies the DLEQ proofs of a token's first three proofs only: a later proof's
+    /// invalid one passes.
+    DleqOfFirstThreeProofsOnly,
+    /// Refuses a token lacking a DLEQ proof only when one of its first three proofs lacks
+    /// one.
+    MissingDleqOfFirstThreeProofsOnly,
+    /// Refuses a token holding locked proofs only when one of its first three proofs is
+    /// locked.
+    LockOfFirstThreeProofsOnly,
+    /// Fetches the keys of the keysets its token's first and last proofs name alone: a
+    /// proof of another keyset between them is checked against keys that are not its own,
+    /// and the token is refused `bad-token`.
+    KeysOfEndProofsOnly,
+    /// Fetches the keys of the keyset its token's last proof names alone: a proof of
+    /// another keyset before it is checked against keys that are not its own, and the token
+    /// is refused `bad-token`.
+    KeysOfLastProofOnly,
+    /// Bans the peer whose payment names a keyset the mint lists and answers a request for
+    /// its keys 12001.
+    KeysRefusedBans,
+    /// Answers a payment naming a keyset the mint lists and answers a request for its keys
+    /// 12001 `mint-unavailable`, as if the mint could not be reached.
+    KeysRefusedUnavailable,
+    /// Keeps a keyset whose keys the mint answered 12001 as refused: a later payment naming
+    /// it is refused `bad-token` without the mint being asked, though it serves the keys by
+    /// then.
+    KeysRefusalCached,
+    /// Asks its first quoted mint for its keyset listing, at most once a second, for a
+    /// payment it refuses `banned`: no check of that payment's needs one.
+    BannedPayAsksListing,
+    /// Asks its first quoted mint for its keyset listing, at most once a second, for a
+    /// payment it refuses `stale`: no check of that payment's needs one.
+    StalePayAsksListing,
+    /// Asks its first quoted mint for its keyset listing, at most once a second, for a
+    /// payment whose token it cannot read: no check of that payment's needs one.
+    UnreadablePayAsksListing,
+    /// Asks its first quoted mint for its keyset listing, at most once a second, for a
+    /// payment it refuses for its token's shape (step 1): no check of that payment's needs
+    /// one.
+    ShapePayAsksListing,
+    /// Asks its first quoted mint for its keyset listing, at most once a second, for a
+    /// payment it refuses `bad-mint`: no check of that payment's needs one.
+    BadMintPayAsksListing,
+    /// Asks its first quoted mint for its keyset listing at every `hello`, and discards the
+    /// answer: no check of a `hello`'s needs one.
+    HelloAsksListing,
+    /// Caches the keys of its first quoted mint alone: every payment at another quoted mint
+    /// asks that mint for its keys again.
+    KeysCachedForFirstMintOnly,
+    /// Asks every quoted mint but its first for the keyset rule's listing at every payment
+    /// that reaches it, though one was asked for in its turn's second.
+    KeysetListingEverySwapAtOtherMints,
+    /// Bounds its asks for a keyset listing at step 3 to one a second at its first quoted
+    /// mint alone: at another, a payment naming a keyset the listing it holds does not name
+    /// asks again at once, though that mint was asked in this second.
+    ListingBoundFirstMintOnly,
+    /// Bans the peer whose payment at a quoted mint other than its first names a keyset
+    /// that mint does not list.
+    UnlistedKeysetBansAtOtherMints,
+    /// Answers a payment at a quoted mint other than its first that names a keyset that
+    /// mint does not list `mint-unavailable`, as if the mint could not be reached.
+    UnlistedKeysetUnavailableAtOtherMints,
+    /// Bans the peer whose payment at a quoted mint other than its first names a keyset
+    /// that mint lists and answers a request for its keys 12001.
+    KeysRefusedBansAtOtherMints,
+    /// Answers a payment at a quoted mint other than its first that names a keyset that
+    /// mint lists and answers a request for its keys 12001 `mint-unavailable`.
+    KeysRefusedUnavailableAtOtherMints,
+    /// Asks its first quoted mint for its keyset listing, at most once a second, for a
+    /// payment whose turn has not come by its deadline, which runs no check.
+    TurnTimeoutAsksListing,
+    /// Asks its first quoted mint for its keys for a payment whose turn has not come by its
+    /// deadline, which runs no check.
+    TurnTimeoutAsksKeys,
+    /// Reads its account's unknown swaps for a payment whose turn has not come by its
+    /// deadline: a read sent at or past its entry's deadline.
+    TurnTimeoutReads,
+    /// Creates an empty account for a peer with none whose payment took a dead turn over
+    /// only in its own deadline's second or later.
+    TakenTurnTimeoutCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited, found
+    /// its account's turn free only in its own deadline's second or later.
+    FreedTurnTimeoutCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment's turn had not come by
+    /// its deadline, another payment holding it.
+    HeldTurnTimeoutCreatesAccount,
+    /// A payment waiting for a turn held by a payment that arrived after it does not
+    /// register with the clock: on a task of its own, it is not woken at its own deadline.
+    PayTurnOwnDeadlineUnwatched,
+    /// On a turn it waited for or took over, verifies the DLEQ proof of a token's last proof
+    /// alone: an earlier proof's invalid one passes.
+    AfterWaitDleqOfLastProofOnly,
+    /// On a turn it waited for or took over, refuses a token lacking a DLEQ proof only when
+    /// its last proof lacks one.
+    AfterWaitMissingDleqOfLastProofOnly,
+    /// On a turn it waited for or took over, refuses a token holding locked proofs only when
+    /// its last proof is locked.
+    AfterWaitLockOfLastProofOnly,
+    /// Discards the keyset listings it asked for at its start: its first payment at a mint
+    /// asks that mint again, a second listing in the second of the first.
+    StartListingDiscarded,
+    /// A `hello` waiting for its account's turn registers with the clock on its first wait
+    /// only: once a clock move has woken it and it waits on, the deadline of a turn held
+    /// past it no longer wakes it.
+    HelloTurnWatchOnce,
+    /// Waits for keys registering with the clock on its first wait only: once a clock move
+    /// has woken it and it waits on, its deadline no longer wakes it.
+    KeysWaitWatchOnce,
+    /// Waits for its swap's outcome registering with the clock on its first wait only: once
+    /// a clock move has woken it and it waits on, its deadline no longer wakes it.
+    AnswerWatchOnce,
+    /// Waits for its swap's outcome without registering with the clock: on a task of its
+    /// own, a payment whose outcome does not come is not woken at its deadline.
+    AnswerNoClockWatch,
+    /// A payment that took a dead turn over asks the mint for its keys whatever keys the
+    /// seeder holds.
+    TakeoverKeysRefetched,
+    /// A payment that waited for its account's turn and took it asks the mint for its keys
+    /// whatever keys the seeder holds.
+    WaitedKeysRefetched,
+    /// Bans a banned peer again as it refuses its request: the ban then counts from that
+    /// refusal, not from when it was earned.
+    BannedAdmitRenewsBan,
+    /// Bans a banned peer again as it refuses its `hello` on arrival: the ban then counts
+    /// from that refusal, not from when it was earned.
+    BannedHelloRenewsBan,
+    /// Bans a banned peer again as it refuses its `hello` for a video it does not serve: the
+    /// ban then counts from that refusal, not from when it was earned.
+    UnknownVideoBannedHelloRenewsBan,
+    /// Bans a banned peer again as it refuses its `hello` as it answers, after its wait and
+    /// its reads: the ban then counts from that refusal, not from when it was earned.
+    BannedHelloRecheckRenewsBan,
+    /// Creates an empty account for a peer with none whose payment, having found its account's turn
+    /// free, is refused `bad-token`, the mint answering a request for its keys 12001.
+    UnwaitedKeysRefusedCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for its account's
+    /// turn and taken it, is refused `bad-token`, the mint answering a request for its keys 12001.
+    WaitedKeysRefusedCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for a dead turn
+    /// and taken it over, is refused `bad-token`, the mint answering a request for its keys 12001.
+    WaitedTakeoverKeysRefusedCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having taken a dead turn over
+    /// as it arrived, is refused `bad-token`, the mint answering a request for its keys 12001.
+    LateTakeoverKeysRefusedCreatesAccount,
+    /// A payment that found its account's turn free, refused `bad-token`, the mint answering a
+    /// request for its keys 12001, keeps its account's turn.
+    UnwaitedKeysRefusedKeepsTurn,
+    /// A payment that waited for its account's turn and took it, refused `bad-token`, the mint
+    /// answering a request for its keys 12001, keeps its account's turn.
+    WaitedKeysRefusedKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token`, the mint
+    /// answering a request for its keys 12001, keeps its account's turn.
+    WaitedTakeoverKeysRefusedKeepsTurn,
+    /// A payment that took a dead turn over as it arrived, refused `bad-token`, the mint answering
+    /// a request for its keys 12001, keeps its account's turn.
+    LateTakeoverKeysRefusedKeepsTurn,
+    /// A payment that found its account's turn free, refused `bad-token`, the mint answering a
+    /// request for its keys 12001, frees its account's turn and wakes nothing waiting for it.
+    UnwaitedKeysRefusedWakesNone,
+    /// A payment that waited for its account's turn and took it, refused `bad-token`, the mint
+    /// answering a request for its keys 12001, frees its account's turn and wakes nothing waiting
+    /// for it.
+    WaitedKeysRefusedWakesNone,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token`, the mint
+    /// answering a request for its keys 12001, frees its account's turn and wakes nothing waiting
+    /// for it.
+    WaitedTakeoverKeysRefusedWakesNone,
+    /// A payment that took a dead turn over as it arrived, refused `bad-token`, the mint answering
+    /// a request for its keys 12001, frees its account's turn and wakes nothing waiting for it.
+    LateTakeoverKeysRefusedWakesNone,
+    /// A payment that found its account's turn free, refused `bad-token`, the mint answering a
+    /// request for its keys 12001, bans its peer.
+    UnwaitedKeysRefusedBans,
+    /// A payment that waited for its account's turn and took it, refused `bad-token`, the mint
+    /// answering a request for its keys 12001, bans its peer.
+    WaitedKeysRefusedBans,
+    /// A payment that waited for a dead turn and took it over, refused `bad-token`, the mint
+    /// answering a request for its keys 12001, bans its peer.
+    WaitedTakeoverKeysRefusedBans,
+    /// A payment that took a dead turn over as it arrived, refused `bad-token`, the mint answering
+    /// a request for its keys 12001, bans its peer.
+    LateTakeoverKeysRefusedBans,
+    /// A payment that found its account's turn free, refused `bad-token`, the mint answering a
+    /// request for its keys 12001, frees its account's turn without noting the floor: a read sent
+    /// before then serves a `hello` that waited.
+    UnwaitedKeysRefusedNoFloor,
+    /// A payment that waited for its account's turn and took it, refused `bad-token`, the mint
+    /// answering a request for its keys 12001, frees its account's turn without noting the floor: a
+    /// read sent before then serves a `hello` that waited.
+    WaitedKeysRefusedNoFloor,
+    /// A payment that found its account's turn free, refused `overpaid` at its account's
+    /// `spent_total` bound, keeps its account's turn.
+    UnwaitedSpentTotalBoundKeepsTurn,
+    /// A payment that waited for its account's turn and took it, refused `overpaid` at its
+    /// account's `spent_total` bound, keeps its account's turn.
+    WaitedSpentTotalBoundKeepsTurn,
+    /// A payment that waited for a dead turn and took it over, refused `overpaid` at its account's
+    /// `spent_total` bound, keeps its account's turn.
+    WaitedTakeoverSpentTotalBoundKeepsTurn,
+    /// A payment that took a dead turn over as it arrived, refused `overpaid` at its account's
+    /// `spent_total` bound, keeps its account's turn.
+    LateTakeoverSpentTotalBoundKeepsTurn,
+    /// A payment that found its account's turn free, refused `overpaid` at its account's
+    /// `spent_total` bound, frees its account's turn and wakes nothing waiting for it.
+    UnwaitedSpentTotalBoundWakesNone,
+    /// A payment that waited for its account's turn and took it, refused `overpaid` at its
+    /// account's `spent_total` bound, frees its account's turn and wakes nothing waiting for it.
+    WaitedSpentTotalBoundWakesNone,
+    /// A payment that waited for a dead turn and took it over, refused `overpaid` at its account's
+    /// `spent_total` bound, frees its account's turn and wakes nothing waiting for it.
+    WaitedTakeoverSpentTotalBoundWakesNone,
+    /// A payment that took a dead turn over as it arrived, refused `overpaid` at its account's
+    /// `spent_total` bound, frees its account's turn and wakes nothing waiting for it.
+    LateTakeoverSpentTotalBoundWakesNone,
+    /// A payment that found its account's turn free, refused `overpaid` at its account's
+    /// `spent_total` bound, bans its peer.
+    UnwaitedSpentTotalBoundBans,
+    /// A payment that waited for its account's turn and took it, refused `overpaid` at its
+    /// account's `spent_total` bound, bans its peer.
+    WaitedSpentTotalBoundBans,
+    /// A payment that waited for a dead turn and took it over, refused `overpaid` at its account's
+    /// `spent_total` bound, bans its peer.
+    WaitedTakeoverSpentTotalBoundBans,
+    /// A payment that took a dead turn over as it arrived, refused `overpaid` at its account's
+    /// `spent_total` bound, bans its peer.
+    LateTakeoverSpentTotalBoundBans,
+    /// A payment that found its account's turn free, refused `overpaid` at its account's
+    /// `spent_total` bound, frees its account's turn without noting the floor: a read sent before
+    /// then serves a `hello` that waited.
+    UnwaitedSpentTotalBoundNoFloor,
+    /// A payment that waited for its account's turn and took it, refused `overpaid` at its
+    /// account's `spent_total` bound, frees its account's turn without noting the floor: a read
+    /// sent before then serves a `hello` that waited.
+    WaitedSpentTotalBoundNoFloor,
+    /// A payment that found its account's turn free, refused `banned`, bans its peer again: the ban
+    /// then counts from that refusal, not from when it was earned.
+    UnwaitedBannedRenewsBan,
+    /// A payment that waited for its account's turn and took it, refused `banned`, bans its peer
+    /// again: the ban then counts from that refusal, not from when it was earned.
+    WaitedBannedRenewsBan,
+    /// A payment that waited for a dead turn and took it over, refused `banned`, bans its peer
+    /// again: the ban then counts from that refusal, not from when it was earned.
+    WaitedTakeoverBannedRenewsBan,
+    /// A payment that took a dead turn over as it arrived, refused `banned`, bans its peer again:
+    /// the ban then counts from that refusal, not from when it was earned.
+    LateTakeoverBannedRenewsBan,
+    /// A payment that found its account's turn free, dropped while it waits for keys, frees its
+    /// account's turn and wakes the first of what waits for it alone.
+    UnwaitedDropAwaitingKeysWakesOne,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for keys,
+    /// frees its account's turn and wakes the first of what waits for it alone.
+    WaitedDropAwaitingKeysWakesOne,
+    /// A payment that waited for a dead turn and took it over, dropped while it waits for keys,
+    /// frees its account's turn and wakes the first of what waits for it alone.
+    WaitedTakeoverDropAwaitingKeysWakesOne,
+    /// A payment that took a dead turn over as it arrived, dropped while it waits for keys, frees
+    /// its account's turn and wakes the first of what waits for it alone.
+    LateTakeoverDropAwaitingKeysWakesOne,
+    /// A payment that found its account's turn free, dropped while it waits for the next second's
+    /// keyset listing, frees its account's turn and wakes the first of what waits for it alone.
+    UnwaitedDropAwaitingListingWakesOne,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for the
+    /// next second's keyset listing, frees its account's turn and wakes the first of what waits for
+    /// it alone.
+    WaitedDropAwaitingListingWakesOne,
+    /// A payment that took a dead turn over as it arrived, dropped while it waits for the next
+    /// second's keyset listing, frees its account's turn and wakes the first of what waits for it
+    /// alone.
+    LateTakeoverDropAwaitingListingWakesOne,
+    /// A payment that found its account's turn free, dropped while it waits for the keyset listing
+    /// its keyset rule judges by, frees its account's turn and wakes the first of what waits for it
+    /// alone.
+    UnwaitedDropAwaitingKeysetListingWakesOne,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for the
+    /// keyset listing its keyset rule judges by, frees its account's turn and wakes the first of
+    /// what waits for it alone.
+    WaitedDropAwaitingKeysetListingWakesOne,
+    /// A payment that waited for a dead turn and took it over, dropped while it waits for the
+    /// keyset listing its keyset rule judges by, frees its account's turn and wakes the first of
+    /// what waits for it alone.
+    WaitedTakeoverDropAwaitingKeysetListingWakesOne,
+    /// A payment that took a dead turn over as it arrived, dropped while it waits for the keyset
+    /// listing its keyset rule judges by, frees its account's turn and wakes the first of what
+    /// waits for it alone.
+    LateTakeoverDropAwaitingKeysetListingWakesOne,
+    /// A payment that found its account's turn free, dropped during its read, frees its account's
+    /// turn and wakes the first of what waits for it alone.
+    UnwaitedDropInReadWakesOne,
+    /// A payment that waited for its account's turn and took it, dropped during its read, frees its
+    /// account's turn and wakes the first of what waits for it alone.
+    WaitedDropInReadWakesOne,
+    /// A payment that waited for a dead turn and took it over, dropped during its read, frees its
+    /// account's turn and wakes the first of what waits for it alone.
+    WaitedTakeoverDropInReadWakesOne,
+    /// A payment that took a dead turn over as it arrived, dropped during its read, frees its
+    /// account's turn and wakes the first of what waits for it alone.
+    LateTakeoverDropInReadWakesOne,
+    /// A payment that found its account's turn free, dropped while it waits for the next second to
+    /// read, frees its account's turn and wakes the first of what waits for it alone.
+    UnwaitedDropAwaitingNextSecondWakesOne,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for the
+    /// next second to read, frees its account's turn and wakes the first of what waits for it
+    /// alone.
+    WaitedDropAwaitingNextSecondWakesOne,
+    /// Creates an empty account for a peer with none whose payment, having found its account's turn
+    /// free, is dropped while it waits for another entry's read under way.
+    UnwaitedDropAwaitingOthersReadCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for its account's
+    /// turn and taken it, is dropped while it waits for another entry's read under way.
+    WaitedDropAwaitingOthersReadCreatesAccount,
+    /// A payment that found its account's turn free, dropped while it waits for another entry's
+    /// read under way, keeps its account's turn.
+    UnwaitedDropAwaitingOthersReadKeepsTurn,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for another
+    /// entry's read under way, keeps its account's turn.
+    WaitedDropAwaitingOthersReadKeepsTurn,
+    /// A payment that found its account's turn free, dropped while it waits for another entry's
+    /// read under way, frees its account's turn and wakes nothing waiting for it.
+    UnwaitedDropAwaitingOthersReadWakesNone,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for another
+    /// entry's read under way, frees its account's turn and wakes nothing waiting for it.
+    WaitedDropAwaitingOthersReadWakesNone,
+    /// A payment that found its account's turn free, dropped while it waits for another entry's
+    /// read under way, frees its account's turn and wakes the first of what waits for it alone.
+    UnwaitedDropAwaitingOthersReadWakesOne,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for another
+    /// entry's read under way, frees its account's turn and wakes the first of what waits for it
+    /// alone.
+    WaitedDropAwaitingOthersReadWakesOne,
+    /// A payment that found its account's turn free, dropped while it waits for another
+    /// entry's read under way, frees its account's turn without noting the floor: a read
+    /// sent before then serves a `hello` that waited.
+    UnwaitedDropAwaitingOthersReadNoFloor,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for
+    /// another entry's read under way, frees its account's turn without noting the floor: a
+    /// read sent before then serves a `hello` that waited.
+    WaitedDropAwaitingOthersReadNoFloor,
+    /// A `hello` that waited for a payment holding its account's turn asks its first quoted
+    /// mint for its keyset listing, and discards the answer: no check of a `hello`'s needs
+    /// one.
+    WaitedHelloAsksListing,
+    /// A `hello` that took a dead turn over asks its first quoted mint for its keyset
+    /// listing, and discards the answer.
+    TakeoverHelloAsksListing,
+    /// A `hello` that waited for no payment, a swap of its account's still unknown, asks
+    /// its first quoted mint for its keyset listing, and discards the answer.
+    ReadingHelloAsksListing,
+    /// Bans a peer whose payment is refused `bad-token`, the mint answering a request for
+    /// its keys 12001, where an earlier swap of its account's is still at the mint, past
+    /// its deadline.
+    KeysRefusedBansWithSwapOut,
+    /// Creates an empty account for a peer with none whose payment, having found its account's
+    /// turn free, is dropped while it waits for the next second to read.
+    UnwaitedDropAwaitingNextSecondCreatesAccount,
+    /// Creates an empty account for a peer with none whose payment, having waited for its
+    /// account's turn and taken it, is dropped while it waits for the next second to read.
+    WaitedDropAwaitingNextSecondCreatesAccount,
+    /// A payment that found its account's turn free, dropped while it waits for the next second
+    /// to read, keeps its account's turn.
+    UnwaitedDropAwaitingNextSecondKeepsTurn,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for the
+    /// next second to read, keeps its account's turn.
+    WaitedDropAwaitingNextSecondKeepsTurn,
+    /// A payment that found its account's turn free, dropped while it waits for the next second
+    /// to read, frees its account's turn and wakes nothing waiting for it.
+    UnwaitedDropAwaitingNextSecondWakesNone,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for the
+    /// next second to read, frees its account's turn and wakes nothing waiting for it.
+    WaitedDropAwaitingNextSecondWakesNone,
+    /// A payment that found its account's turn free, dropped while it waits for the next second
+    /// to read, frees its account's turn without noting the floor: a read sent before then
+    /// serves a `hello` that waited.
+    UnwaitedDropAwaitingNextSecondNoFloor,
+    /// A payment that waited for its account's turn and took it, dropped while it waits for the
+    /// next second to read, frees its account's turn without noting the floor: a read sent
+    /// before then serves a `hello` that waited.
+    WaitedDropAwaitingNextSecondNoFloor,
+    /// Sends a payment's own read of swap state without asking to be woken as it comes
+    /// back: a payment on a task of its own is polled again only when something else wakes
+    /// it.
+    PayReadUnwoken,
+    /// Sends a sweep's read of swap state without asking to be woken as it comes back: a
+    /// sweep on a task of its own never finishes.
+    SweepReadUnwoken,
+    /// Settles a swap's outcome that is no claim (spent, invalid, or no answer the seeder
+    /// can use) without waking the payment that awaits it.
+    NoClaimUnwoken,
+    /// Settles a swap's outcome on a task of its own that wakes the payment first, yields,
+    /// and then settles it without a wake: a payment on a task of its own, polled between
+    /// the two, finds no answer and is never woken again.
+    OutcomeWokenEarly,
+    /// The same for an outcome `spent` alone.
+    SpentWokenEarly,
+    /// The same for proofs the mint refuses as invalid alone.
+    InvalidWokenEarly,
+    /// The same for a swap that never reached the mint alone.
+    UnreachableWokenEarly,
+    /// The same for a swap left with no answer, its retry included, alone.
+    LostWokenEarly,
+    /// The same for a swap the mint refuses as pending alone.
+    PendingWokenEarly,
+    /// The same for a swap whose outputs the mint refuses alone.
+    OutputsRefusedWokenEarly,
+    /// The same for a swap the mint refuses for an expired keyset alone.
+    ExpiredWokenEarly,
+    /// Takes a key request's answer on a task of its own that wakes the payment first,
+    /// yields, and only then lets it see the keys, without a wake.
+    KeysWokenEarly,
+    /// The same for the answer to a keyset listing asked for at step 3.
+    ListingWokenEarly,
+    /// The same for the answer to the keyset listing the keyset rule judges by.
+    KeysetListingWokenEarly,
+    /// The same for a read of swap state an entry sends, a `hello`'s or a payment's.
+    ReadWokenEarly,
+    /// The same for a payment's own read of swap state alone.
+    PayReadWokenEarly,
+    /// The same for a sweep's read of swap state.
+    SweepReadWokenEarly,
+    /// Settles the swap of a payment whose connection closed without waking what waits for
+    /// its account's turn: a `hello` waiting there on a task of its own is never polled
+    /// again.
+    DroppedLandWakesNone,
+    /// Settles a swap's outcome on a task of its own that wakes what waits for the
+    /// account's turn first, yields, and then frees the turn without a wake: an entry on a
+    /// task of its own, polled between the two, finds the turn held and is never woken
+    /// again.
+    TurnWokenEarly,
+    /// Asks for a mint's keys so that the mint's refusal of them (12001) does not wake the
+    /// payment that waits for the answer: on a task of its own, it is never polled again.
+    KeysRefusalUnwoken,
+    /// The same as [`SeederFlaw::KeysWokenEarly`] for a refusal of the keys asked for.
+    KeysRefusalWokenEarly,
+    /// Asks every quoted mint but the first for its keys without asking to be woken as
+    /// they come.
+    OtherMintKeysUnwoken,
+    /// The same for the keyset listing a payment asks such a mint for at step 3.
+    OtherMintListingUnwoken,
+    /// The same for the keyset listing a payment's keyset rule judges by at such a mint:
+    /// woken by the clock alone.
+    OtherMintKeysetListingUnwoken,
+    /// The same as [`SeederFlaw::KeysWokenEarly`] at every quoted mint but the first.
+    OtherMintKeysWokenEarly,
+    /// The same as [`SeederFlaw::ListingWokenEarly`] at every quoted mint but the first.
+    OtherMintListingWokenEarly,
+    /// The same as [`SeederFlaw::KeysetListingWokenEarly`] at every quoted mint but the
+    /// first.
+    OtherMintKeysetListingWokenEarly,
+    /// A payment that waits at step 3 for a keyset listing it did not ask for (another
+    /// entry's, or one the seeder asked for at its start), its answer held, does not ask to
+    /// be woken as it comes: a payment that asked for it is. The keyset rule's wait for such
+    /// a listing is not touched.
+    OthersListingUnwoken,
+    /// The same as [`SeederFlaw::ListingWokenEarly`] for a payment that waits at step 3 for
+    /// a keyset listing it did not ask for.
+    OthersListingWokenEarly,
+    /// A proof found spent by a swap at a quoted mint other than the first is refused
+    /// `spent` with no ban: the first mint's bans.
+    OtherMintSpentNoBan,
+    /// Proofs a quoted mint other than the first refuses as invalid are refused `bad-token`
+    /// with no ban: the first mint's ban.
+    OtherMintInvalidNoBan,
+    /// A claim at a quoted mint other than the first whose answer lands late is not
+    /// credited: the seeder holds the proofs, and the account shows nothing.
+    OtherMintLateClaimNotCredited,
+    /// A claim at a quoted mint other than the first that a read learns (an account's own
+    /// or a sweep's) is not credited: the swap is taken as decided, and the account shows
+    /// nothing.
+    OtherMintReadClaimNotCredited,
+    /// A swap whose outcome is unknown stops only the account's payments at its own mint:
+    /// one at another quoted mint is swapped, so an account holds one unknown swap for each
+    /// mint.
+    UnknownPerMint,
+    /// A swap that claims in time, its peer banned since its turn came (on its other
+    /// video), is answered `banned` and not credited: the proofs are claimed, and the
+    /// account shows nothing.
+    BannedClaimNotCredited,
+    /// A mint's refusal of the keys a payment asked for (12001) that comes at the payment's
+    /// deadline or later is used: the payment is refused `bad-token`, not
+    /// `mint-unavailable`.
+    LateKeysRefusalUsed,
+    /// A mint's refusal of the keys asked for (12001) drops the mint's keyset listing with
+    /// it: the next payment of that second that needs one asks for it again, so a mint is
+    /// asked for its listing more than once a second.
+    ListingDroppedOnKeysRefusal,
+    /// A payment that found its account's turn free checks its token's mint before its
+    /// structure: a token of a mint not quoted that step 1 refuses is refused `bad-mint`,
+    /// not `bad-token`.
+    UnwaitedMintBeforeStructure,
+    /// The same as [`SeederFlaw::UnwaitedMintBeforeStructure`] for a payment that waited
+    /// for its account's turn and took it.
+    WaitedMintBeforeStructure,
+    /// The same as [`SeederFlaw::UnwaitedMintBeforeStructure`] for a payment that waited
+    /// for a dead turn and took it over.
+    WaitedTakeoverMintBeforeStructure,
+    /// The same as [`SeederFlaw::UnwaitedMintBeforeStructure`] for a payment that took a
+    /// dead turn over as it arrived.
+    LateTakeoverMintBeforeStructure,
+    /// A payment that found its account's turn free checks its token's mint before the
+    /// watermark: a good token of a mint not quoted, for no chunk, is refused `bad-mint`,
+    /// not `stale`.
+    UnwaitedMintBeforeStale,
+    /// The same as [`SeederFlaw::UnwaitedMintBeforeStale`] for a payment that waited for
+    /// its account's turn and took it.
+    WaitedMintBeforeStale,
+    /// The same as [`SeederFlaw::UnwaitedMintBeforeStale`] for a payment that waited for a
+    /// dead turn and took it over.
+    WaitedTakeoverMintBeforeStale,
+    /// The same as [`SeederFlaw::UnwaitedMintBeforeStale`] for a payment that took a dead
+    /// turn over as it arrived.
+    LateTakeoverMintBeforeStale,
+    /// A sweep skips the unknown swaps of a video the seeder no longer serves: a claim there
+    /// is learnt only by its account's own entry, and a swap left unspent there is never
+    /// completed.
+    SweepSkipsDroppedVideos,
+    /// The unpaid chunks of a video leave the global count as the seeder stops serving it:
+    /// the cap they filled admits as many again within `debt_ttl`.
+    DroppedVideoFreesDebt,
+    /// The unpaid chunks of a video the seeder no longer serves never age out of the global
+    /// count: a cap they filled refuses unpaid service on every video for good.
+    DroppedVideoDebtNeverAges,
+    /// Refuses `unknown-video` to a peer whose only record on a video it no longer serves is
+    /// a swap abandoned in flight at its deadline, where that is a swap whose outcome is
+    /// unknown as one whose answer was lost: the peer is refused until the swap lands or a
+    /// sweep learns it.
+    DroppedVideoIgnoresSwapInFlight,
+    /// A payment whose turn came in time asks the mint for keys at its deadline or later
+    /// (as a keyset listing that names its keyset comes then), though nothing that needs
+    /// them is judged any more.
+    KeysAskedAtDeadline,
+    /// A payment whose turn came in time asks the mint for its keyset listing at its
+    /// deadline or later (one that waited for the next second's listing into its deadline,
+    /// say), though no check of it is judged any more.
+    ListingAskedAtDeadline,
+    /// A swap whose outcome is unknown stops only the account's payments that overlap it:
+    /// one for chunks beyond it is swapped.
+    UnknownBlocksOnlyOverlap,
+    /// A payment credits every other peer's account on its video up to the same chunk, as
+    /// well as its own.
+    CreditSpillsToPeers,
+    /// The ceilings on `debt_ttl`, `account_ttl` and `ban_ttl` are compared in whole
+    /// seconds: a ttl less than a second past its ceiling is accepted.
+    TtlsComparedInSeconds,
+    /// A late claim at a quoted mint other than the first is credited, and its chunks stay
+    /// in the global count: a cap they filled stays full until they age out.
+    OtherMintLateClaimKeepsDebt,
+    /// The unpaid chunks of a video count for `debt_ttl` from the time the seeder stops
+    /// serving it, not from their admission: they hold the cap longer than `debt_ttl`.
+    DroppedVideoDebtAgesFromDrop,
+    /// A payment on a video the seeder no longer serves is credited, and the chunks it
+    /// covers stay in the global count.
+    DroppedVideoPayKeepsDebt,
+    /// A sweep skips the swaps abandoned in flight on a video the seeder no longer serves,
+    /// and reads those there whose answers were lost: one left unspent is never completed.
+    SweepSkipsDroppedVideosInFlight,
+    /// Answers a `hello` for a video it no longer serves from a peer whose only record there
+    /// is a swap abandoned in flight, without reading that swap: a claim the mint has made
+    /// is not learnt, and the quote shows no account.
+    DroppedVideoInFlightHelloSkipsRead,
+    /// Answers a `hello` for a video it no longer serves from a peer whose only record is a
+    /// swap whose answer was lost on its other video, where it refuses it `unknown-video`.
+    DroppedVideoAnyUnknownSwap,
+    /// Answers a `hello` for a video it no longer serves from a peer whose only record is a
+    /// swap abandoned in flight on its other video, where it refuses it `unknown-video`.
+    DroppedVideoAnySwapInFlight,
+    /// A mint's refusal of the keys asked for (12001) that comes at the payment's deadline
+    /// or later is kept: the next payment naming the keyset is refused without asking,
+    /// though the mint serves the keys again.
+    LateKeysRefusalCached,
+}
+
+/// How a payment came to its account's turn: the paths of the suite's matrix of payments,
+/// for the defects planted on one of them alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Came {
+    /// It found the turn free, and waited for nothing.
+    Unwaited,
+    /// It waited for a payment, and took the turn as that one left it.
+    Waited,
+    /// It waited for a payment held past its deadline, and took the turn over there.
+    WaitedTakeover,
+    /// It took a dead turn over as it arrived, and waited for nothing.
+    LateTakeover,
+}
+
+impl Came {
+    /// Whether it took the turn over, and whether it waited for it.
+    fn of(took_over: bool, waited: bool) -> Self {
+        match (took_over, waited) {
+            (false, false) => Self::Unwaited,
+            (false, true) => Self::Waited,
+            (true, true) => Self::WaitedTakeover,
+            (true, false) => Self::LateTakeover,
+        }
+    }
+}
+
+/// What a defect planted on one path of a `hello` for a video the seeder no longer serves
+/// does wrong ([`Came`], the paths of a `hello` as of a payment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelloSlip {
+    /// It reads none of its account's unknown swaps.
+    SkipsRead,
+    /// It does not check its peer's ban again as it answers.
+    NoBanRecheck,
+    /// It checks the ban again without ageing the bans first.
+    BanNotAged,
+    /// It does not check its session id again as it answers.
+    NoIdRecheck,
+    /// It checks its session id again before its peer's ban.
+    IdBeforeBan,
+}
+
+/// The check that refused a payment before its swap was sent, by its answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Check {
+    Banned,
+    Stale,
+    Unreadable,
+    /// Step 1's other refusals: unit, mints, proof count, locks, DLEQ proofs missing.
+    Shape,
+    BadMint,
+    UnlistedKeyset,
+    NoKeys,
+    BadDleq,
+    Underpaid,
+    Overpaid,
+    /// The mint answers a request for its keys 12001, a keyset its listing names.
+    KeysRefused,
+    /// `overpaid`: an exact payment that would take `spent_total` past 2^53-1.
+    SpentTotalBound,
+    /// No keyset listing for the keyset rule by the deadline.
+    NoKeysetListing,
+    /// The keyset to swap to expires too soon.
+    Keyset,
+    /// An earlier swap of the account is still unknown after the payment's read.
+    Unknown,
+    /// `stale` as the watermark is read again, after the payment's read.
+    RecheckStale,
+    /// `overpaid` as the watermark is read again, after the payment's read.
+    RecheckOverpaid,
+    /// Its swap not sent by its deadline.
+    Unsent,
+}
+
+impl Check {
+    /// The check that refused `rej`, the payment's own read begun (`read`) or not.
+    fn of(rej: &Rej, read: bool) -> Option<Self> {
+        Some(match (rej.detail.as_deref()?, read) {
+            ("this peer is banned", _) => Self::Banned,
+            ("already paid up to there", false) => Self::Stale,
+            ("already paid up to there", true) => Self::RecheckStale,
+            ("unreadable token", _) => Self::Unreadable,
+            ("not a single-mint sat token with DLEQs", _) => Self::Shape,
+            ("not a quoted mint", _) => Self::BadMint,
+            ("a keyset the mint does not list", _) => Self::UnlistedKeyset,
+            ("a keyset the mint does not know", _) => Self::KeysRefused,
+            ("spent_total would pass 2^53-1", _) => Self::SpentTotalBound,
+            ("no keys from the mint within 60 s", _) => Self::NoKeys,
+            ("no keyset listing from the mint within 60 s", _) => Self::NoKeysetListing,
+            ("an invalid DLEQ", _) => Self::BadDleq,
+            ("short of the chunks claimed", _) => Self::Underpaid,
+            ("more than the chunks claimed", false) => Self::Overpaid,
+            ("more than the chunks claimed", true) => Self::RecheckOverpaid,
+            ("the mint's keyset expires too soon to swap to", _) => Self::Keyset,
+            ("an earlier payment's outcome is not known yet", _) => Self::Unknown,
+            ("no answer from the mint within 60 s", _) => Self::Unsent,
+            _ => return None,
+        })
+    }
+}
+
+/// What a defect of the matrix of payments does wrong with a payment refused, or dropped,
+/// before its swap is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slip {
+    /// It creates an empty account for a peer with none.
+    CreatesAccount,
+    /// It keeps the account's turn.
+    KeepsTurn,
+    /// It frees the turn, and wakes nothing waiting for it.
+    WakesNone,
+    /// It frees the turn without noting the floor: a `hello` that waited reads none after
+    /// it.
+    NoFloor,
+    /// It bans the payment's peer.
+    Bans,
+    /// It frees the turn, and wakes the first of what waits for it alone (drops only).
+    WakesOne,
+}
+
+/// Where a payment that holds its account's turn is dropped, before its swap is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// Waiting for keys.
+    Keys,
+    /// Waiting for the next second, to ask for the mint's keyset listing again.
+    Listing,
+    /// Waiting for the keyset listing its keyset rule judges by.
+    KeysetListing,
+    /// During its read of its account's unknown swaps.
+    Read,
+    /// Waiting for the next second to read, the second's two reads spent.
+    NextSecond,
+    /// Waiting for another entry's read under way, which would serve it.
+    OthersRead,
+}
+
+/// The check before which a defect of the matrix of payments reads its account's unknown
+/// swaps, instead of after them all; or, last, the keyset rule run after the read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadAt {
+    Ban,
+    Stale,
+    Structure,
+    Mint,
+    Keys,
+    Dleq,
+    Amount,
+    /// The keyset to swap to is checked after the read.
+    KeysetAfter,
+}
+
+/// A check a defect of the matrix of payments runs before one NFX-07 §3 runs first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Early {
+    /// The watermark before the ban.
+    StaleBeforeBan,
+    /// Step 1 before the ban.
+    StructureBeforeBan,
+    /// Step 1 before the watermark.
+    StructureBeforeStale,
+    /// The amount before the mint.
+    AmountBeforeMint,
+    /// The amount before the keys are fetched.
+    AmountBeforeKeys,
+    /// The keyset to swap to before the amount.
+    KeysetBeforeAmount,
+    /// The token's own mint dialled before the mint check.
+    TokenMintDialled,
+    /// The mint before step 1.
+    MintBeforeStructure,
+    /// The mint before the watermark.
+    MintBeforeStale,
+}
+
+/// The keyset listing a defect judges the keyset rule by, instead of one asked for in the
+/// payment's turn's second or later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Judged {
+    /// The one the seeder holds, whenever it was asked for.
+    Stale,
+    /// One asked for since the payment arrived.
+    FromArrival,
+    /// One asked for in the second it judges.
+    OfJudgingSecond,
+    /// One asked for before the turn's second, its answer held: waited for.
+    HeldStale,
+}
+
+impl SeederFlaw {
+    /// The `hello`s for a video no longer served that a defect mishandles: on which path,
+    /// and how.
+    fn dropped_hello_slip(self) -> Option<(Came, HelloSlip)> {
+        Some(match self {
+            Self::DroppedVideoUnwaitedRecheckBanNotAged => (Came::Unwaited, HelloSlip::BanNotAged),
+            Self::DroppedVideoUnwaitedRecheckIdBeforeBan => {
+                (Came::Unwaited, HelloSlip::IdBeforeBan)
+            }
+            Self::DroppedVideoWaitedRecheckIdBeforeBan => (Came::Waited, HelloSlip::IdBeforeBan),
+            Self::DroppedVideoWaitedTakeoverSkipsRead => {
+                (Came::WaitedTakeover, HelloSlip::SkipsRead)
+            }
+            Self::DroppedVideoWaitedTakeoverRecheckBanNotAged => {
+                (Came::WaitedTakeover, HelloSlip::BanNotAged)
+            }
+            Self::DroppedVideoWaitedTakeoverNoIdRecheck => {
+                (Came::WaitedTakeover, HelloSlip::NoIdRecheck)
+            }
+            Self::DroppedVideoWaitedTakeoverRecheckIdBeforeBan => {
+                (Came::WaitedTakeover, HelloSlip::IdBeforeBan)
+            }
+            Self::DroppedVideoLateTakeoverSkipsRead => (Came::LateTakeover, HelloSlip::SkipsRead),
+            Self::DroppedVideoLateTakeoverNoBanRecheck => {
+                (Came::LateTakeover, HelloSlip::NoBanRecheck)
+            }
+            Self::DroppedVideoLateTakeoverRecheckBanNotAged => {
+                (Came::LateTakeover, HelloSlip::BanNotAged)
+            }
+            Self::DroppedVideoLateTakeoverNoIdRecheck => {
+                (Came::LateTakeover, HelloSlip::NoIdRecheck)
+            }
+            Self::DroppedVideoLateTakeoverRecheckIdBeforeBan => {
+                (Came::LateTakeover, HelloSlip::IdBeforeBan)
+            }
+            _ => return None,
+        })
+    }
+
+    /// Whether it is one of the flaws that, on a task of the seeder's own, wake a payment,
+    /// or what waits for its turn, before they settle its swap's outcome
+    /// ([`Inner::wakes_early`] says for which outcomes).
+    fn settles_after_a_wake(self) -> bool {
+        matches!(
+            self,
+            Self::OutcomeWokenEarly
+                | Self::TurnWokenEarly
+                | Self::SpentWokenEarly
+                | Self::InvalidWokenEarly
+                | Self::UnreachableWokenEarly
+                | Self::LostWokenEarly
+                | Self::PendingWokenEarly
+                | Self::OutputsRefusedWokenEarly
+                | Self::ExpiredWokenEarly
+        )
+    }
+
+    /// The refusals a defect of the matrix of payments mishandles: how, on which path, by
+    /// which check.
+    fn refusal_slip(self) -> Option<(Slip, Came, Check)> {
+        Some(match self {
+            Self::UnwaitedStaleCreatesAccount => {
+                (Slip::CreatesAccount, Came::Unwaited, Check::Stale)
+            }
+            Self::UnwaitedUnlistedKeysetCreatesAccount => {
+                (Slip::CreatesAccount, Came::Unwaited, Check::UnlistedKeyset)
+            }
+            Self::WaitedStaleCreatesAccount => (Slip::CreatesAccount, Came::Waited, Check::Stale),
+            Self::WaitedShapeCreatesAccount => (Slip::CreatesAccount, Came::Waited, Check::Shape),
+            Self::WaitedUnlistedKeysetCreatesAccount => {
+                (Slip::CreatesAccount, Came::Waited, Check::UnlistedKeyset)
+            }
+            Self::WaitedTakeoverBannedCreatesAccount => {
+                (Slip::CreatesAccount, Came::WaitedTakeover, Check::Banned)
+            }
+            Self::WaitedTakeoverStaleCreatesAccount => {
+                (Slip::CreatesAccount, Came::WaitedTakeover, Check::Stale)
+            }
+            Self::WaitedTakeoverUnreadableCreatesAccount => (
+                Slip::CreatesAccount,
+                Came::WaitedTakeover,
+                Check::Unreadable,
+            ),
+            Self::WaitedTakeoverShapeCreatesAccount => {
+                (Slip::CreatesAccount, Came::WaitedTakeover, Check::Shape)
+            }
+            Self::WaitedTakeoverBadMintCreatesAccount => {
+                (Slip::CreatesAccount, Came::WaitedTakeover, Check::BadMint)
+            }
+            Self::WaitedTakeoverUnlistedKeysetCreatesAccount => (
+                Slip::CreatesAccount,
+                Came::WaitedTakeover,
+                Check::UnlistedKeyset,
+            ),
+            Self::WaitedTakeoverNoKeysCreatesAccount => {
+                (Slip::CreatesAccount, Came::WaitedTakeover, Check::NoKeys)
+            }
+            Self::WaitedTakeoverBadDleqCreatesAccount => {
+                (Slip::CreatesAccount, Came::WaitedTakeover, Check::BadDleq)
+            }
+            Self::WaitedTakeoverUnderpaidCreatesAccount => {
+                (Slip::CreatesAccount, Came::WaitedTakeover, Check::Underpaid)
+            }
+            Self::WaitedTakeoverOverpaidCreatesAccount => {
+                (Slip::CreatesAccount, Came::WaitedTakeover, Check::Overpaid)
+            }
+            Self::WaitedTakeoverKeysetCreatesAccount => {
+                (Slip::CreatesAccount, Came::WaitedTakeover, Check::Keyset)
+            }
+            Self::WaitedTakeoverUnknownRefusalCreatesAccount => {
+                (Slip::CreatesAccount, Came::WaitedTakeover, Check::Unknown)
+            }
+            Self::WaitedTakeoverUnsentCreatesAccount => {
+                (Slip::CreatesAccount, Came::WaitedTakeover, Check::Unsent)
+            }
+            Self::LateTakeoverStaleCreatesAccount => {
+                (Slip::CreatesAccount, Came::LateTakeover, Check::Stale)
+            }
+            Self::LateTakeoverShapeCreatesAccount => {
+                (Slip::CreatesAccount, Came::LateTakeover, Check::Shape)
+            }
+            Self::LateTakeoverUnlistedKeysetCreatesAccount => (
+                Slip::CreatesAccount,
+                Came::LateTakeover,
+                Check::UnlistedKeyset,
+            ),
+            Self::LateTakeoverUnsentCreatesAccount => {
+                (Slip::CreatesAccount, Came::LateTakeover, Check::Unsent)
+            }
+            Self::UnwaitedUnlistedKeysetKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Check::UnlistedKeyset)
+            }
+            Self::UnwaitedRecheckOverpaidKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Check::RecheckOverpaid)
+            }
+            Self::WaitedShapeKeepsTurn => (Slip::KeepsTurn, Came::Waited, Check::Shape),
+            Self::WaitedUnlistedKeysetKeepsTurn => {
+                (Slip::KeepsTurn, Came::Waited, Check::UnlistedKeyset)
+            }
+            Self::WaitedRecheckStaleKeepsTurn => {
+                (Slip::KeepsTurn, Came::Waited, Check::RecheckStale)
+            }
+            Self::WaitedRecheckOverpaidKeepsTurn => {
+                (Slip::KeepsTurn, Came::Waited, Check::RecheckOverpaid)
+            }
+            Self::WaitedTakeoverBannedKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::Banned)
+            }
+            Self::WaitedTakeoverStaleKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::Stale)
+            }
+            Self::WaitedTakeoverUnreadableKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::Unreadable)
+            }
+            Self::WaitedTakeoverShapeKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::Shape)
+            }
+            Self::WaitedTakeoverBadMintKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::BadMint)
+            }
+            Self::WaitedTakeoverUnlistedKeysetKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::UnlistedKeyset)
+            }
+            Self::WaitedTakeoverNoKeysKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::NoKeys)
+            }
+            Self::WaitedTakeoverBadDleqKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::BadDleq)
+            }
+            Self::WaitedTakeoverUnderpaidKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::Underpaid)
+            }
+            Self::WaitedTakeoverOverpaidKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::Overpaid)
+            }
+            Self::WaitedTakeoverKeysetKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::Keyset)
+            }
+            Self::WaitedTakeoverUnknownRefusalKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::Unknown)
+            }
+            Self::WaitedTakeoverRecheckStaleKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::RecheckStale)
+            }
+            Self::WaitedTakeoverRecheckOverpaidKeepsTurn => (
+                Slip::KeepsTurn,
+                Came::WaitedTakeover,
+                Check::RecheckOverpaid,
+            ),
+            Self::LateTakeoverShapeKeepsTurn => (Slip::KeepsTurn, Came::LateTakeover, Check::Shape),
+            Self::LateTakeoverUnlistedKeysetKeepsTurn => {
+                (Slip::KeepsTurn, Came::LateTakeover, Check::UnlistedKeyset)
+            }
+            Self::LateTakeoverRecheckStaleKeepsTurn => {
+                (Slip::KeepsTurn, Came::LateTakeover, Check::RecheckStale)
+            }
+            Self::LateTakeoverRecheckOverpaidKeepsTurn => {
+                (Slip::KeepsTurn, Came::LateTakeover, Check::RecheckOverpaid)
+            }
+            Self::UnwaitedUnlistedKeysetWakesNone => {
+                (Slip::WakesNone, Came::Unwaited, Check::UnlistedKeyset)
+            }
+            Self::UnwaitedRecheckOverpaidWakesNone => {
+                (Slip::WakesNone, Came::Unwaited, Check::RecheckOverpaid)
+            }
+            Self::WaitedUnlistedKeysetWakesNone => {
+                (Slip::WakesNone, Came::Waited, Check::UnlistedKeyset)
+            }
+            Self::WaitedRecheckStaleWakesNone => {
+                (Slip::WakesNone, Came::Waited, Check::RecheckStale)
+            }
+            Self::WaitedRecheckOverpaidWakesNone => {
+                (Slip::WakesNone, Came::Waited, Check::RecheckOverpaid)
+            }
+            Self::WaitedTakeoverUnlistedKeysetWakesNone => {
+                (Slip::WakesNone, Came::WaitedTakeover, Check::UnlistedKeyset)
+            }
+            Self::WaitedTakeoverBadDleqWakesNone => {
+                (Slip::WakesNone, Came::WaitedTakeover, Check::BadDleq)
+            }
+            Self::WaitedTakeoverUnderpaidWakesNone => {
+                (Slip::WakesNone, Came::WaitedTakeover, Check::Underpaid)
+            }
+            Self::WaitedTakeoverOverpaidWakesNone => {
+                (Slip::WakesNone, Came::WaitedTakeover, Check::Overpaid)
+            }
+            Self::WaitedTakeoverKeysetWakesNone => {
+                (Slip::WakesNone, Came::WaitedTakeover, Check::Keyset)
+            }
+            Self::WaitedTakeoverUnknownRefusalWakesNone => {
+                (Slip::WakesNone, Came::WaitedTakeover, Check::Unknown)
+            }
+            Self::LateTakeoverUnlistedKeysetWakesNone => {
+                (Slip::WakesNone, Came::LateTakeover, Check::UnlistedKeyset)
+            }
+            Self::UnwaitedBannedNoFloor => (Slip::NoFloor, Came::Unwaited, Check::Banned),
+            Self::UnwaitedStaleNoFloor => (Slip::NoFloor, Came::Unwaited, Check::Stale),
+            Self::UnwaitedUnreadableNoFloor => (Slip::NoFloor, Came::Unwaited, Check::Unreadable),
+            Self::UnwaitedShapeNoFloor => (Slip::NoFloor, Came::Unwaited, Check::Shape),
+            Self::UnwaitedBadMintNoFloor => (Slip::NoFloor, Came::Unwaited, Check::BadMint),
+            Self::UnwaitedUnlistedKeysetNoFloor => {
+                (Slip::NoFloor, Came::Unwaited, Check::UnlistedKeyset)
+            }
+            Self::UnwaitedBadDleqNoFloor => (Slip::NoFloor, Came::Unwaited, Check::BadDleq),
+            Self::UnwaitedOverpaidNoFloor => (Slip::NoFloor, Came::Unwaited, Check::Overpaid),
+            Self::UnwaitedKeysetNoFloor => (Slip::NoFloor, Came::Unwaited, Check::Keyset),
+            Self::WaitedShapeNoFloor => (Slip::NoFloor, Came::Waited, Check::Shape),
+            Self::WaitedUnlistedKeysetNoFloor => {
+                (Slip::NoFloor, Came::Waited, Check::UnlistedKeyset)
+            }
+            Self::WaitedTakeoverUnknownRefusalNoFloor => {
+                (Slip::NoFloor, Came::WaitedTakeover, Check::Unknown)
+            }
+            Self::UnwaitedUnlistedKeysetBans => (Slip::Bans, Came::Unwaited, Check::UnlistedKeyset),
+            Self::UnwaitedRecheckOverpaidBans => {
+                (Slip::Bans, Came::Unwaited, Check::RecheckOverpaid)
+            }
+            Self::WaitedShapeBans => (Slip::Bans, Came::Waited, Check::Shape),
+            Self::WaitedUnlistedKeysetBans => (Slip::Bans, Came::Waited, Check::UnlistedKeyset),
+            Self::WaitedNoKeysBans => (Slip::Bans, Came::Waited, Check::NoKeys),
+            Self::WaitedRecheckStaleBans => (Slip::Bans, Came::Waited, Check::RecheckStale),
+            Self::WaitedRecheckOverpaidBans => (Slip::Bans, Came::Waited, Check::RecheckOverpaid),
+            Self::WaitedUnsentBans => (Slip::Bans, Came::Waited, Check::Unsent),
+            Self::WaitedTakeoverStaleBans => (Slip::Bans, Came::WaitedTakeover, Check::Stale),
+            Self::WaitedTakeoverUnreadableBans => {
+                (Slip::Bans, Came::WaitedTakeover, Check::Unreadable)
+            }
+            Self::WaitedTakeoverShapeBans => (Slip::Bans, Came::WaitedTakeover, Check::Shape),
+            Self::WaitedTakeoverBadMintBans => (Slip::Bans, Came::WaitedTakeover, Check::BadMint),
+            Self::WaitedTakeoverUnlistedKeysetBans => {
+                (Slip::Bans, Came::WaitedTakeover, Check::UnlistedKeyset)
+            }
+            Self::WaitedTakeoverNoKeysBans => (Slip::Bans, Came::WaitedTakeover, Check::NoKeys),
+            Self::WaitedTakeoverBadDleqBans => (Slip::Bans, Came::WaitedTakeover, Check::BadDleq),
+            Self::WaitedTakeoverUnderpaidBans => {
+                (Slip::Bans, Came::WaitedTakeover, Check::Underpaid)
+            }
+            Self::WaitedTakeoverOverpaidBans => (Slip::Bans, Came::WaitedTakeover, Check::Overpaid),
+            Self::WaitedTakeoverKeysetBans => (Slip::Bans, Came::WaitedTakeover, Check::Keyset),
+            Self::WaitedTakeoverUnknownRefusalBans => {
+                (Slip::Bans, Came::WaitedTakeover, Check::Unknown)
+            }
+            Self::WaitedTakeoverRecheckStaleBans => {
+                (Slip::Bans, Came::WaitedTakeover, Check::RecheckStale)
+            }
+            Self::WaitedTakeoverRecheckOverpaidBans => {
+                (Slip::Bans, Came::WaitedTakeover, Check::RecheckOverpaid)
+            }
+            Self::WaitedTakeoverUnsentBans => (Slip::Bans, Came::WaitedTakeover, Check::Unsent),
+            Self::LateTakeoverShapeBans => (Slip::Bans, Came::LateTakeover, Check::Shape),
+            Self::LateTakeoverUnlistedKeysetBans => {
+                (Slip::Bans, Came::LateTakeover, Check::UnlistedKeyset)
+            }
+            Self::LateTakeoverNoKeysBans => (Slip::Bans, Came::LateTakeover, Check::NoKeys),
+            Self::LateTakeoverRecheckStaleBans => {
+                (Slip::Bans, Came::LateTakeover, Check::RecheckStale)
+            }
+            Self::LateTakeoverRecheckOverpaidBans => {
+                (Slip::Bans, Came::LateTakeover, Check::RecheckOverpaid)
+            }
+            Self::LateTakeoverUnsentBans => (Slip::Bans, Came::LateTakeover, Check::Unsent),
+            Self::UnwaitedNoKeysetListingCreatesAccount => {
+                (Slip::CreatesAccount, Came::Unwaited, Check::NoKeysetListing)
+            }
+            Self::WaitedNoKeysetListingCreatesAccount => {
+                (Slip::CreatesAccount, Came::Waited, Check::NoKeysetListing)
+            }
+            Self::WaitedTakeoverNoKeysetListingCreatesAccount => (
+                Slip::CreatesAccount,
+                Came::WaitedTakeover,
+                Check::NoKeysetListing,
+            ),
+            Self::LateTakeoverNoKeysetListingCreatesAccount => (
+                Slip::CreatesAccount,
+                Came::LateTakeover,
+                Check::NoKeysetListing,
+            ),
+            Self::UnwaitedNoKeysetListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Check::NoKeysetListing)
+            }
+            Self::WaitedNoKeysetListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::Waited, Check::NoKeysetListing)
+            }
+            Self::WaitedTakeoverNoKeysetListingKeepsTurn => (
+                Slip::KeepsTurn,
+                Came::WaitedTakeover,
+                Check::NoKeysetListing,
+            ),
+            Self::LateTakeoverNoKeysetListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::LateTakeover, Check::NoKeysetListing)
+            }
+            Self::UnwaitedNoKeysetListingBans => {
+                (Slip::Bans, Came::Unwaited, Check::NoKeysetListing)
+            }
+            Self::WaitedNoKeysetListingBans => (Slip::Bans, Came::Waited, Check::NoKeysetListing),
+            Self::WaitedTakeoverNoKeysetListingBans => {
+                (Slip::Bans, Came::WaitedTakeover, Check::NoKeysetListing)
+            }
+            Self::LateTakeoverNoKeysetListingBans => {
+                (Slip::Bans, Came::LateTakeover, Check::NoKeysetListing)
+            }
+            Self::UnwaitedKeysRefusedCreatesAccount => {
+                (Slip::CreatesAccount, Came::Unwaited, Check::KeysRefused)
+            }
+            Self::WaitedKeysRefusedCreatesAccount => {
+                (Slip::CreatesAccount, Came::Waited, Check::KeysRefused)
+            }
+            Self::WaitedTakeoverKeysRefusedCreatesAccount => (
+                Slip::CreatesAccount,
+                Came::WaitedTakeover,
+                Check::KeysRefused,
+            ),
+            Self::LateTakeoverKeysRefusedCreatesAccount => {
+                (Slip::CreatesAccount, Came::LateTakeover, Check::KeysRefused)
+            }
+            Self::UnwaitedKeysRefusedKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Check::KeysRefused)
+            }
+            Self::WaitedKeysRefusedKeepsTurn => (Slip::KeepsTurn, Came::Waited, Check::KeysRefused),
+            Self::WaitedTakeoverKeysRefusedKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Check::KeysRefused)
+            }
+            Self::LateTakeoverKeysRefusedKeepsTurn => {
+                (Slip::KeepsTurn, Came::LateTakeover, Check::KeysRefused)
+            }
+            Self::UnwaitedKeysRefusedWakesNone => {
+                (Slip::WakesNone, Came::Unwaited, Check::KeysRefused)
+            }
+            Self::WaitedKeysRefusedWakesNone => (Slip::WakesNone, Came::Waited, Check::KeysRefused),
+            Self::WaitedTakeoverKeysRefusedWakesNone => {
+                (Slip::WakesNone, Came::WaitedTakeover, Check::KeysRefused)
+            }
+            Self::LateTakeoverKeysRefusedWakesNone => {
+                (Slip::WakesNone, Came::LateTakeover, Check::KeysRefused)
+            }
+            Self::UnwaitedKeysRefusedBans => (Slip::Bans, Came::Unwaited, Check::KeysRefused),
+            Self::WaitedKeysRefusedBans => (Slip::Bans, Came::Waited, Check::KeysRefused),
+            Self::WaitedTakeoverKeysRefusedBans => {
+                (Slip::Bans, Came::WaitedTakeover, Check::KeysRefused)
+            }
+            Self::LateTakeoverKeysRefusedBans => {
+                (Slip::Bans, Came::LateTakeover, Check::KeysRefused)
+            }
+            Self::UnwaitedKeysRefusedNoFloor => (Slip::NoFloor, Came::Unwaited, Check::KeysRefused),
+            Self::WaitedKeysRefusedNoFloor => (Slip::NoFloor, Came::Waited, Check::KeysRefused),
+            Self::UnwaitedSpentTotalBoundKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Check::SpentTotalBound)
+            }
+            Self::WaitedSpentTotalBoundKeepsTurn => {
+                (Slip::KeepsTurn, Came::Waited, Check::SpentTotalBound)
+            }
+            Self::WaitedTakeoverSpentTotalBoundKeepsTurn => (
+                Slip::KeepsTurn,
+                Came::WaitedTakeover,
+                Check::SpentTotalBound,
+            ),
+            Self::LateTakeoverSpentTotalBoundKeepsTurn => {
+                (Slip::KeepsTurn, Came::LateTakeover, Check::SpentTotalBound)
+            }
+            Self::UnwaitedSpentTotalBoundWakesNone => {
+                (Slip::WakesNone, Came::Unwaited, Check::SpentTotalBound)
+            }
+            Self::WaitedSpentTotalBoundWakesNone => {
+                (Slip::WakesNone, Came::Waited, Check::SpentTotalBound)
+            }
+            Self::WaitedTakeoverSpentTotalBoundWakesNone => (
+                Slip::WakesNone,
+                Came::WaitedTakeover,
+                Check::SpentTotalBound,
+            ),
+            Self::LateTakeoverSpentTotalBoundWakesNone => {
+                (Slip::WakesNone, Came::LateTakeover, Check::SpentTotalBound)
+            }
+            Self::UnwaitedSpentTotalBoundBans => {
+                (Slip::Bans, Came::Unwaited, Check::SpentTotalBound)
+            }
+            Self::WaitedSpentTotalBoundBans => (Slip::Bans, Came::Waited, Check::SpentTotalBound),
+            Self::WaitedTakeoverSpentTotalBoundBans => {
+                (Slip::Bans, Came::WaitedTakeover, Check::SpentTotalBound)
+            }
+            Self::LateTakeoverSpentTotalBoundBans => {
+                (Slip::Bans, Came::LateTakeover, Check::SpentTotalBound)
+            }
+            Self::UnwaitedSpentTotalBoundNoFloor => {
+                (Slip::NoFloor, Came::Unwaited, Check::SpentTotalBound)
+            }
+            Self::WaitedSpentTotalBoundNoFloor => {
+                (Slip::NoFloor, Came::Waited, Check::SpentTotalBound)
+            }
+            Self::UnwaitedBannedRenewsBan => (Slip::Bans, Came::Unwaited, Check::Banned),
+            Self::WaitedBannedRenewsBan => (Slip::Bans, Came::Waited, Check::Banned),
+            Self::WaitedTakeoverBannedRenewsBan => {
+                (Slip::Bans, Came::WaitedTakeover, Check::Banned)
+            }
+            Self::LateTakeoverBannedRenewsBan => (Slip::Bans, Came::LateTakeover, Check::Banned),
+            _ => return None,
+        })
+    }
+
+    /// The drops a defect of the matrix of payments mishandles: how, on which path, where.
+    fn drop_slip(self) -> Option<(Slip, Came, Stage)> {
+        Some(match self {
+            Self::UnwaitedDropAwaitingListingCreatesAccount => {
+                (Slip::CreatesAccount, Came::Unwaited, Stage::Listing)
+            }
+            Self::WaitedDropAwaitingListingCreatesAccount => {
+                (Slip::CreatesAccount, Came::Waited, Stage::Listing)
+            }
+            Self::WaitedTakeoverDropAwaitingKeysCreatesAccount => {
+                (Slip::CreatesAccount, Came::WaitedTakeover, Stage::Keys)
+            }
+            Self::WaitedTakeoverDropInReadCreatesAccount => {
+                (Slip::CreatesAccount, Came::WaitedTakeover, Stage::Read)
+            }
+            Self::LateTakeoverDropAwaitingListingCreatesAccount => {
+                (Slip::CreatesAccount, Came::LateTakeover, Stage::Listing)
+            }
+            Self::UnwaitedDropAwaitingListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Stage::Listing)
+            }
+            Self::WaitedDropAwaitingListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::Waited, Stage::Listing)
+            }
+            Self::WaitedTakeoverDropAwaitingKeysKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Stage::Keys)
+            }
+            Self::WaitedTakeoverDropInReadKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Stage::Read)
+            }
+            Self::LateTakeoverDropAwaitingListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::LateTakeover, Stage::Listing)
+            }
+            Self::UnwaitedDropAwaitingListingWakesNone => {
+                (Slip::WakesNone, Came::Unwaited, Stage::Listing)
+            }
+            Self::WaitedDropAwaitingListingWakesNone => {
+                (Slip::WakesNone, Came::Waited, Stage::Listing)
+            }
+            Self::WaitedTakeoverDropAwaitingKeysWakesNone => {
+                (Slip::WakesNone, Came::WaitedTakeover, Stage::Keys)
+            }
+            Self::WaitedTakeoverDropInReadWakesNone => {
+                (Slip::WakesNone, Came::WaitedTakeover, Stage::Read)
+            }
+            Self::LateTakeoverDropAwaitingListingWakesNone => {
+                (Slip::WakesNone, Came::LateTakeover, Stage::Listing)
+            }
+            Self::LateTakeoverDropInReadWakesNone => {
+                (Slip::WakesNone, Came::LateTakeover, Stage::Read)
+            }
+            Self::UnwaitedDropAwaitingListingNoFloor => {
+                (Slip::NoFloor, Came::Unwaited, Stage::Listing)
+            }
+            Self::WaitedDropAwaitingListingNoFloor => (Slip::NoFloor, Came::Waited, Stage::Listing),
+            Self::UnwaitedDropAwaitingKeysetListingCreatesAccount => {
+                (Slip::CreatesAccount, Came::Unwaited, Stage::KeysetListing)
+            }
+            Self::WaitedDropAwaitingKeysetListingCreatesAccount => {
+                (Slip::CreatesAccount, Came::Waited, Stage::KeysetListing)
+            }
+            Self::WaitedTakeoverDropAwaitingKeysetListingCreatesAccount => (
+                Slip::CreatesAccount,
+                Came::WaitedTakeover,
+                Stage::KeysetListing,
+            ),
+            Self::LateTakeoverDropAwaitingKeysetListingCreatesAccount => (
+                Slip::CreatesAccount,
+                Came::LateTakeover,
+                Stage::KeysetListing,
+            ),
+            Self::UnwaitedDropAwaitingKeysetListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Stage::KeysetListing)
+            }
+            Self::WaitedDropAwaitingKeysetListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::Waited, Stage::KeysetListing)
+            }
+            Self::WaitedTakeoverDropAwaitingKeysetListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::WaitedTakeover, Stage::KeysetListing)
+            }
+            Self::LateTakeoverDropAwaitingKeysetListingKeepsTurn => {
+                (Slip::KeepsTurn, Came::LateTakeover, Stage::KeysetListing)
+            }
+            Self::UnwaitedDropAwaitingKeysetListingWakesNone => {
+                (Slip::WakesNone, Came::Unwaited, Stage::KeysetListing)
+            }
+            Self::WaitedDropAwaitingKeysetListingWakesNone => {
+                (Slip::WakesNone, Came::Waited, Stage::KeysetListing)
+            }
+            Self::WaitedTakeoverDropAwaitingKeysetListingWakesNone => {
+                (Slip::WakesNone, Came::WaitedTakeover, Stage::KeysetListing)
+            }
+            Self::LateTakeoverDropAwaitingKeysetListingWakesNone => {
+                (Slip::WakesNone, Came::LateTakeover, Stage::KeysetListing)
+            }
+            Self::UnwaitedDropAwaitingKeysetListingNoFloor => {
+                (Slip::NoFloor, Came::Unwaited, Stage::KeysetListing)
+            }
+            Self::WaitedDropAwaitingKeysetListingNoFloor => {
+                (Slip::NoFloor, Came::Waited, Stage::KeysetListing)
+            }
+            Self::UnwaitedDropAwaitingKeysWakesOne => (Slip::WakesOne, Came::Unwaited, Stage::Keys),
+            Self::WaitedDropAwaitingKeysWakesOne => (Slip::WakesOne, Came::Waited, Stage::Keys),
+            Self::WaitedTakeoverDropAwaitingKeysWakesOne => {
+                (Slip::WakesOne, Came::WaitedTakeover, Stage::Keys)
+            }
+            Self::LateTakeoverDropAwaitingKeysWakesOne => {
+                (Slip::WakesOne, Came::LateTakeover, Stage::Keys)
+            }
+            Self::UnwaitedDropAwaitingListingWakesOne => {
+                (Slip::WakesOne, Came::Unwaited, Stage::Listing)
+            }
+            Self::WaitedDropAwaitingListingWakesOne => {
+                (Slip::WakesOne, Came::Waited, Stage::Listing)
+            }
+            Self::LateTakeoverDropAwaitingListingWakesOne => {
+                (Slip::WakesOne, Came::LateTakeover, Stage::Listing)
+            }
+            Self::UnwaitedDropAwaitingKeysetListingWakesOne => {
+                (Slip::WakesOne, Came::Unwaited, Stage::KeysetListing)
+            }
+            Self::WaitedDropAwaitingKeysetListingWakesOne => {
+                (Slip::WakesOne, Came::Waited, Stage::KeysetListing)
+            }
+            Self::WaitedTakeoverDropAwaitingKeysetListingWakesOne => {
+                (Slip::WakesOne, Came::WaitedTakeover, Stage::KeysetListing)
+            }
+            Self::LateTakeoverDropAwaitingKeysetListingWakesOne => {
+                (Slip::WakesOne, Came::LateTakeover, Stage::KeysetListing)
+            }
+            Self::UnwaitedDropInReadWakesOne => (Slip::WakesOne, Came::Unwaited, Stage::Read),
+            Self::WaitedDropInReadWakesOne => (Slip::WakesOne, Came::Waited, Stage::Read),
+            Self::WaitedTakeoverDropInReadWakesOne => {
+                (Slip::WakesOne, Came::WaitedTakeover, Stage::Read)
+            }
+            Self::LateTakeoverDropInReadWakesOne => {
+                (Slip::WakesOne, Came::LateTakeover, Stage::Read)
+            }
+            Self::UnwaitedDropAwaitingNextSecondWakesOne => {
+                (Slip::WakesOne, Came::Unwaited, Stage::NextSecond)
+            }
+            Self::WaitedDropAwaitingNextSecondWakesOne => {
+                (Slip::WakesOne, Came::Waited, Stage::NextSecond)
+            }
+            Self::UnwaitedDropAwaitingOthersReadCreatesAccount => {
+                (Slip::CreatesAccount, Came::Unwaited, Stage::OthersRead)
+            }
+            Self::WaitedDropAwaitingOthersReadCreatesAccount => {
+                (Slip::CreatesAccount, Came::Waited, Stage::OthersRead)
+            }
+            Self::UnwaitedDropAwaitingOthersReadKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Stage::OthersRead)
+            }
+            Self::WaitedDropAwaitingOthersReadKeepsTurn => {
+                (Slip::KeepsTurn, Came::Waited, Stage::OthersRead)
+            }
+            Self::UnwaitedDropAwaitingOthersReadWakesNone => {
+                (Slip::WakesNone, Came::Unwaited, Stage::OthersRead)
+            }
+            Self::WaitedDropAwaitingOthersReadWakesNone => {
+                (Slip::WakesNone, Came::Waited, Stage::OthersRead)
+            }
+            Self::UnwaitedDropAwaitingOthersReadWakesOne => {
+                (Slip::WakesOne, Came::Unwaited, Stage::OthersRead)
+            }
+            Self::WaitedDropAwaitingOthersReadWakesOne => {
+                (Slip::WakesOne, Came::Waited, Stage::OthersRead)
+            }
+            Self::UnwaitedDropAwaitingOthersReadNoFloor => {
+                (Slip::NoFloor, Came::Unwaited, Stage::OthersRead)
+            }
+            Self::WaitedDropAwaitingOthersReadNoFloor => {
+                (Slip::NoFloor, Came::Waited, Stage::OthersRead)
+            }
+            Self::UnwaitedDropAwaitingNextSecondCreatesAccount => {
+                (Slip::CreatesAccount, Came::Unwaited, Stage::NextSecond)
+            }
+            Self::WaitedDropAwaitingNextSecondCreatesAccount => {
+                (Slip::CreatesAccount, Came::Waited, Stage::NextSecond)
+            }
+            Self::UnwaitedDropAwaitingNextSecondKeepsTurn => {
+                (Slip::KeepsTurn, Came::Unwaited, Stage::NextSecond)
+            }
+            Self::WaitedDropAwaitingNextSecondKeepsTurn => {
+                (Slip::KeepsTurn, Came::Waited, Stage::NextSecond)
+            }
+            Self::UnwaitedDropAwaitingNextSecondWakesNone => {
+                (Slip::WakesNone, Came::Unwaited, Stage::NextSecond)
+            }
+            Self::WaitedDropAwaitingNextSecondWakesNone => {
+                (Slip::WakesNone, Came::Waited, Stage::NextSecond)
+            }
+            Self::UnwaitedDropAwaitingNextSecondNoFloor => {
+                (Slip::NoFloor, Came::Unwaited, Stage::NextSecond)
+            }
+            Self::WaitedDropAwaitingNextSecondNoFloor => {
+                (Slip::NoFloor, Came::Waited, Stage::NextSecond)
+            }
+            _ => return None,
+        })
+    }
+
+    /// Where a defect of the matrix of payments reads, on which path.
+    fn read_at(self) -> Option<(ReadAt, Came)> {
+        Some(match self {
+            Self::LateTakeoverReadsBeforeBan => (ReadAt::Ban, Came::LateTakeover),
+            Self::LateTakeoverReadsBeforeStale => (ReadAt::Stale, Came::LateTakeover),
+            Self::LateTakeoverReadsBeforeStructure => (ReadAt::Structure, Came::LateTakeover),
+            Self::LateTakeoverReadsBeforeMint => (ReadAt::Mint, Came::LateTakeover),
+            Self::LateTakeoverReadsBeforeKeyFetch => (ReadAt::Keys, Came::LateTakeover),
+            Self::WaitedReadsBeforeDleq => (ReadAt::Dleq, Came::Waited),
+            Self::WaitedReadsBeforeAmount => (ReadAt::Amount, Came::Waited),
+            Self::WaitedKeysetAfterRead => (ReadAt::KeysetAfter, Came::Waited),
+            Self::LateTakeoverReadsBeforeDleq => (ReadAt::Dleq, Came::LateTakeover),
+            Self::LateTakeoverReadsBeforeAmount => (ReadAt::Amount, Came::LateTakeover),
+            Self::WaitedTakeoverKeysetAfterRead => (ReadAt::KeysetAfter, Came::WaitedTakeover),
+            Self::LateTakeoverKeysetAfterRead => (ReadAt::KeysetAfter, Came::LateTakeover),
+            _ => return None,
+        })
+    }
+
+    /// The check a defect of the matrix of payments runs early, on which path.
+    fn early(self) -> Option<(Early, Came)> {
+        Some(match self {
+            Self::WaitedStaleBeforeBan => (Early::StaleBeforeBan, Came::Waited),
+            Self::WaitedTakeoverStaleBeforeBan => (Early::StaleBeforeBan, Came::WaitedTakeover),
+            Self::LateTakeoverStaleBeforeBan => (Early::StaleBeforeBan, Came::LateTakeover),
+            Self::WaitedStructureBeforeBan => (Early::StructureBeforeBan, Came::Waited),
+            Self::LateTakeoverStructureBeforeBan => (Early::StructureBeforeBan, Came::LateTakeover),
+            Self::WaitedTakeoverStructureBeforeBan => {
+                (Early::StructureBeforeBan, Came::WaitedTakeover)
+            }
+            Self::UnwaitedStructureBeforeStale => (Early::StructureBeforeStale, Came::Unwaited),
+            Self::WaitedStructureBeforeStale => (Early::StructureBeforeStale, Came::Waited),
+            Self::WaitedKeysetBeforeAmount => (Early::KeysetBeforeAmount, Came::Waited),
+            Self::WaitedTokenMintDialled => (Early::TokenMintDialled, Came::Waited),
+            Self::WaitedTakeoverStructureBeforeStale => {
+                (Early::StructureBeforeStale, Came::WaitedTakeover)
+            }
+            Self::WaitedTakeoverAmountBeforeMint => (Early::AmountBeforeMint, Came::WaitedTakeover),
+            Self::WaitedTakeoverAmountBeforeKeys => (Early::AmountBeforeKeys, Came::WaitedTakeover),
+            Self::WaitedTakeoverKeysetBeforeAmount => {
+                (Early::KeysetBeforeAmount, Came::WaitedTakeover)
+            }
+            Self::WaitedTakeoverTokenMintDialled => (Early::TokenMintDialled, Came::WaitedTakeover),
+            Self::LateTakeoverStructureBeforeStale => {
+                (Early::StructureBeforeStale, Came::LateTakeover)
+            }
+            Self::LateTakeoverKeysetBeforeAmount => (Early::KeysetBeforeAmount, Came::LateTakeover),
+            Self::LateTakeoverTokenMintDialled => (Early::TokenMintDialled, Came::LateTakeover),
+            Self::UnwaitedMintBeforeStructure => (Early::MintBeforeStructure, Came::Unwaited),
+            Self::WaitedMintBeforeStructure => (Early::MintBeforeStructure, Came::Waited),
+            Self::WaitedTakeoverMintBeforeStructure => {
+                (Early::MintBeforeStructure, Came::WaitedTakeover)
+            }
+            Self::LateTakeoverMintBeforeStructure => {
+                (Early::MintBeforeStructure, Came::LateTakeover)
+            }
+            Self::UnwaitedMintBeforeStale => (Early::MintBeforeStale, Came::Unwaited),
+            Self::WaitedMintBeforeStale => (Early::MintBeforeStale, Came::Waited),
+            Self::WaitedTakeoverMintBeforeStale => (Early::MintBeforeStale, Came::WaitedTakeover),
+            Self::LateTakeoverMintBeforeStale => (Early::MintBeforeStale, Came::LateTakeover),
+            _ => return None,
+        })
+    }
+
+    /// The keyset listing a defect judges the keyset rule by, on which path.
+    fn judged(self) -> Option<(Judged, Came)> {
+        Some(match self {
+            Self::WaitedTakeoverKeysetListingStale => (Judged::Stale, Came::WaitedTakeover),
+            Self::WaitedTakeoverKeysetListingFromArrival => {
+                (Judged::FromArrival, Came::WaitedTakeover)
+            }
+            Self::UnwaitedKeysetListingOfJudgingSecond => (Judged::OfJudgingSecond, Came::Unwaited),
+            Self::WaitedKeysetListingOfJudgingSecond => (Judged::OfJudgingSecond, Came::Waited),
+            Self::WaitedTakeoverKeysetListingOfJudgingSecond => {
+                (Judged::OfJudgingSecond, Came::WaitedTakeover)
+            }
+            Self::LateTakeoverKeysetListingOfJudgingSecond => {
+                (Judged::OfJudgingSecond, Came::LateTakeover)
+            }
+            Self::UnwaitedStaleHeldListingAwaited => (Judged::HeldStale, Came::Unwaited),
+            Self::WaitedStaleHeldListingAwaited => (Judged::HeldStale, Came::Waited),
+            Self::WaitedTakeoverStaleHeldListingAwaited => {
+                (Judged::HeldStale, Came::WaitedTakeover)
+            }
+            Self::LateTakeoverStaleHeldListingAwaited => (Judged::HeldStale, Came::LateTakeover),
+            _ => return None,
+        })
+    }
+}
+
+/// A defect planted in a mock viewer, to prove the adversary suite catches it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerFlaw {
+    PaysAhead,
+    IgnoresBadAck,
+    PaysAtTheWindow,
+    PaysAtFullWindow,
+    /// Pays its own price cap instead of the quoted price.
+    PaysAtCap,
+    AcceptsSecondQuote,
+    AcceptsUnsolicitedAck,
+    IgnoresSpentTotal,
+    AckAcceptsInflated,
+    NoReclaim,
+    ReclaimsFirstProofOnly,
+    NoReclaimUnlessSpent,
+    /// Pays again after `mint-unavailable` whatever the reclaim found.
+    IgnoresReclaimOutcome,
+    /// A retried reclaim ignores proofs found spent.
+    RetryIgnoresSpent,
+    LastPayIgnoresStop,
+    /// Pays at session end while a reclaim is incomplete.
+    LastPayIgnoresReclaim,
+    PaysForRefused,
+    /// Un-owes a refused request only while it is unpaid, so a paid one is paid twice.
+    RefusedNoCredit,
+    /// Un-owes two chunks per refusal.
+    RefusedTwice,
+    /// Never pays ahead after a refusal, so a full cap locks it out.
+    NoPayAhead,
+    /// Pays ahead half a window per refusal, whatever credit it holds.
+    PayAheadUnbounded,
+    /// Keeps paying ahead after a single refusal.
+    PayAheadSticky,
+    /// Pays ahead while a reclaim is incomplete.
+    PayAheadIgnoresReclaim,
+    /// Pays ahead over a payment in flight.
+    PayAheadIgnoresPending,
+    TrustsQuote,
+    /// Adopts a quote below its ledger.
+    ResyncsDown,
+    /// Settles an unsettled payment when `spent_total` alone matches.
+    SettleOnSpentOnly,
+    /// Settles an unsettled payment when `accepted_upto` alone matches.
+    SettleOnUptoOnly,
+    /// Settles a payment awaiting a quote when `accepted_upto` alone matches.
+    SettleLostOnUpto,
+    /// Settles a payment awaiting a quote when `spent_total` alone matches.
+    SettleLostOnSpentOnly,
+    /// Settles a payment awaiting a quote on another video's quote.
+    SettleLostAnyLedger,
+    /// Reports a payment awaiting a quote on every ledger of the standing.
+    AwaitingQuoteAnyLedger,
+    /// Files a lost payment a sibling's retried reclaim found under the sibling.
+    RetryAsSelf,
+    /// Reclaims a closed session's unsettled payment only from its own ledger.
+    CatchUpOwnOnly,
+    /// Frees the standing's in-flight slot when a session ends.
+    EndClearsInFlight,
+    /// Pays the last payment over another video's payment in flight.
+    LastPayIgnoresOtherInFlight,
+    /// Pays the last payment over its own payment in flight.
+    LastPayIgnoresOwnPending,
+    /// Takes any quoted `window`, however large.
+    NoWindowCeiling,
+    /// Keeps paying after any number of `mint-unavailable` answers in a row.
+    NoUnavailableBudget,
+    /// Treats a refused `hello` as a refused payment, and reclaims at once.
+    HelloRefusalReclaims,
+    /// Lets `timeout` act on a payment an earlier session left unsettled.
+    TimeoutTouchesUnsettled,
+    /// Ignores a `rej` that answers no payment.
+    UnsolicitedRejIgnored,
+    /// Stops for good when a reclaim finds proofs spent, whatever a later quote shows.
+    LostIsFinal,
+    /// Resumes paying on a quote that does not show the payment it awaits.
+    ForgivesLost,
+    /// Keeps its stop, and a payment awaiting a quote, to one video.
+    StopPerVideo,
+    /// Lets an incomplete reclaim hold back only its own video.
+    ReclaimPerVideo,
+    /// Keeps one payment in flight per video, not per seeder.
+    InFlightPerVideo,
+    /// Checks its price cap on the first quote only.
+    SkipsCapOnResume,
+    KeepsPayingAfterTimeout,
+    /// Reclaims an unanswered payment before 180 s.
+    TimeoutEarly,
+    /// Reclaims an unanswered payment a second before the wait is over.
+    TimeoutAt179,
+    /// Checks its window ceiling on the first quote only.
+    SkipsCeilingOnResume,
+    /// Frees the standing's slot when a `hello` is refused.
+    HelloRefusedFreesSlot,
+    /// Settles a closed session's payment on another video's quote.
+    SettleUnsettledAnyLedger,
+    /// Resets the `mint-unavailable` count on a refusal.
+    RefusalResetsUnavailable,
+    /// Pays ahead after a refusal whatever the `mint-unavailable` count.
+    PayAheadSkipsBudget,
+    /// Files a closed session's payment found spent under the ledger that caught up.
+    CatchUpFilesUnderSelf,
+    /// Stops on any refused `hello` but `bad-session`.
+    HelloRefusalStops,
+    /// Keeps the `mint-unavailable` count across an ack.
+    AckKeepsUnavailable,
+    /// Counts `mint-unavailable` answers per video, not per seeder.
+    UnavailablePerLedger,
+    /// Pays the last payment whatever the `mint-unavailable` count.
+    LastPayIgnoresBudget,
+    /// Ignores a `hello` refused `banned`.
+    BannedHelloIgnored,
+    /// On a `rej` with no payment in flight, reclaims a closed session's payment at once
+    /// and carries on.
+    UnsolicitedRejReclaimsUnsettled,
+    /// Finishes no reclaim once stopped.
+    StoppedSkipsReclaim,
+    /// Once stopped, finishes incomplete reclaims but leaves closed sessions' payments
+    /// unsettled.
+    StoppedSkipsUnsettled,
+    /// Resets the `mint-unavailable` count when a `hello` is refused.
+    HelloRefusedResetsBudget,
+    /// Stops on a `hello` refused with a code it does not know.
+    UnknownHelloRefusalStops,
+    /// Stops only the video whose `hello` was refused `banned`.
+    BannedHelloStopsLedger,
+    /// Files a closed session's payment whose catch-up reclaim is blocked under the
+    /// ledger that caught up.
+    CatchUpBlockedAsSelf,
+    /// Ignores a `rej` once the standing has stopped.
+    RejSkipsWhenStopped,
+    /// Drops a payment refused once the standing has stopped, without reclaiming it.
+    RejNoReclaimWhenStopped,
+    /// Ignores `timeout` once the standing has stopped.
+    TimeoutSkipsWhenStopped,
+    /// Drops a payment timed out once the standing has stopped, without reclaiming it.
+    TimeoutNoReclaimWhenStopped,
+    /// Resets the `mint-unavailable` count on any quote, refused or not.
+    QuoteResetsFirst,
+    /// Resets the `mint-unavailable` count when any session of the standing ends.
+    EndResetsBudget,
+    /// Resets the `mint-unavailable` count when a retried reclaim completes.
+    RetryResetsBudget,
+    /// Settles a closed session's payment on an ack with no payment in flight.
+    AckSettlesUnsettled,
+    /// Takes proofs its own unanswered reclaim took back for spent, without a restore.
+    ReclaimNoRestore,
+    /// Counts a payment as back when a restore finds any of its proofs, not all.
+    ReclaimRestoreAny,
+    /// Settles no payment whose reclaim is incomplete from a quote, and stops instead.
+    QuoteIgnoresReclaiming,
+    /// Pays ahead half a window rounded up, beyond half on an odd window.
+    PayAheadRoundsUp,
+    /// Settles a payment whose reclaim is incomplete when `spent_total` alone matches.
+    SettleReclaimingOnSpentOnly,
+    /// Settles a payment whose reclaim is incomplete when `accepted_upto` alone matches.
+    SettleReclaimingOnUpto,
+    /// Settles a payment whose reclaim is incomplete on another video's quote.
+    SettleReclaimingAnyLedger,
+    /// Settles a payment whose reclaim is incomplete, but keeps retrying the reclaim.
+    ReclaimSettleKeepsEntry,
+    /// Takes an unanswered restore as every proof back.
+    ReclaimRestoreDownIsBack,
+    /// Takes an unanswered restore as proofs spent.
+    ReclaimRestoreDownIsSpent,
+    /// Keeps retrying a reclaim refused because the proofs' keyset expired, though a NUT-07
+    /// check shows them unspent: it never completes.
+    ExpiredReclaimRetried,
+    /// Takes every reclaim refused 12003 with its proofs unspent as lost to the expiry,
+    /// though the 12003 may be the reclaim's outputs' keyset, and the proofs still good.
+    ExpiredByCodeAlone,
+    /// Takes a 12003 whose reclaim outputs' keyset has expired as incomplete, before
+    /// looking at the proofs' own: proofs of that very keyset are never written off.
+    OutputsExpiryFirst,
+    /// Writes off every proof of a token once any is listed expired (the twentieth's).
+    ExpiredTokenWhole,
+    /// Writes off a token's proofs only when every one is listed expired: a mixed token
+    /// never completes.
+    ExpiredNeedsEveryProof,
+    /// After a 12003, calls the payment found spent unless a restore shows every proof its
+    /// own: a mixed token whose good proofs its lost reclaim took back is never settled.
+    ExpiredRestoreNeedsEveryProof,
+    /// Writes a mixed token off whole while the mint's active keyset has expired too,
+    /// instead of holding the reclaim of its good proofs incomplete.
+    MixedActiveExpiredWritesOff,
+    /// Pays with proofs the mint lists under an expired keyset (a wallet selecting an
+    /// inactive keyset's proofs first, with no expiry filter): again, after a reclaim lost
+    /// them to the expiry, and fresh ones while the mint's active keyset has expired.
+    PaysWithExpiredProofs,
+    /// After a 12003, takes every spent input for its own once a restore shows any one of
+    /// them its own: a seeder that kept one proof gets paid again.
+    ExpiredSpentAnyOwn,
+    /// Takes a 12003 with an input pending as every input unspent: the payment is written off
+    /// to the expiry, the reserved request then signs, and the next payment is stale.
+    ExpiredPendingIsLost,
+    /// After a 12003 with a spent input not its own, awaits a quote without taking back the
+    /// inputs left unspent (the twenty-second rework's): the seeder can take them later.
+    ExpiredForeignKeepsRest,
+    /// Takes a 12003 whose NUT-07 check goes unanswered as every input unspent: the payment
+    /// is written off to the expiry.
+    ExpiredCheckDownIsUnspent,
+    /// Takes a quote whose `served` exceeds the chunks it requested by one.
+    ServedOffByOne,
+    /// Settles a payment on a quote whose `spent_total` covers the payment, whatever the
+    /// ledger's earlier spend: an inflated total, or one that drops the ledger, settles it.
+    SettleIgnoresLedgerSpent,
+    /// After a 12003 with a spent input not its own, awaits a quote when the inputs left are
+    /// pending, instead of holding the reclaim incomplete: they are never taken back.
+    ForeignPendingAwaits,
+    /// After a 12003 with a spent input not its own, when the inputs left cannot be
+    /// taken back yet (the mint's active keyset expired too, or they are pending), awaits a
+    /// quote at once instead of holding the reclaim incomplete: they are never taken back.
+    ExpiredForeignBlockedAwaits,
+    /// Pays the last payment of a session with proofs the mint lists expired.
+    LastPayWithExpiredProofs,
+    /// Checks a payment's proofs against the mint's listing only while its active keyset has
+    /// expired: it pays with proofs it holds of an expired older keyset, which a wallet
+    /// spends first.
+    ListingOnlyWhileActiveExpired,
+    /// Accepts an ack whose `accepted_upto` is short of the payment's `upto_chunk` but above
+    /// its ledger: it pays the chunks between again.
+    AckAcceptsShort,
+    /// Accepts an ack short of the payment in both fields at its price: `accepted_upto`
+    /// above its ledger and short of `upto_chunk`, `spent_total` short by the chunks
+    /// between. It takes the ack for its ledger and pays those chunks again.
+    AckAcceptsPartial,
+    /// Accepts an ack whose `accepted_upto` matches the payment but whose `spent_total` is
+    /// short of its ledger's plus the payment's, though above its ledger.
+    AckAcceptsShortSpent,
+    /// Checks a session's last payment against the mint's listing only while its active
+    /// keyset has expired: at the end, it pays with proofs it holds of an expired older
+    /// keyset, which a wallet spends first.
+    LastPayListingOnlyWhileActiveExpired,
+    /// Gives no sign that its tries are used up.
+    BudgetNotSignalled,
+    /// Reclaims a payment left unsettled by a dropped connection at once.
+    CatchUpIgnoresWait,
+    /// Reclaims a payment in flight the moment its connection closes.
+    EndReclaimsNow,
+    /// Forgets a payment in flight when its connection closes.
+    EndForgetsPending,
+    ForgetsLedger,
+    /// Stops paying after `mint-unavailable`.
+    StopsOnOutage,
+    /// Takes a reclaim refused as pending (CDK 11002) for proofs found spent.
+    ReclaimPendingIsSpent,
+    /// Accepts an ack whose `accepted_upto` is below its ledger's, `spent_total` its
+    /// ledger's plus the payment's: it takes the ack for its ledger, rewinding it, and pays
+    /// those chunks again.
+    AckResyncsDown,
+    /// Accepts an ack whose `accepted_upto` matches the payment but whose `spent_total` is
+    /// below its ledger's.
+    AckAcceptsSpentBelowLedger,
+    /// With no keyset expired, takes a reclaim that finds a proof spent beside inputs
+    /// pending for found spent: it awaits a quote, and never takes those inputs back once
+    /// the mint rolls their request back.
+    PendingBesideSpentAwaits,
+    /// On a selection holding a proof the mint lists expired, drops every proof it holds of
+    /// an older keyset, good ones included: it loses proofs it could pay with.
+    DropsHeldOlderOnAnyExpired,
+    /// Checks a quote's mints on its first session only: a resumed session's quote naming no
+    /// mint it holds tokens from is taken.
+    MintCheckFirstOnly,
+    /// Accepts an ack equal to its ledger in both fields, as if the payment had not been
+    /// taken: it counts the payment spent and pays its chunks again.
+    AckAcceptsLedger,
+    /// Accepts an ack below its ledger in both fields and takes it for its ledger (resyncs
+    /// down, as it never does to a quote): it pays those chunks again.
+    AckResyncsDownBoth,
+    /// Takes an honest ack of the payment in flight as leave to pay again: the ack clears
+    /// the standing's stop.
+    AckClearsStop,
+    /// Pays ahead after a refusal though it has stopped.
+    PayAheadIgnoresStop,
+    /// Says it awaits a quote while stopped (its tries used, or a payment awaiting one),
+    /// though no new session makes it pay.
+    AwaitingQuoteWhenStopped,
+    /// Takes a quote only if every mint it names is one it holds: it refuses a quote naming
+    /// its mint among others.
+    QuoteNeedsEveryMint,
+    /// Takes a quote naming a lookalike of its mint, one URL a prefix of the other.
+    QuoteMintByPrefix,
+    /// Compares a quote's mints with its own as parsed URLs, not byte for byte: it takes a
+    /// quote naming its mint in another spelling (upper case, a trailing `/`, the default
+    /// port).
+    QuoteMintNormalised,
+    /// Stops on a quote over its price cap, where it only refuses it.
+    CapRefusalStops,
+    /// Takes a quote equal to its ledger as cancelling its incomplete reclaim: it pays
+    /// again, and the proofs it never took back are left for the seeder to claim.
+    QuoteAtLedgerDropsReclaim,
+    /// Takes a new session's honest quote as leave to pay again: the quote clears the
+    /// standing's stop, as it restores the tries.
+    QuoteClearsStop,
+    /// Says it awaits a quote for a payment found spent after its standing has stopped,
+    /// though no new session makes it pay.
+    AwaitingLostWhenStopped,
+    /// Accepts an ack whose `accepted_upto` matches the payment but whose `spent_total` is
+    /// its ledger's, as if the payment were free.
+    AckSpentAtLedger,
+    /// Takes the session's end as the end of its stop: the next session pays again.
+    EndClearsStop,
+    /// Takes a `hello` refused with a code other than `banned` as a fresh start with the
+    /// seeder: it clears the standing's stop.
+    HelloRefusedClearsStop,
+    /// Takes a request refused after the stop as leave to pay ahead: the refusal clears the
+    /// standing's stop.
+    RefusalClearsStop,
+    /// Takes `mint-unavailable`, every proof taken back, as leave to pay again even once
+    /// stopped: it clears the standing's stop.
+    UnavailableClearsStop,
+    /// Gives a ledger made after the stop, for another video, a standing of its own: not
+    /// stopped.
+    SiblingAfterStopUnstopped,
+    /// Takes a `hello` refused with a code other than `banned` as settling this ledger's
+    /// payment found spent: it pays again, with no quote showing that payment.
+    HelloRefusedForgivesLost,
+    /// Drops this ledger's incomplete reclaims on a `hello` refused with a code other than
+    /// `banned`: it pays again, and never takes back the proofs it left out.
+    HelloRefusedDropsReclaim,
+    /// Reads a second quote on the open session before refusing it: it stops on one
+    /// dishonest about the account, where it refuses it unread.
+    SecondQuoteReadFirst,
+    /// Stops on a resumed session's quote over its price cap, where it only refuses it.
+    ResumedCapRefusalStops,
+    /// Stops on a resumed session's quote naming no mint it holds, where it only refuses it.
+    ResumedMintRefusalStops,
+    /// Stops on a resumed session's quote whose `window` is over its ceiling, where it only
+    /// refuses it.
+    ResumedCeilingRefusalStops,
+    /// Restores the standing's three tries when it makes a ledger for another video, before
+    /// any session of it quotes.
+    SiblingRestoresTries,
+    /// Refuses the seeder's honest ack of a payment ahead of what it requested, as if the
+    /// ack did not match, and stops: after a refusal it pays ahead (NFX-07 §3a), and then
+    /// stops paying the seeder that took the payment.
+    AckRefusesPayAhead,
+    /// Fails `due()` while its ledger holds credit (chunks paid for beyond those it
+    /// requested), where it answers that nothing is due or, right after a refusal, pays
+    /// ahead what that credit leaves of half the window, rounded down (NFX-07 §3a): the pair
+    /// stalls on its credit.
+    DueErrsOnCredit,
+    /// Takes a quote it refuses over its price cap as settling this ledger's payment found
+    /// spent: it pays again, with no quote showing that payment.
+    PriceRefusalForgivesLost,
+    /// Takes a quote it refuses for its `window` as settling this ledger's payment found
+    /// spent: it pays again, with no quote showing that payment.
+    WindowRefusalForgivesLost,
+    /// Takes a quote it refuses for its mints as settling this ledger's payment found spent:
+    /// it pays again, with no quote showing that payment.
+    MintRefusalForgivesLost,
+    /// Takes a second quote on the open session, which it refuses, as settling this ledger's
+    /// payment found spent: it pays again, with no quote showing that payment.
+    SecondQuoteForgivesLost,
+    /// Takes a refused request as settling this ledger's payment found spent: it pays ahead,
+    /// with no quote showing that payment.
+    RefusalForgivesLost,
+    /// Takes making a ledger for another video as settling this ledger's payment found
+    /// spent: it pays again, with no quote showing that payment.
+    SiblingForgivesLost,
+    /// Drops this ledger's incomplete reclaim on a quote it refuses over its price cap: it
+    /// pays again, and never takes back the proofs it left out.
+    PriceRefusalDropsReclaim,
+    /// Drops this ledger's incomplete reclaim on a quote it refuses for its `window`: it pays
+    /// again, and never takes back the proofs it left out.
+    WindowRefusalDropsReclaim,
+    /// Drops this ledger's incomplete reclaim on a quote it refuses for its mints: it pays
+    /// again, and never takes back the proofs it left out.
+    MintRefusalDropsReclaim,
+    /// Drops this ledger's incomplete reclaim on a second quote on the open session, which
+    /// it refuses: it pays again, and never takes back the proofs it left out.
+    SecondQuoteDropsReclaim,
+    /// Drops this ledger's incomplete reclaim when it makes a ledger for another video: it
+    /// pays again, and never takes back the proofs it left out.
+    SiblingDropsReclaim,
+    /// Frees the standing's slot, held by this ledger's payment a dropped connection left
+    /// unsettled, on a quote it refuses over its price cap: it pays over that payment before
+    /// its 180 s reclaim.
+    PriceRefusalFreesSlot,
+    /// Frees the slot this ledger's unsettled payment holds on a quote it refuses for its
+    /// `window`: it pays over that payment before its 180 s reclaim.
+    WindowRefusalFreesSlot,
+    /// Frees the slot this ledger's unsettled payment holds on a quote it refuses for its
+    /// mints: it pays over that payment before its 180 s reclaim.
+    MintRefusalFreesSlot,
+    /// Frees the slot this ledger's unsettled payment holds on a second quote on the open
+    /// session, which it refuses: it pays over that payment before its 180 s reclaim.
+    SecondQuoteFreesSlot,
+    /// Frees the slot this ledger's unsettled payment holds when a request is refused: it
+    /// pays ahead over that payment before its 180 s reclaim.
+    RefusalFreesSlot,
+    /// Frees the slot this ledger's unsettled payment holds when it makes a ledger for
+    /// another video: it pays over that payment before its 180 s reclaim.
+    SiblingFreesSlot,
+    /// Takes a quote it refuses over its price cap as leave to pay again: the refusal clears
+    /// the standing's stop.
+    PriceRefusalClearsStop,
+    /// Takes a quote it refuses for its `window` as leave to pay again: the refusal clears
+    /// the standing's stop.
+    WindowRefusalClearsStop,
+    /// Takes a quote it refuses for its mints as leave to pay again: the refusal clears the
+    /// standing's stop.
+    MintRefusalClearsStop,
+    /// Takes a second quote on the open session, which it refuses, as leave to pay again:
+    /// the refusal clears the standing's stop.
+    SecondQuoteClearsStop,
+    /// Once stopped, reclaims a payment a dropped connection left unsettled at once, without
+    /// the 180 s wait: the seeder's swap of it, still on its way, is refused `spent`.
+    StoppedIgnoresWait,
+    /// Finishes incomplete reclaims, and reclaims closed sessions' unsettled payments, only
+    /// while it holds a session's quote: a seeder that refuses its `hello`s or quotes holds
+    /// the reclaim off, and claims the proofs meanwhile.
+    CatchUpOnlyInSession,
+    /// Settles an unsettled payment on a quote whose `accepted_upto` is above the payment's,
+    /// `spent_total` exact: it takes the inflated watermark for its ledger.
+    SettleOnUptoAbove,
+    /// Settles a payment awaiting a quote on a quote whose `accepted_upto` is above the
+    /// payment's, `spent_total` exact: it takes the inflated watermark for its ledger.
+    SettleLostOnUptoAbove,
+    /// Settles a payment whose reclaim is incomplete on a quote whose `accepted_upto` is
+    /// above the payment's, `spent_total` exact: it takes the inflated watermark for its
+    /// ledger.
+    SettleReclaimingOnUptoAbove,
+    /// Takes a quote it refuses over its price cap as settling a payment the quote shows: it
+    /// takes the word of a quote it did not take.
+    PriceRefusalSettles,
+    /// Takes a quote it refuses for its `window` as settling a payment the quote shows: it
+    /// takes the word of a quote it did not take.
+    WindowRefusalSettles,
+    /// Takes a quote it refuses for its mints as settling a payment the quote shows: it takes
+    /// the word of a quote it did not take.
+    MintRefusalSettles,
+    /// Reads a second quote on the open session, which it refuses, as settling a payment the
+    /// quote shows: it takes the word of a quote it did not take.
+    SecondQuoteSettles,
+    /// Takes a timeout with no payment on the session as settling this ledger's payment
+    /// found spent: it pays again, with no quote showing that payment.
+    TimeoutForgivesLost,
+    /// Drops this ledger's incomplete reclaim on a timeout with no payment on the session: it
+    /// pays again, and never takes back the proofs it left out.
+    TimeoutDropsReclaim,
+    /// Frees the slot this ledger's unsettled payment holds on a timeout with no payment on
+    /// the session: it pays over that payment before its 180 s reclaim.
+    TimeoutFreesSlot,
+    /// Takes a timeout with no payment on the session as leave to pay again: it clears the
+    /// standing's stop.
+    TimeoutClearsStop,
+    /// Takes a refused `hello` for a refused request: its next session pays ahead.
+    HelloRefusalPaysAhead,
+    /// Takes a quote it refuses over its price cap for a refused request: its next session
+    /// pays ahead.
+    PriceRefusalPaysAhead,
+    /// Takes a quote it refuses for its `window` for a refused request: its next session
+    /// pays ahead.
+    WindowRefusalPaysAhead,
+    /// Takes a quote it refuses for its mints for a refused request: its next session pays
+    /// ahead.
+    MintRefusalPaysAhead,
+    /// Takes a second quote on the open session, which it refuses, for a refused request: it
+    /// pays ahead.
+    SecondQuotePaysAhead,
+    /// Takes the session's end for a refused request: its next session pays ahead.
+    EndPaysAhead,
+    /// Starts a ledger made for another video paying ahead, with no refusal on that video.
+    SiblingPaysAhead,
+    /// Holding no session's quote, finishes only this ledger's incomplete reclaims: another
+    /// video's wait for a session of their own, and the seeder can claim the proofs meanwhile.
+    NoSessionRetriesOwnOnly,
+    /// Holding no session's quote, reclaims only this ledger's closed sessions' payments at
+    /// 180 s: another video's stay in flight until a session of their own.
+    NoSessionReclaimsOwnOnly,
+    /// Takes a quote it refuses over its price cap as a new session's: it restores the
+    /// standing's three `mint-unavailable` tries, and another video pays again.
+    PriceRefusalRestoresTries,
+    /// Takes a quote it refuses for its `window` as a new session's: it restores the
+    /// standing's three `mint-unavailable` tries, and another video pays again.
+    WindowRefusalRestoresTries,
+    /// Takes a quote it refuses for its mints as a new session's: it restores the standing's
+    /// three `mint-unavailable` tries, and another video pays again.
+    MintRefusalRestoresTries,
+    /// Holding no session's quote, reclaims another video's payment a dropped connection
+    /// left unsettled at once, without the 180 s wait.
+    NoSessionIgnoresOthersWait,
+    /// Once stopped, reclaims its own ledger's payment a dropped connection left unsettled
+    /// at once, without the 180 s wait.
+    StoppedIgnoresOwnWait,
+    /// Once stopped, and holding no session's quote, leaves closed sessions' payments
+    /// unsettled: a watcher refused `banned` never reclaims them.
+    StoppedNoSessionSkipsUnsettled,
+    /// Holding no session's quote, takes a reclaim that finds proofs spent as every proof
+    /// back: it pays again at its next session, and a seeder that refuses its `hello`s takes
+    /// a payment each round.
+    NoSessionSpentIsBack,
+    /// Holding no session's quote, drops a reclaim the mint cannot serve yet: it pays again
+    /// at its next session, and never takes back the proofs.
+    NoSessionBlockedDropped,
+    /// Holding no session's quote, reclaims a closed session's payment at 180 s but keeps
+    /// the standing's slot held: every proof back, it never pays again.
+    NoSessionReclaimKeepsSlot,
+    /// On a quote it refuses over its price cap, its `window` or its mints, from a ledger
+    /// with nothing requested or acknowledged, clears the standing's stop: a new video's
+    /// first quote is leave to pay again.
+    FreshRefusalClearsStop,
+    /// On a quote it refuses over its price cap, its `window` or its mints, from a ledger
+    /// with nothing requested or acknowledged, forgives every video's payment found spent.
+    FreshRefusalForgivesAll,
+    /// On a quote it refuses over its price cap, its `window` or its mints, from a ledger
+    /// with nothing requested or acknowledged, drops every video's incomplete reclaim.
+    FreshRefusalDropsAllReclaims,
+    /// On a quote it refuses over its price cap, its `window` or its mints, from a ledger
+    /// with nothing requested or acknowledged, frees the slot any video's unsettled payment
+    /// holds.
+    FreshRefusalFreesAnySlot,
+    /// On a quote it takes from a ledger with nothing requested or acknowledged, forgives
+    /// every video's payment found spent: a new video's first quote settles them.
+    FreshTakenForgivesAll,
+    /// On a quote it takes from a ledger with nothing requested or acknowledged, drops every
+    /// video's incomplete reclaim.
+    FreshTakenDropsAllReclaims,
+    /// On a quote it refuses over its price cap, its `window` or its mints, forgives the
+    /// other videos' payments found spent.
+    OtherRefusalForgivesLost,
+    /// On a quote it refuses over its price cap, its `window` or its mints, drops the other
+    /// videos' incomplete reclaims.
+    OtherRefusalDropsReclaims,
+    /// On a quote it refuses over its price cap, its `window` or its mints, frees the slot
+    /// another video's unsettled payment holds.
+    RefusalFreesOtherSlot,
+    /// Drops this ledger's incomplete reclaim on an unsolicited ack, which stops it: the
+    /// seeder claims the proofs it left out.
+    UnsolicitedAckDropsReclaim,
+    /// Drops this ledger's incomplete reclaim on an unsolicited `rej`, which stops it: the
+    /// seeder claims the proofs it left out.
+    UnsolicitedRejDropsReclaim,
+    /// Drops this ledger's incomplete reclaim on a dishonest quote, which stops it: the
+    /// seeder claims the proofs it left out.
+    DishonestQuoteDropsReclaim,
+    /// Forgets this ledger's payment a dropped connection left unsettled on a dishonest
+    /// quote, which stops it: never reclaimed, it is the seeder's to claim.
+    DishonestQuoteForgetsUnsettled,
+    /// Holding no session's quote, takes proofs found spent as the seeder's without
+    /// restoring its own outputs: its own reclaim, its answer lost, leaves the payment
+    /// awaiting a quote that never comes.
+    NoSessionSkipsRestore,
+    /// Holding no session's quote, takes a reclaim refused because a proof's keyset expired
+    /// as proofs found spent: the payment awaits a quote, though the seeder took nothing.
+    NoSessionExpiredIsSpent,
+    /// Holding no session's quote, takes a reclaim refused as pending as proofs found spent:
+    /// the payment awaits a quote before the mint has decided anything.
+    NoSessionPendingIsSpent,
+    /// Holding no session's quote, files a payment found spent under the ledger that
+    /// reclaimed it: another video's payment no longer awaits a quote on its own ledger.
+    NoSessionLostUnderSelf,
+    /// Holding no session's quote, files a retried reclaim under the ledger that retried
+    /// it: another video's payment no longer awaits a quote on its own ledger.
+    NoSessionRetryAsSelf,
+    /// Once stopped, and holding no session's quote, drops a reclaim the mint cannot serve
+    /// yet: the seeder claims the proofs once the mint is back.
+    StoppedNoSessionBlockedDropped,
+    /// Counts a payment's 180 s from the session's end, not from sending it: a dropped
+    /// connection lengthens the wait.
+    EndRestartsWait,
+    /// Starts the 180 s of every closed session's payment again on a quote it refuses over
+    /// its price cap, its `window` or its mints.
+    RefusedQuoteRestartsWait,
+    /// Starts the 180 s of this ledger's closed session's payment again on a refused
+    /// `hello`.
+    HelloRefusalRestartsWait,
+    /// Starts the 180 s of every closed session's payment again when it makes a ledger for
+    /// another video.
+    SiblingRestartsWait,
+    /// Starts the 180 s of this ledger's closed session's payment again on a refused
+    /// request.
+    RefusalRestartsWait,
+    /// Starts the 180 s of this ledger's closed session's payment again on a second quote on
+    /// the open session, which it refuses.
+    SecondQuoteRestartsWait,
+    /// On a second quote on the open session, which it refuses, from a ledger with nothing
+    /// requested or acknowledged, forgives every video's payment found spent.
+    FreshSecondQuoteForgivesAll,
+    /// On a second quote on the open session, which it refuses, drops the other videos'
+    /// incomplete reclaims.
+    SecondQuoteDropsOtherReclaims,
+    /// Out of `mint-unavailable` tries, does not finish its incomplete reclaims: the seeder
+    /// claims the proofs of the third try once the mint is back.
+    OutOfTriesSkipsReclaim,
+    /// Starts the 180 s of this ledger's closed session's payment again on a `hello`
+    /// refused `banned`.
+    BannedHelloRestartsWait,
+    /// Holding no session's quote, takes proofs found spent, its restore unanswered, as its
+    /// own reclaim's: every proof back, it pays again after a seeder's claim.
+    NoSessionRestoreDownIsBack,
+    /// Holding no session's quote, takes proofs found spent, its restore unanswered, as the
+    /// seeder's: its own reclaim, its answer lost, leaves the payment awaiting a quote.
+    NoSessionRestoreDownIsSpent,
+    /// Counts each retry of a reclaim the mint cannot serve yet as a `mint-unavailable`
+    /// answer: a mint outage uses up the standing's tries.
+    RetryCountsATry,
+    /// Once stopped, forgets the payment in flight when its session ends: never reclaimed,
+    /// it is the seeder's to claim.
+    StoppedEndForgetsPending,
+    /// Holding no session's quote, says a payment awaits a quote on this ledger when
+    /// another video's does: the watcher opens sessions whose quotes cannot settle it.
+    NoSessionAwaitingAnyLedger,
+    /// Holding no session's quote, retries a reclaim refused because a proof's keyset
+    /// expired instead of deciding it per proof: the good proofs wait for a session, and the
+    /// seeder claims them meanwhile.
+    NoSessionExpiredRetried,
+    /// Holding no session's quote, writes a token off whole to the expiry when one of its
+    /// proofs' keysets has expired: the good proofs are never taken back.
+    NoSessionExpiredTokenWhole,
+    /// Holding no session's quote, takes a reclaim completing as a new session: it restores
+    /// the standing's three `mint-unavailable` tries, and another video pays again.
+    NoSessionReclaimRestoresTries,
+    /// On a quote it refuses over its price cap, its `window` or its mints, settles another
+    /// video's payment the quote shows against this ledger, both fields: unsettled, found
+    /// spent or being reclaimed. That video pays again, and a seeder that kept the payment
+    /// takes a second.
+    RefusedQuoteSettlesAnyLedger,
+    /// On a second quote on the open session, which it refuses, settles another video's
+    /// payment the quote shows against this ledger, both fields.
+    SecondQuoteSettlesAnyLedger,
+    /// On a dishonest quote, which stops it, settles another video's payment the quote shows
+    /// against this ledger, both fields: never reclaimed, it is the seeder's to claim.
+    DishonestQuoteSettlesAnyLedger,
+    /// On an unsolicited ack, which stops it, settles another video's payment the ack shows
+    /// against this ledger, both fields: never reclaimed, it is the seeder's to claim.
+    UnsolicitedAckSettlesAnyLedger,
+    /// Starts the 180 s of the payment in flight on this session again on a refused
+    /// request: a seeder that refuses one every 179 s holds it unreclaimed for ever.
+    RefusalRestartsLiveWait,
+    /// Starts the 180 s of the payment in flight on this session again on a second quote,
+    /// which it refuses.
+    SecondQuoteRestartsLiveWait,
+    /// Starts the 180 s of the payment in flight on this session again on each new request.
+    RequestedRestartsLiveWait,
+    /// Once stopped, reclaims the payment in flight on this session at its first timeout,
+    /// before 180 s: an honest seeder swapping it finds the proofs spent, and bans it.
+    StoppedTimeoutEarly,
+    /// On a dishonest quote, which stops it, reclaims this ledger's closed session's payment
+    /// at once, before 180 s from sending.
+    DishonestQuoteReclaimsNow,
+    /// On a dishonest quote, which stops it, reclaims every video's closed session's
+    /// payment at once, before 180 s from sending.
+    DishonestQuoteReclaimsAllNow,
+    /// On an unsolicited ack, which stops it, reclaims this ledger's closed session's
+    /// payment at once, before 180 s from sending.
+    UnsolicitedAckReclaimsNow,
+    /// Counts a closed session's payment reclaimed with every proof back, which no answer
+    /// refused, as a `mint-unavailable` answer: a dropped connection uses one of the
+    /// standing's tries.
+    UnansweredBackCountsATry,
+    /// Counts a quote it refuses over its price cap, its `window` or its mints as a
+    /// `mint-unavailable` answer: it stops paying an honest seeder before three.
+    RefusedQuoteCountsATry,
+    /// Counts a session's end as a `mint-unavailable` answer, whichever video it was for.
+    EndCountsATry,
+    /// Takes a timeout with no payment on the session as a new session: it restores the
+    /// standing's tries, so a runner that calls it between answers gives a seeder answering
+    /// `mint-unavailable` endless tries.
+    TimeoutRestoresTries,
+    /// Takes a closed session's payment reclaimed with every proof back as a new session:
+    /// it restores the standing's tries.
+    UnsettledBackResetsTries,
+    /// Keeps paying after a payment refused `unknown-video`, though it counts no try: a
+    /// seeder that refuses every payment so costs it a reclaim's fees for each.
+    UnknownVideoRejContinues,
+    /// Keeps paying after a payment refused `payment-required`, counting no try.
+    PaymentRequiredRejContinues,
+    /// Keeps paying after a payment refused `below-fee`, counting no try.
+    BelowFeeRejContinues,
+    /// Keeps paying after a payment refused `bad-lock`, counting no try.
+    BadLockRejContinues,
+    /// Keeps paying after a payment refused `bad-voucher`, counting no try.
+    BadVoucherRejContinues,
+    /// Keeps paying after a payment refused `root-mismatch`, counting no try.
+    RootMismatchRejContinues,
+    /// Counts a `hello` refused `mint-unavailable` as a `mint-unavailable` answer: another
+    /// video's live session stops paying an honest seeder before three.
+    HelloMintUnavailableCountsTry,
+    /// Takes a timeout before 180 s from sending, its payment in flight, as a new session:
+    /// it restores the standing's tries.
+    TimeoutBeforeWaitRestoresTries,
+    /// Counts a timeout before 180 s from sending, its payment in flight, as a
+    /// `mint-unavailable` answer.
+    TimeoutBeforeWaitCountsATry,
+    /// Once stopped, retries only this ledger's incomplete reclaims: another video's waits
+    /// for a ledger the watcher may never use again, and the seeder claims the proofs once
+    /// the mint is back.
+    StoppedRetriesOwnOnly,
+    /// Drops the reclaim of a payment unanswered after 180 s when the mint cannot serve it
+    /// yet, since it stops anyway: the seeder claims the proofs once the mint is back.
+    TimeoutDropsBlockedReclaim,
+    /// Frees the standing's slot on a refused request while this session's payment is in
+    /// flight: another video pays over it.
+    RefusalFreesLiveSlot,
+    /// Frees the standing's slot on a timeout before 180 s from sending, its payment in
+    /// flight: another video pays over it.
+    TimeoutFreesLiveSlot,
+    /// Frees the standing's slot on each new request while this session's payment is in
+    /// flight: another video pays over it.
+    RequestedFreesLiveSlot,
+    /// Frees the standing's slot when it makes a ledger for another video while this
+    /// session's payment is in flight: that video pays over it.
+    SiblingFreesLiveSlot,
+    /// On a quote it takes from a ledger with nothing requested or acknowledged, frees the
+    /// slot another video's payment in flight on a live session holds, and pays over it.
+    FreshTakenFreesLiveSlot,
+    /// Takes the `window` of a second quote on the open session, though it refuses the
+    /// quote: a seeder names a larger one, and the watcher pays later, and ahead further
+    /// after a refusal.
+    SecondQuoteAdoptsWindow,
+    /// Takes the price of a second quote on the open session, within its cap, though it
+    /// refuses the quote: it pays more per chunk than the quote it took.
+    SecondQuoteAdoptsPrice,
+    /// Once stopped, reclaims every video's closed session's payment at once on a `hello`
+    /// refused with any code but `banned`, before 180 s from sending.
+    StoppedHelloRefusedReclaimsNow,
+    /// Counts a closed session's payment reclaimed after 180 s, its proofs lost to their
+    /// keyset's expiry, as a `mint-unavailable` answer, though no answer refused it.
+    UnansweredExpiredCountsATry,
+    /// Takes an unsolicited ack showing another video's payment in flight on its live
+    /// session, both fields, as that payment's ack: it settles it and does not stop, and the
+    /// seeder that kept it claims the proofs.
+    AckSettlesOtherLive,
+    /// Takes a quote it refuses (for its price, its `window` or its mints, or as a second)
+    /// showing another video's payment in flight on its live session, both fields, as
+    /// settling it: another video pays over it, and it is never reclaimed.
+    RefusedQuoteSettlesOtherLive,
+    /// Takes a dishonest quote showing another video's payment in flight on its live
+    /// session, both fields, as settling it, then stops: it is never reclaimed.
+    DishonestQuoteSettlesOtherLive,
+    /// On a quote it takes, settles another video's payment the quote shows by that video's
+    /// ledger (its `upto`, and that ledger's spent plus its amount): in flight, left
+    /// unsettled, awaiting a quote or being reclaimed, the payment is dropped, never
+    /// reclaimed.
+    TakenQuoteSettlesOtherVideos,
+    /// Counts a live session's 180 s from the session's quote, not from sending: a payment
+    /// sent later is reclaimed early, and an honest seeder swapping it bans the watcher.
+    LiveWaitFromQuote,
+    /// Counts a live session's 180 s from the seeder's last answer (the session's quote, or
+    /// the last ack it took), not from sending: a payment sent later is reclaimed early.
+    LiveWaitFromLastAnswer,
+    /// Once stopped, counts a live session's 180 s from the seeder's last answer (the
+    /// session's quote, or the last ack it took), not from sending.
+    StoppedLiveWaitFromLastAnswer,
+    /// On a timeout with no payment on its session, reclaims another video's payment in
+    /// flight on its live session at once, before 180 s from sending: an honest seeder
+    /// swapping it finds the proofs spent, and bans the watcher.
+    OtherTimeoutReclaimsLiveNow,
+    /// On a refused request, reclaims another video's payment in flight on its live session
+    /// at once, before 180 s from sending.
+    OtherRefusedRequestReclaimsLiveNow,
+    /// On a `hello` refused with any code but `banned`, reclaims another video's payment in
+    /// flight on its live session at once, before 180 s from sending.
+    OtherHelloRefusedReclaimsLiveNow,
+    /// Starts the 180 s of another video's payment in flight on its live session again on a
+    /// timeout with no payment on its own session: a runner that calls it on an idle video
+    /// holds that payment unreclaimed for ever.
+    OtherTimeoutRestartsLiveWait,
+    /// Starts the 180 s of another video's payment in flight on its live session again on
+    /// each request of its own.
+    OtherRequestRestartsLiveWait,
+    /// Counts a closed session's payment's 180 s from the seeder's last answer on that
+    /// session (its quote, or the last ack it took), not from sending: a payment sent later
+    /// is reclaimed early, and an honest seeder that swapped it finds the proofs spent.
+    EndWaitFromLastAnswer,
+    /// Counts a closed session's payment's 180 s from that session's quote, not from
+    /// sending.
+    EndWaitFromQuote,
+    /// Once stopped, counts this ledger's closed session's payment's 180 s from that
+    /// session's quote, not from sending.
+    StoppedCatchUpFromQuote,
+    /// Pays with a token of one-sat proofs, as a wallet holding only small proofs sends an
+    /// exact selection whatever its count (CDK's `max_proofs` unset): more than 64 proofs
+    /// once a payment passes 64 sat, which the seeder refuses `bad-token`.
+    PaysInUnitProofs,
+    /// Pays its last payment of a session with one-sat proofs, whatever their count.
+    LastPayInUnitProofs,
+    /// Pays ahead after a refusal with one-sat proofs, whatever their count.
+    PayAheadInUnitProofs,
+    /// Pays with one-sat proofs up to 65 of them, and swaps to fewer only past that: a
+    /// payment of 65 sat holds 65 proofs.
+    SixtyFiveProofs,
+    /// Pays with a selection of an older keyset's proofs topped up with fresh ones as it
+    /// is, whatever its count: it never swaps to fewer first.
+    MixedSelectionUnswapped,
+    /// Swaps such a selection to fewer proofs only past 65 of them: one of 65 is paid as it
+    /// is.
+    MixedSelectionPastSixtyFive,
+    /// Counts a payment's 180 s from the last request it sent before it, not from sending:
+    /// a payment that waited behind the answer to the one before is reclaimed early.
+    WaitFromLastRequest,
+    /// Counts a payment's 180 s from the request that brought its unpaid count to half the
+    /// window, not from sending.
+    WaitFromDueRequest,
+    /// Counts the 180 s of a payment made after a `rej` from that `rej`, not from sending.
+    WaitFromLastRej,
+    /// Counts the 180 s of a payment ahead after a refusal from that refusal, not from
+    /// sending.
+    WaitFromRefusal,
+    /// Counts a closed session's payment's 180 s from the last request sent on that
+    /// session, not from sending.
+    EndWaitFromLastRequest,
+    /// Once stopped, counts a live session's 180 s from the last request sent on it, not
+    /// from sending.
+    StoppedLiveWaitFromLastRequest,
+    /// Once stopped, counts this ledger's closed session's payment's 180 s from the last
+    /// request sent on that session, not from sending.
+    StoppedCatchUpFromLastRequest,
+    /// Takes a live payment unanswered at 180 s whose reclaim finds a proof spent as
+    /// awaiting a quote, as a closed session's is, and does not stop: a quote showing it
+    /// makes it pay again.
+    TimeoutSpentAwaitsQuote,
+    /// Takes a payment refused with a code other than `mint-unavailable` whose reclaim
+    /// finds a proof spent as awaiting a quote, and does not stop: a quote showing it makes
+    /// it pay again.
+    RejSpentAwaitsQuote,
+    /// Takes a quote that settles a payment found spent as leave to pay again: it clears
+    /// the standing's stop.
+    SettlingQuoteClearsStop,
+    /// Takes a quote whose `served` is at most the chunks requested or the chunks paid for,
+    /// whichever is more: a seeder books the watcher's credit as served.
+    ServedUpToAcked,
+    /// Takes a quote whose `served` counts its refused requests too: a seeder books a chunk
+    /// it refused as served.
+    ServedCountsRefused,
+    /// Takes a quote that settles a payment if its `served` is at most that payment's
+    /// `upto_chunk`: a seeder books a pay-ahead it settles as served.
+    ServedWithinSettled,
+    /// Pays once the unpaid count reaches half the window, rounded down: on an odd window,
+    /// one chunk early, and so more often.
+    DueRoundsDown,
+    /// Pays once the unpaid count reaches the whole window when the window is odd: the
+    /// seeder refuses its next request each time.
+    DueFullOnOdd,
+    /// With no session open and not stopped, counts its own closed session's payment's 180 s
+    /// from the last request sent on that session, not from sending: a payment that waited
+    /// behind the answer to the one before is reclaimed early.
+    NoSessionCatchUpFromLastRequest,
+    /// With no session open and not stopped, counts its own closed session's payment's 180 s
+    /// from that session's quote, not from sending.
+    NoSessionCatchUpFromQuote,
+    /// Catching up another video's closed session's payment with a session open, counts its
+    /// 180 s from the last request its ledger sent before it, not from sending.
+    OtherSessionCatchUpFromLastRequest,
+    /// Catching up another video's closed session's payment with no session open, counts its
+    /// 180 s from the last request its ledger sent before it, not from sending.
+    OtherNoSessionCatchUpFromLastRequest,
+    /// Pays again, after a closed session's payment came back whole at 180 s, in one-sat
+    /// proofs whatever their count: the wallet's own reclaimed proofs, never swapped to fewer.
+    RepayAfterReclaimInUnitProofs,
+    /// Pays again, after a payment lost a proof to its keyset's expiry, in one-sat proofs
+    /// whatever their count.
+    RepayAfterExpiryInUnitProofs,
+    /// Pays again, after a reclaim retried once the mint was back, in one-sat proofs whatever
+    /// their count.
+    RepayAfterRetryInUnitProofs,
+    /// Pays its first payment of a session that resumed the account in one-sat proofs,
+    /// whatever their count.
+    ResumedPayInUnitProofs,
+    /// Pays, after a quote settled a payment that awaited it, in one-sat proofs whatever their
+    /// count.
+    SettledLostPayInUnitProofs,
+    /// Pays, after a quote settled a payment whose reclaim was incomplete, in one-sat proofs
+    /// whatever their count.
+    SettledReclaimPayInUnitProofs,
+    /// Pays on a ledger made for another video in one-sat proofs, whatever their count.
+    SiblingPaysInUnitProofs,
+    /// Pays, once its ledger has held credit, in one-sat proofs whatever their count.
+    CreditPayInUnitProofs,
+    /// Skips a stop that comes while a payment found spent earlier awaits a quote, as if
+    /// awaiting were a stop already: the quote that settles that payment makes it pay again.
+    StopSkippedWhileAwaiting,
+    /// Does not stop on a `hello` refused `banned` while a payment awaits a quote.
+    BannedHelloWhileAwaitingNoStop,
+    /// Refuses a dishonest quote without stopping while a payment awaits a quote.
+    DishonestQuoteWhileAwaitingNoStop,
+    /// Does not stop on an unsolicited `rej` while a payment awaits a quote.
+    UnsolicitedRejWhileAwaitingNoStop,
+    /// Takes a quote that settles a closed session's payment as leave to pay again: it clears
+    /// the standing's stop.
+    UnsettledSettlingQuoteClearsStop,
+    /// Takes a quote that settles a payment whose reclaim is incomplete as leave to pay again:
+    /// it clears the standing's stop.
+    ReclaimSettlingQuoteClearsStop,
+    /// Takes its due point from the first session's quote's window, on every later session
+    /// too, whatever window that session's quote names.
+    DueWindowOfFirstQuote,
+    /// Does not stop on a `hello` refused `banned` while its `mint-unavailable` tries are used.
+    BannedHelloOutOfTriesNoStop,
+    /// Refuses a dishonest quote without stopping while its `mint-unavailable` tries are used.
+    DishonestQuoteOutOfTriesNoStop,
+    /// Does not stop on an unsolicited `rej` while its `mint-unavailable` tries are used.
+    UnsolicitedRejOutOfTriesNoStop,
+    /// Pays once the unpaid count reaches half the window, rounded down, on a session that
+    /// resumed the account: on an odd window, one chunk early.
+    DueRoundsDownOnResume,
+    /// Pays once the unpaid count reaches half the window, rounded down, on a ledger made for
+    /// another video: on an odd window, one chunk early.
+    DueRoundsDownOnSibling,
+    /// In a new session and not stopped, counts its own closed session's payment's 180 s from
+    /// the last request it sent before it, not from sending.
+    OwnSessionCatchUpFromLastRequest,
+    /// In a new session and not stopped, counts its own closed session's payment's 180 s from
+    /// the last refusal it had, not from sending.
+    OwnSessionCatchUpFromRefusal,
+    /// Pays again, after `mint-unavailable` with every proof back, in one-sat proofs whatever
+    /// their count.
+    RepayAfterUnavailableInUnitProofs,
+    /// Takes a quote that settles a payment whatever its `served` claims.
+    ServedUncheckedWhenSettling,
+    /// Pays ahead after a refusal half the first session's quote's window, on every later
+    /// session too, whatever window that session's quote names.
+    PayAheadWindowOfFirstQuote,
+    /// Forgets the payments awaiting a quote as it stops: a quote that shows one is then
+    /// refused as dishonest, where it settles it into the ledger.
+    LostForgottenOnStop,
+    /// Once stopped, settles nothing by a quote that shows a payment: the quote is refused as
+    /// dishonest, where it settles the payment into the ledger.
+    StoppedQuoteSettlesNothing,
+    /// Counts the 180 s of a payment due at half the window from the last request it sent
+    /// before it, not from sending: one sent behind the answer to the one before is
+    /// reclaimed early.
+    DueWaitFromLastRequest,
+    /// Counts the 180 s of a session's last payment from the last request it sent before it,
+    /// not from sending.
+    LastPayWaitFromLastRequest,
+    /// Pays once the unpaid count reaches half the window, rounded down, once its ledger has
+    /// held credit: on an odd window, one chunk early.
+    DueRoundsDownWithCredit,
+    /// Takes a quote whose `served` is at most the chunks requested on any of the seeder's
+    /// videos: a seeder books one video's requests as served on another.
+    ServedCountsSiblingRequests,
+    /// Counts the 180 s of a payment made on a session that resumed the account from that
+    /// session's quote, not from sending.
+    ResumedPayWaitFromQuote,
+    /// Counts the 180 s of a payment made on a ledger made for another video from the last
+    /// request it sent before it, not from sending.
+    SiblingPayWaitFromLastRequest,
+    /// Counts the 180 s of a payment made once its ledger has held credit from the last
+    /// request it sent before it, not from sending.
+    CreditPayWaitFromLastRequest,
+    /// Counts the 180 s of a payment made with a `mint-unavailable` try used from the
+    /// session's quote, not from sending.
+    RepayWaitFromQuote,
+    /// Counts the 180 s of a session's last payment from the session's quote, not from
+    /// sending.
+    LastPayWaitFromQuote,
+    /// Counts the 180 s of a payment ahead after a refusal from the last request it sent
+    /// before it, not from sending.
+    AheadWaitFromLastRequest,
+    /// Pays once the unpaid count reaches half the window, rounded down, with a
+    /// `mint-unavailable` try used: on an odd window, one chunk early.
+    DueRoundsDownAfterUnavailable,
+    /// Pays once the unpaid count reaches half the window, rounded down, once a payment of
+    /// its standing was found spent: on an odd window, one chunk early.
+    DueRoundsDownAfterSpent,
+    /// Pays ahead after a refusal half the window, rounded up, with a `mint-unavailable` try
+    /// used: on an odd window, a chunk more.
+    PayAheadRoundsUpAfterUnavailable,
+    /// Pays ahead after a refusal half the window, rounded up, on a ledger made for another
+    /// video: on an odd window, a chunk more.
+    PayAheadRoundsUpOnSibling,
+    /// Pays ahead after a refusal half the window, whatever credit it holds, on a ledger made
+    /// for another video.
+    PayAheadIgnoresCreditOnSibling,
+    /// Pays with one-sat proofs, whatever their count, once it has taken an ack on the
+    /// session.
+    AckedPayInUnitProofs,
+    /// Pays the last payment of a session that resumed the account with one-sat proofs,
+    /// whatever their count.
+    LastPayOnResumeInUnitProofs,
+    /// Pays ahead after a refusal with one-sat proofs, whatever their count, with a
+    /// `mint-unavailable` try used.
+    AheadAfterUnavailableInUnitProofs,
+    /// Pays ahead after a refusal with one-sat proofs, whatever their count, on a ledger
+    /// made for another video.
+    AheadOnSiblingInUnitProofs,
+    /// Takes a quote whose `served` is at most the chunks another of the seeder's videos'
+    /// ledgers has paid for: a seeder books that credit as served on this video.
+    ServedUpToOtherAcked,
+    /// Takes a quote whose `served` is at most the requests sent on the seeder's other
+    /// videos, refused or not.
+    ServedCountsOtherSent,
+    /// Counts the 180 s of a closed session's last payment from the last request it sent
+    /// before it, whichever ledger catches it up, not from sending.
+    LastPayCatchUpFromRequest,
+    /// Pays ahead after a refusal half the window, whatever credit it holds, on a session
+    /// that resumed the account.
+    ResumedCreditAheadIgnoresCredit,
+    /// Pays once the unpaid count reaches half the window, rounded down, on a session that
+    /// resumed the account of a ledger made for another video: on an odd window, one chunk
+    /// early.
+    SiblingResumedDueRoundsDown,
+    /// Once stopped, counts another video's closed session's payment's 180 s from this
+    /// ledger's session's quote, not from sending.
+    StoppedOtherCatchUpFromQuote,
+    /// Not stopped, in a session, counts another video's closed session's payment's 180 s
+    /// from this ledger's session's quote, not from sending.
+    OtherSessionCatchUpFromQuote,
+    /// Not stopped, with no session, counts another video's closed session's payment's 180 s
+    /// from this ledger's last session's quote, not from sending.
+    OtherNoSessionCatchUpFromQuote,
+    /// Once stopped, with no session, counts another video's closed session's payment's
+    /// 180 s from this ledger's last session's quote, not from sending.
+    StoppedOtherNoSessionCatchUpFromQuote,
+    /// On a ledger made for another video, counts a live session's payment's 180 s from the
+    /// last request it sent before it, not from sending.
+    SiblingTimeoutFromLastRequest,
+    /// On a session that resumed the account, counts a live session's payment's 180 s from
+    /// the session's quote, not from sending.
+    ResumedTimeoutFromQuote,
+    /// On a session that resumed its account with nothing to settle, counts its payment's
+    /// 180 s from the session's quote, not from sending.
+    PlainResumePayWaitFromQuote,
+    /// After a closed session's payment, reclaimed late in its ledger's next session, came
+    /// back, pays in one-sat proofs, whatever their count.
+    SessionLateReclaimPayInUnitProofs,
+    /// After a closed session's payment, reclaimed late in its ledger's next session, came
+    /// back, counts its payment's 180 s from the session's quote, not from sending.
+    SessionLateReclaimPayWaitFromQuote,
+    /// After a closed session's payment, reclaimed late in its ledger's next session, came
+    /// back, pays at half the window, rounded down.
+    SessionLateReclaimDueRoundsDown,
+    /// After a closed session's payment, reclaimed in its ledger's next session, lost a
+    /// proof to the expiry, pays in one-sat proofs, whatever their count.
+    SessionExpiredReclaimPayInUnitProofs,
+    /// After a closed session's payment, reclaimed in its ledger's next session, lost a
+    /// proof to the expiry, counts its payment's 180 s from the session's quote, not from
+    /// sending.
+    SessionExpiredReclaimPayWaitFromQuote,
+    /// After a closed session's payment, reclaimed in its ledger's next session, lost a
+    /// proof to the expiry, pays at half the window, rounded down.
+    SessionExpiredReclaimDueRoundsDown,
+    /// After a closed session's payment came back whole in a reclaim done with no session,
+    /// pays in one-sat proofs, whatever their count.
+    NoSessionReclaimPayInUnitProofs,
+    /// After a closed session's payment came back whole in a reclaim done with no session,
+    /// counts its payment's 180 s from the session's quote, not from sending.
+    NoSessionReclaimPayWaitFromQuote,
+    /// After a closed session's payment came back whole in a reclaim done with no session,
+    /// pays at half the window, rounded down.
+    NoSessionReclaimDueRoundsDown,
+    /// After a closed session's payment, reclaimed late with no session, came back, pays in
+    /// one-sat proofs, whatever their count.
+    NoSessionLateReclaimPayInUnitProofs,
+    /// After a closed session's payment, reclaimed late with no session, came back, counts
+    /// its payment's 180 s from the session's quote, not from sending.
+    NoSessionLateReclaimPayWaitFromQuote,
+    /// After a closed session's payment, reclaimed late with no session, came back, pays at
+    /// half the window, rounded down.
+    NoSessionLateReclaimDueRoundsDown,
+    /// After a closed session's payment, reclaimed with no session, lost a proof to the
+    /// expiry, pays in one-sat proofs, whatever their count.
+    NoSessionExpiredReclaimPayInUnitProofs,
+    /// After a closed session's payment, reclaimed with no session, lost a proof to the
+    /// expiry, counts its payment's 180 s from the session's quote, not from sending.
+    NoSessionExpiredReclaimPayWaitFromQuote,
+    /// After a closed session's payment, reclaimed with no session, lost a proof to the
+    /// expiry, pays at half the window, rounded down.
+    NoSessionExpiredReclaimDueRoundsDown,
+    /// After its closed session's payment came back whole in a reclaim another video's
+    /// ledger did in its session, pays in one-sat proofs, whatever their count.
+    OtherLedgerReclaimPayInUnitProofs,
+    /// After its closed session's payment came back whole in a reclaim another video's
+    /// ledger did in its session, counts its payment's 180 s from the session's quote, not
+    /// from sending.
+    OtherLedgerReclaimPayWaitFromQuote,
+    /// After its closed session's payment came back whole in a reclaim another video's
+    /// ledger did in its session, pays at half the window, rounded down.
+    OtherLedgerReclaimDueRoundsDown,
+    /// After its closed session's payment, reclaimed late by another video's ledger in its
+    /// session, came back, pays in one-sat proofs, whatever their count.
+    OtherLedgerLateReclaimPayInUnitProofs,
+    /// After its closed session's payment, reclaimed late by another video's ledger in its
+    /// session, came back, counts its payment's 180 s from the session's quote, not from
+    /// sending.
+    OtherLedgerLateReclaimPayWaitFromQuote,
+    /// After its closed session's payment, reclaimed late by another video's ledger in its
+    /// session, came back, pays at half the window, rounded down.
+    OtherLedgerLateReclaimDueRoundsDown,
+    /// After its closed session's payment, reclaimed by another video's ledger in its
+    /// session, lost a proof to the expiry, pays in one-sat proofs, whatever their count.
+    OtherLedgerExpiredReclaimPayInUnitProofs,
+    /// After its closed session's payment, reclaimed by another video's ledger in its
+    /// session, lost a proof to the expiry, counts its payment's 180 s from the session's
+    /// quote, not from sending.
+    OtherLedgerExpiredReclaimPayWaitFromQuote,
+    /// After its closed session's payment, reclaimed by another video's ledger in its
+    /// session, lost a proof to the expiry, pays at half the window, rounded down.
+    OtherLedgerExpiredReclaimDueRoundsDown,
+    /// After its closed session's payment came back whole in a reclaim another video's
+    /// ledger did with no session, pays in one-sat proofs, whatever their count.
+    OtherNoSessionReclaimPayInUnitProofs,
+    /// After its closed session's payment came back whole in a reclaim another video's
+    /// ledger did with no session, counts its payment's 180 s from the session's quote, not
+    /// from sending.
+    OtherNoSessionReclaimPayWaitFromQuote,
+    /// After its closed session's payment came back whole in a reclaim another video's
+    /// ledger did with no session, pays at half the window, rounded down.
+    OtherNoSessionReclaimDueRoundsDown,
+    /// After its closed session's payment, reclaimed late by another video's ledger with no
+    /// session, came back, pays in one-sat proofs, whatever their count.
+    OtherNoSessionLateReclaimPayInUnitProofs,
+    /// After its closed session's payment, reclaimed late by another video's ledger with no
+    /// session, came back, counts its payment's 180 s from the session's quote, not from
+    /// sending.
+    OtherNoSessionLateReclaimPayWaitFromQuote,
+    /// After its closed session's payment, reclaimed late by another video's ledger with no
+    /// session, came back, pays at half the window, rounded down.
+    OtherNoSessionLateReclaimDueRoundsDown,
+    /// After its closed session's payment, reclaimed by another video's ledger with no
+    /// session, lost a proof to the expiry, pays in one-sat proofs, whatever their count.
+    OtherNoSessionExpiredReclaimPayInUnitProofs,
+    /// After its closed session's payment, reclaimed by another video's ledger with no
+    /// session, lost a proof to the expiry, counts its payment's 180 s from the session's
+    /// quote, not from sending.
+    OtherNoSessionExpiredReclaimPayWaitFromQuote,
+    /// After its closed session's payment, reclaimed by another video's ledger with no
+    /// session, lost a proof to the expiry, pays at half the window, rounded down.
+    OtherNoSessionExpiredReclaimDueRoundsDown,
+    /// After a new session's quote restored the three tries it had used, pays in one-sat
+    /// proofs, whatever their count.
+    TriesRestoredPayInUnitProofs,
+    /// After a new session's quote restored the three tries it had used, counts its
+    /// payment's 180 s from the session's quote, not from sending.
+    TriesRestoredPayWaitFromQuote,
+    /// After a new session's quote restored the three tries it had used, pays at half the
+    /// window, rounded down.
+    TriesRestoredDueRoundsDown,
+    /// After a quote it refused without stopping, pays in one-sat proofs, whatever their
+    /// count.
+    RefusedQuotePayInUnitProofs,
+    /// After a quote it refused without stopping, counts its payment's 180 s from the
+    /// session's quote, not from sending.
+    RefusedQuotePayWaitFromQuote,
+    /// After a quote it refused without stopping, pays at half the window, rounded down.
+    RefusedQuoteDueRoundsDown,
+    /// After a refused hello that did not stop it, pays in one-sat proofs, whatever their
+    /// count.
+    RefusedHelloPayInUnitProofs,
+    /// After a refused hello that did not stop it, counts its payment's 180 s from the
+    /// session's quote, not from sending.
+    RefusedHelloPayWaitFromQuote,
+    /// After a refused hello that did not stop it, pays at half the window, rounded down.
+    RefusedHelloDueRoundsDown,
+    /// After a timeout with no payment on its session, pays in one-sat proofs, whatever
+    /// their count.
+    IdleTimeoutPayInUnitProofs,
+    /// After a timeout with no payment on its session, counts its payment's 180 s from the
+    /// session's quote, not from sending.
+    IdleTimeoutPayWaitFromQuote,
+    /// After a timeout with no payment on its session, pays at half the window, rounded
+    /// down.
+    IdleTimeoutDueRoundsDown,
+    /// Pays a payment that waited behind another video's payment in flight in one-sat
+    /// proofs, whatever their count.
+    BehindOtherVideoPayInUnitProofs,
+    /// Counts the 180 s of a payment that waited behind another video's payment in flight
+    /// from its last request, not from sending.
+    BehindOtherVideoWaitFromRequest,
+    /// After a refusal, pays ahead half the window less the credit every ledger of the
+    /// standing holds, another video's included.
+    PayAheadLessOtherLedgersCredit,
+    /// While another video's ledger holds credit, pays in one-sat proofs, whatever their
+    /// count.
+    BesideCreditPayInUnitProofs,
+    /// While another video's ledger owes chunks, counts its payment's 180 s from the
+    /// session's quote, not from sending.
+    BesideOwedPayWaitFromQuote,
+    /// Once another video's ledger has had a payment acked, pays in one-sat proofs,
+    /// whatever their count.
+    BesideAckPayInUnitProofs,
+    /// Once another video's ledger has had a payment acked, counts its payment's 180 s from
+    /// the session's quote, not from sending.
+    BesideAckPayWaitFromQuote,
+    /// Once another video's ledger has had a payment acked, pays at half the window,
+    /// rounded down.
+    BesideAckDueRoundsDown,
+    /// Once another video's ledger has had a payment refused mint-unavailable, pays ahead
+    /// half the window, rounded up, after a refusal.
+    BesideUnavailablePayAheadRoundsUp,
+    /// Once a quote has settled a payment of another video's ledger, pays in one-sat
+    /// proofs, whatever their count.
+    BesideSettledPayInUnitProofs,
+    /// Once a quote has settled a payment of another video's ledger, pays at half the
+    /// window, rounded down.
+    BesideSettledDueRoundsDown,
+    /// Once another video's ledger has had a closed session's payment back in a reclaim
+    /// done with no session, counts its payment's 180 s from the session's quote, not from
+    /// sending.
+    BesideNoSessionReclaimPayWaitFromQuote,
+    /// Once a new session's quote on another video's ledger has restored the tries the
+    /// standing had used, pays at half the window, rounded down.
+    BesideTriesRestoredDueRoundsDown,
+    /// Once another video's ledger has refused a quote without stopping, pays in one-sat
+    /// proofs, whatever their count.
+    BesideRefusedQuotePayInUnitProofs,
+    /// Once another video's ledger has resumed its account with nothing to settle, pays
+    /// ahead half the window, rounded up, after a refusal.
+    BesidePlainResumePayAheadRoundsUp,
+    /// Does not stop on a dishonest quote on a ledger while that ledger's own payment
+    /// awaits a quote.
+    OwnDishonestQuoteWhileAwaitingNoStop,
+    /// Does not stop on a dishonest quote on a ledger once that ledger's own payments have
+    /// used the standing's three tries.
+    OwnDishonestQuoteOutOfTriesNoStop,
+    /// Does not stop on a hello refused banned on a ledger while that ledger's own payment
+    /// awaits a quote.
+    OwnBannedHelloWhileAwaitingNoStop,
+    /// Does not stop on a hello refused banned on a ledger once that ledger's own payments
+    /// have used the standing's three tries.
+    OwnBannedHelloOutOfTriesNoStop,
+    /// Does not stop on an unsolicited rej on a ledger while that ledger's own payment
+    /// awaits a quote.
+    OwnUnsolicitedRejWhileAwaitingNoStop,
+    /// At a session's end, reclaims a closed session's payment at once, however young: the
+    /// catch-up of `last_pay` does not wait 180 s from sending.
+    LastPayCatchUpIgnoresWait,
+    /// A ledger made while a closed session's payment was unsettled reclaims it at once,
+    /// however young.
+    NewLedgerCatchUpIgnoresWait,
+    /// Drops a payment answered by an ack that does not match: its proofs are never
+    /// reclaimed.
+    WrongAckNoReclaim,
+    /// Reclaims a payment answered by an ack that does not match only 180 s after it was
+    /// sent.
+    WrongAckReclaimWaits,
+    /// Forgets a payment answered by an ack that does not match once its reclaim finds a
+    /// proof spent: a quote showing it is refused.
+    WrongAckSpentForgotten,
+    /// At a session's end, sends a selection of more than 64 proofs, drawn from two
+    /// keysets, as it is.
+    LastPayMixedUnswapped,
+    /// Paying ahead after a refusal, sends a selection of more than 64 proofs, drawn from
+    /// two keysets, as it is.
+    AheadMixedUnswapped,
+    /// On a ledger made for another video, sends a selection of more than 64 proofs, drawn
+    /// from two keysets, as it is.
+    SiblingMixedUnswapped,
+    /// Pays at half the window of the session its ledger first paid on, not the open
+    /// session's.
+    DueWindowOfFirstPayment,
+    /// After a refusal, pays ahead half the window of the session its ledger first paid on,
+    /// not the open session's.
+    PayAheadWindowOfFirstPayment,
+    /// Pays at half the window of the session its ledger first sent a request on, not the
+    /// open session's.
+    DueWindowOfFirstRequest,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because its
+    /// own payment was in flight.
+    LicenceOutlivesOwnPayment,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because
+    /// another video's payment was in flight.
+    LicenceOutlivesOtherPayment,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because a
+    /// closed session's payment was unsettled.
+    LicenceOutlivesUnsettled,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because the
+    /// ledger held half a window of credit.
+    LicenceOutlivesCredit,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because a
+    /// reclaim was incomplete.
+    LicenceOutlivesReclaim,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because a
+    /// payment awaited a quote.
+    LicenceOutlivesAwaiting,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because the
+    /// standing was out of tries.
+    LicenceOutlivesTries,
+    /// Keeps a refusal's licence to pay ahead through a `due` that paid nothing because it
+    /// held no proof the mint still takes.
+    LicenceOutlivesExpiredProofs,
+    /// Keeps a refusal's licence to pay ahead across the session's end: its next session
+    /// pays ahead.
+    LicenceOutlivesEnd,
+    /// Takes a quote whose `served` counts the requests the seeder refused after they were
+    /// paid for.
+    ServedCountsPaidRefused,
+    /// Takes a quote whose `served` is at most the `upto_chunk` of another video's payment
+    /// in flight on its live session.
+    ServedCountsOtherLive,
+    /// Drops a payment answered by an ack whose `spent_total` alone does not match: its
+    /// proofs are never reclaimed.
+    WrongAckBySpentNoReclaim,
+    /// Drops a payment answered by an ack whose `accepted_upto` alone does not match: its
+    /// proofs are never reclaimed.
+    WrongAckByUptoNoReclaim,
+    /// Ends a refusal's licence to pay ahead when `last_pay` makes a payment: the `due` that
+    /// follows the refusal pays nothing ahead.
+    LastPaymentEndsLicence,
+    /// A timeout before 180 s from sending, its payment in flight on the session, undoes a
+    /// stop.
+    EarlyTimeoutClearsStop,
+    /// A request sent while the ledger's payment is in flight on its session undoes a stop.
+    RequestInFlightClearsStop,
+    /// A request refused while the ledger's payment is in flight on its session undoes a
+    /// stop.
+    RefusalInFlightClearsStop,
+    /// A second quote on a session whose payment is in flight undoes a stop.
+    SecondQuoteInFlightClearsStop,
+    /// A ledger made for another video while a live session's payment is in flight undoes a
+    /// stop.
+    SiblingWhileLiveClearsStop,
+    /// A session's end, while another video's payment is in flight on its live session,
+    /// undoes a stop.
+    OtherEndWhileLiveClearsStop,
+    /// A `hello` refused, with a code but `banned`, while another video's payment is in
+    /// flight on its live session, undoes a stop.
+    OtherHelloRefusedWhileLiveClearsStop,
+    /// A request sent while another video's payment is in flight on its live session undoes
+    /// a stop.
+    OtherRequestWhileLiveClearsStop,
+    /// A quote refused for its price while another video's payment is in flight on its live
+    /// session undoes a stop.
+    OtherPriceRefusalWhileLiveClearsStop,
+    /// A quote taken while another video's payment is in flight on its live session undoes
+    /// a stop.
+    OtherQuoteWhileLiveClearsStop,
+    /// A timeout with no payment on the session, while another video's payment is in flight
+    /// on its live session, undoes a stop.
+    OtherIdleTimeoutWhileLiveClearsStop,
+    /// A request sent while a payment awaits a quote undoes a stop.
+    RequestWhileAwaitingClearsStop,
+    /// A request sent while a reclaim is incomplete undoes a stop.
+    RequestWhileReclaimingClearsStop,
+    /// Pays every session's payments at the price of the first quote its ledger took.
+    PriceOfFirstQuote,
+    /// Pays its own cap a chunk, not the quoted price, for a payment ahead after a refusal.
+    PayAheadAtCap,
+    /// Pays its own cap a chunk, not the quoted price, on a ledger made for another video.
+    SiblingPaysAtCap,
+    /// Pays its own cap a chunk, not the quoted price, on a resumed session.
+    ResumedPaysAtCap,
+    /// Counts no try for a `mint-unavailable` answer to a payment made at a session's end.
+    LastPayUnavailableUncounted,
+    /// Counts no try for a `mint-unavailable` answer whose payment's proofs were lost to
+    /// their keyset's expiry.
+    UnavailableExpiredUncounted,
+    /// A new session's accepted quote that settles a payment restores no tries.
+    SettlingQuoteKeepsTries,
+    /// An ack resets the count of `mint-unavailable` answers only if every one of them
+    /// answered a payment of the ack's own ledger.
+    OtherVideosAckKeepsTries,
+    /// A new session's accepted quote restores the tries only once all three were used.
+    QuoteKeepsPartialTries,
+    /// A `hello` refused `banned` starts the 180 s of the payment in flight on that ledger's
+    /// live session again.
+    BannedHelloRestartsLiveWait,
+    /// A request sent ends a refusal's licence to pay ahead.
+    RequestEndsLicence,
+    /// An ack ends a refusal's licence to pay ahead.
+    AckEndsLicence,
+    /// Does not stop where the reclaim at 180 s is one the mint cannot serve yet, down or
+    /// holding the proofs reserved.
+    TimeoutBlockedNoStop,
+    /// Once stopped, takes a matching ack without settling its payment into the ledger.
+    StoppedAckNotSettled,
+    /// On a ledger made for another video, a request sent while its payment is in flight
+    /// on its session undoes a stop.
+    SiblingRequestInFlightClearsStop,
+    /// Pays every ledger's payments at the price of the quote the standing took last, on
+    /// whichever of the seeder's videos.
+    PriceOfLastQuoteTaken,
+    /// A `hello` refused, with a code but `banned`, on a ledger whose payment is in flight
+    /// on its live session starts that payment's 180 s again.
+    OwnHelloRefusedRestartsLiveWait,
+    /// A `hello` refused, with a code but `banned`, on a ledger whose payment is in flight
+    /// on its live session frees the standing's one place.
+    OwnHelloRefusedFreesLiveSlot,
+    /// A second quote on the open session ends a refusal's licence to pay ahead.
+    SecondQuoteEndsLicence,
+    /// A timeout with no payment on the session ends a refusal's licence to pay ahead.
+    IdleTimeoutEndsLicence,
+    /// A refused `hello` ends a refusal's licence to pay ahead.
+    HelloRefusedEndsLicence,
+    /// A `mint-unavailable` answer to the payment in flight ends a refusal's licence to pay
+    /// ahead.
+    UnavailableEndsLicence,
+    /// Does not stop where the reclaim at 180 s finds the proofs lost to their keyset's
+    /// expiry.
+    TimeoutExpiredNoStop,
+    /// Does not stop where the reclaim at 180 s is refused as pending.
+    TimeoutPendingNoStop,
+    /// Takes a matching ack without settling its payment into the ledger where a `hello`
+    /// refused `banned` on that ledger stopped it while the payment was in flight.
+    OwnStopAckNotSettled,
+    /// A timeout before a payment's 180 s, that payment in flight on the session, ends a
+    /// refusal's licence to pay ahead.
+    EarlyTimeoutEndsLicence,
+}
+
+/// Whose history a defect planted on one history keys on: the paying ledger's own, or that
+/// of another of the standing's ledgers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Whose {
+    Own,
+    Other,
+}
+
+/// Where a closed session's payment was reclaimed: by its own ledger, in a session or with
+/// none, or by another video's ledger, in a session of its own or with none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Session,
+    NoSession,
+    Other,
+    OtherNoSession,
+}
+
+/// How that reclaim ended: every proof back at once, or once the mint could serve it, or a
+/// proof lost to its keyset's expiry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Whole,
+    Late,
+    Expired,
+}
+
+/// What a ledger has been through, or holds, for the defects planted on one history alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Past {
+    /// Its open session resumed the account, with nothing to settle and no credit.
+    PlainResume,
+    /// A closed session's payment of its own was reclaimed.
+    Caught(Place, Outcome),
+    /// A new session's quote restored the three tries the standing had used.
+    TriesRestored,
+    /// It refused a quote without stopping.
+    RefusedQuote,
+    /// Its `hello` was refused, with a code other than `banned`.
+    RefusedHello,
+    /// A timeout came with no payment on its session.
+    IdleTimeout,
+    /// A payment of its own was acked.
+    Acked,
+    /// A payment of its own was refused `mint-unavailable`.
+    Unavailable,
+    /// A quote settled a payment of its own.
+    Settled,
+    /// It holds credit.
+    Credit,
+    /// It owes chunks.
+    Owes,
+    /// Its payment now due waited behind another video's payment in flight.
+    BehindOther,
+}
+
+/// What such a defect does wrong with the payment that follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaySlip {
+    /// It pays in one-sat proofs.
+    Units,
+    /// It counts the payment's 180 s from the session's quote.
+    WaitFromQuote,
+    /// It counts them from the last request.
+    WaitFromRequest,
+    /// It pays at half the window, rounded down.
+    DueRoundsDown,
+    /// It pays ahead half the window, rounded up.
+    AheadRoundsUp,
+    /// It pays ahead less the credit the other ledgers hold too.
+    AheadLessOthersCredit,
+}
+
+/// What stops a watcher on a ledger with no payment in flight, for the defects that skip
+/// one stop on a ledger that waits on something of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cause {
+    DishonestQuote,
+    BannedHello,
+    UnsolicitedRej,
+}
+
+/// What that ledger waits on: its own payment awaiting a quote, or the three tries its own
+/// payments used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Waits {
+    Awaiting,
+    OutOfTries,
+}
+
+impl ViewerFlaw {
+    /// The history a defect is planted on, and what it does wrong with the next payment.
+    fn past_slip(self) -> Option<(Whose, Past, PaySlip)> {
+        Some(match self {
+            Self::PlainResumePayWaitFromQuote => {
+                (Whose::Own, Past::PlainResume, PaySlip::WaitFromQuote)
+            }
+            Self::SessionLateReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::Session, Outcome::Late),
+                PaySlip::Units,
+            ),
+            Self::SessionLateReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::Session, Outcome::Late),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::SessionLateReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::Session, Outcome::Late),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::SessionExpiredReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::Session, Outcome::Expired),
+                PaySlip::Units,
+            ),
+            Self::SessionExpiredReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::Session, Outcome::Expired),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::SessionExpiredReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::Session, Outcome::Expired),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::NoSessionReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Whole),
+                PaySlip::Units,
+            ),
+            Self::NoSessionReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Whole),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::NoSessionReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Whole),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::NoSessionLateReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Late),
+                PaySlip::Units,
+            ),
+            Self::NoSessionLateReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Late),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::NoSessionLateReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Late),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::NoSessionExpiredReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Expired),
+                PaySlip::Units,
+            ),
+            Self::NoSessionExpiredReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Expired),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::NoSessionExpiredReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::NoSession, Outcome::Expired),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::OtherLedgerReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Whole),
+                PaySlip::Units,
+            ),
+            Self::OtherLedgerReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Whole),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::OtherLedgerReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Whole),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::OtherLedgerLateReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Late),
+                PaySlip::Units,
+            ),
+            Self::OtherLedgerLateReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Late),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::OtherLedgerLateReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Late),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::OtherLedgerExpiredReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Expired),
+                PaySlip::Units,
+            ),
+            Self::OtherLedgerExpiredReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Expired),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::OtherLedgerExpiredReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::Other, Outcome::Expired),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::OtherNoSessionReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Whole),
+                PaySlip::Units,
+            ),
+            Self::OtherNoSessionReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Whole),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::OtherNoSessionReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Whole),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::OtherNoSessionLateReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Late),
+                PaySlip::Units,
+            ),
+            Self::OtherNoSessionLateReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Late),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::OtherNoSessionLateReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Late),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::OtherNoSessionExpiredReclaimPayInUnitProofs => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Expired),
+                PaySlip::Units,
+            ),
+            Self::OtherNoSessionExpiredReclaimPayWaitFromQuote => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Expired),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::OtherNoSessionExpiredReclaimDueRoundsDown => (
+                Whose::Own,
+                Past::Caught(Place::OtherNoSession, Outcome::Expired),
+                PaySlip::DueRoundsDown,
+            ),
+            Self::TriesRestoredPayInUnitProofs => (Whose::Own, Past::TriesRestored, PaySlip::Units),
+            Self::TriesRestoredPayWaitFromQuote => {
+                (Whose::Own, Past::TriesRestored, PaySlip::WaitFromQuote)
+            }
+            Self::TriesRestoredDueRoundsDown => {
+                (Whose::Own, Past::TriesRestored, PaySlip::DueRoundsDown)
+            }
+            Self::RefusedQuotePayInUnitProofs => (Whose::Own, Past::RefusedQuote, PaySlip::Units),
+            Self::RefusedQuotePayWaitFromQuote => {
+                (Whose::Own, Past::RefusedQuote, PaySlip::WaitFromQuote)
+            }
+            Self::RefusedQuoteDueRoundsDown => {
+                (Whose::Own, Past::RefusedQuote, PaySlip::DueRoundsDown)
+            }
+            Self::RefusedHelloPayInUnitProofs => (Whose::Own, Past::RefusedHello, PaySlip::Units),
+            Self::RefusedHelloPayWaitFromQuote => {
+                (Whose::Own, Past::RefusedHello, PaySlip::WaitFromQuote)
+            }
+            Self::RefusedHelloDueRoundsDown => {
+                (Whose::Own, Past::RefusedHello, PaySlip::DueRoundsDown)
+            }
+            Self::IdleTimeoutPayInUnitProofs => (Whose::Own, Past::IdleTimeout, PaySlip::Units),
+            Self::IdleTimeoutPayWaitFromQuote => {
+                (Whose::Own, Past::IdleTimeout, PaySlip::WaitFromQuote)
+            }
+            Self::IdleTimeoutDueRoundsDown => {
+                (Whose::Own, Past::IdleTimeout, PaySlip::DueRoundsDown)
+            }
+            Self::BehindOtherVideoPayInUnitProofs => {
+                (Whose::Own, Past::BehindOther, PaySlip::Units)
+            }
+            Self::BehindOtherVideoWaitFromRequest => {
+                (Whose::Own, Past::BehindOther, PaySlip::WaitFromRequest)
+            }
+            Self::PayAheadLessOtherLedgersCredit => {
+                (Whose::Other, Past::Credit, PaySlip::AheadLessOthersCredit)
+            }
+            Self::BesideCreditPayInUnitProofs => (Whose::Other, Past::Credit, PaySlip::Units),
+            Self::BesideOwedPayWaitFromQuote => (Whose::Other, Past::Owes, PaySlip::WaitFromQuote),
+            Self::BesideAckPayInUnitProofs => (Whose::Other, Past::Acked, PaySlip::Units),
+            Self::BesideAckPayWaitFromQuote => (Whose::Other, Past::Acked, PaySlip::WaitFromQuote),
+            Self::BesideAckDueRoundsDown => (Whose::Other, Past::Acked, PaySlip::DueRoundsDown),
+            Self::BesideUnavailablePayAheadRoundsUp => {
+                (Whose::Other, Past::Unavailable, PaySlip::AheadRoundsUp)
+            }
+            Self::BesideSettledPayInUnitProofs => (Whose::Other, Past::Settled, PaySlip::Units),
+            Self::BesideSettledDueRoundsDown => {
+                (Whose::Other, Past::Settled, PaySlip::DueRoundsDown)
+            }
+            Self::BesideNoSessionReclaimPayWaitFromQuote => (
+                Whose::Other,
+                Past::Caught(Place::NoSession, Outcome::Whole),
+                PaySlip::WaitFromQuote,
+            ),
+            Self::BesideTriesRestoredDueRoundsDown => {
+                (Whose::Other, Past::TriesRestored, PaySlip::DueRoundsDown)
+            }
+            Self::BesideRefusedQuotePayInUnitProofs => {
+                (Whose::Other, Past::RefusedQuote, PaySlip::Units)
+            }
+            Self::BesidePlainResumePayAheadRoundsUp => {
+                (Whose::Other, Past::PlainResume, PaySlip::AheadRoundsUp)
+            }
+            _ => return None,
+        })
+    }
+
+    /// The stop a defect skips, and what the ledger it comes on waits on.
+    fn own_stop(self) -> Option<(Cause, Waits)> {
+        Some(match self {
+            Self::OwnDishonestQuoteWhileAwaitingNoStop => (Cause::DishonestQuote, Waits::Awaiting),
+            Self::OwnDishonestQuoteOutOfTriesNoStop => (Cause::DishonestQuote, Waits::OutOfTries),
+            Self::OwnBannedHelloWhileAwaitingNoStop => (Cause::BannedHello, Waits::Awaiting),
+            Self::OwnBannedHelloOutOfTriesNoStop => (Cause::BannedHello, Waits::OutOfTries),
+            Self::OwnUnsolicitedRejWhileAwaitingNoStop => (Cause::UnsolicitedRej, Waits::Awaiting),
+            _ => return None,
+        })
+    }
+}
+
+/// Why a viewer refuses a quote without stopping, for the flaws that act on the refusal.
+#[derive(Clone, Copy)]
+enum Refusal {
+    Price,
+    Window,
+    Mint,
+    Second,
+}
+
+/// (peer, video index): one account.
+type Key = (PeerId, usize);
+/// One unpaid admission in the global count: (account, account generation, chunk).
+type Debt = (Key, u64, u64);
+
+struct Account {
+    /// Distinguishes this account from a forgotten one with the same key, so their chunk
+    /// numbers never collide in the global count.
+    generation: u64,
+    admitted: u64,
+    acked: u64,
+    spent: u64,
+    /// Chunk numbers of unpaid admissions, oldest first.
+    unpaid: VecDeque<u64>,
+    files: HashSet<String>,
+    banned: bool,
+    /// The last admission, payment or session close.
+    last_active: u64,
+}
+
+/// The payment holding an account's turn.
+struct Holder {
+    pay: u64,
+    deadline: u64,
+}
+
+/// One `pay`, from its arrival until both its future and its swap are done. Every
+/// decision about it is applied under the engine's one lock, so it is answered, credited
+/// and banned on consistently whichever side (the future, the swap's completion, a
+/// takeover, a read of its state) acts first. A read of its state is a mint round trip,
+/// made without the lock: its decision is applied only if the swap is still undecided
+/// then.
+struct PayRecord {
+    key: Key,
+    /// 60 s from arrival.
+    deadline: u64,
+    /// The swap has been sent: from then the swap's completion, the deadline or a
+    /// takeover releases the turn, not the future.
+    sent: bool,
+    /// The swap settled in time: what the future answers.
+    answer: Option<Result<Ack, Rej>>,
+    /// Answered `mint-unavailable`: the swap is abandoned. A late outcome is credited if
+    /// a claim, and never banned on.
+    abandoned: bool,
+    /// The swap's outcome has come.
+    landed: bool,
+    /// The future has answered, or is gone.
+    finished: bool,
+    waker: Option<Waker>,
+    /// Its outcome, come, to settle as the future is next polled
+    /// ([`SeederFlaw::OutcomeLandsOnPoll`] only).
+    on_poll: Option<Box<dyn FnOnce() + Send>>,
+    /// The swap once sent: what settles it, its token and its output set.
+    swap: Option<(Settle, String, u64)>,
+    /// In its read of its account's unknown swaps ([`SeederFlaw::DropInReadCreatesAccount`]
+    /// and the like only).
+    reading: bool,
+    /// Refused as its account's watermark was read again ([`SeederFlaw::RecheckWakesNone`]
+    /// and [`SeederFlaw::RecheckKeepsTurn`] only).
+    rechecked: bool,
+    /// Its own read of its account's unknown swaps begun ([`SeederFlaw::UnreadRefusalNoFloor`],
+    /// [`SeederFlaw::ReadRefusalNoFloor`] and [`SeederFlaw::WaitedReadRefusalNoFloor`] only).
+    read: bool,
+    /// Keyset listings asked for before it arrived ([`State::listings_asked`]): only one
+    /// asked for since tells it that a keyset its proofs name is not the mint's.
+    listings_seen: u64,
+    /// Waiting for the next second, to ask for the listing again.
+    listing_wait: bool,
+    /// Waiting for the keyset listing its keyset rule judges by (step 5).
+    keyset_wait: bool,
+    /// Its step 3 asked for a listing: its keyset rule asks for another
+    /// ([`SeederFlaw::KeysetListingAfterStep3Asked`] only).
+    force_listing: bool,
+    /// How it came to its turn, once it has ([`SeederFlaw::TakeoverKeysRefetched`] and
+    /// [`SeederFlaw::WaitedKeysRefetched`] only).
+    came: Option<Came>,
+    /// Its wait for its swap's outcome has registered with the clock
+    /// ([`SeederFlaw::AnswerWatchOnce`] only).
+    answer_watched: bool,
+    /// Where it waits in its read, the turn held: for the next second, or for another
+    /// entry's read (the defects planted on a drop there only).
+    read_wait: Option<Stage>,
+}
+
+/// A mint's keyset listing (NUT-02), as the seeder last asked for it.
+#[derive(Clone, Copy)]
+struct Listing {
+    /// The second it was asked for in.
+    at: u64,
+    /// Its place among every listing asked for ([`State::listings_asked`]).
+    seq: u64,
+    /// Its place among the releases of held key requests ([`MockNetwork::listed`]).
+    released: u64,
+    /// Its handle, when its answer comes back from another thread (0: it does not).
+    call: u64,
+    /// The mint's answer; `None` while it is held, or on its way back.
+    answer: Option<Listed>,
+}
+
+#[derive(Default)]
+struct State {
+    accounts: HashMap<Key, Account>,
+    /// Each mint's keys it holds, once fetched (NFX-07 §3 step 3): a keyset a token names
+    /// that they do not hold is fetched, if the mint lists it, and none serves another mint.
+    /// [`Harness::forget_keys`] drops them all.
+    keys: HashMap<String, MintKeys>,
+    /// Each mint's keyset listing, as last asked for: asked for again at most once a second.
+    listings: HashMap<String, Listing>,
+    /// Keyset listings asked for so far, of every mint.
+    listings_asked: u64,
+    /// The keyset rule's own listings ([`SeederFlaw::KeysetListingOwnCache`] only).
+    keyset_listings: HashMap<String, Listing>,
+    /// The keysets each mint's last listing was asked for
+    /// ([`SeederFlaw::ListingRateLimitedPerKeyset`] only).
+    listed_for: HashMap<String, HashSet<u64>>,
+    next_generation: u64,
+    /// Banned peers, and when each was banned.
+    banned: HashMap<PeerId, u64>,
+    /// Open session ids and their account.
+    open: HashMap<String, Key>,
+    /// Open sessions per peer (or per account, with [`SeederFlaw::SessionCapPerVideo`]).
+    open_count: HashMap<(PeerId, Option<usize>), usize>,
+    /// Open sessions per account, for forgetting.
+    open_accounts: HashMap<Key, usize>,
+    /// Hellos waiting for their account's turn, per peer: they count toward the cap.
+    hellos_waiting: HashMap<PeerId, usize>,
+    /// Sessions ever opened ([`SeederFlaw::SessionCapLifetime`] only).
+    ever: HashMap<PeerId, usize>,
+    /// Unpaid admissions and their time, oldest first, for ageing.
+    debt: VecDeque<(Debt, u64)>,
+    /// Unpaid admissions not yet aged out: the global cap's count. A set, so a chunk
+    /// cannot be freed twice.
+    live: HashSet<Debt>,
+    /// The counter [`SeederFlaw::CountFreedTwice`] keeps instead.
+    flawed_count: u64,
+    /// The payment holding each account's turn.
+    paying: HashMap<Key, Holder>,
+    /// Hellos and payments waiting for an account's turn.
+    waiting: HashMap<Key, Vec<Waker>>,
+    /// Every `pay` not yet done on both sides.
+    pays: HashMap<u64, PayRecord>,
+    next_pay: u64,
+    /// Swaps whose answer was lost: learnt by reading their state once the mint can be
+    /// reached. With the swaps abandoned in flight, at most one per account: while one is
+    /// unknown, the account's payments are not swapped.
+    unknown: Vec<Unknown>,
+    /// The second each account's own entries last read its swaps, and each read sent in it:
+    /// kept for that second.
+    own_reads: HashMap<Key, OwnReads>,
+    /// The position a waiting `hello` noted as the payment it first waited for left the
+    /// turn ([`SeederFlaw::QuoteAtFirstWake`] only).
+    first_wake_position: HashMap<Key, (u64, u64, u64)>,
+    /// Hellos waiting for their account's turn, per account
+    /// ([`SeederFlaw::WaitingCountedPerVideo`] only).
+    hellos_waiting_per_account: HashMap<Key, usize>,
+    /// Entries waiting for a read to come back ([`SeederFlaw::ReadWaitUnwokenByClock`] and
+    /// [`SeederFlaw::PayReadWaitUnwokenByClock`] only).
+    read_waiters: Vec<Waker>,
+    /// Entries waiting for a read to become the state each names
+    /// ([`SeederFlaw::ReadWaitUnwokenByAbandon`] and
+    /// [`SeederFlaw::PayReadWaitUnwokenByReturn`] only).
+    read_waiters_on: Vec<(ReadState, Waker)>,
+    /// The late claim being settled is of a quoted mint other than the first
+    /// ([`SeederFlaw::OtherMintLateClaimKeepsDebt`] only).
+    claim_elsewhere: bool,
+    /// The videos it no longer serves ([`Harness::drop_video`]): it keeps their accounts.
+    dropped: HashSet<usize>,
+    /// Keysets whose keys a mint answered 12001, by mint ([`SeederFlaw::KeysRefusalCached`]
+    /// and [`SeederFlaw::LateKeysRefusalCached`] only).
+    keys_refused: HashSet<(String, u64)>,
+    /// Payments woken before their swap's outcome was settled ([`SeederFlaw::OutcomeWokenEarly`]
+    /// and the like only): its settlement wakes them no more.
+    woken_early: HashSet<u64>,
+    /// Payments whose turn's waiters were woken before their swap's outcome was settled
+    /// ([`SeederFlaw::TurnWokenEarly`] only): its settlement wakes them no more.
+    turn_woken_early: HashSet<u64>,
+}
+
+/// An account's own reads in one second: the second, each read sent in it, and how many had
+/// been sent when its turn was last freed that second (a `hello` that waited for the turn
+/// reads after it: none of those serves it). A turn freed at its payment's deadline was
+/// freed as that second began, and counts none.
+type OwnReads = (u64, Vec<OwnRead>, usize);
+
+/// One read of an account's swaps, sent by a payment of `by` (`None`: a `hello`), covering
+/// the swaps undecided when it was sent (by their outputs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnRead {
+    by: Option<Vec<u64>>,
+    covers: Vec<u64>,
+    state: ReadState,
+}
+
+/// Where a read sent is: a read counts from when it is sent, whatever becomes of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadState {
+    /// Sent, and not back yet (a round trip).
+    UnderWay,
+    /// Back: its result is applied.
+    Back,
+    /// Its entry was dropped before it came back: it counts, and has no result.
+    Abandoned,
+}
+
+/// What an entry does about its account's reads, decided in one look at them.
+enum Plan {
+    /// Wait until no read of the account is under way, then answer (a flaw's).
+    WaitAll,
+    /// Answer without reading: a read serves it, or it has no time left.
+    Done,
+    /// Wait a poll for a read under way that would serve it, then look again.
+    WaitRead,
+    /// Wait a poll for the next second (the second's two reads spent), then look again.
+    NextSecond,
+    /// Read: in the place taken (its index), exactly the swaps it covers; or, with the
+    /// flaw, in a place taken once sent.
+    Read(Option<(usize, Vec<Unknown>, Vec<InFlight>)>),
+}
+
+/// Who applies a read of swap state: the sweep, or an account's own entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Learner {
+    /// The background sweep.
+    Sweep,
+    /// The account's own `hello`.
+    Hello,
+    /// A payment of the account.
+    Pay,
+}
+
+/// A read of swap state, sent, and not yet applied: its swaps, and what it found for each.
+struct Learnt {
+    lost: Vec<Unknown>,
+    flight: Vec<InFlight>,
+    reads: Vec<Read>,
+}
+
+impl Learnt {
+    /// The swaps it covers, by their outputs.
+    fn covers(&self) -> Vec<u64> {
+        self.lost
+            .iter()
+            .map(|u| u.outputs)
+            .chain(self.flight.iter().map(|f| f.3))
+            .collect()
+    }
+}
+
+/// A swap sent and past its payment's deadline, unanswered: the payment, its parameters,
+/// its token, its outputs and its deadline.
+type InFlight = (u64, Settle, String, u64, u64);
+
+/// A swap whose answer was lost.
+#[derive(Clone)]
+struct Unknown {
+    pay: Settle,
+    token: String,
+    outputs: u64,
+    /// When its answer was lost.
+    since: u64,
+}
+
+/// A seeder's configuration (NFX-07 §3).
+#[derive(Debug, Clone)]
+pub struct EngineConfig {
+    pub price_per_chunk: u64,
+    pub mints: Vec<String>,
+    pub window: u64,
+    pub global_cap: u64,
+    pub debt_ttl: Duration,
+    pub account_ttl: Duration,
+    pub ban_ttl: Duration,
+}
+
+impl EngineConfig {
+    /// A seeder refuses to start outside these (NFX-07 §3). A zero `debt_ttl`, or a cap
+    /// beyond the ceiling, would switch the cap off; an `account_ttl` below `debt_ttl`
+    /// would let a forgotten account start afresh while its debt still counted.
+    pub fn validate(&self) -> Result<(), String> {
+        self.check(None)
+    }
+
+    fn check(&self, flaw: Option<SeederFlaw>) -> Result<(), String> {
+        if self.price_per_chunk == 0 || self.price_per_chunk > MAX_INT {
+            return Err("price_per_chunk is 1 to 2^53-1".into());
+        }
+        if self.mints.is_empty() || self.mints.len() > 16 {
+            return Err("quote 1 to 16 mints".into());
+        }
+        if self.window < 2 || self.window > MAX_WINDOW {
+            return Err("window is 2 to 64".into());
+        }
+        let ceiling = flaw != Some(SeederFlaw::NoCapCeiling);
+        if self.global_cap == 0 || (ceiling && self.global_cap > MAX_GLOBAL_CAP) {
+            return Err("the global cap is 1 to 1,000,000".into());
+        }
+        if self.debt_ttl < MIN_DEBT_TTL {
+            return Err("debt_ttl is at least 10 minutes".into());
+        }
+        let ceilings = flaw != Some(SeederFlaw::NoTtlCeiling);
+        let max_debt_ttl = if flaw == Some(SeederFlaw::DebtTtlCeilingOffByOne) {
+            MAX_DEBT_TTL + Duration::from_secs(1)
+        } else {
+            MAX_DEBT_TTL
+        };
+        // The flaw: the ceilings compared in whole seconds.
+        let over = if flaw == Some(SeederFlaw::TtlsComparedInSeconds) {
+            self.debt_ttl.as_secs() > max_debt_ttl.as_secs()
+                || self.account_ttl.as_secs() > MAX_STATE_TTL.as_secs()
+                || self.ban_ttl.as_secs() > MAX_STATE_TTL.as_secs()
+        } else {
+            self.debt_ttl > max_debt_ttl
+                || self.account_ttl > MAX_STATE_TTL
+                || self.ban_ttl > MAX_STATE_TTL
+        };
+        if ceilings && over {
+            return Err("debt_ttl is at most 24 h; account_ttl and ban_ttl at most 30 days".into());
+        }
+        let short = if flaw == Some(SeederFlaw::EqualTtlRefused) {
+            self.account_ttl <= self.debt_ttl
+        } else {
+            self.account_ttl < self.debt_ttl
+        };
+        if short {
+            return Err("account_ttl is at least debt_ttl".into());
+        }
+        if self.ban_ttl < self.debt_ttl && flaw != Some(SeederFlaw::NoBanTtlCheck) {
+            return Err("ban_ttl is at least debt_ttl".into());
+        }
+        // Its quote must be one the pay/1 writer emits: every mint URL valid.
+        let quote = Message::Quote(Quote {
+            price_per_chunk: self.price_per_chunk,
+            mints: self.mints.clone(),
+            window: self.window,
+            served: 0,
+            accepted_upto: 0,
+            spent_total: 0,
+        });
+        let opts = ParseOptions {
+            allow_loopback_http: flaw == Some(SeederFlaw::ValidateAllowsLoopback),
+        };
+        quote
+            .to_line_with(opts)
+            .map_err(|e| format!("its quote is not valid pay/1: {e}"))?;
+        Ok(())
+    }
+}
+
+struct Video {
+    addr: VideoAddr,
+    members: HashSet<String>,
+}
+
+struct Inner {
+    config: EngineConfig,
+    videos: Vec<Video>,
+    clock: Clock,
+    net: MockNetwork,
+    flaw: Option<SeederFlaw>,
+    state: Mutex<State>,
+    /// The time it ages its state to, where it does so on a task of its own
+    /// ([`Timing::ages_on_a_task`]): the clock's as that task last saw it, or as the
+    /// seeder itself last moved it.
+    aged: AtomicU64,
+}
+
+/// Ready on the next poll: the shape of a mint round trip, with no time passing.
+async fn next_poll() {
+    let mut yielded = false;
+    poll_fn(|cx| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
+impl Inner {
+    /// Polls more, waking itself, as an honest engine may take at a step
+    /// ([`Timing::yields`]).
+    async fn dawdle(&self) {
+        let mut left = self.net.ledger().timing.yields;
+        poll_fn(|cx| {
+            if left == 0 {
+                return Poll::Ready(());
+            }
+            left -= 1;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        })
+        .await;
+    }
+
+    /// `entry` (a `hello`, a `pay` or a sweep) as a seeder runs it that takes its entries
+    /// through tasks of the runtime it was made in ([`Timing::hop`]): through
+    /// [`Timing::tasks_in`] tasks first, its wakes passed on by one if
+    /// [`Timing::wakes_through_a_task`], its answer through [`Timing::tasks_out`] more, and
+    /// through another after a `pay` that waited if [`Timing::task_after_a_wait`].
+    async fn through_tasks<T>(&self, pay: bool, entry: impl Future<Output = T>) -> T {
+        let (hop, tasks_in, tasks_out, after_a_wait, relays) = {
+            let l = self.net.ledger();
+            let t = &l.timing;
+            (
+                t.hop.clone(),
+                t.tasks_in,
+                t.tasks_out,
+                t.task_after_a_wait,
+                t.wakes_through_a_task,
+            )
+        };
+        let Some(hop) = hop else {
+            return entry.await;
+        };
+        for _ in 0..tasks_in {
+            a_task(&hop).await;
+        }
+        let mut entry = std::pin::pin!(entry);
+        let mut waited = false;
+        let answer = poll_fn(|cx| {
+            let polled = if relays {
+                let relay = Waker::from(Arc::new(Relay {
+                    hop: hop.clone(),
+                    entry: cx.waker().clone(),
+                }));
+                entry.as_mut().poll(&mut Context::from_waker(&relay))
+            } else {
+                entry.as_mut().poll(cx)
+            };
+            waited |= polled.is_pending();
+            polled
+        })
+        .await;
+        for _ in 0..tasks_out {
+            a_task(&hop).await;
+        }
+        if pay && waited && after_a_wait {
+            a_task(&hop).await;
+        }
+        answer
+    }
+
+    /// The waker a call of an entry's asks the mint to wake as its answer comes: the
+    /// entry's own. With `flaw`, on a seeder that has tasks of its own, one that wakes the
+    /// entry before it lets it see the answer ([`EarlyWake`]): `seen` is then false until
+    /// it does.
+    fn early_waker(&self, flaw: SeederFlaw, cx: &Context<'_>, seen: &Arc<AtomicBool>) -> Waker {
+        let spawn = if self.has(flaw) {
+            self.net.ledger().timing.spawn.clone()
+        } else {
+            None
+        };
+        let Some(spawn) = spawn else {
+            return cx.waker().clone();
+        };
+        seen.store(false, Ordering::SeqCst);
+        Waker::from(Arc::new(EarlyWake {
+            spawn,
+            entry: cx.waker().clone(),
+            seen: seen.clone(),
+        }))
+    }
+
+    /// A read's round trip, sent by `by`: back once the mint has answered it, its sender
+    /// woken as it comes back. The flaws: not woken, or woken before the answer can be
+    /// seen.
+    async fn read_back(&self, by: Learner) {
+        let unwoken = match by {
+            Learner::Hello => self.has(SeederFlaw::ReadUnwoken),
+            Learner::Pay => {
+                self.has(SeederFlaw::ReadUnwoken) || self.has(SeederFlaw::PayReadUnwoken)
+            }
+            Learner::Sweep => self.has(SeederFlaw::SweepReadUnwoken),
+        };
+        let early = match by {
+            Learner::Hello => self.has(SeederFlaw::ReadWokenEarly),
+            Learner::Pay => {
+                self.has(SeederFlaw::ReadWokenEarly) || self.has(SeederFlaw::PayReadWokenEarly)
+            }
+            Learner::Sweep => self.has(SeederFlaw::SweepReadWokenEarly),
+        };
+        let early = if early {
+            self.net.ledger().timing.spawn.clone()
+        } else {
+            None
+        };
+        self.net.round_trip_as(!unwoken, early).await;
+    }
+
+    /// Whether, with tasks of its own, it wakes a payment before it settles its swap's
+    /// outcome `outcome` (the flaws).
+    fn wakes_early(&self, outcome: Swap) -> bool {
+        match self.flaw {
+            Some(SeederFlaw::OutcomeWokenEarly) => true,
+            Some(SeederFlaw::SpentWokenEarly) => outcome == Swap::Spent,
+            Some(SeederFlaw::InvalidWokenEarly) => outcome == Swap::Invalid,
+            Some(SeederFlaw::UnreachableWokenEarly) => outcome == Swap::Unreachable,
+            Some(SeederFlaw::LostWokenEarly) => outcome == Swap::Lost,
+            Some(SeederFlaw::PendingWokenEarly) => outcome == Swap::Pending,
+            Some(SeederFlaw::OutputsRefusedWokenEarly) => outcome == Swap::OutputsRefused,
+            Some(SeederFlaw::ExpiredWokenEarly) => outcome == Swap::Expired,
+            _ => false,
+        }
+    }
+
+    /// The flaws ([`SeederFlaw::OutcomeWokenEarly`] and the like), on a task of the seeder's
+    /// own: the outcome's payment is woken first, and the outcome settled a turn of the
+    /// runtime later, with no wake.
+    async fn land_woken_early(
+        &self,
+        id: u64,
+        pay: &Settle,
+        token: &str,
+        outputs: u64,
+        outcome: Swap,
+    ) {
+        let outcome = self.after_swap(id, token, outputs, outcome);
+        if self.wakes_early(outcome) {
+            let waker = {
+                let mut st = self.state();
+                st.woken_early.insert(id);
+                st.pays.get_mut(&id).and_then(|r| r.waker.take())
+            };
+            wake_all(waker.into_iter().collect());
+            next_poll().await;
+        } else if self.has(SeederFlaw::TurnWokenEarly) {
+            let waiters = {
+                let mut st = self.state();
+                st.turn_woken_early.insert(id);
+                st.waiting.remove(&pay.key)
+            };
+            wake_all(waiters.unwrap_or_default());
+            next_poll().await;
+        }
+        self.land(id, pay, token, outputs, outcome);
+    }
+
+    /// With what it starts the task that takes a closed connection, if it takes one on a
+    /// task of its own ([`Timing::closes_on_a_task`]).
+    fn closes_on_a_task(&self) -> Option<Spawner> {
+        let l = self.net.ledger();
+        l.timing.spawn.clone().filter(|_| l.timing.closes_on_a_task)
+    }
+
+    /// The time it ages its state to ([`Inner::age`]): the clock's; or, where it ages on a
+    /// task of its own ([`Timing::ages_on_a_task`]), the time that task last saw.
+    fn aged_now(&self) -> u64 {
+        if self.net.ledger().timing.ages_on_a_task {
+            self.aged.load(Ordering::SeqCst)
+        } else {
+            self.clock.now()
+        }
+    }
+
+    /// The seeder's own wait moves the clock by `by` (a read left unanswered, the seam of
+    /// [`Harness::advance_during_next_land`]): it has seen that time pass itself.
+    fn pass(&self, by: Duration) {
+        self.clock.advance(by);
+        self.aged.store(self.clock.now(), Ordering::SeqCst);
+    }
+}
+
+/// Ready on the next poll, with nothing asked to wake it: only a poll it did not ask for
+/// comes ([`SeederFlaw::NextSecondUnwoken`], [`SeederFlaw::PayNextSecondUnwoken`]).
+async fn unwoken_poll() {
+    let mut polled = false;
+    poll_fn(|_| {
+        if polled {
+            Poll::Ready(())
+        } else {
+            polled = true;
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
+fn wake_all(wake: Vec<Waker>) {
+    for w in wake {
+        w.wake();
+    }
+}
+
+/// A turn through a task of the runtime the seeder was made in, started with `spawn`: this
+/// waits until that task has run ([`Timing::tasks_in`] and the like).
+async fn a_task(spawn: &Spawner) {
+    let done = Arc::new(Mutex::new((false, None::<Waker>)));
+    let ran = done.clone();
+    spawn(Box::pin(async move {
+        let waker = {
+            let mut d = lock(&ran);
+            d.0 = true;
+            d.1.take()
+        };
+        if let Some(w) = waker {
+            w.wake();
+        }
+    }));
+    poll_fn(|cx| {
+        let mut d = lock(&done);
+        if d.0 {
+            return Poll::Ready(());
+        }
+        d.1 = Some(cx.waker().clone());
+        Poll::Pending
+    })
+    .await;
+}
+
+/// Passes a wake of an entry on to it through a task of the seeder's runtime
+/// ([`Timing::wakes_through_a_task`]): a task for each wake, so as many as the wakers the
+/// entry handed out while it waited.
+struct Relay {
+    hop: Spawner,
+    entry: Waker,
+}
+
+impl Wake for Relay {
+    fn wake(self: Arc<Self>) {
+        let entry = self.entry.clone();
+        (self.hop)(Box::pin(async move { entry.wake() }));
+    }
+}
+
+/// What a flawed seeder asks to be woken in an entry's stead as an answer comes
+/// ([`SeederFlaw::KeysWokenEarly`] and the like): it starts a task of the seeder's own,
+/// which wakes the entry, yields, and only then lets the entry see the answer (`seen`),
+/// waking it no more. An entry polled between the two finds nothing, and waits for good.
+struct EarlyWake {
+    spawn: Spawner,
+    entry: Waker,
+    seen: Arc<AtomicBool>,
+}
+
+impl Wake for EarlyWake {
+    fn wake(self: Arc<Self>) {
+        let (entry, seen) = (self.entry.clone(), self.seen.clone());
+        (self.spawn)(Box::pin(async move {
+            entry.wake();
+            next_poll().await;
+            seen.store(true, Ordering::SeqCst);
+        }));
+    }
+}
+
+fn unavailable(detail: &str) -> Rej {
+    rej(RejCode::MintUnavailable, detail)
+}
+
+impl Inner {
+    fn state(&self) -> MutexGuard<'_, State> {
+        lock(&self.state)
+    }
+
+    fn has(&self, f: SeederFlaw) -> bool {
+        self.flaw == Some(f)
+    }
+
+    /// When this seeder asks for keyset listings beyond what NFX-07 §3 requires.
+    fn listings(&self) -> Listings {
+        self.net.ledger().listings
+    }
+
+    /// Ask every quoted mint for its keyset listing, at the seeder's start.
+    fn list_at_start(&self) {
+        let now = self.clock.now();
+        for mint in &self.config.mints {
+            let seq = {
+                let mut st = self.state();
+                st.listings_asked += 1;
+                st.listings_asked
+            };
+            let (released, call, answer) = self.net.list_keysets(mint, Waker::noop());
+            if self.has(SeederFlaw::StartListingDiscarded) {
+                continue;
+            }
+            self.state().listings.insert(
+                mint.clone(),
+                Listing {
+                    at: now,
+                    seq,
+                    released,
+                    call,
+                    answer,
+                },
+            );
+        }
+    }
+
+    /// Whether `mint` is a quoted mint other than the first (the defects that keep a rule
+    /// at the first quoted mint alone).
+    fn other_mint(&self, mint: &str) -> bool {
+        self.config.mints.first().is_some_and(|m| m != mint)
+    }
+
+    /// Whether `token` is of a quoted mint other than the first (the defects that keep a
+    /// swap's outcomes right at the first quoted mint alone).
+    fn token_at_other_mint(&self, token: &str) -> bool {
+        self.net
+            .read(token)
+            .is_some_and(|i| i.mints.first().is_some_and(|m| self.other_mint(m)))
+    }
+
+    /// Whether payment `pay` asks its mint for nothing more: at or past its deadline, or
+    /// abandoned (NFX-07 §3, the deadline: no key request and no listing request is sent
+    /// then, judged at every look). The defect `ask` asks there, and so does the seeder
+    /// with no deadline at all; no other defect does.
+    fn asks_no_more(&self, pay: u64, ask: SeederFlaw) -> bool {
+        // `NoDeadline` keeps asking: this rule is a clause of the deadline it lacks, and a
+        // payment of it that had asked for nothing by then would wait for ever on no
+        // request, where its defect is to wait for the mint. The defects that use what comes
+        // at or past the deadline (`LateKeysUsed`, `LateListingUsed`,
+        // `KeysInDeadlineSecondUsed`, `KeysetListingWaitPastDeadline`) act on the answer to
+        // a request sent in time, or on a wait: they ask no more than an honest seeder.
+        if self.has(ask) || self.has(SeederFlaw::NoDeadline) {
+            return false;
+        }
+        let st = self.state();
+        let now = self.clock.now();
+        st.pays
+            .get(&pay)
+            .is_none_or(|r| r.abandoned || now >= r.deadline)
+    }
+
+    /// Ask the first quoted mint for its keyset listing, unless it was asked in this
+    /// second: the defects that ask where no check needs one.
+    fn ask_listing_unneeded(&self) {
+        let Some(mint) = self.config.mints.first() else {
+            return;
+        };
+        let now = self.clock.now();
+        let seq = {
+            let mut st = self.state();
+            if st.listings.get(mint).is_some_and(|l| l.at == now) {
+                return;
+            }
+            st.listings_asked += 1;
+            st.listings_asked
+        };
+        let (released, call, answer) = self.net.list_keysets(mint, Waker::noop());
+        self.state().listings.insert(
+            mint.clone(),
+            Listing {
+                at: now,
+                seq,
+                released,
+                call,
+                answer,
+            },
+        );
+    }
+
+    /// Note where the payment holding `key`'s turn waits in its read, or that it waits no
+    /// more (the defects planted on a drop there only).
+    fn read_wait(&self, key: Key, stage: Option<Stage>) {
+        if self.flaw.and_then(SeederFlaw::drop_slip).is_none() {
+            return;
+        }
+        let mut st = self.state();
+        if let Some(id) = st.paying.get(&key).map(|h| h.pay)
+            && let Some(r) = st.pays.get_mut(&id)
+        {
+            r.read_wait = stage;
+        }
+    }
+
+    /// Whether a defect of the matrix of payments does `slip` with a payment that came to
+    /// its turn so, refused by `check`.
+    fn slips(&self, slip: Slip, came: Came, check: Option<Check>) -> bool {
+        check.is_some_and(|c| self.flaw.and_then(SeederFlaw::refusal_slip) == Some((slip, came, c)))
+    }
+
+    /// Whether a defect of the matrix of payments reads at `at`, for a payment that came to
+    /// its turn so.
+    fn reads_at(&self, at: ReadAt, came: Came) -> bool {
+        self.flaw.and_then(SeederFlaw::read_at) == Some((at, came))
+    }
+
+    /// Whether a defect of the matrix of payments runs `early`, for a payment that came to
+    /// its turn so.
+    fn runs_early(&self, early: Early, came: Came) -> bool {
+        self.flaw.and_then(SeederFlaw::early) == Some((early, came))
+    }
+
+    /// Whether a defect judges the keyset rule of a payment that came to its turn so by the
+    /// listing `judged` says.
+    fn judges(&self, judged: Judged, came: Came) -> bool {
+        self.flaw.and_then(SeederFlaw::judged) == Some((judged, came))
+    }
+
+    fn debt_key(&self, key: Key, generation: u64, n: u64) -> Debt {
+        if self.has(SeederFlaw::LiveKeyedByPeer) {
+            ((key.0, 0), 0, n)
+        } else {
+            (key, generation, n)
+        }
+    }
+
+    fn free_flawed(&self, st: &mut State, n: u64) {
+        st.flawed_count = if self.has(SeederFlaw::CountFreedTwiceWrapping) {
+            st.flawed_count.wrapping_sub(n)
+        } else {
+            st.flawed_count.saturating_sub(n)
+        };
+    }
+
+    /// Learn the outcome of swaps left unknown (an answer lost, or a swap abandoned in
+    /// flight) while the mint can be reached: a claim is credited as a late one, and a
+    /// swap that can no longer go through leaves nothing to credit. `scope`: that
+    /// account's own, as its `hello` and `pay` learn them; `None`: every account's, as the
+    /// background sweep does. Each is decided on its own: one still unknown delays no
+    /// other. The reads are mint round trips, made without the state lock, in as few
+    /// requests as the mint's limits allow; a decision is applied only to a swap still
+    /// undecided when it comes back, so an answer, or another learner, that settled it
+    /// meanwhile is not counted again. One whose inputs still read unspent `account_ttl`
+    /// after it became unknown is completed: the seeder sends its swap again, with the
+    /// same outputs, and settles it as that answer says.
+    /// Whether it read anything. `until`: the reads, and completions, end then (a
+    /// payment's deadline): one still unanswered is abandoned, and proves nothing. `by`:
+    /// who applies it.
+    fn learn(&self, scope: Option<Key>, until: Option<u64>, by: Learner) -> bool {
+        match self.learn_read(scope, until) {
+            Some(learnt) => {
+                self.learn_apply(&learnt, by);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The read half of [`Inner::learn`]: the swaps it covers, fixed as it is sent, and the
+    /// mint's answers (completions included). `None`: nothing to read.
+    fn learn_read(&self, scope: Option<Key>, until: Option<u64>) -> Option<Learnt> {
+        let (lost, flight) = self.to_learn(scope);
+        self.learn_read_of(lost, flight, until)
+    }
+
+    /// [`Inner::learn_read`] of the swaps given: exactly those are sent.
+    fn learn_read_of(
+        &self,
+        lost: Vec<Unknown>,
+        flight: Vec<InFlight>,
+        until: Option<u64>,
+    ) -> Option<Learnt> {
+        if self.has(SeederFlaw::NeverRestores) {
+            return None;
+        }
+        if lost.is_empty() && flight.is_empty() {
+            return None;
+        }
+        let items: Vec<(String, u64)> = lost
+            .iter()
+            .map(|u| (u.token.clone(), u.outputs))
+            .chain(flight.iter().map(|f| (f.2.clone(), f.3)))
+            .collect();
+        let since: Vec<(u64, bool)> = lost
+            .iter()
+            .map(|u| (u.since, false))
+            .chain(flight.iter().map(|f| (f.4, true)))
+            .collect();
+        let mut reads: Vec<Read> = if self.has(SeederFlaw::ReadsPerSwap) {
+            items
+                .iter()
+                .flat_map(|i| self.read_states(std::slice::from_ref(i), until))
+                .collect()
+        } else {
+            self.read_states(&items, until)
+        };
+        // Undecided with every input unspent `account_ttl` after it became unknown: its
+        // payer has had the inputs back all that time and never spent them. The seeder
+        // completes the swap: a claim is credited late, like any other.
+        let ttl = if self.has(SeederFlaw::CompletesAtDebtTtl) {
+            self.config.debt_ttl.as_secs()
+        } else {
+            self.config.account_ttl.as_secs()
+        };
+        for (i, read) in reads.iter_mut().enumerate() {
+            let (since, in_flight) = since[i];
+            let due = *read == Read::Unspent
+                && self.clock.now() >= since.saturating_add(ttl)
+                && !self.has(SeederFlaw::UndecidedNeverExpires)
+                && !(in_flight && self.has(SeederFlaw::FlightNeverExpires));
+            if due {
+                let key = if i < lost.len() {
+                    lost[i].pay.key
+                } else {
+                    flight[i - lost.len()].1.key
+                };
+                *read = if self.has(SeederFlaw::ExpiryDrops) {
+                    Read::Nothing
+                } else {
+                    self.complete(key, &items[i].0, items[i].1, until)
+                };
+            }
+        }
+        Some(Learnt {
+            lost,
+            flight,
+            reads,
+        })
+    }
+
+    /// The apply half of [`Inner::learn`]: each decision taken for a swap still undecided,
+    /// by `by`.
+    fn learn_apply(&self, learnt: &Learnt, by: Learner) {
+        let (lost, flight, reads) = (&learnt.lost, &learnt.flight, &learnt.reads);
+        let (lost_reads, flight_reads) = reads.split_at(lost.len());
+        let decided = |read: Read| matches!(read, Read::Claimed | Read::Nothing);
+        let mut wake = Vec::new();
+        {
+            let mut st = self.state();
+            for (u, &read) in lost.iter().zip(lost_reads) {
+                if !decided(read) {
+                    if self.has(SeederFlaw::LearnStopsAtFirstUnknown) {
+                        break;
+                    }
+                    continue;
+                }
+                // Decided by another learner meanwhile: nothing more to do.
+                match st.unknown.iter().position(|x| x.outputs == u.outputs) {
+                    Some(i) => {
+                        st.unknown.remove(i);
+                    }
+                    None if self.has(SeederFlaw::LostNoRecheck) => {}
+                    None => continue,
+                }
+                if read == Read::Claimed {
+                    st.claim_elsewhere = self.claim_kept_counted(&u.token);
+                    if !self.read_claim_lost(&u.token) {
+                        self.settle_late(&mut st, &u.pay, Swap::Claimed);
+                    }
+                } else if self.nothing_frees(by, false) {
+                    self.free_unpaid(&mut st, &u.pay);
+                }
+            }
+            let lost_open = st
+                .unknown
+                .iter()
+                .any(|u| lost.iter().any(|l| l.outputs == u.outputs));
+            if !(lost_open && self.has(SeederFlaw::InFlightWaitsForUnknown)) {
+                for (f, &read) in flight.iter().zip(flight_reads) {
+                    let (id, pay) = (f.0, &f.1);
+                    if !decided(read) {
+                        if self.has(SeederFlaw::InFlightStopsAtFirstUnknown) {
+                            break;
+                        }
+                        continue;
+                    }
+                    // An answer that landed while it was read has settled it.
+                    let open = st.pays.get(&id).is_some_and(|r| r.sent && !r.landed);
+                    if !open && !self.has(SeederFlaw::NoRecheckAfterRead) {
+                        continue;
+                    }
+                    if read == Read::Claimed {
+                        st.claim_elsewhere = self.claim_kept_counted(&f.2);
+                        if !self.read_claim_lost(&f.2) {
+                            self.settle_late(&mut st, pay, Swap::Claimed);
+                        }
+                    } else if self.nothing_frees(by, true) {
+                        self.free_unpaid(&mut st, pay);
+                    }
+                    st.pays.remove(&id);
+                    // A turn it still holds is released, and what waits for it woken; a
+                    // turn another payment took over stays that payment's.
+                    if self.has(SeederFlaw::DecidedKeepsTurn) {
+                        continue;
+                    }
+                    if self.has(SeederFlaw::DecidedFreesAnyTurn) {
+                        self.free_turn(&mut st, pay.key);
+                    }
+                    if self.has(SeederFlaw::DecidedLeavesWaiters) {
+                        if st.paying.get(&pay.key).is_some_and(|h| h.pay == id) {
+                            self.free_turn(&mut st, pay.key);
+                        }
+                    } else {
+                        wake.extend(self.release_turn(&mut st, pay.key, id));
+                    }
+                }
+            }
+        }
+        wake_all(wake);
+    }
+
+    /// The flaw: a claim at a quoted mint other than the first, learnt by a read, is not
+    /// credited.
+    fn read_claim_lost(&self, token: &str) -> bool {
+        self.has(SeederFlaw::OtherMintReadClaimNotCredited) && self.token_at_other_mint(token)
+    }
+
+    /// The flaw: a late claim at a quoted mint other than the first leaves its chunks in the
+    /// global count.
+    fn claim_kept_counted(&self, token: &str) -> bool {
+        self.has(SeederFlaw::OtherMintLateClaimKeepsDebt) && self.token_at_other_mint(token)
+    }
+
+    /// Whether a swap learnt as nothing by `by` frees its account's chunks from the global
+    /// count (`in_flight`: abandoned in flight, else its answer lost): only a flaw's does.
+    fn nothing_frees(&self, by: Learner, in_flight: bool) -> bool {
+        let (own, pay) = (by != Learner::Sweep, by == Learner::Pay);
+        self.has(SeederFlaw::LateNothingFreesDebt)
+            || (in_flight && self.has(SeederFlaw::NothingInFlightFreesDebt))
+            || (own && self.has(SeederFlaw::OwnNothingFreesDebt))
+            || (pay && self.has(SeederFlaw::PayNothingFreesDebt))
+            || (own && in_flight && self.has(SeederFlaw::OwnNothingInFlightFreesDebt))
+            || (pay && in_flight && self.has(SeederFlaw::PayNothingInFlightFreesDebt))
+    }
+
+    /// What the flaws of [`Inner::nothing_frees`] free for a swap learnt as nothing: its
+    /// account's unpaid chunks up to the payment leave the global count, unpaid.
+    fn free_unpaid(&self, st: &mut State, pay: &Settle) {
+        let Some(a) = st.accounts.get(&pay.key) else {
+            return;
+        };
+        let generation = a.generation;
+        let freed: Vec<u64> = a
+            .unpaid
+            .iter()
+            .copied()
+            .filter(|n| *n <= pay.upto)
+            .collect();
+        for n in freed {
+            st.live.remove(&self.debt_key(pay.key, generation, n));
+        }
+    }
+
+    /// The swaps [`Inner::learn`] reads: `scope`'s own, or every account's. Lost answers
+    /// first, then swaps in flight past their deadlines, oldest first.
+    fn to_learn(&self, scope: Option<Key>) -> (Vec<Unknown>, Vec<InFlight>) {
+        let st = self.state();
+        self.to_learn_in(&st, scope)
+    }
+
+    /// [`Inner::to_learn`], under a lock already held.
+    fn to_learn_in(&self, st: &State, scope: Option<Key>) -> (Vec<Unknown>, Vec<InFlight>) {
+        let scope = scope.filter(|_| !self.has(SeederFlaw::ReadsOtherAccounts));
+        let mine = |k: Key| {
+            scope.is_none_or(|s| {
+                if self.has(SeederFlaw::ScopeByPeer) {
+                    s.0 == k.0
+                } else {
+                    s == k
+                }
+            }) && !(scope.is_none()
+                && st.dropped.contains(&k.1)
+                && self.has(SeederFlaw::SweepSkipsDroppedVideos))
+        };
+        let now = self.clock.now();
+        let lost: Vec<Unknown> = st
+            .unknown
+            .iter()
+            .filter(|u| mine(u.pay.key))
+            .cloned()
+            .collect();
+        let mut flight: Vec<InFlight> = if self.has(SeederFlaw::InFlightNeverDecided) {
+            Vec::new()
+        } else {
+            st.pays
+                .iter()
+                .filter(|(_, r)| {
+                    mine(r.key) && r.sent && !r.landed && (r.abandoned || now >= r.deadline)
+                })
+                .filter(|(_, r)| {
+                    !(scope.is_none()
+                        && st.dropped.contains(&r.key.1)
+                        && self.has(SeederFlaw::SweepSkipsDroppedVideosInFlight))
+                })
+                .filter_map(|(id, r)| r.swap.clone().map(|(p, t, o)| (*id, p, t, o, r.deadline)))
+                .collect()
+        };
+        flight.sort_by_key(|f| f.0);
+        (lost, flight)
+    }
+
+    /// Whether the mint's active keyset expires too soon to swap to, by its `final_expiry`
+    /// as the mint lists it now, with no listing asked for ([`SeederFlaw::KeysetFirst`] and
+    /// the like only: an honest seeder judges by a listing, [`Inner::keyset_listing`]).
+    fn keyset_too_soon(&self) -> bool {
+        self.too_soon(self.net.keyset_final_expiry())
+    }
+
+    /// Whether a keyset whose `final_expiry` is `final_expiry` expires sooner than twice
+    /// `account_ttl` away by this seeder's clock: then it is not swapped to.
+    fn too_soon(&self, final_expiry: Option<u64>) -> bool {
+        if self.has(SeederFlaw::IgnoresKeysetExpiry) {
+            return false;
+        }
+        let ttl = if self.has(SeederFlaw::KeysetMarginBanTtl) {
+            self.config.ban_ttl
+        } else if self.has(SeederFlaw::KeysetMarginMaxTtl) {
+            self.config.account_ttl.max(self.config.ban_ttl)
+        } else {
+            self.config.account_ttl
+        };
+        let horizon = self.clock.now() + 2 * ttl.as_secs();
+        final_expiry.is_some_and(|t| {
+            if self.has(SeederFlaw::KeysetMarginInclusive) {
+                t <= horizon
+            } else {
+                t < horizon
+            }
+        })
+    }
+
+    /// Whether `key` has swaps of its own to read now.
+    fn has_reads(&self, key: Key) -> bool {
+        if self.has(SeederFlaw::NeverRestores) {
+            return false;
+        }
+        let (lost, flight) = self.to_learn(Some(key));
+        !lost.is_empty() || !flight.is_empty()
+    }
+
+    /// Learn `key`'s own unknown swaps at a payment of `proofs` that has passed its
+    /// checks, by its deadline `until`, unless this engine learns only at a `hello`.
+    async fn learn_here(&self, key: Key, proofs: Vec<u64>, until: u64) {
+        if !self.has(SeederFlaw::LearnOnHelloOnly) {
+            let until = (!self.has(SeederFlaw::OwnReadsIgnoreDeadline)).then_some(until);
+            self.learn_own(key, Some(proofs), until, None).await;
+        }
+    }
+
+    /// Learn `key`'s own unknown swaps at its entry: a `hello` (`proofs` `None`), or a
+    /// payment of `proofs`. An account's own reads are at most two a second: a `hello`
+    /// reuses any read of its account made that second, a payment reuses one made for the
+    /// same proofs, and past two reads that second every entry reuses them. So a flood,
+    /// of hellos or of payments whatever their proofs, costs the mint two reads a second,
+    /// while a watcher paying again after its reclaim, with other proofs, reads afresh.
+    /// An entry takes its read's place in the same look at the second's reads that decides
+    /// it reads, before the read is sent: an entry meanwhile, on this task or another,
+    /// reuses it instead of reading again. No read is sent at or past the entry's deadline.
+    /// `waited`: a `hello` that waited for a payment, which reads after it (only a read sent
+    /// after its wait ended serves it).
+    async fn learn_own(
+        &self,
+        key: Key,
+        proofs: Option<Vec<u64>>,
+        until: Option<u64>,
+        floor: Option<(u64, usize)>,
+    ) {
+        let slot = self.slot(key);
+        let by = if proofs.is_some() {
+            Learner::Pay
+        } else {
+            Learner::Hello
+        };
+        // A `hello` that waited for a payment: the reads of its second sent before its wait
+        // ended (`floor`, noted as it saw the turn free) serve it not.
+        let after_wait = floor.is_some() && !self.has(SeederFlaw::WaitedHelloReusesEarlierRead);
+        let look_floor = floor.map(|_| {
+            let now = self.clock.now();
+            let sent = self
+                .state()
+                .own_reads
+                .get(&slot)
+                .filter(|(at, ..)| *at == now)
+                .map_or(0, |(_, reads, _)| reads.len());
+            (now, sent)
+        });
+        let bounded = !self.has(SeederFlaw::OwnReadsUnbounded);
+        let waits_any = self.has(SeederFlaw::WaitsWhileReading)
+            || (proofs.is_some() && self.has(SeederFlaw::PayWaitsForRead));
+        let first_in_time = until.is_none_or(|u| self.clock.now() < u);
+        let first_look = self.clock.now();
+        let at_first_look = self.has(SeederFlaw::CountedAtFirstLook)
+            || (proofs.is_some() && self.has(SeederFlaw::PayCountedAtFirstLook));
+        let mut waited_in = None;
+        loop {
+            let now = self.clock.now();
+            if self.has(SeederFlaw::SecondEndReturns) && waited_in.is_some_and(|w| w != now) {
+                return;
+            }
+            let in_time = if self.has(SeederFlaw::InTimeOnce) {
+                first_in_time
+            } else {
+                until.is_none_or(|u| now < u)
+            };
+            let plan = {
+                let mut st = self.state();
+                // What this entry needs read: the account's swaps undecided now. A read
+                // serves it only if it covered every one of them (so not one sent before a
+                // swap became unknown), and it is this entry's, or a hello's, or past two
+                // that second.
+                let (lost, flight) = self.to_learn_in(&st, Some(key));
+                let need: Vec<u64> = lost
+                    .iter()
+                    .map(|u| u.outputs)
+                    .chain(flight.iter().map(|f| f.3))
+                    .collect();
+                let (back, under_way, sent) = if need.is_empty()
+                    || self.has(SeederFlaw::NeverRestores)
+                {
+                    (true, false, 0)
+                } else {
+                    match st.own_reads.get(&slot).filter(|(at, ..)| *at == now) {
+                        None => (false, false, 0),
+                        Some((_, reads, freed)) => {
+                            let past_two =
+                                reads.len() >= 2 && !self.has(SeederFlaw::OwnReadsPerProofs);
+                            let noted = if self.has(SeederFlaw::FloorAtLatestFree) {
+                                Some((now, *freed))
+                            } else if self.has(SeederFlaw::FloorAtLook) {
+                                look_floor
+                            } else {
+                                floor
+                            };
+                            let across = self.has(SeederFlaw::FloorAcrossSeconds);
+                            let from = match noted {
+                                Some((at, n)) if after_wait && (at == now || across) => n,
+                                _ => 0,
+                            };
+                            let from = if past_two && self.has(SeederFlaw::FloorIgnoredPastTwo) {
+                                0
+                            } else {
+                                from
+                            };
+                            let serves = |i: usize, r: &OwnRead| {
+                                let blind = self.has(SeederFlaw::ReuseByCoverageBlind)
+                                    || (proofs.is_some()
+                                        && self.has(SeederFlaw::PayReuseCoverageBlind))
+                                    || (past_two && self.has(SeederFlaw::PastTwoCoverageBlind))
+                                    || (proofs.is_some()
+                                        && r.by == proofs
+                                        && self.has(SeederFlaw::OwnProofsCoverageBlind));
+                                i >= from
+                                    && (past_two
+                                        || proofs.is_none()
+                                        || r.by == proofs
+                                        || self.has(SeederFlaw::PayServedByAnyRead))
+                                    && (blind || need.iter().all(|o| r.covers.contains(o)))
+                            };
+                            let back = |r: &OwnRead| {
+                                r.state == ReadState::Back
+                                    || (r.state == ReadState::Abandoned
+                                        && self.has(SeederFlaw::AbandonedReadReused))
+                            };
+                            let sent = if self.has(SeederFlaw::WaitedCountsAfterFloor) {
+                                reads.len().saturating_sub(from)
+                            } else {
+                                reads.len()
+                            };
+                            (
+                                reads
+                                    .iter()
+                                    .enumerate()
+                                    .any(|(i, r)| serves(i, r) && back(r)),
+                                reads.iter().enumerate().any(|(i, r)| {
+                                    (serves(i, r)
+                                        || (self.has(SeederFlaw::FloorIgnoredForUnderWay)
+                                            && serves(i.max(from), r))
+                                        || self.has(SeederFlaw::WaitsForAnyUnderWay)
+                                        || (proofs.is_none()
+                                            && self.has(SeederFlaw::HelloWaitsForAnyUnderWay)))
+                                        && r.state == ReadState::UnderWay
+                                }),
+                                sent,
+                            )
+                        }
+                    }
+                };
+                let past_two_again = (self.has(SeederFlaw::PastTwoReadsAgain)
+                    || (proofs.is_some() && self.has(SeederFlaw::OwnReadsPerProofs)))
+                    && sent >= 2;
+                if need.is_empty() || self.has(SeederFlaw::NeverRestores) {
+                    Plan::Done
+                } else if bounded && waits_any && (back || under_way) {
+                    Plan::WaitAll
+                } else if bounded && back {
+                    Plan::Done
+                } else if bounded && under_way && !past_two_again {
+                    // Shared with its result: wait for it, to this entry's deadline at most
+                    // (then as a read unanswered). Each poll looks again: the second may end
+                    // first.
+                    if self.has(SeederFlaw::ReuseWithoutWaiting)
+                        || (!in_time && !self.has(SeederFlaw::WaitReadPastDeadline))
+                    {
+                        Plan::Done
+                    } else {
+                        Plan::WaitRead
+                    }
+                } else if bounded && sent >= 2 && !past_two_again {
+                    // Two sent this second, and none with a result for this entry: it reads
+                    // in the next second, by its deadline.
+                    if (!in_time && !self.has(SeederFlaw::NextSecondPastDeadline))
+                        || (proofs.is_some() && self.has(SeederFlaw::PayNextSecondReturns))
+                    {
+                        Plan::Done
+                    } else {
+                        Plan::NextSecond
+                    }
+                } else if !in_time && !self.has(SeederFlaw::ReadsPastDeadline) {
+                    if self.has(SeederFlaw::PlaceTakenPastDeadline) {
+                        let index = self.take_place(&mut st, slot, now, proofs.clone(), need);
+                        if let Some((_, reads, _)) = st.own_reads.get_mut(&slot) {
+                            reads[index].state = ReadState::Abandoned;
+                        }
+                    }
+                    Plan::Done // no time left to send it: no read, and none counted
+                } else if self.has(SeederFlaw::PlaceTakenAfterCheck) {
+                    Plan::Read(None)
+                } else {
+                    // Its place, taken now, covering exactly the swaps it is about to send.
+                    let covers = if self.has(SeederFlaw::CoversSetAfterSend) {
+                        Vec::new()
+                    } else if self.has(SeederFlaw::CoversLostOnly) {
+                        lost.iter().map(|u| u.outputs).collect()
+                    } else {
+                        need
+                    };
+                    let at = if at_first_look { first_look } else { now };
+                    let index = self.take_place(&mut st, slot, at, proofs.clone(), covers);
+                    Plan::Read(Some((index, lost, flight)))
+                }
+            };
+            match plan {
+                Plan::WaitAll => {
+                    // A wait on any read of the account under way, whatever the second.
+                    while self
+                        .state()
+                        .own_reads
+                        .get(&slot)
+                        .is_some_and(|(_, reads, _)| {
+                            reads.iter().any(|r| r.state == ReadState::UnderWay)
+                        })
+                    {
+                        next_poll().await;
+                    }
+                    return;
+                }
+                Plan::Done => return,
+                Plan::WaitRead => {
+                    waited_in.get_or_insert(now);
+                    if proofs.is_some() {
+                        self.read_wait(key, Some(Stage::OthersRead));
+                    }
+                    if self.has(SeederFlaw::ReadWaitUnwokenByClock)
+                        || (proofs.is_some() && self.has(SeederFlaw::PayReadWaitUnwokenByClock))
+                    {
+                        self.read_change().await;
+                    } else if self.has(SeederFlaw::ReadWaitUnwokenByAbandon) {
+                        self.read_becomes(ReadState::Back).await;
+                    } else if proofs.is_some() && self.has(SeederFlaw::PayReadWaitUnwokenByReturn) {
+                        self.read_becomes(ReadState::Abandoned).await;
+                    } else {
+                        next_poll().await;
+                    }
+                    if proofs.is_some() {
+                        self.read_wait(key, None);
+                    }
+                    if self.has(SeederFlaw::ReuseWaitsOnePoll) {
+                        return;
+                    }
+                    continue;
+                }
+                Plan::NextSecond => {
+                    waited_in.get_or_insert(now);
+                    if proofs.is_some() {
+                        self.read_wait(key, Some(Stage::NextSecond));
+                    }
+                    if self.has(SeederFlaw::NextSecondUnwoken)
+                        || (proofs.is_some() && self.has(SeederFlaw::PayNextSecondUnwoken))
+                    {
+                        unwoken_poll().await;
+                    } else {
+                        next_poll().await;
+                    }
+                    if proofs.is_some() {
+                        self.read_wait(key, None);
+                    }
+                    continue;
+                }
+                Plan::Read(None) => {
+                    self.net.deliver_as_read().await;
+                    // The flaw: its place taken only as it is sent, or once it is back.
+                    if self.net.round_trips() {
+                        let Some(learnt) = self.learn_read(Some(key), until) else {
+                            return;
+                        };
+                        let reading =
+                            Reading::start(self, slot, now, proofs.clone(), learnt.covers());
+                        self.read_back(by).await;
+                        self.learn_apply(&learnt, by);
+                        reading.back();
+                    } else if let Some(learnt) = self.learn_read(Some(key), until) {
+                        self.learn_apply(&learnt, by);
+                        self.record_read(
+                            slot,
+                            now,
+                            proofs.clone(),
+                            learnt.covers(),
+                            ReadState::Back,
+                        );
+                    }
+                    return;
+                }
+                Plan::Read(Some((index, lost, flight))) => {
+                    let at = if at_first_look { first_look } else { now };
+                    let reading = Reading::taken(self, slot, at, index);
+                    self.net.deliver_as_read().await;
+                    // Sent now, exactly the swaps its place covers: its requests reach the
+                    // mint.
+                    let Some(learnt) = self.learn_read_of(lost, flight, until) else {
+                        return;
+                    };
+                    if self.has(SeederFlaw::CoversSetAfterSend) {
+                        reading.cover(learnt.covers());
+                    }
+                    if self.net.round_trips() {
+                        // Its result is applied when it is back, on a later poll.
+                        self.read_back(by).await;
+                    }
+                    if self.has(SeederFlaw::CoverageFixedAtBack) {
+                        // Back: on the next poll, or once the mint answers on this thread.
+                        let (lost, flight) = self.to_learn(Some(key));
+                        reading.cover(
+                            lost.iter()
+                                .map(|u| u.outputs)
+                                .chain(flight.iter().map(|f| f.3))
+                                .collect(),
+                        );
+                    }
+                    self.learn_apply(&learnt, by);
+                    reading.back();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Ready once a read comes back or is abandoned, and only then: the wait of
+    /// [`SeederFlaw::ReadWaitUnwokenByClock`] and [`SeederFlaw::PayReadWaitUnwokenByClock`],
+    /// which no clock move wakes.
+    async fn read_change(&self) {
+        let mut asked = false;
+        poll_fn(|cx| {
+            if asked {
+                return Poll::Ready(());
+            }
+            asked = true;
+            self.state().read_waiters.push(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
+    }
+
+    /// Ready once the clock moves or a read becomes `state`, and only then: the wait of
+    /// [`SeederFlaw::ReadWaitUnwokenByAbandon`] (`Back`) and
+    /// [`SeederFlaw::PayReadWaitUnwokenByReturn`] (`Abandoned`).
+    async fn read_becomes(&self, state: ReadState) {
+        let mut asked = false;
+        poll_fn(|cx| {
+            if asked {
+                return Poll::Ready(());
+            }
+            asked = true;
+            self.state()
+                .read_waiters_on
+                .push((state, cx.waker().clone()));
+            self.clock.watch(cx.waker());
+            Poll::Pending
+        })
+        .await;
+    }
+
+    /// Take a place for a read of `slot`'s swaps in second `now`, covering `covers` (the
+    /// swaps it is about to send), under way from now: its index in that second's reads.
+    fn take_place(
+        &self,
+        st: &mut State,
+        slot: Key,
+        now: u64,
+        proofs: Option<Vec<u64>>,
+        covers: Vec<u64>,
+    ) -> usize {
+        let reads = st.own_reads.entry(slot).or_insert((now, Vec::new(), 0));
+        if reads.0 != now && !self.has(SeederFlaw::NoSecondReset) {
+            let kept = if self.has(SeederFlaw::FreedKeptAtNewSecond) {
+                reads.2
+            } else {
+                0
+            };
+            *reads = (now, Vec::new(), kept);
+        }
+        reads.1.push(OwnRead {
+            by: proofs,
+            covers,
+            state: ReadState::UnderWay,
+        });
+        reads.1.len() - 1
+    }
+
+    /// Count a read of `slot`'s swaps sent in second `now`, by a payment of `proofs` or a
+    /// `hello` (`None`), covering `covers`, in `state`; its index in that second's reads.
+    fn record_read(
+        &self,
+        slot: Key,
+        now: u64,
+        proofs: Option<Vec<u64>>,
+        covers: Vec<u64>,
+        state: ReadState,
+    ) -> usize {
+        let mut st = self.state();
+        let reads = st.own_reads.entry(slot).or_insert((now, Vec::new(), 0));
+        if reads.0 != now && !self.has(SeederFlaw::NoSecondReset) {
+            *reads = (now, Vec::new(), 0);
+        }
+        reads.1.push(OwnRead {
+            by: proofs,
+            covers,
+            state,
+        });
+        reads.1.len() - 1
+    }
+
+    /// Send a swap left unknown again, with the same outputs: a retry. Answered `spent`,
+    /// or refused for good (its outputs' keyset rotated out, or its inputs invalid), a
+    /// restore of its outputs settles it: signed is the first request's claim, and
+    /// unsigned is nothing, since no request can sign those outputs now. Refused because a
+    /// keyset expired, the same once no input is pending. Late, nothing is banned on.
+    /// Refused as pending, or unanswered: still unknown.
+    fn complete(&self, key: Key, token: &str, outputs: u64, until: Option<u64>) -> Read {
+        let until = until.filter(|_| !self.has(SeederFlaw::CompleteIgnoresDeadline));
+        if until.is_some_and(|u| self.clock.now() >= u) {
+            return Read::Unknown; // no time left to send it in
+        }
+        let outputs_sent = if self.has(SeederFlaw::CompleteFreshOutputs) {
+            self.net.fresh_outputs()
+        } else {
+            outputs
+        };
+        let restore_until = until.filter(|_| !self.has(SeederFlaw::CompleteRestoreUncapped));
+        let by_restore = || match self.restore(token, outputs, restore_until) {
+            Some(true) => Read::Claimed,
+            Some(false) => Read::Nothing,
+            None if self.has(SeederFlaw::CompleteRestoreDownNothing) => Read::Nothing,
+            None => Read::Unknown,
+        };
+        let answer = self.net.resend(token, outputs_sent);
+        if answer == Swap::Lost {
+            self.wait_unanswered(until); // its client waited for it
+        }
+        match answer {
+            Swap::Claimed => Read::Claimed,
+            Swap::Lost if self.has(SeederFlaw::CompleteLostByRestore) => by_restore(),
+            Swap::Unreachable if self.has(SeederFlaw::CompleteUnreachableNothing) => Read::Nothing,
+            Swap::Invalid if self.has(SeederFlaw::CompleteInvalidBans) => {
+                self.ban(&mut self.state(), key);
+                by_restore()
+            }
+            Swap::Spent if self.has(SeederFlaw::CompleteSpentIsNothing) => Read::Nothing,
+            Swap::Spent => by_restore(),
+            Swap::OutputsRefused if self.has(SeederFlaw::CompleteRefusedStaysUnknown) => {
+                Read::Unknown
+            }
+            Swap::OutputsRefused if self.has(SeederFlaw::CompleteRefusedIsNothing) => Read::Nothing,
+            Swap::OutputsRefused => by_restore(),
+            Swap::Invalid if self.has(SeederFlaw::CompleteInvalidStaysUnknown) => Read::Unknown,
+            Swap::Invalid => by_restore(),
+            Swap::Expired if self.has(SeederFlaw::CompleteExpiredAtOnce) => by_restore(),
+            Swap::Expired => match self.restore_unless_pending(token, outputs, restore_until) {
+                Some(true) => Read::Claimed,
+                Some(false) => Read::Nothing,
+                None => Read::Unknown,
+            },
+            Swap::Pending if self.has(SeederFlaw::CompletePendingIsNothing) => Read::Nothing,
+            Swap::Pending | Swap::Lost | Swap::Unreachable => Read::Unknown,
+        }
+    }
+
+    /// A swap refused because a keyset expired (CDK 12003): its inputs' or its outputs',
+    /// which the answer does not say. An inputs' expiry does not stop a first request the
+    /// mint reserved before it, so a restore of its outputs settles it only once a NUT-07
+    /// check shows an input spent (the first request is then not waiting to sign) or none
+    /// pending. `None`: not yet (an input pending and none spent, or a read unanswered).
+    fn restore_unless_pending(
+        &self,
+        token: &str,
+        outputs: u64,
+        until: Option<u64>,
+    ) -> Option<bool> {
+        match self.net.input_states(&[token.to_owned()]) {
+            Ok(s) if s[0] == InputState::Pending => None,
+            Ok(s)
+                if self.has(SeederFlaw::ExpiredSpentIsClaim)
+                    && self.net.outputs_expired(outputs) =>
+            {
+                Some(s[0] == InputState::Spent)
+            }
+            Ok(_) => match self.restore(token, outputs, until) {
+                None if self.has(SeederFlaw::ExpiredRestoreDownKnown) => Some(false),
+                signed => signed,
+            },
+            Err(_) if self.has(SeederFlaw::ExpiredRestoreOnStateDown) => {
+                self.restore(token, outputs, until)
+            }
+            Err(_) => {
+                self.wait_unanswered(until.filter(|_| !self.has(SeederFlaw::ExpiredStateUncapped)));
+                None
+            }
+        }
+    }
+
+    /// One read over `n` items, in requests the mint accepts: one if it can, else split in
+    /// halves as the mint refuses them as too large (CDK 11014 or 11015); every swap it
+    /// once took fits in a request alone. `None` for items no answer covered; an
+    /// unanswered request costs its client the wait (its timeout).
+    fn split_read<T: Clone>(
+        &self,
+        n: usize,
+        read: &dyn Fn(std::ops::Range<usize>) -> Result<Vec<T>, ReadErr>,
+        until: Option<u64>,
+    ) -> Vec<Option<T>> {
+        let mut out = Vec::with_capacity(n);
+        let mut todo = Vec::new();
+        todo.push(0..n);
+        while let Some(r) = todo.pop() {
+            if until.is_some_and(|u| self.clock.now() >= u) {
+                out.push((r.start, vec![None; r.len()])); // no time left to ask
+                continue;
+            }
+            match read(r.clone()) {
+                Ok(v) => out.push((r.start, v.into_iter().map(Some).collect::<Vec<_>>())),
+                Err(err)
+                    if r.len() > 1
+                        && !self.has(SeederFlaw::NoSplitOnLimit)
+                        && (err == ReadErr::TooMany || self.has(SeederFlaw::SplitOnUnanswered)) =>
+                {
+                    if err == ReadErr::Unanswered {
+                        self.wait_unanswered(until);
+                    }
+                    let mid = r.start + r.len() / 2;
+                    if self.has(SeederFlaw::SplitMisaligned) {
+                        todo.push(r.start..mid);
+                        todo.push(mid..r.end);
+                    } else {
+                        todo.push(mid..r.end);
+                        todo.push(r.start..mid);
+                    }
+                }
+                Err(err) => {
+                    if err == ReadErr::Unanswered {
+                        self.wait_unanswered(until);
+                    }
+                    out.push((r.start, vec![None; r.len()]));
+                }
+            }
+        }
+        // Each answer back with its own swap, whatever order the requests went in.
+        if !self.has(SeederFlaw::SplitMisaligned) {
+            out.sort_by_key(|(start, _)| *start);
+        }
+        out.into_iter().flat_map(|(_, v)| v).collect()
+    }
+
+    /// An unanswered request costs its client the wait: its timeout, or up to `until`,
+    /// when it gives up.
+    fn wait_unanswered(&self, until: Option<u64>) {
+        let mut wait = self.net.ledger().read_timeout;
+        if let Some(u) = until {
+            wait = wait.min(u.saturating_sub(self.clock.now()));
+        }
+        if wait > 0 {
+            self.pass(Duration::from_secs(wait));
+        }
+    }
+
+    /// Read the state of swaps `(token, outputs)`: their inputs first (NUT-07), then
+    /// their own outputs (NUT-09 restore). In that order, a swap processed between the
+    /// two reads shows as signed. Signed outputs are a claim, whatever the first read
+    /// said. Unsigned outputs with an input spent are nothing: the swap is atomic, so it
+    /// can no longer go through. Anything else proves nothing: an input pending (reserved
+    /// by a request the mint is still processing), every input unspent, or a read
+    /// unanswered.
+    fn read_states(&self, items: &[(String, u64)], until: Option<u64>) -> Vec<Read> {
+        let tokens: Vec<String> = items.iter().map(|i| i.0.clone()).collect();
+        let outputs: Vec<u64> = items.iter().map(|i| i.1).collect();
+        let sizes: Vec<usize> = tokens.iter().map(|t| self.net.proofs_in(t)).collect();
+        let n = items.len();
+        let states = || self.split_read(n, &|r| self.net.input_states(&tokens[r]), until);
+        let restore = || {
+            self.split_read(
+                n,
+                &|r| {
+                    if self.has(SeederFlaw::RestoreByToken) {
+                        self.net.restore_by_tokens(&tokens[r.clone()], &sizes[r])
+                    } else {
+                        self.net.restore_swaps(&outputs[r.clone()], &sizes[r])
+                    }
+                },
+                until,
+            )
+        };
+        let (states, signed) = if self.has(SeederFlaw::RestoreBeforeInputs) {
+            let signed = restore();
+            (states(), signed)
+        } else {
+            let states = states();
+            (states, restore())
+        };
+        (0..n)
+            .map(|i| {
+                // The eighteenth rework's rule, now a planted flaw ([`Inner::by_inputs`]).
+                if self.has(SeederFlaw::ExpiredSpentIsClaim) && self.net.outputs_expired(outputs[i])
+                {
+                    return match states[i] {
+                        Some(InputState::Spent) => Read::Claimed,
+                        Some(InputState::Unspent) => Read::Nothing,
+                        Some(InputState::Pending) | None => Read::Unknown,
+                    };
+                }
+                if states[i].is_none() && self.has(SeederFlaw::SignedNeedsStates) {
+                    return Read::Unknown;
+                }
+                let Some(signed) = signed[i] else {
+                    return Read::Unknown;
+                };
+                if signed {
+                    return Read::Claimed;
+                }
+                let state = match states[i] {
+                    Some(InputState::Spent)
+                        if self.has(SeederFlaw::SpentBesidePendingUnknown)
+                            && self.net.any_reserved(&tokens[i]) =>
+                    {
+                        InputState::Pending
+                    }
+                    Some(s) => s,
+                    None if self.has(SeederFlaw::StateDownIsSpent) => InputState::Spent,
+                    None => return Read::Unknown,
+                };
+                let spent = match state {
+                    InputState::Spent => true,
+                    InputState::Pending => self.has(SeederFlaw::PendingIsSpent),
+                    InputState::Unspent => false,
+                };
+                if self.has(SeederFlaw::NotSignedStaysUnknown) {
+                    Read::Unknown
+                } else if spent || self.has(SeederFlaw::NotSignedFinal) {
+                    Read::Nothing
+                } else if state == InputState::Unspent {
+                    Read::Unspent
+                } else {
+                    Read::Unknown
+                }
+            })
+            .collect()
+    }
+
+    /// Whether `key` has a swap of unknown outcome: one whose answer was lost, or one sent
+    /// and still unanswered (abandoned at its deadline while in flight). `except` is the
+    /// payment asking.
+    fn unknown_swap(&self, st: &State, key: Key, except: u64) -> bool {
+        let same = |k: Key| {
+            if self.has(SeederFlaw::UnknownGlobal) {
+                true
+            } else if self.has(SeederFlaw::UnknownPeerWide) {
+                k.0 == key.0
+            } else {
+                k == key
+            }
+        };
+        let in_flight_same = |k: Key| {
+            if self.has(SeederFlaw::InFlightGlobal) {
+                true
+            } else if self.has(SeederFlaw::InFlightPeerWide) {
+                k.0 == key.0
+            } else {
+                same(k)
+            }
+        };
+        if self.has(SeederFlaw::UnknownNeedsAccount) && !st.accounts.contains_key(&key) {
+            return false;
+        }
+        st.unknown.iter().any(|u| same(u.pay.key))
+            || (!self.has(SeederFlaw::InFlightNotUnknown)
+                && st.pays.iter().any(|(id, r)| {
+                    *id != except
+                        && in_flight_same(r.key)
+                        && r.sent
+                        && !r.landed
+                        && (r.finished || !self.has(SeederFlaw::InFlightFinishedOnly))
+                }))
+    }
+
+    /// A restore of this swap's own outputs (NUT-09): they are unique to one swap and its
+    /// retries, so it finds that swap and no other.
+    /// Unanswered, it costs its client the wait, to `until` at the latest. Once the
+    /// outputs' keyset has expired a restore no longer shows them (CDK skips an expired
+    /// keyset's signatures): a claim then reads as unsigned, and is never credited. Nothing
+    /// else can prove it: spent inputs may be the payer's own reclaim or a double spend.
+    fn restore(&self, token: &str, outputs: u64, until: Option<u64>) -> Option<bool> {
+        if self.has(SeederFlaw::ExpiredSpentIsClaim) && self.net.outputs_expired(outputs) {
+            return self.by_inputs(token, until);
+        }
+        let signed = if self.has(SeederFlaw::RestoreByToken) {
+            self.net.restore_by_token(token)
+        } else {
+            self.net.restore_swap(outputs, self.net.proofs_in(token))
+        };
+        if signed.is_none() {
+            self.wait_unanswered(until);
+        }
+        signed
+    }
+
+    /// The mistake the eighteenth rework made ([`SeederFlaw::ExpiredSpentIsClaim`]): a swap
+    /// whose outputs a restore cannot show decided by its inputs, an input spent taken as
+    /// the claim, though it may be the payer's reclaim or a double spend.
+    fn by_inputs(&self, token: &str, until: Option<u64>) -> Option<bool> {
+        match self.net.input_states(&[token.to_owned()]) {
+            Ok(s) => match s[0] {
+                InputState::Spent => Some(true),
+                InputState::Unspent => Some(false),
+                InputState::Pending => None,
+            },
+            Err(_) => {
+                self.wait_unanswered(until);
+                None
+            }
+        }
+    }
+
+    /// A swap that got no answer is retried while its payment is in time (NUT-19). A
+    /// retry answered `spent` may be the first attempt, gone through unseen: a restore of
+    /// its outputs settles that, and it is never a ban.
+    fn after_swap(&self, id: u64, token: &str, outputs: u64, outcome: Swap) -> Swap {
+        if outcome != Swap::Lost || self.has(SeederFlaw::NoRetry) {
+            return outcome;
+        }
+        let deadline = {
+            let st = self.state();
+            let now = self.clock.now();
+            st.pays
+                .get(&id)
+                .filter(|r| {
+                    !r.abandoned
+                        && if self.has(SeederFlaw::RetryAtDeadline) {
+                            now <= r.deadline
+                        } else {
+                            now < r.deadline
+                        }
+                })
+                .map(|r| r.deadline)
+        };
+        let Some(deadline) = deadline else {
+            return outcome;
+        };
+        // Its reads, and the retry itself, end at the payment's deadline.
+        let until = (!self.has(SeederFlaw::RetryRestoreUncapped)).then_some(deadline);
+        let retried = self.net.resend(token, outputs);
+        if retried == Swap::Lost {
+            // Its client waited for it.
+            self.wait_unanswered((!self.has(SeederFlaw::RetryResendUncapped)).then_some(deadline));
+        }
+        match retried {
+            // No answer to the retry either: the outcome is still unknown.
+            Swap::Lost if self.has(SeederFlaw::RetryLostIsNothing) => Swap::Unreachable,
+            // Spent may be the first attempt, gone through unseen: a restore of this swap's
+            // outputs says. Not this swap's: known, and never a ban; nothing to learn.
+            Swap::Spent if self.has(SeederFlaw::RetrySpentIsOwn) => Swap::Claimed,
+            Swap::Spent if !self.has(SeederFlaw::RetryBansOnSpent) => {
+                match self.restore(token, outputs, until) {
+                    Some(true) => Swap::Claimed,
+                    Some(false) if self.has(SeederFlaw::RetrySpentUnsignedStaysUnknown) => {
+                        Swap::Lost
+                    }
+                    Some(false) => Swap::Unreachable,
+                    None if self.has(SeederFlaw::RetrySpentRestoreDownKnown) => Swap::Unreachable,
+                    None => Swap::Lost,
+                }
+            }
+            // Its outputs refused for good: the first attempt, if it went through, shows in
+            // a restore; if not, it never can now.
+            Swap::OutputsRefused if self.has(SeederFlaw::RetryRefusedIsKnown) => Swap::Unreachable,
+            Swap::OutputsRefused if self.has(SeederFlaw::RetryRefusedIsClaim) => Swap::Claimed,
+            Swap::OutputsRefused => match self.restore(token, outputs, until) {
+                Some(true) => Swap::Claimed,
+                Some(false) if self.has(SeederFlaw::RetryRefusedUnsignedStaysUnknown) => Swap::Lost,
+                Some(false) => Swap::Unreachable,
+                None if self.has(SeederFlaw::RetryRefusedRestoreDownKnown) => Swap::Unreachable,
+                None => Swap::Lost,
+            },
+            // The retry never reached the mint: the first attempt's outcome is still unknown.
+            Swap::Unreachable => Swap::Lost,
+            Swap::Invalid if self.has(SeederFlaw::RetryInvalidByRestore) => {
+                match self.restore(token, outputs, until) {
+                    Some(true) => Swap::Claimed,
+                    Some(false) => Swap::Unreachable,
+                    None => Swap::Lost,
+                }
+            }
+            // A keyset expired: the first attempt, reserved before the expiry, may still
+            // sign. Settled by a restore once no input is pending.
+            Swap::Expired if self.has(SeederFlaw::RetryExpiredStaysUnknown) => Swap::Lost,
+            Swap::Expired if self.has(SeederFlaw::RetryExpiredAtOnce) => {
+                match self.restore(token, outputs, until) {
+                    Some(true) => Swap::Claimed,
+                    Some(false) => Swap::Unreachable,
+                    None => Swap::Lost,
+                }
+            }
+            Swap::Expired => match self.restore_unless_pending(token, outputs, until) {
+                Some(true) => Swap::Claimed,
+                Some(false) if self.has(SeederFlaw::RetryExpiredUnsignedStaysUnknown) => Swap::Lost,
+                Some(false) => Swap::Unreachable,
+                None => Swap::Lost,
+            },
+            // Refused as pending: the first attempt may be what the mint is processing.
+            Swap::Pending if self.has(SeederFlaw::RetryPendingKnown) => Swap::Unreachable,
+            Swap::Pending => Swap::Lost,
+            // Invalid inputs are the proofs' own: the first attempt was refused the same way.
+            retried => retried,
+        }
+    }
+
+    /// Housekeeping, on every entry (after a `hello` or `pay` has learnt its own account's
+    /// unknown swaps): age out unpaid admissions older than `debt_ttl` from the global
+    /// count, expire bans after `ban_ttl`, and forget never-paid accounts that have had no
+    /// open session for `account_ttl`.
+    fn age(&self, st: &mut State) {
+        let now = self.clock.now();
+        if !self.has(SeederFlaw::OwnReadsNeverPruned) {
+            st.own_reads.retain(|_, (at, ..)| *at == now);
+        }
+        let now = self.aged_now();
+        let secs = |d: Duration| d.as_secs();
+        if !self.has(SeederFlaw::DebtNeverAges) {
+            let ttl = if self.has(SeederFlaw::AgeTtlOneSecond) {
+                1
+            } else {
+                secs(self.config.debt_ttl)
+            };
+            if self.has(SeederFlaw::DebtLogUntrimmed) {
+                let aged: Vec<Debt> = st
+                    .debt
+                    .iter()
+                    .filter(|(_, t)| t.saturating_add(ttl) <= now)
+                    .map(|(d, _)| *d)
+                    .collect();
+                for d in aged {
+                    st.live.remove(&d);
+                }
+            } else if self.has(SeederFlaw::DroppedVideoDebtNeverAges) {
+                // The flaw: the unpaid chunks of a video no longer served are kept.
+                let dropped = st.dropped.clone();
+                let mut kept = VecDeque::new();
+                while let Some((debt, t)) = st.debt.pop_front() {
+                    if t.saturating_add(ttl) > now || dropped.contains(&debt.0.1) {
+                        kept.push_back((debt, t));
+                    } else {
+                        st.live.remove(&debt);
+                    }
+                }
+                st.debt = kept;
+            } else {
+                while let Some(&(debt, t)) = st.debt.front() {
+                    if t.saturating_add(ttl) > now {
+                        break;
+                    }
+                    st.debt.pop_front();
+                    st.live.remove(&debt);
+                    self.free_flawed(st, 1);
+                }
+            }
+        }
+        if !self.has(SeederFlaw::BansNeverExpire) {
+            let ttl = secs(if self.has(SeederFlaw::BanExpiresEarly) {
+                self.config.debt_ttl
+            } else {
+                self.config.ban_ttl
+            });
+            let mut expired = Vec::new();
+            st.banned.retain(|peer, at| {
+                let keep = at.saturating_add(ttl) > now;
+                if !keep {
+                    expired.push(*peer);
+                }
+                keep
+            });
+            if self.has(SeederFlaw::BanExpiryResetsAccounts) {
+                st.accounts.retain(|k, _| !expired.contains(&k.0));
+            }
+        }
+        if !self.has(SeederFlaw::NeverForgets) {
+            let ttl = secs(if self.has(SeederFlaw::ForgetsAtDebtTtl) {
+                self.config.debt_ttl
+            } else {
+                self.config.account_ttl
+            });
+            let forget_paid = self.has(SeederFlaw::ForgetsPaidAccounts);
+            let forget_open = self.has(SeederFlaw::ForgetsOpenAccounts);
+            let unserved = self.has(SeederFlaw::ForgetsUnserved);
+            // An account whose swap has an unknown outcome is kept until it is learnt.
+            let held: HashSet<Key> = if self.has(SeederFlaw::ForgetsUnknownAccount) {
+                HashSet::new()
+            } else {
+                st.accounts
+                    .keys()
+                    .copied()
+                    .filter(|k| self.unknown_swap(st, *k, 0))
+                    .collect()
+            };
+            let State {
+                accounts,
+                open_accounts,
+                ..
+            } = st;
+            accounts.retain(|k, a| {
+                if held.contains(k) {
+                    return true;
+                }
+                let open = open_accounts.contains_key(k) && !forget_open;
+                let idle = !open && a.last_active.saturating_add(ttl) <= now;
+                let never_paid = if unserved {
+                    a.admitted == 0
+                } else {
+                    a.acked == 0
+                };
+                !(idle && (never_paid || forget_paid))
+            });
+        }
+    }
+
+    fn account<'a>(&self, st: &'a mut State, key: Key) -> &'a mut Account {
+        let now = self.clock.now();
+        let generation = st.next_generation;
+        let a = st.accounts.entry(key).or_insert_with(|| Account {
+            generation,
+            admitted: 0,
+            acked: 0,
+            spent: 0,
+            unpaid: VecDeque::new(),
+            files: HashSet::new(),
+            banned: false,
+            last_active: now,
+        });
+        if a.generation == generation {
+            st.next_generation += 1;
+        }
+        a.last_active = now;
+        a
+    }
+
+    fn peer_banned(&self, st: &State, key: Key) -> bool {
+        if self.has(SeederFlaw::BanPerVideo) {
+            st.accounts.get(&key).is_some_and(|a| a.banned)
+        } else {
+            st.banned.contains_key(&key.0)
+        }
+    }
+
+    fn ban(&self, st: &mut State, key: Key) {
+        if self.has(SeederFlaw::DroppedVideoSpentNoBan) && st.dropped.contains(&key.1) {
+            return;
+        }
+        // A peer with no account has been served nothing and owes nothing: nothing is kept.
+        let has_account = if self.has(SeederFlaw::BanNeedsThisAccount) {
+            st.accounts.contains_key(&key)
+        } else if self.has(SeederFlaw::BanNeedsPaidOrThis) {
+            st.accounts.contains_key(&key)
+                || st.accounts.iter().any(|(k, a)| k.0 == key.0 && a.acked > 0)
+        } else if self.has(SeederFlaw::BanNeedsServed) {
+            st.accounts
+                .iter()
+                .any(|(k, a)| k.0 == key.0 && a.admitted > 0)
+        } else {
+            st.accounts.keys().any(|k| k.0 == key.0)
+        };
+        if !has_account && !self.has(SeederFlaw::BansWithoutAccount) {
+            return;
+        }
+        if self.has(SeederFlaw::BanPerVideo) {
+            self.account(st, key).banned = true;
+        } else {
+            st.banned.insert(key.0, self.clock.now());
+        }
+        if self.has(SeederFlaw::BanForgetsDebt) {
+            let peer = key.0;
+            st.accounts.retain(|k, _| k.0 != peer);
+            st.live.retain(|(k, _, _)| k.0 != peer);
+            st.debt.retain(|((k, _, _), _)| k.0 != peer);
+        }
+    }
+
+    /// The account's unpaid chunks (its window's count).
+    fn window_count(&self, st: &State, key: Key) -> u64 {
+        if self.has(SeederFlaw::PeerDebtAges) {
+            return st.live.iter().filter(|(k, _, _)| *k == key).count() as u64;
+        }
+        let owed = |a: &Account| a.admitted.saturating_sub(a.acked);
+        if self.has(SeederFlaw::WindowAcrossVideos) {
+            return st
+                .accounts
+                .iter()
+                .filter(|(k, _)| k.0 == key.0)
+                .map(|(_, a)| owed(a))
+                .sum();
+        }
+        st.accounts.get(&key).map_or(0, owed)
+    }
+
+    /// The global cap's count.
+    fn global_unpaid(&self, st: &State) -> u64 {
+        if self.has(SeederFlaw::GlobalCapNetsCredit) {
+            let admitted: u64 = st.accounts.values().map(|a| a.admitted).sum();
+            let acked: u64 = st.accounts.values().map(|a| a.acked).sum();
+            return admitted.saturating_sub(acked);
+        }
+        if self.has(SeederFlaw::CountFreedTwice) || self.has(SeederFlaw::CountFreedTwiceWrapping) {
+            return st.flawed_count;
+        }
+        st.live.len() as u64
+    }
+
+    /// Credit `key` with a payment up to `upto` worth `amount`: its unpaid chunks up to
+    /// there leave the global count (unless they had aged out already). `snapshot` is the
+    /// debt a flawed engine saw when it checked the payment.
+    fn credit(&self, st: &mut State, key: Key, pay: (u64, u64), snapshot: &[u64], late: bool) {
+        let (upto, amount) = pay;
+        let paid_stays = self.has(SeederFlaw::PaidDebtStaysCounted)
+            || (late && self.has(SeederFlaw::LateClaimKeepsDebt))
+            || (late && st.claim_elsewhere && self.has(SeederFlaw::OtherMintLateClaimKeepsDebt))
+            || (st.dropped.contains(&key.1) && self.has(SeederFlaw::DroppedVideoPayKeepsDebt));
+        let all = self.has(SeederFlaw::CreditFreesAllDebt)
+            || (late && self.has(SeederFlaw::LateCreditFreesAll));
+        let from_snapshot = self.has(SeederFlaw::CreditFromSnapshot)
+            || (late && self.has(SeederFlaw::LateCreditFromSnapshot));
+        let a = self.account(st, key);
+        let generation = a.generation;
+        let mut freed = Vec::new();
+        while let Some(&n) = a.unpaid.front() {
+            if n > upto && !all {
+                break;
+            }
+            a.unpaid.pop_front();
+            freed.push(n);
+        }
+        if from_snapshot {
+            let (kept, stale): (Vec<u64>, Vec<u64>) =
+                freed.iter().partition(|n| snapshot.contains(n));
+            for n in stale.iter().rev() {
+                a.unpaid.push_front(*n);
+            }
+            freed = kept;
+        }
+        a.acked = a.acked.max(upto);
+        a.spent += amount;
+        if self.has(SeederFlaw::CreditSpillsToPeers) {
+            // The flaw: every other peer's account on the video is paid up to there too.
+            let mut spilt = Vec::new();
+            for (k, other) in st
+                .accounts
+                .iter_mut()
+                .filter(|(k, _)| k.1 == key.1 && k.0 != key.0)
+            {
+                while other.unpaid.front().is_some_and(|n| *n <= upto) {
+                    if let Some(n) = other.unpaid.pop_front() {
+                        spilt.push((*k, other.generation, n));
+                    }
+                }
+                other.acked = other.acked.max(upto);
+            }
+            for (k, generation, n) in spilt {
+                st.live.remove(&self.debt_key(k, generation, n));
+            }
+        }
+        if self.has(SeederFlaw::CreditFreesPeerDebt) {
+            st.live
+                .retain(|(k, _, n)| !(k.0 == key.0 && *k != key && *n <= upto));
+        }
+        if !paid_stays {
+            for n in &freed {
+                st.live.remove(&self.debt_key(key, generation, *n));
+            }
+        }
+        self.free_flawed(st, freed.len() as u64);
+    }
+
+    fn account_spent(&self, st: &State, key: Key) -> u64 {
+        if self.has(SeederFlaw::AckSpentPeerWide) {
+            return st
+                .accounts
+                .iter()
+                .filter(|(k, _)| k.0 == key.0)
+                .map(|(_, a)| a.spent)
+                .sum();
+        }
+        st.accounts.get(&key).map_or(0, |a| a.spent)
+    }
+
+    /// What a swap settled in time means for the account.
+    fn settle(&self, st: &mut State, pay: &Settle, outcome: Swap) -> Result<Ack, Rej> {
+        let key = pay.key;
+        match outcome {
+            Swap::Claimed
+                if self.has(SeederFlaw::BannedClaimNotCredited) && self.peer_banned(st, key) =>
+            {
+                Err(rej(RejCode::Banned, "this peer is banned"))
+            }
+            Swap::Claimed => Ok(self.ack(st, pay)),
+            Swap::Spent => {
+                if !self.has(SeederFlaw::NoBanOnSpent) {
+                    self.ban(st, key);
+                }
+                Err(rej(RejCode::Spent, "a proof is already spent"))
+            }
+            Swap::Invalid => {
+                if self.has(SeederFlaw::InvalidCreatesAccount) {
+                    self.account(st, key);
+                }
+                if !self.has(SeederFlaw::InvalidNoBan) {
+                    self.ban(st, key);
+                }
+                Err(rej(RejCode::BadToken, "the mint refuses these proofs"))
+            }
+            Swap::OutputsRefused if self.has(SeederFlaw::FirstRefusedBans) => {
+                self.ban(st, key);
+                Err(rej(RejCode::BadToken, "the mint refuses these proofs"))
+            }
+            Swap::Expired if self.has(SeederFlaw::FirstExpiredBans) => {
+                self.ban(st, key);
+                Err(rej(RejCode::BadToken, "the mint refuses these proofs"))
+            }
+            Swap::Pending if self.has(SeederFlaw::PendingBans) => {
+                self.ban(st, key);
+                Err(rej(RejCode::Spent, "a proof is already spent"))
+            }
+            // Refused as pending: another request holds the inputs, and this one did
+            // nothing. It may be the payer's own other payment, so it is never a ban. A
+            // keyset expired: the payer's, or the seeder's own outputs'; the code does not
+            // say which, so never a ban either.
+            Swap::Unreachable
+            | Swap::Lost
+            | Swap::Pending
+            | Swap::OutputsRefused
+            | Swap::Expired => {
+                let creates = match outcome {
+                    Swap::Unreachable => SeederFlaw::UnreachableCreatesAccount,
+                    Swap::Pending => SeederFlaw::PendingCreatesAccount,
+                    Swap::OutputsRefused => SeederFlaw::OutputsRefusedCreatesAccount,
+                    Swap::Expired => SeederFlaw::ExpiredCreatesAccount,
+                    _ => SeederFlaw::LostCreatesAccount,
+                };
+                if self.has(creates) {
+                    self.account(st, key);
+                }
+                if self.has(SeederFlaw::OutageBans) {
+                    self.ban(st, key);
+                }
+                if self.has(SeederFlaw::OutageCredits) {
+                    return Ok(self.ack(st, pay));
+                }
+                Err(unavailable("the mint cannot be reached"))
+            }
+        }
+    }
+
+    /// What a late outcome of an abandoned swap means: a claim is credited, and nothing
+    /// is banned on.
+    fn settle_late(&self, st: &mut State, pay: &Settle, outcome: Swap) {
+        match outcome {
+            Swap::Claimed
+                if self.has(SeederFlaw::LateCreditNeedsAccount)
+                    && !st.accounts.contains_key(&pay.key) => {}
+            Swap::Claimed
+                if self.has(SeederFlaw::LateClaimSkipsBanned) && self.peer_banned(st, pay.key) => {}
+            Swap::Claimed if !self.has(SeederFlaw::LateClaimNotCredited) => {
+                self.credit(st, pay.key, (pay.upto, pay.amount), &pay.snapshot, true);
+            }
+            Swap::Spent | Swap::Invalid if self.has(SeederFlaw::LateOutcomeBans) => {
+                self.ban(st, pay.key);
+            }
+            Swap::Spent | Swap::Invalid if self.has(SeederFlaw::LateNothingCreatesAccount) => {
+                self.account(st, pay.key);
+            }
+            _ => {}
+        }
+    }
+
+    fn ack(&self, st: &mut State, pay: &Settle) -> Ack {
+        self.credit(st, pay.key, (pay.upto, pay.amount), &pay.snapshot, false);
+        let in_session = pay.session_spent.fetch_add(pay.amount, Ordering::Relaxed) + pay.amount;
+        Ack {
+            accepted_upto: pay.upto,
+            spent_total: if self.has(SeederFlaw::SpentTotalPerSession) {
+                in_session
+            } else {
+                self.account_spent(st, pay.key)
+            },
+        }
+    }
+
+    /// A new `pay`'s record; its deadline is 60 s from now, its arrival.
+    fn arrive(&self, key: Key) -> u64 {
+        let mut st = self.state();
+        st.next_pay += 1;
+        let id = st.next_pay;
+        let deadline = if self.has(SeederFlaw::DeadlineFromSwap) {
+            u64::MAX // set when the swap is sent
+        } else {
+            self.clock.now() + SEEDER_DEADLINE.as_secs()
+        };
+        let listings_seen = st.listings_asked;
+        st.pays.insert(
+            id,
+            PayRecord {
+                key,
+                deadline,
+                sent: false,
+                answer: None,
+                abandoned: false,
+                landed: false,
+                finished: false,
+                waker: None,
+                on_poll: None,
+                swap: None,
+                reading: false,
+                rechecked: false,
+                read: false,
+                listings_seen,
+                listing_wait: false,
+                keyset_wait: false,
+                force_listing: false,
+                came: None,
+                answer_watched: false,
+                read_wait: None,
+            },
+        );
+        id
+    }
+
+    /// Release `key`'s turn if payment `pay` holds it, and wake what waits for it.
+    fn release_turn(&self, st: &mut State, key: Key, pay: u64) -> Vec<Waker> {
+        let ours = st
+            .paying
+            .get(&key)
+            .is_some_and(|h| h.pay == pay || self.has(SeederFlaw::StaleTurnFrees));
+        if ours {
+            self.free_turn(st, key);
+        }
+        if self.has(SeederFlaw::WaitingKeptEmpty) {
+            return std::mem::take(st.waiting.entry(key).or_default());
+        }
+        let mut wake = st.waiting.remove(&key).unwrap_or_default();
+        if self.has(SeederFlaw::WakesOneDropsRest) {
+            wake.truncate(1);
+        }
+        wake
+    }
+
+    /// Free `key`'s turn: what waits for it goes on, and a `hello` among them reads after
+    /// it, so the second's reads sent by now serve none of them. A turn held to its
+    /// payment's deadline was freed at that deadline, however late this runs: every read
+    /// of this second was sent at or after it (deadlines and the clock are whole seconds).
+    fn free_turn(&self, st: &mut State, key: Key) {
+        let holder = st.paying.remove(&key);
+        let now = self.clock.now();
+        let at_deadline = holder.is_some_and(|h| {
+            if self.has(SeederFlaw::DeadlineSecondEarly) {
+                now + 1 >= h.deadline
+            } else if self.has(SeederFlaw::DeadlineSecondLate) {
+                now > h.deadline
+            } else {
+                now >= h.deadline
+            }
+        }) && !self.has(SeederFlaw::FreedAfterDeadline);
+        if self.has(SeederFlaw::FreeTurnNoFloor) {
+            return;
+        }
+        if let Some((at, reads, freed)) = st.own_reads.get_mut(&self.slot(key))
+            && *at == now
+            && !at_deadline
+            && !(self.has(SeederFlaw::FloorFirstFreeOnly) && *freed > 0)
+        {
+            *freed = reads.len();
+        }
+    }
+
+    /// Run `free`, which frees `key`'s turn if payment `pay` holds it. With `flaw`, a
+    /// planted defect of that way of freeing it, a turn held past its deadline is noted as
+    /// freed now, not at the deadline.
+    fn freeing(
+        &self,
+        st: &mut State,
+        key: Key,
+        pay: u64,
+        flaw: SeederFlaw,
+        free: impl FnOnce(&mut State) -> Vec<Waker>,
+    ) -> Vec<Waker> {
+        let now = self.clock.now();
+        let late = self.has(flaw)
+            && st
+                .paying
+                .get(&key)
+                .is_some_and(|h| h.pay == pay && now >= h.deadline);
+        let wake = free(st);
+        if late
+            && let Some((at, reads, freed)) = st.own_reads.get_mut(&self.slot(key))
+            && *at == now
+        {
+            *freed = reads.len();
+        }
+        wake
+    }
+
+    /// Where `key`'s own reads are counted: its account's (by peer alone, with the flaw).
+    fn slot(&self, key: Key) -> Key {
+        if self.has(SeederFlaw::ReuseByPeer) {
+            (key.0, 0)
+        } else {
+            key
+        }
+    }
+
+    /// Abandon payment `pay`: it is answered `mint-unavailable`, and its account released.
+    fn abandon(&self, st: &mut State, key: Key, pay: u64) -> Vec<Waker> {
+        let mut wake = Vec::new();
+        if let Some(r) = st.pays.get_mut(&pay) {
+            r.abandoned = true;
+            wake.extend(r.waker.take());
+        }
+        wake.extend(self.release_turn(st, key, pay));
+        wake
+    }
+
+    /// Wait for `key`'s turn; with `claim`, take it for that payment. A turn held past its
+    /// deadline is taken over (its payment abandoned). `false` first: the claiming
+    /// payment's own deadline passed first. Then, if it waited, as the turn was found free:
+    /// the second, and how many of the account's reads that second had been sent when the
+    /// turn was last freed. A `hello` that waited reads after that ([`Inner::learn_own`]).
+    /// Last, whether this wait took the turn over.
+    async fn wait_turn_at(
+        &self,
+        key: Key,
+        claim: Option<u64>,
+    ) -> (bool, Option<(u64, usize)>, bool) {
+        let mut waited = false;
+        let mut arrival: Option<(u64, usize)> = None;
+        let mut first_holder: Option<u64> = None;
+        let mut first_wake: Option<(u64, usize)> = None;
+        let mut uncounted = false;
+        let mut took_over = false;
+        let mut late_floor: Option<(u64, usize)> = None;
+        let mut watched = false;
+        poll_fn(|cx| {
+            let mut wake = Vec::new();
+            let done = {
+                let mut st = self.state();
+                let now = self.clock.now();
+                let mut done = None;
+                // A turn held past its deadline is taken over: its payment is abandoned.
+                if let Some(h) = st.paying.get(&key) {
+                    let (holder, deadline) = (h.pay, h.deadline);
+                    let expired = if self.has(SeederFlaw::TakeoverAt61) {
+                        now > deadline
+                    } else {
+                        now >= deadline
+                    };
+                    let takeover = expired
+                        && !(!waited
+                            && claim.is_none()
+                            && self.has(SeederFlaw::NoTakeoverAtArrival))
+                        && !self.has(SeederFlaw::NoTakeover)
+                        && !self.has(SeederFlaw::NoDeadline)
+                        && !(claim.is_some() && self.has(SeederFlaw::PayNoTakeover));
+                    if takeover {
+                        let flaw = SeederFlaw::TakeoverFreedAfterDeadline;
+                        wake = self.freeing(&mut st, key, holder, flaw, |st| {
+                            self.abandon(st, key, holder)
+                        });
+                        took_over = true;
+                        let creates = self.has(SeederFlaw::HelloTakeoverCreatesAccount)
+                            || (!waited && self.has(SeederFlaw::LateHelloTakeoverCreatesAccount));
+                        if claim.is_none() && creates {
+                            self.account(&mut st, key);
+                        }
+                        if !waited && claim.is_none() && self.has(SeederFlaw::LateArrivalWaited) {
+                            let sent = st
+                                .own_reads
+                                .get(&self.slot(key))
+                                .filter(|(at, ..)| *at == now)
+                                .map_or(0, |(_, reads, _)| reads.len());
+                            late_floor = Some((now, sent));
+                        }
+                    }
+                }
+                // A payment whose own deadline has passed takes no turn.
+                let free = !st.paying.contains_key(&key);
+                let over = claim.and_then(|id| st.pays.get(&id)).is_some_and(|r| {
+                    let late_turn = self.has(SeederFlaw::TurnAtDeadlineSecond)
+                        || self.has(SeederFlaw::TurnAtDeadlineSecondStructure)
+                        || (took_over && self.has(SeederFlaw::TakeoverAtDeadlineSecondStructure))
+                        || (!took_over && self.has(SeederFlaw::FreedAtDeadlineSecondBanStale));
+                    let past = if free && self.has(SeederFlaw::TurnPastDeadlineSecondTaken) {
+                        now == r.deadline
+                    } else if free && late_turn {
+                        now > r.deadline
+                    } else {
+                        now >= r.deadline
+                    };
+                    r.abandoned || (past && !self.has(SeederFlaw::TurnWaitPastDeadline))
+                });
+                if over && !self.has(SeederFlaw::NoDeadline) {
+                    done = Some(false);
+                } else if let Some(holder) = st.paying.get(&key).map(|h| h.pay)
+                    && !(claim.is_none()
+                        && self.has(SeederFlaw::HelloWaitsForFirstOnly)
+                        && first_holder.is_some_and(|f| f != holder))
+                {
+                    first_holder.get_or_insert(holder);
+                    // A `hello` behind a later payment: the one it first waited for has left.
+                    let moved_on = claim.is_none() && first_holder != Some(holder);
+                    if moved_on && first_wake.is_none() && self.has(SeederFlaw::FloorAtFirstWake) {
+                        let freed = st
+                            .own_reads
+                            .get(&self.slot(key))
+                            .filter(|(at, ..)| *at == now)
+                            .map_or(0, |(_, _, freed)| *freed);
+                        first_wake = Some((now, freed));
+                    }
+                    if moved_on && !uncounted && self.has(SeederFlaw::HelloUncountedAfterFirst) {
+                        uncounted = true;
+                        if let Some(n) = st.hellos_waiting.get_mut(&key.0) {
+                            *n = n.saturating_sub(1);
+                            if *n == 0 {
+                                st.hellos_waiting.remove(&key.0);
+                            }
+                        }
+                    }
+                    if moved_on && self.has(SeederFlaw::QuoteAtFirstWake) {
+                        let position = st
+                            .accounts
+                            .get(&key)
+                            .map_or((0, 0, 0), |a| (a.admitted, a.acked, a.spent));
+                        st.first_wake_position.entry(key).or_insert(position);
+                    }
+                    if !waited && self.has(SeederFlaw::FloorAtArrival) {
+                        let sent = st
+                            .own_reads
+                            .get(&self.slot(key))
+                            .filter(|(at, ..)| *at == now)
+                            .map_or(0, |(_, reads, _)| reads.len());
+                        arrival = Some((now, sent));
+                    }
+                    waited = true;
+                    st.waiting.entry(key).or_default().push(cx.waker().clone());
+                    let once = watched
+                        && ((claim.is_some() && self.has(SeederFlaw::PayTurnWatchOnce))
+                            || (claim.is_none() && self.has(SeederFlaw::HelloTurnWatchOnce)));
+                    // The flaw: the turn's holder arrived after this payment.
+                    let own_unwatched = self.has(SeederFlaw::PayTurnOwnDeadlineUnwatched)
+                        && claim
+                            .and_then(|id| st.pays.get(&id))
+                            .zip(st.paying.get(&key))
+                            .is_some_and(|(own, holder)| holder.deadline > own.deadline);
+                    if !self.has(SeederFlaw::TurnNoClockWatch)
+                        && !(claim.is_some() && self.has(SeederFlaw::PayTurnNoClockWatch))
+                        && !once
+                        && !own_unwatched
+                    {
+                        self.clock.watch(cx.waker());
+                        watched = true;
+                    }
+                    drop(st);
+                    wake_all(wake);
+                    return Poll::Pending;
+                }
+                let freed = st
+                    .own_reads
+                    .get(&self.slot(key))
+                    .filter(|(at, ..)| *at == now)
+                    .map_or(0, |(_, _, freed)| *freed);
+                if uncounted {
+                    *st.hellos_waiting.entry(key.0).or_default() += 1; // for its `done`
+                }
+                if done.is_none() {
+                    if let Some(id) = claim {
+                        let deadline = if self.has(SeederFlaw::HolderDeadlineFromTurn) {
+                            now + SEEDER_DEADLINE.as_secs()
+                        } else {
+                            st.pays.get(&id).map_or(u64::MAX, |r| r.deadline)
+                        };
+                        st.paying.insert(key, Holder { pay: id, deadline });
+                    }
+                    done = Some(true);
+                }
+                let floor = if self.has(SeederFlaw::FloorAtArrival) {
+                    arrival
+                } else if first_wake.is_some() {
+                    first_wake
+                } else if late_floor.is_some() {
+                    late_floor
+                } else {
+                    (waited || self.has(SeederFlaw::FloorWithoutWait)).then_some((now, freed))
+                };
+                (done, floor)
+            };
+            let (done, floor) = done;
+            wake_all(wake);
+            Poll::Ready((done.unwrap_or(true), floor, took_over))
+        })
+        .await
+    }
+
+    /// The keys payment `pay` checks its token's DLEQs against: the quoted mint `mint`'s,
+    /// of the keysets `named`, from the cache or fetched and cached (NFX-07 §3 step 3).
+    /// Keys it holds of every keyset named are used at once, without asking the mint. Those
+    /// of a keyset it does not hold are asked for only if the mint's keyset listing
+    /// (NUT-02) names it. The listing is asked for again when it names not every such
+    /// keyset, at most once a second per mint: a payment that finds it asked for this
+    /// second, before it arrived, waits for the next second's. A keyset the mint does not
+    /// list, by a listing asked for after the payment arrived, or whose keys it answers
+    /// 12001, is `bad-token`; of a 12001 it keeps nothing, and the next payment naming the
+    /// keyset asks again. `mint-unavailable` once its deadline passes first, or it has
+    /// been abandoned: keys it finds at or past its deadline (whole seconds: in the
+    /// deadline's second too) came after it, and are not used, since the checks they serve
+    /// would be reached late; nor is the mint's refusal of them. And from its deadline it
+    /// asks for nothing more, keys or listing: no request is sent that could not be used.
+    async fn fetch_keys(
+        &self,
+        mint: &str,
+        named: &HashSet<u64>,
+        pay: u64,
+    ) -> Result<MintKeys, Rej> {
+        // Whether it has asked, and its key request on its way back, if any.
+        let (mut asked, mut call) = (false, 0);
+        // The listing it asked for itself, if any ([`SeederFlaw::OthersListingsDistrusted`]
+        // and the like only), and whether it waited for a held one
+        // ([`SeederFlaw::HeldListingTrustedFromBeforeArrival`] only).
+        let (mut own_ask, mut held_waited) = (None, false);
+        // The mints that alone started the keysets named, if any: fixed as each starts.
+        let owners: HashMap<u64, Option<String>> =
+            named.iter().map(|k| (*k, self.net.owner_of(*k))).collect();
+        // What its key requests and listings ask to be woken by: the flaws, nothing; or a
+        // task of the seeder's own that wakes it before the answer can be seen (`keys_seen`
+        // and `listing_seen` false meanwhile).
+        let keys_seen = Arc::new(AtomicBool::new(true));
+        let listing_seen = Arc::new(AtomicBool::new(true));
+        let other_mint = self.other_mint(mint);
+        // The flaws planted on one kind of answer alone: a refusal of the keys, an answer
+        // of a mint other than the first, a listing the payment did not ask for (`others`).
+        let keys_waker = |cx: &Context<'_>| {
+            let refused = self.net.refuses_keys(mint);
+            if self.has(SeederFlaw::KeysUnwoken)
+                || (refused && self.has(SeederFlaw::KeysRefusalUnwoken))
+                || (other_mint && self.has(SeederFlaw::OtherMintKeysUnwoken))
+            {
+                Waker::noop().clone()
+            } else if refused && self.has(SeederFlaw::KeysRefusalWokenEarly) {
+                self.early_waker(SeederFlaw::KeysRefusalWokenEarly, cx, &keys_seen)
+            } else if other_mint && self.has(SeederFlaw::OtherMintKeysWokenEarly) {
+                self.early_waker(SeederFlaw::OtherMintKeysWokenEarly, cx, &keys_seen)
+            } else {
+                self.early_waker(SeederFlaw::KeysWokenEarly, cx, &keys_seen)
+            }
+        };
+        let listing_waker = |cx: &Context<'_>, others: bool| {
+            if self.has(SeederFlaw::ListingUnwoken)
+                || (other_mint && self.has(SeederFlaw::OtherMintListingUnwoken))
+                || (others && self.has(SeederFlaw::OthersListingUnwoken))
+            {
+                Waker::noop().clone()
+            } else if others && self.has(SeederFlaw::OthersListingWokenEarly) {
+                self.early_waker(SeederFlaw::OthersListingWokenEarly, cx, &listing_seen)
+            } else if other_mint && self.has(SeederFlaw::OtherMintListingWokenEarly) {
+                self.early_waker(SeederFlaw::OtherMintListingWokenEarly, cx, &listing_seen)
+            } else {
+                self.early_waker(SeederFlaw::ListingWokenEarly, cx, &listing_seen)
+            }
+        };
+        // Polled once already, waiting ([`SeederFlaw::KeysGiveUpOnWake`] only), and the clock
+        // watched ([`SeederFlaw::KeysWaitWatchOnce`] only).
+        let (mut waited, mut watched) = (false, false);
+        poll_fn(|cx| {
+            // Waiting for the next second to ask for the listing again.
+            let mut next_second = false;
+            // At or past its deadline it asks for nothing more, keys or listing: what came
+            // would not be used.
+            let no_keys = self.asks_no_more(pay, SeederFlaw::KeysAskedAtDeadline);
+            let no_listing = self.asks_no_more(pay, SeederFlaw::ListingAskedAtDeadline);
+            // The mint answered its key request 12001 in this poll
+            // ([`SeederFlaw::LateKeysRefusalUsed`] only).
+            let mut keys_refused = false;
+            let found = loop {
+                let mut st = self.state();
+                let own = st.keys.get(mint);
+                // The flaws: keys of the keysets it held then, used for any; or one named
+                // keyset's, used for all; or none used, asked for again at every payment, at
+                // every mint but the first, or on a turn waited for or taken over.
+                let came = st.pays.get(&pay).and_then(|r| r.came);
+                let refetched = self.has(SeederFlaw::KeysNeverCached)
+                    || (other_mint && self.has(SeederFlaw::KeysCachedForFirstMintOnly))
+                    || (matches!(came, Some(Came::WaitedTakeover | Came::LateTakeover))
+                        && self.has(SeederFlaw::TakeoverKeysRefetched))
+                    || (came == Some(Came::Waited) && self.has(SeederFlaw::WaitedKeysRefetched));
+                let never = refetched && !asked;
+                let kept = own.is_some() && self.has(SeederFlaw::KeysKeptAcrossRotation);
+                let any_named = own.is_some_and(|k| !k.keysets.is_disjoint(named))
+                    && self.has(SeederFlaw::KeysOfAnyNamedKeyset);
+                let cached = if never {
+                    None
+                } else if own.is_some_and(|k| named.is_subset(&k.keysets)) || kept || any_named {
+                    own.cloned()
+                } else if self.has(SeederFlaw::KeysOfAnyMint) {
+                    // Another mint's, which hold the keysets named.
+                    st.keys
+                        .values()
+                        .find(|k| named.is_subset(&k.keysets))
+                        .cloned()
+                } else {
+                    None
+                };
+                if let Some(keys) = cached {
+                    break Some(Ok(keys));
+                }
+                let missing: HashSet<u64> = match own {
+                    Some(k) if !never => named.difference(&k.keysets).copied().collect(),
+                    _ => named.clone(),
+                };
+                // The flaw: a keyset whose keys the mint once answered 12001 stays refused.
+                if (self.has(SeederFlaw::KeysRefusalCached)
+                    || self.has(SeederFlaw::LateKeysRefusalCached))
+                    && missing
+                        .iter()
+                        .any(|k| st.keys_refused.contains(&(mint.to_owned(), *k)))
+                {
+                    break Some(Err(rej(
+                        RejCode::BadToken,
+                        "a keyset the mint does not know",
+                    )));
+                }
+                // The flaws: one listing for all mints; or a listing of an earlier second
+                // taken as none.
+                let key = self.listing_key(mint);
+                let listing = st.listings.get(key).copied().filter(|l| {
+                    l.at == self.clock.now() || !self.has(SeederFlaw::ListingAskedEachSecond)
+                });
+                // The flaw: a keyset any mint's listing names taken as this one's.
+                let any_mints = self.has(SeederFlaw::KeysetNamedByAnyMintsListing);
+                let unlisted = listing.and_then(|l| l.answer).map(|a| {
+                    missing.iter().any(|k| {
+                        let owner = owners.get(k).and_then(Option::as_deref);
+                        let elsewhere = any_mints
+                            && st
+                                .listings
+                                .iter()
+                                .any(|(m, l)| l.answer.is_some_and(|b| b.names(m, *k, owner)));
+                        !a.names(mint, *k, owner) && !elsewhere
+                    })
+                });
+                if unlisted == Some(false) || self.has(SeederFlaw::UnlistedKeysFetched) {
+                    // Every keyset missing is the mint's: ask for their keys.
+                    if !keys_seen.load(Ordering::SeqCst) {
+                        break None; // the flaw: asked for, and not to be seen yet
+                    }
+                    if !asked && no_keys {
+                        break None; // at its deadline: not asked for
+                    }
+                    let ask = !std::mem::replace(&mut asked, true);
+                    drop(st);
+                    break match self
+                        .net
+                        .fetch_keys(mint, &missing, ask, &mut call, &keys_waker(cx))
+                    {
+                        None => None,
+                        Some(None) => {
+                            // A keyset the mint lists, and answers a request for its keys
+                            // 12001: nothing is kept of the answer (the flaw keeps it).
+                            if self.has(SeederFlaw::KeysRefusalCached) {
+                                let mut st = self.state();
+                                for k in &missing {
+                                    st.keys_refused.insert((mint.to_owned(), *k));
+                                }
+                            }
+                            // The flaw: a refusal that comes at its deadline or later is kept.
+                            if self.has(SeederFlaw::LateKeysRefusalCached) {
+                                let mut st = self.state();
+                                let now = self.clock.now();
+                                if st.pays.get(&pay).is_some_and(|r| now >= r.deadline) {
+                                    for k in &missing {
+                                        st.keys_refused.insert((mint.to_owned(), *k));
+                                    }
+                                }
+                            }
+                            // The flaw: the mint's listing is dropped with the refusal.
+                            if self.has(SeederFlaw::ListingDroppedOnKeysRefusal) {
+                                self.state().listings.remove(key);
+                            }
+                            keys_refused = true;
+                            Some(Err(rej(
+                                RejCode::BadToken,
+                                "a keyset the mint does not know",
+                            )))
+                        }
+                        Some(Some(served)) => {
+                            keys_seen.store(true, Ordering::SeqCst);
+                            let mut st = self.state();
+                            let held = st.keys.entry(mint.to_owned()).or_insert_with(|| MintKeys {
+                                mint: served.mint.clone(),
+                                keysets: HashSet::new(),
+                            });
+                            held.keysets.extend(served.keysets);
+                            Some(Ok(held.clone()))
+                        }
+                    };
+                }
+                let arrived = st.pays.get(&pay).map_or(u64::MAX, |r| r.listings_seen);
+                let now = self.clock.now();
+                // The flaw: another mint's listing, asked for since it arrived, judges it.
+                let other_judges = self.has(SeederFlaw::ListingJudgesOtherMints)
+                    && st
+                        .listings
+                        .iter()
+                        .filter(|(m, l)| m.as_str() != mint && l.seq > arrived)
+                        .max_by_key(|(_, l)| l.seq)
+                        .is_some_and(|(m, l)| {
+                            l.answer.is_some_and(|a| {
+                                missing.iter().any(|k| {
+                                    let owner = owners.get(k).and_then(Option::as_deref);
+                                    !a.names(m, *k, owner)
+                                })
+                            })
+                        });
+                if other_judges {
+                    break Some(Err(rej(
+                        RejCode::BadToken,
+                        "a keyset the mint does not list",
+                    )));
+                }
+                // The flaws: a listing another entry asked for is not trusted, or not if
+                // asked for in the second it arrived.
+                let arrival = st
+                    .pays
+                    .get(&pay)
+                    .map_or(0, |r| r.deadline.saturating_sub(SEEDER_DEADLINE.as_secs()));
+                let distrusted = listing.is_some_and(|l| {
+                    own_ask != Some(l.seq)
+                        && (self.has(SeederFlaw::OthersListingsDistrusted)
+                            || (l.at <= arrival
+                                && self.has(SeederFlaw::ListingFromArrivalSecondDistrusted)))
+                });
+                if let Some(l) = listing
+                    && unlisted == Some(true)
+                    && !distrusted
+                    && (l.seq > arrived
+                        || (l.at == now && self.has(SeederFlaw::ListingTrustedFromBeforeArrival))
+                        || (held_waited
+                            && self.has(SeederFlaw::HeldListingTrustedFromBeforeArrival)))
+                {
+                    // Asked for since it arrived: a keyset it names not is not the mint's.
+                    break Some(Err(rej(
+                        RejCode::BadToken,
+                        "a keyset the mint does not list",
+                    )));
+                }
+                if let Some(l) = listing
+                    && l.answer.is_none()
+                {
+                    // Its answer is held: wait for it.
+                    if !listing_seen.load(Ordering::SeqCst) {
+                        break None; // the flaw: not to be seen yet
+                    }
+                    drop(st);
+                    let others = own_ask != Some(l.seq);
+                    let Some(answer) =
+                        self.net
+                            .listed(mint, l.released, l.call, &listing_waker(cx, others))
+                    else {
+                        break None;
+                    };
+                    listing_seen.store(true, Ordering::SeqCst);
+                    held_waited = true;
+                    if let Some(l) = self.state().listings.get_mut(key) {
+                        l.answer = Some(answer);
+                    }
+                    continue;
+                }
+                // The flaws: asked again two seconds on; or for each keyset, not each mint;
+                // or once a second for every mint together.
+                let recent = listing.is_some_and(|l| {
+                    l.at == now
+                        || (l.at + 1 == now && self.has(SeederFlaw::ListingAskedEveryOtherSecond))
+                }) || (self.has(SeederFlaw::ListingBoundPerSeeder)
+                    && st.listings.values().any(|l| l.at == now));
+                let other_keyset = self.has(SeederFlaw::ListingRateLimitedPerKeyset)
+                    && !st
+                        .listed_for
+                        .get(mint)
+                        .is_some_and(|k| missing.is_subset(k));
+                if recent
+                    && !other_keyset
+                    && !self.has(SeederFlaw::ListingEveryPayment)
+                    && !(other_mint && self.has(SeederFlaw::ListingBoundFirstMintOnly))
+                {
+                    // Asked for this second, before it arrived: the next second's serves it.
+                    next_second = true;
+                    break None;
+                }
+                if no_listing {
+                    break None; // at its deadline: not asked for
+                }
+                st.listings_asked += 1;
+                if self.has(SeederFlaw::ListingRateLimitedPerKeyset) {
+                    st.listed_for.insert(mint.to_owned(), missing.clone());
+                }
+                if self.has(SeederFlaw::KeysDroppedWithListing) {
+                    st.keys.remove(mint);
+                }
+                let seq = st.listings_asked;
+                own_ask = Some(seq);
+                drop(st);
+                let (released, call, answer) =
+                    self.net.list_keysets(mint, &listing_waker(cx, false));
+                self.state().listings.insert(
+                    key.to_owned(),
+                    Listing {
+                        at: now,
+                        seq,
+                        released,
+                        call,
+                        answer,
+                    },
+                );
+                if answer.is_none() {
+                    break None;
+                }
+            };
+            if let Some(Ok(keys)) = &found
+                && self.has(SeederFlaw::LateKeysUsed)
+            {
+                return Poll::Ready(Ok(keys.clone()));
+            }
+            // Each of the two uses its own kind of refusal found late, and not the other's.
+            if let Some(Err(r)) = &found
+                && ((!keys_refused && self.has(SeederFlaw::LateListingUsed))
+                    || (keys_refused && self.has(SeederFlaw::LateKeysRefusalUsed)))
+            {
+                return Poll::Ready(Err(r.clone()));
+            }
+            let st = self.state();
+            let now = self.clock.now();
+            let over = st.pays.get(&pay).is_none_or(|r| {
+                let past = if found.is_some() && self.has(SeederFlaw::KeysInDeadlineSecondUsed) {
+                    now > r.deadline
+                } else {
+                    now >= r.deadline
+                };
+                r.abandoned || past
+            });
+            if over && !self.has(SeederFlaw::NoDeadline) {
+                return Poll::Ready(Err(unavailable("no keys from the mint within 60 s")));
+            }
+            if let Some(found) = found {
+                return Poll::Ready(found);
+            }
+            if asked && waited && self.has(SeederFlaw::KeysGiveUpOnWake) {
+                return Poll::Ready(Err(unavailable("no keys from the mint")));
+            }
+            waited = true;
+            drop(st);
+            if let Some(r) = self.state().pays.get_mut(&pay) {
+                r.listing_wait = next_second;
+            }
+            let unwoken = next_second && self.has(SeederFlaw::ListingWaitUnwoken);
+            let once = watched && !next_second && self.has(SeederFlaw::KeysWaitWatchOnce);
+            if !self.has(SeederFlaw::FetchNoClockWatch) && !unwoken && !once {
+                self.clock.watch(cx.waker());
+                watched = true;
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    /// The `final_expiry` the quoted mint `mint` lists for its active keyset, for payment
+    /// `pay`'s keyset rule (NFX-07 §3 step 5), by the mint's keyset listing asked for in
+    /// the second `since` (its turn's) or later: by any entry, before the payment arrived
+    /// or after. If the one the seeder holds is older, it asks for the listing now, in a
+    /// later second than that one; one whose answer is held it waits for.
+    /// `mint-unavailable` once its deadline passes first, or it has been abandoned: a
+    /// listing that comes at or past the deadline is not used, nor is one asked for then.
+    /// `stale_held`: one held asked for before `since` is waited for too
+    /// ([`SeederFlaw::UnwaitedStaleHeldListingAwaited`] and the like only).
+    async fn keyset_listing(
+        &self,
+        mint: &str,
+        pay: u64,
+        since: u64,
+        stale_held: bool,
+    ) -> Result<Option<u64>, Rej> {
+        // Asked for by this payment ([`SeederFlaw::KeysetListingEverySwap`] and the like
+        // only), and the clock watched ([`SeederFlaw::KeysetListingWatchOnce`] only).
+        let (mut asked, mut watched) = (false, false);
+        let key = self.listing_key(mint);
+        let own = self.has(SeederFlaw::KeysetListingOwnCache);
+        let other_mint = self.other_mint(mint);
+        let seen = Arc::new(AtomicBool::new(true));
+        poll_fn(|cx| {
+            // The flaws: woken by the clock alone; or by a task of the seeder's own, before
+            // the listing can be seen (`seen` false meanwhile).
+            let waker = || {
+                if self.has(SeederFlaw::KeysetListingWaitUnwoken)
+                    || (other_mint && self.has(SeederFlaw::OtherMintKeysetListingUnwoken))
+                {
+                    Waker::noop().clone()
+                } else if other_mint && self.has(SeederFlaw::OtherMintKeysetListingWokenEarly) {
+                    self.early_waker(SeederFlaw::OtherMintKeysetListingWokenEarly, cx, &seen)
+                } else {
+                    self.early_waker(SeederFlaw::KeysetListingWokenEarly, cx, &seen)
+                }
+            };
+            // At or past its deadline it asks for no listing: one that came would not be used.
+            // No payment of an honest seeder comes here then, so no case shows this guard: it
+            // first looks in the poll its keys came in, before its deadline, nothing awaited
+            // between, and asks then, or waits for a listing held and takes its answer.
+            let no_listing = self.asks_no_more(pay, SeederFlaw::ListingAskedAtDeadline);
+            let found = loop {
+                let mut st = self.state();
+                let now = self.clock.now();
+                let cache = if own {
+                    &st.keyset_listings
+                } else {
+                    &st.listings
+                };
+                let mut listing = cache
+                    .get(key)
+                    .copied()
+                    .filter(|l| l.at >= since || (stale_held && l.answer.is_none()));
+                // The flaws: the last listing of any mint serves; one is asked for at every
+                // payment, or as its step 3 asked for one, or as it finds one held; one held
+                // is taken as listing no expiry, or asked for again in a later second.
+                if self.has(SeederFlaw::KeysetListingOfOtherMints)
+                    && let Some(last) = st
+                        .listings
+                        .values()
+                        .filter(|l| l.at >= since && l.answer.is_some())
+                        .max_by_key(|l| l.seq)
+                {
+                    listing = Some(*last);
+                }
+                let forced = st.pays.get(&pay).is_some_and(|r| r.force_listing);
+                let held = listing.is_some_and(|l| l.answer.is_none());
+                if !asked
+                    && (self.has(SeederFlaw::KeysetListingEverySwap)
+                        || (other_mint && self.has(SeederFlaw::KeysetListingEverySwapAtOtherMints))
+                        || forced
+                        || (held && self.has(SeederFlaw::HeldListingAskedAgain)))
+                {
+                    listing = None;
+                }
+                if held && self.has(SeederFlaw::HeldListingJudgedUnlisted) {
+                    break Some(None);
+                }
+                if listing.is_some_and(|l| l.answer.is_none() && l.at < now)
+                    && self.has(SeederFlaw::KeysetListingAskedWhileHeld)
+                {
+                    listing = None;
+                }
+                if let Some(l) = listing {
+                    if let Some(answer) = l.answer {
+                        break Some(answer.final_expiry);
+                    }
+                    // Its answer is held: wait for it.
+                    if !seen.load(Ordering::SeqCst) {
+                        break None; // the flaw: not to be seen yet
+                    }
+                    drop(st);
+                    let Some(mut answer) = self.net.listed(mint, l.released, l.call, &waker())
+                    else {
+                        break None;
+                    };
+                    seen.store(true, Ordering::SeqCst);
+                    if self.has(SeederFlaw::HeldListingExpiryDropped) {
+                        answer.final_expiry = None;
+                    }
+                    let mut st = self.state();
+                    let cache = if own {
+                        &mut st.keyset_listings
+                    } else {
+                        &mut st.listings
+                    };
+                    if let Some(l) = cache.get_mut(key) {
+                        l.answer = Some(answer);
+                    }
+                    continue;
+                }
+                // The flaw: no mint asked once one was in this second.
+                if self.has(SeederFlaw::KeysetListingBoundPerSeeder)
+                    && st.listings.values().any(|l| l.at == now)
+                {
+                    break None;
+                }
+                if no_listing {
+                    break None; // at its deadline: not asked for
+                }
+                asked = true;
+                if !self.has(SeederFlaw::KeysetListingUncounted) {
+                    st.listings_asked += 1;
+                }
+                let seq = st.listings_asked;
+                drop(st);
+                let (released, call, answer) = self.net.list_keysets(mint, &waker());
+                let listed = Listing {
+                    at: now,
+                    seq,
+                    released,
+                    call,
+                    answer,
+                };
+                let mut st = self.state();
+                if let Some(r) = st.pays.get_mut(&pay) {
+                    r.force_listing = false;
+                }
+                if own {
+                    st.keyset_listings.insert(key.to_owned(), listed);
+                } else {
+                    st.listings.insert(key.to_owned(), listed);
+                }
+                if answer.is_none() {
+                    break None;
+                }
+            };
+            let st = self.state();
+            let now = self.clock.now();
+            let over = st.pays.get(&pay).is_none_or(|r| {
+                let past = if self.has(SeederFlaw::KeysetListingWaitPastDeadline) {
+                    now > r.deadline
+                } else {
+                    now >= r.deadline
+                };
+                r.abandoned || past
+            });
+            if over && !self.has(SeederFlaw::NoDeadline) {
+                let detail = "no keyset listing from the mint within 60 s";
+                return Poll::Ready(Err(if self.has(SeederFlaw::NoKeysetListingBadToken) {
+                    rej(RejCode::BadToken, detail)
+                } else {
+                    unavailable(detail)
+                }));
+            }
+            if let Some(found) = found {
+                return Poll::Ready(Ok(found));
+            }
+            drop(st);
+            if let Some(r) = self.state().pays.get_mut(&pay) {
+                r.keyset_wait = true;
+            }
+            let once = watched && self.has(SeederFlaw::KeysetListingWatchOnce);
+            if !self.has(SeederFlaw::KeysetListingNoClockWatch) && !once {
+                self.clock.watch(cx.waker());
+                watched = true;
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    /// The key a mint's keyset listing is cached under: the mint's own
+    /// ([`SeederFlaw::ListingOneForAllMints`] keeps one for all).
+    fn listing_key<'a>(&self, mint: &'a str) -> &'a str {
+        if self.has(SeederFlaw::ListingOneForAllMints) {
+            ""
+        } else {
+            mint
+        }
+    }
+
+    /// The swap's outcome has come, on whatever task: settle it in time, or as late.
+    fn land(&self, id: u64, pay: &Settle, token: &str, outputs: u64, outcome: Swap) {
+        // The outcome arrives; the harness may move the clock before it is settled
+        // ([`Harness::advance_during_next_land`]). Lateness is judged at settlement.
+        let arrived = self.clock.now();
+        let during = std::mem::take(&mut self.net.ledger().advance_during_land);
+        if during > 0 {
+            self.pass(Duration::from_secs(during));
+        }
+        // The flaws: at a quoted mint other than the first, a spent or an invalid proof
+        // refused with no ban, and a claim that lands late not credited.
+        let elsewhere = [
+            SeederFlaw::OtherMintSpentNoBan,
+            SeederFlaw::OtherMintInvalidNoBan,
+            SeederFlaw::OtherMintLateClaimNotCredited,
+            SeederFlaw::OtherMintLateClaimKeepsDebt,
+        ]
+        .iter()
+        .any(|f| self.has(*f))
+            && self.token_at_other_mint(token);
+        let spared = match outcome {
+            Swap::Spent if elsewhere && self.has(SeederFlaw::OtherMintSpentNoBan) => {
+                Some(rej(RejCode::Spent, "a proof is already spent"))
+            }
+            Swap::Invalid if elsewhere && self.has(SeederFlaw::OtherMintInvalidNoBan) => {
+                Some(rej(RejCode::BadToken, "the mint refuses these proofs"))
+            }
+            _ => None,
+        };
+        let late_lost = outcome == Swap::Claimed
+            && elsewhere
+            && self.has(SeederFlaw::OtherMintLateClaimNotCredited);
+        let wake = {
+            let mut st = self.state();
+            // A payment whose outcome was decided has no record left: its answer, lost or
+            // not, changes nothing.
+            let record = st
+                .pays
+                .get(&id)
+                .map_or(self.has(SeederFlaw::DecidedLostRelearnt), |r| {
+                    let in_time = !r.abandoned && self.clock.now() < r.deadline;
+                    (in_time || !self.has(SeederFlaw::UnknownOnlyInTime))
+                        && (!r.finished || !self.has(SeederFlaw::UnknownOnlyWhileAwaited))
+                });
+            let unknown = outcome == Swap::Lost
+                || (outcome == Swap::Pending && self.has(SeederFlaw::PendingFirstUnknown))
+                || (outcome == Swap::OutputsRefused && self.has(SeederFlaw::FirstRefusedUnknown))
+                || (outcome == Swap::Expired && self.has(SeederFlaw::FirstExpiredUnknown));
+            if unknown && record && !self.has(SeederFlaw::NeverRestores) {
+                st.unknown.push(Unknown {
+                    pay: pay.clone(),
+                    token: token.to_owned(),
+                    outputs,
+                    since: self.clock.now(),
+                });
+            }
+            let now = self.clock.now();
+            let early = st.woken_early.remove(&id);
+            let turn_early = st.turn_woken_early.remove(&id);
+            let Some(r) = st.pays.get_mut(&id) else {
+                return;
+            };
+            r.landed = true;
+            let judged = if self.has(SeederFlaw::LandStaleClock) {
+                arrived
+            } else {
+                now
+            };
+            // An outcome settled in the deadline's second came after the deadline, which
+            // was as that second began.
+            let past = if self.has(SeederFlaw::LandInTimeAtDeadline) {
+                judged > r.deadline
+            } else {
+                judged >= r.deadline
+            };
+            let expired =
+                past && !self.has(SeederFlaw::NoDeadline) && !self.has(SeederFlaw::LateByFlagOnly);
+            let late = (r.abandoned && !self.has(SeederFlaw::LandStaleClock)) || expired;
+            r.abandoned = late;
+            let finished = r.finished;
+            let mut wake: Vec<Waker> = r.waker.take().into_iter().collect();
+            if self.has(SeederFlaw::OutcomeUnwoken) {
+                wake.clear();
+            }
+            // The flaws: an outcome that is no claim wakes no one; one whose payment was
+            // woken before it was settled wakes it no more.
+            if early || (outcome != Swap::Claimed && self.has(SeederFlaw::NoClaimUnwoken)) {
+                wake.clear();
+            }
+            if late {
+                st.claim_elsewhere = elsewhere;
+                if !late_lost {
+                    self.settle_late(&mut st, pay, outcome);
+                }
+            } else {
+                let answer = match spared {
+                    Some(refusal) => Err(refusal),
+                    None => self.settle(&mut st, pay, outcome),
+                };
+                if let Some(r) = st.pays.get_mut(&id) {
+                    r.answer = Some(answer);
+                }
+            }
+            let flaw = SeederFlaw::LandFreedAfterDeadline;
+            let waiters = self.freeing(&mut st, pay.key, id, flaw, |st| {
+                self.release_turn(st, pay.key, id)
+            });
+            // The flaws: what waits for the turn was woken before it was freed, and is not
+            // now; or is not, the payment's connection closed.
+            if !turn_early && !(finished && self.has(SeederFlaw::DroppedLandWakesNone)) {
+                wake.extend(waiters);
+            }
+            if finished && !self.has(SeederFlaw::LandKeepsFinished) {
+                st.pays.remove(&id);
+            }
+            wake
+        };
+        wake_all(wake);
+    }
+
+    /// The answer to payment `id` once its swap is sent: its outcome if it settled in
+    /// time, else `mint-unavailable` at the deadline.
+    fn answer(&self, id: u64, cx: &Context<'_>) -> Poll<Result<Ack, Rej>> {
+        let on_poll = self
+            .state()
+            .pays
+            .get_mut(&id)
+            .and_then(|r| r.on_poll.take());
+        if let Some(land) = on_poll {
+            land();
+        }
+        let (result, wake) = {
+            let mut st = self.state();
+            let now = self.clock.now();
+            let beats = self.has(SeederFlaw::DeadlineBeatsSettled);
+            let Some(r) = st.pays.get_mut(&id) else {
+                return Poll::Ready(Err(unavailable("no record of this payment")));
+            };
+            let expired = now >= r.deadline && !self.has(SeederFlaw::NoDeadline);
+            if (!beats || !expired)
+                && let Some(a) = r.answer.take()
+            {
+                return Poll::Ready(a);
+            }
+            if r.abandoned {
+                return Poll::Ready(Err(unavailable("no answer from the mint within 60 s")));
+            }
+            if !expired {
+                r.waker = Some(cx.waker().clone());
+                // The flaws: the clock watched on its first wait only, or never.
+                let once = r.answer_watched && self.has(SeederFlaw::AnswerWatchOnce);
+                if !once && !self.has(SeederFlaw::AnswerNoClockWatch) {
+                    self.clock.watch(cx.waker());
+                    r.answer_watched = true;
+                }
+                return Poll::Pending;
+            }
+            r.answer = None;
+            let key = r.key;
+            let flaw = SeederFlaw::AnswerFreedAfterDeadline;
+            let wake = self.freeing(&mut st, key, id, flaw, |st| self.abandon(st, key, id));
+            (
+                Err(unavailable("no answer from the mint within 60 s")),
+                wake,
+            )
+        };
+        wake_all(wake);
+        Poll::Ready(result)
+    }
+
+    fn identities_held(&self) -> usize {
+        let st = self.state();
+        st.accounts.len()
+            + st.banned.len()
+            + st.open.len()
+            + st.open_count.len()
+            + st.open_accounts.len()
+            + st.hellos_waiting.len()
+            + st.ever.len()
+            + st.paying.len()
+            + st.waiting.len()
+            + st.pays.len()
+            + st.debt.len()
+            + st.unknown.len()
+            + st.own_reads.len()
+    }
+}
+
+/// A read of an account's swaps under way (a round trip): marked back when it is, or
+/// abandoned if its entry is dropped first. Either way it was sent, and counts.
+struct Reading<'a> {
+    e: &'a Inner,
+    slot: Key,
+    at: u64,
+    index: usize,
+    back: bool,
+}
+
+impl<'a> Reading<'a> {
+    fn start(e: &'a Inner, slot: Key, at: u64, by: Option<Vec<u64>>, covers: Vec<u64>) -> Self {
+        let index = e.record_read(slot, at, by, covers, ReadState::UnderWay);
+        Self {
+            e,
+            slot,
+            at,
+            index,
+            back: false,
+        }
+    }
+
+    /// A read whose place [`Inner::take_place`] took.
+    fn taken(e: &'a Inner, slot: Key, at: u64, index: usize) -> Self {
+        Self {
+            e,
+            slot,
+            at,
+            index,
+            back: false,
+        }
+    }
+
+    fn back(mut self) {
+        self.set(ReadState::Back);
+        self.back = true;
+    }
+
+    fn set(&self, state: ReadState) {
+        self.with(|r| r.state = state);
+        if self.e.has(SeederFlaw::ReadWaitUnwokenByClock)
+            || self.e.has(SeederFlaw::PayReadWaitUnwokenByClock)
+        {
+            let waiting = std::mem::take(&mut self.e.state().read_waiters);
+            wake_all(waiting);
+        }
+        if self.e.has(SeederFlaw::ReadWaitUnwokenByAbandon)
+            || self.e.has(SeederFlaw::PayReadWaitUnwokenByReturn)
+        {
+            let woken: Vec<_> = {
+                let mut st = self.e.state();
+                let (woken, kept) = std::mem::take(&mut st.read_waiters_on)
+                    .into_iter()
+                    .partition(|(on, _)| *on == state);
+                st.read_waiters_on = kept;
+                woken
+            };
+            wake_all(woken.into_iter().map(|(_, w)| w).collect());
+        }
+    }
+
+    /// The swaps it covers, by their outputs.
+    fn cover(&self, covers: Vec<u64>) {
+        self.with(|r| r.covers = covers);
+    }
+
+    fn with(&self, f: impl FnOnce(&mut OwnRead)) {
+        let mut st = self.e.state();
+        let ignores = self.e.has(SeederFlaw::ReadingIgnoresSecond);
+        if let Some((at, reads, _)) = st.own_reads.get_mut(&self.slot)
+            && (*at == self.at || ignores)
+            && let Some(r) = reads.get_mut(self.index)
+        {
+            f(r);
+        }
+    }
+}
+
+impl Drop for Reading<'_> {
+    fn drop(&mut self) {
+        if self.back {
+            return;
+        }
+        if self.e.has(SeederFlaw::AbandonedFreesItsPlace) {
+            // The nineteenth rework's: the abandoned read gives its place back.
+            let mut st = self.e.state();
+            if let Some((at, reads, _)) = st.own_reads.get_mut(&self.slot)
+                && *at == self.at
+                && self.index < reads.len()
+            {
+                reads.remove(self.index);
+            }
+            return;
+        }
+        self.set(ReadState::Abandoned);
+    }
+}
+
+/// A payment's parameters, carried into its swap's completion.
+#[derive(Clone)]
+struct Settle {
+    key: Key,
+    upto: u64,
+    amount: u64,
+    snapshot: Vec<u64>,
+    session_spent: Arc<AtomicU64>,
+}
+
+/// Owned by a `pay` future: when it answers or is dropped, the payment's record is
+/// finished, and a turn it holds without a swap in flight is released. Dropped before its
+/// swap is sent (its connection closed), it is abandoned unswapped.
+#[derive(Clone)]
+struct PayGuard {
+    e: Arc<Inner>,
+    id: u64,
+    /// The future answered, not dropped on the way.
+    answered: bool,
+    /// Its refusal keeps the turn ([`SeederFlaw::StaleKeepsTurn`] and the like only).
+    kept: bool,
+    /// Its refusal wakes none of what waits for the turn ([`SeederFlaw::OverpaidWakesNone`]
+    /// and the like only).
+    quiet: bool,
+    /// It took a dead turn over.
+    took: bool,
+    /// It waited for a payment it did not take the turn over from.
+    waited: bool,
+    /// Its refusal frees the turn without noting the floor ([`SeederFlaw::OverpaidNoFloor`]
+    /// and the like only).
+    unfloored: bool,
+    /// How it came to its turn.
+    came: Came,
+    /// Its drop is being taken, on a task of the seeder's own ([`Timing::closes_on_a_task`]).
+    taken: bool,
+}
+
+impl Drop for PayGuard {
+    fn drop(&mut self) {
+        // An honest seeder may take a payment dropped unanswered on a task of its own.
+        if !self.answered
+            && !self.taken
+            && let Some(spawn) = self.e.closes_on_a_task()
+        {
+            let mut later = self.clone();
+            later.taken = true;
+            spawn(Box::pin(async move {
+                next_poll().await;
+                drop(later);
+            }));
+            return;
+        }
+        let wake = {
+            let mut st = self.e.state();
+            let Some(r) = st.pays.get_mut(&self.id) else {
+                return;
+            };
+            r.finished = true;
+            r.waker = None;
+            let (key, sent, landed, reading, read) = (r.key, r.sent, r.landed, r.reading, r.read);
+            let (listing_wait, keyset_wait, read_wait) =
+                (r.listing_wait, r.keyset_wait, r.read_wait);
+            if sent && !landed && self.e.has(SeederFlaw::DropAbandonsInFlight) {
+                r.abandoned = true;
+            }
+            if sent && !landed {
+                // The swap's completion, or a read of its state past the deadline, settles
+                // it and releases the turn.
+                Vec::new()
+            } else {
+                st.pays.remove(&self.id);
+                let dropped = !self.answered;
+                let held = st.paying.get(&key).is_some_and(|h| h.pay == self.id);
+                let waited = held && self.waited;
+                let stage = if let Some(wait) = read_wait {
+                    wait
+                } else if reading {
+                    Stage::Read
+                } else if keyset_wait {
+                    Stage::KeysetListing
+                } else if listing_wait {
+                    Stage::Listing
+                } else {
+                    Stage::Keys
+                };
+                let slips = |slip: Slip| {
+                    dropped
+                        && held
+                        && self.e.flaw.and_then(SeederFlaw::drop_slip)
+                            == Some((slip, self.came, stage))
+                };
+                let forgets = if dropped {
+                    self.e.has(SeederFlaw::WaitingDropForgetsWaiters)
+                } else {
+                    self.e.has(SeederFlaw::TimeoutForgetsWaiters)
+                };
+                if sent
+                    || self.kept
+                    || self.e.has(SeederFlaw::RefusalKeepsTurn)
+                    || (dropped && self.e.has(SeederFlaw::DropHoldsTurn))
+                    || (dropped && self.took && self.e.has(SeederFlaw::TakeoverDropHoldsTurn))
+                    || slips(Slip::KeepsTurn)
+                {
+                    Vec::new()
+                } else if forgets && st.paying.get(&key).is_some_and(|h| h.pay != self.id) {
+                    st.waiting.remove(&key); // their wakers dropped, none woken
+                    Vec::new()
+                } else if dropped && self.e.has(SeederFlaw::DropFreesAnyTurn) {
+                    self.e.free_turn(&mut st, key);
+                    st.waiting.remove(&key).unwrap_or_default()
+                } else if (dropped
+                    && (self.e.has(SeederFlaw::DropFreesWithoutFloor)
+                        || (reading && self.e.has(SeederFlaw::DropInReadNoFloor))
+                        || (waited && self.e.has(SeederFlaw::WaitedPayDropNoFloor))))
+                    || (dropped
+                        && reading
+                        && waited
+                        && self.e.has(SeederFlaw::WaitedDropInReadNoFloor))
+                    || (!dropped && self.unfloored)
+                    || slips(Slip::NoFloor)
+                    || (!dropped
+                        && ((!read && self.e.has(SeederFlaw::UnreadRefusalNoFloor))
+                            || (self.took && self.e.has(SeederFlaw::TakeoverRefusalNoFloor))
+                            || (waited && self.e.has(SeederFlaw::WaitedRefusalNoFloor))
+                            || (read && self.e.has(SeederFlaw::ReadRefusalNoFloor))
+                            || (read
+                                && waited
+                                && self.e.has(SeederFlaw::WaitedReadRefusalNoFloor))))
+                {
+                    if st.paying.get(&key).is_some_and(|h| h.pay == self.id) {
+                        st.paying.remove(&key); // its floor not noted
+                    }
+                    st.waiting.remove(&key).unwrap_or_default()
+                } else {
+                    let (e, flaw) = (&self.e, SeederFlaw::ReleaseFreedAfterDeadline);
+                    let wake = e.freeing(&mut st, key, self.id, flaw, |st| {
+                        e.release_turn(st, key, self.id)
+                    });
+                    let creates = e.has(SeederFlaw::DropCreatesAccount)
+                        || (!held && e.has(SeederFlaw::WaitingDropCreatesAccount))
+                        || (reading && e.has(SeederFlaw::DropInReadCreatesAccount))
+                        || (self.took && e.has(SeederFlaw::TakeoverPayDropCreatesAccount))
+                        || (waited && e.has(SeederFlaw::WaitedPayDropCreatesAccount))
+                        || (reading && waited && e.has(SeederFlaw::WaitedDropInReadCreatesAccount))
+                        || (reading
+                            && self.took
+                            && e.has(SeederFlaw::TakeoverDropInReadCreatesAccount))
+                        || slips(Slip::CreatesAccount);
+                    if dropped && creates {
+                        e.account(&mut st, key);
+                    }
+                    let quiet = if dropped {
+                        self.e.has(SeederFlaw::DropWakesNone)
+                            || (reading && self.e.has(SeederFlaw::DropInReadWakesNone))
+                            || (self.took && self.e.has(SeederFlaw::TakeoverDropWakesNone))
+                            || (waited && self.e.has(SeederFlaw::WaitedPayDropWakesNone))
+                            || (reading
+                                && waited
+                                && self.e.has(SeederFlaw::WaitedDropInReadWakesNone))
+                            || slips(Slip::WakesNone)
+                    } else {
+                        self.e.has(SeederFlaw::RefusalWakesNone) || self.quiet
+                    };
+                    let mut wake = wake;
+                    if (dropped && self.took && self.e.has(SeederFlaw::TakeoverDropWakesOne))
+                        || slips(Slip::WakesOne)
+                    {
+                        wake.truncate(1);
+                    }
+                    if quiet { Vec::new() } else { wake }
+                }
+            }
+        };
+        wake_all(wake);
+    }
+}
+
+/// A `hello` waiting for its account's turn, counted toward its peer's session cap.
+#[derive(Clone)]
+struct HelloWait {
+    e: Arc<Inner>,
+    key: Key,
+    counted: bool,
+    /// Past its wait, in its reads.
+    reading: bool,
+    /// It took a dead turn over.
+    took: bool,
+    /// It waited for a payment it did not take the turn over from.
+    waited: bool,
+    /// Its drop is being taken, on a task of the seeder's own ([`Timing::closes_on_a_task`]).
+    taken: bool,
+}
+
+impl HelloWait {
+    fn done(&mut self, st: &mut State) {
+        if !self.counted {
+            return;
+        }
+        self.counted = false;
+        if let Some(n) = st.hellos_waiting.get_mut(&self.key.0) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                st.hellos_waiting.remove(&self.key.0);
+            }
+        }
+        if let Some(n) = st.hellos_waiting_per_account.get_mut(&self.key) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                st.hellos_waiting_per_account.remove(&self.key);
+            }
+        }
+    }
+}
+
+impl Drop for HelloWait {
+    fn drop(&mut self) {
+        if !self.counted {
+            return;
+        }
+        // An honest seeder may take a `hello` dropped unanswered on a task of its own.
+        if !self.taken
+            && let Some(spawn) = self.e.closes_on_a_task()
+        {
+            let mut later = self.clone();
+            later.taken = true;
+            spawn(Box::pin(async move {
+                next_poll().await;
+                drop(later);
+            }));
+            return;
+        }
+        let e = self.e.clone();
+        let mut st = e.state();
+        let creates = if !self.reading {
+            e.has(SeederFlaw::WaitingHelloDropCreatesAccount)
+        } else {
+            e.has(SeederFlaw::HelloDropInReadCreatesAccount)
+                || (self.waited && e.has(SeederFlaw::WaitedHelloDropInReadCreatesAccount))
+                || (self.took && e.has(SeederFlaw::TakeoverHelloDropInReadCreatesAccount))
+        };
+        if creates {
+            e.account(&mut st, self.key);
+        }
+        let leaks = e.has(SeederFlaw::HelloWaitLeaksOnDrop)
+            || (self.reading && e.has(SeederFlaw::HelloDropInReadCounted))
+            || (self.waited && e.has(SeederFlaw::WaitedHelloDropInReadCounted))
+            || (self.took && e.has(SeederFlaw::TakeoverHelloDropInReadCounted));
+        if !leaks {
+            self.done(&mut st);
+        }
+    }
+}
+
+/// An honest seeder (NFX-07 §3). With a [`SeederFlaw`] it is deliberately not.
+#[derive(Clone)]
+pub struct MockEngine(Arc<Inner>);
+
+impl MockEngine {
+    /// A seeder for `videos` (each with its member files), or its refusal to start
+    /// ([`EngineConfig::validate`]).
+    pub fn try_new(
+        config: EngineConfig,
+        videos: Vec<(VideoAddr, HashSet<String>)>,
+        net: MockNetwork,
+        clock: Clock,
+        flaw: Option<SeederFlaw>,
+    ) -> Result<Self, String> {
+        if flaw != Some(SeederFlaw::NoValidate) {
+            config.check(flaw)?;
+        }
+        let e = Inner {
+            config,
+            videos: videos
+                .into_iter()
+                .map(|(addr, members)| Video { addr, members })
+                .collect(),
+            aged: AtomicU64::new(clock.now()),
+            clock,
+            net,
+            flaw,
+            state: Mutex::new(State::default()),
+        };
+        let (held_from_start, ageing) = {
+            let l = e.net.ledger();
+            let t = &l.timing;
+            (
+                t.held_from_start,
+                t.spawn.clone().filter(|_| t.ages_on_a_task),
+            )
+        };
+        if e.listings() != Listings::OnDemand || held_from_start {
+            e.list_at_start();
+        }
+        if held_from_start {
+            // The keys of the keyset each quoted mint issues from, kept from an earlier run.
+            for mint in &e.config.mints {
+                let keyset = {
+                    let l = e.net.ledger();
+                    l.own_active.get(mint).copied().unwrap_or(l.active_keyset)
+                };
+                e.state().keys.insert(
+                    mint.clone(),
+                    MintKeys {
+                        mint: mint.clone(),
+                        keysets: HashSet::from([keyset]),
+                    },
+                );
+            }
+        }
+        let e = Arc::new(e);
+        if let Some(spawn) = ageing {
+            // The task that ages its state: woken by each move of the clock, and gone with
+            // the seeder.
+            let (seeder, clock) = (Arc::downgrade(&e), e.clock.clone());
+            spawn(Box::pin(poll_fn(move |cx| {
+                let Some(e) = seeder.upgrade() else {
+                    return Poll::Ready(());
+                };
+                clock.watch(cx.waker());
+                e.aged.store(clock.now(), Ordering::SeqCst);
+                e.age(&mut e.state());
+                Poll::Pending
+            })));
+        }
+        Ok(Self(e))
+    }
+
+    /// Per-identity records held.
+    #[must_use]
+    pub fn identities_held(&self) -> usize {
+        self.0.identities_held()
+    }
+
+    /// Stop serving video `video`, keeping its accounts, as a seeder that drops a video does.
+    pub fn drop_video(&self, video: usize) {
+        let mut st = self.0.state();
+        st.dropped.insert(video);
+        if self.0.has(SeederFlaw::DroppedVideoDebtAgesFromDrop) {
+            // The flaw: its unpaid chunks count from now.
+            let now = self.0.clock.now();
+            for (debt, at) in &mut st.debt {
+                if debt.0.1 == video {
+                    *at = now;
+                }
+            }
+        }
+        if self.0.has(SeederFlaw::DroppedVideoFreesDebt) {
+            // The flaw: its unpaid chunks leave the global count.
+            st.live.retain(|(k, _, _)| k.1 != video);
+            st.debt.retain(|((k, _, _), _)| k.1 != video);
+        }
+    }
+}
+
+fn rej(code: RejCode, detail: &str) -> Rej {
+    Rej {
+        code,
+        detail: Some(detail.to_owned()),
+    }
+}
+
+impl SeederEngine for MockEngine {
+    type Session = MockSession;
+
+    async fn sweep(&self) {
+        self.0.through_tasks(false, self.sweep_now()).await;
+    }
+
+    async fn hello(&self, peer: &PeerId, hello: &Hello) -> Result<MockSession, Rej> {
+        self.0
+            .through_tasks(false, self.hello_now(peer, hello))
+            .await
+    }
+}
+
+impl MockEngine {
+    /// A sweep, at the seeder ([`SeederEngine::sweep`]).
+    async fn sweep_now(&self) {
+        let spawn = {
+            let l = self.0.net.ledger();
+            l.timing.spawn.clone().filter(|_| l.timing.sweep_on_a_task)
+        };
+        let Some(spawn) = spawn else {
+            if self.0.net.round_trips() {
+                self.0.read_back(Learner::Sweep).await;
+            }
+            self.0.learn(None, None, Learner::Sweep);
+            return;
+        };
+        // On a task of its own, which this awaits.
+        let done = Arc::new(Mutex::new((false, None::<Waker>)));
+        let (e, finished) = (self.0.clone(), done.clone());
+        spawn(Box::pin(async move {
+            next_poll().await;
+            if e.net.round_trips() {
+                e.read_back(Learner::Sweep).await;
+            }
+            e.learn(None, None, Learner::Sweep);
+            let waker = {
+                let mut d = lock(&finished);
+                d.0 = true;
+                d.1.take()
+            };
+            if let Some(w) = waker {
+                w.wake();
+            }
+        }));
+        poll_fn(|cx| {
+            let mut d = lock(&done);
+            if d.0 {
+                return Poll::Ready(());
+            }
+            d.1 = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
+    }
+
+    /// A `hello`, at the seeder ([`SeederEngine::hello`]).
+    async fn hello_now(&self, peer: &PeerId, hello: &Hello) -> Result<MockSession, Rej> {
+        let e = &self.0;
+        e.dawdle().await;
+        let video = match e.videos.iter().position(|v| v.addr == hello.video) {
+            Some(v) => v,
+            None if e.has(SeederFlaw::HelloAnyVideo) => 0,
+            None => {
+                // A banned peer is refused `banned`, whatever video it names.
+                let mut st = e.state();
+                if !e.has(SeederFlaw::UnknownVideoBanNotAged) {
+                    e.age(&mut st);
+                }
+                if st.banned.contains_key(peer) && !e.has(SeederFlaw::UnknownVideoBeforeBan) {
+                    if e.has(SeederFlaw::UnknownVideoBannedHelloRenewsBan) {
+                        st.banned.insert(*peer, e.clock.now());
+                    }
+                    return Err(rej(RejCode::Banned, "this peer is banned"));
+                }
+                if e.has(SeederFlaw::UnknownVideoCounted) {
+                    *st.hellos_waiting.entry(*peer).or_default() += 1;
+                }
+                return Err(rej(RejCode::UnknownVideo, "not served here"));
+            }
+        };
+        let key = (*peer, video);
+        // A video it no longer serves: a peer it holds an account for there, or a swap of
+        // one whose outcome is unknown, is answered as before, and admitted nothing; any
+        // other is refused `unknown-video`, and a banned one `banned`.
+        {
+            let mut st = e.state();
+            if st.dropped.contains(&video) && !e.has(SeederFlaw::DroppedVideoQuotesAnyone) {
+                if !e.has(SeederFlaw::DroppedVideoBanNotAged) {
+                    e.age(&mut st);
+                }
+                // A swap of the account's abandoned in flight: sent, unanswered, and at or
+                // past its payment's deadline. Its outcome is unknown as one whose answer
+                // was lost, from that deadline; before it, the payment holds its turn.
+                let now = e.clock.now();
+                let swap_abandoned_in_flight = |st: &State| {
+                    st.pays.values().any(|r| {
+                        r.key == key && r.sent && !r.landed && (r.abandoned || now >= r.deadline)
+                    })
+                };
+                let holds = st.accounts.contains_key(&key)
+                    || (e.has(SeederFlaw::DroppedVideoAnyAccount)
+                        && st.accounts.keys().any(|(p, _)| p == peer))
+                    || (st.unknown.iter().any(|u| u.pay.key == key)
+                        && !e.has(SeederFlaw::DroppedVideoIgnoresUnknownSwap))
+                    || (st.unknown.iter().any(|u| u.pay.key.0 == *peer)
+                        && e.has(SeederFlaw::DroppedVideoAnyUnknownSwap))
+                    || (st.pays.values().any(|r| {
+                        r.key.0 == *peer
+                            && r.sent
+                            && !r.landed
+                            && (r.abandoned || now >= r.deadline)
+                    }) && e.has(SeederFlaw::DroppedVideoAnySwapInFlight))
+                    || (swap_abandoned_in_flight(&st)
+                        && !e.has(SeederFlaw::DroppedVideoIgnoresSwapInFlight))
+                    || (st.paying.contains_key(&key)
+                        && e.has(SeederFlaw::DroppedVideoCountsPaymentInProgress));
+                if !holds || e.has(SeederFlaw::DroppedVideoRefusesAccounts) {
+                    if st.banned.contains_key(peer) && !e.has(SeederFlaw::DroppedVideoBanUnchecked)
+                    {
+                        return Err(rej(RejCode::Banned, "this peer is banned"));
+                    }
+                    return Err(rej(RejCode::UnknownVideo, "no longer served here"));
+                }
+            }
+        }
+        let count_key = (
+            *peer,
+            e.has(SeederFlaw::SessionCapPerVideo).then_some(video),
+        );
+        let cap = MAX_OPEN_SESSIONS_PER_PEER + usize::from(e.has(SeederFlaw::SessionCapOffByOne));
+        {
+            let mut st = e.state();
+            e.age(&mut st);
+            let id_open = |st: &State| {
+                let open = st.open.get(&hello.session);
+                if e.has(SeederFlaw::SessionIdPerVideo) {
+                    open.is_some_and(|k| k.1 == video)
+                } else {
+                    open.is_some()
+                }
+            };
+            if e.has(SeederFlaw::SessionIdBeforeBan) && id_open(&st) {
+                return Err(rej(RejCode::BadSession, "that session is open"));
+            }
+            let at_cap = |st: &State| {
+                st.open_count.get(&count_key).copied().unwrap_or(0)
+                    + st.hellos_waiting.get(peer).copied().unwrap_or(0)
+                    >= cap
+            };
+            if e.has(SeederFlaw::CapBeforeBan) && at_cap(&st) {
+                return Err(rej(RejCode::BadSession, "too many open sessions"));
+            }
+            if e.peer_banned(&st, key) && !e.has(SeederFlaw::HelloBanNotAtArrival) {
+                if e.has(SeederFlaw::BannedHelloRenewsBan) {
+                    e.ban(&mut st, key);
+                }
+                return Err(rej(RejCode::Banned, "this peer is banned"));
+            }
+            let dropped_id =
+                st.dropped.contains(&video) && e.has(SeederFlaw::DroppedVideoSkipsIdCheck);
+            if id_open(&st) && !e.has(SeederFlaw::SessionIdAnyPeer) && !dropped_id {
+                if e.has(SeederFlaw::OpenIdRefusalCounted) {
+                    *st.hellos_waiting.entry(*peer).or_default() += 1;
+                }
+                return Err(rej(RejCode::BadSession, "that session is open"));
+            }
+            let opened = if e.has(SeederFlaw::SessionCapLifetime) {
+                st.ever.get(peer).copied().unwrap_or(0)
+            } else {
+                st.open_count.get(&count_key).copied().unwrap_or(0)
+            };
+            let waiting = if e.has(SeederFlaw::HelloWaitUncapped)
+                || (st.dropped.contains(&video) && e.has(SeederFlaw::DroppedVideoWaitUncapped))
+            {
+                0
+            } else if e.has(SeederFlaw::WaitingCountedPerVideo) {
+                st.hellos_waiting_per_account
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(0)
+            } else if e.has(SeederFlaw::WaitingCountedAcrossPeers) {
+                st.hellos_waiting.values().sum()
+            } else {
+                st.hellos_waiting.get(peer).copied().unwrap_or(0)
+            };
+            if opened + waiting >= cap
+                && !(st.dropped.contains(&video) && e.has(SeederFlaw::DroppedVideoSkipsSessionCap))
+            {
+                return Err(rej(RejCode::BadSession, "too many open sessions"));
+            }
+            *st.hellos_waiting.entry(*peer).or_default() += 1;
+            if e.has(SeederFlaw::WaitingCountedPerVideo) {
+                *st.hellos_waiting_per_account.entry(key).or_default() += 1;
+            }
+        }
+        let mut wait = HelloWait {
+            e: e.clone(),
+            key,
+            counted: true,
+            reading: false,
+            took: false,
+            waited: false,
+            taken: false,
+        };
+        if e.has(SeederFlaw::HelloAsksListing)
+            && let Some(mint) = e.config.mints.first()
+        {
+            let _ = e.net.list_keysets(mint, Waker::noop());
+        }
+        let read_first = e.has(SeederFlaw::HelloReadsBeforeTurn)
+            || (e.has(SeederFlaw::DroppedVideoReadsBeforeTurn)
+                && e.state().dropped.contains(&video));
+        if read_first {
+            e.learn_own(key, None, None, None).await;
+        }
+        // Wait for a payment in progress, so the quote cannot miss it; then read, after it.
+        let (mut floor, mut took_over) = (None, false);
+        let unwaited = e.has(SeederFlaw::QuoteWithoutTurn)
+            || (e.has(SeederFlaw::DroppedVideoHelloNoWait) && e.state().dropped.contains(&video));
+        if !unwaited {
+            (_, floor, took_over) = e.wait_turn_at(key, None).await;
+        }
+        (wait.reading, wait.took, wait.waited) = (true, took_over, floor.is_some() && !took_over);
+        // The flaws: a keyset listing asked for by a `hello`, on one of its paths.
+        let asks = (wait.waited && e.has(SeederFlaw::WaitedHelloAsksListing))
+            || (wait.took && e.has(SeederFlaw::TakeoverHelloAsksListing))
+            || (!wait.waited && !wait.took && e.has(SeederFlaw::ReadingHelloAsksListing) && {
+                let (lost, flight) = e.to_learn(Some(key));
+                !lost.is_empty() || !flight.is_empty()
+            });
+        if asks && let Some(mint) = e.config.mints.first() {
+            let _ = e.net.list_keysets(mint, Waker::noop());
+        }
+        if e.has(SeederFlaw::HelloBanCheckBeforeRead) {
+            let mut st = e.state();
+            e.age(&mut st);
+            if e.peer_banned(&st, key) {
+                return Err(rej(RejCode::Banned, "this peer is banned"));
+            }
+        }
+        // The defect planted on this path alone, for a video it no longer serves.
+        let came = Came::of(took_over, floor.is_some());
+        let slip = e
+            .flaw
+            .and_then(SeederFlaw::dropped_hello_slip)
+            .filter(|(c, _)| *c == came && e.state().dropped.contains(&video))
+            .map(|(_, s)| s);
+        if read_first
+            || (took_over && e.has(SeederFlaw::HelloTakeoverSkipsRead))
+            || slip == Some(HelloSlip::SkipsRead)
+            || (e.has(SeederFlaw::DroppedVideoInFlightHelloSkipsRead) && {
+                // The flaw: let in by a swap abandoned in flight alone, it reads nothing.
+                let st = e.state();
+                st.dropped.contains(&video)
+                    && !st.accounts.contains_key(&key)
+                    && !st.unknown.iter().any(|u| u.pay.key == key)
+            })
+        {
+        } else if e.has(SeederFlaw::HelloReadsAll) {
+            e.learn(None, None, Learner::Hello);
+        } else if e.has(SeederFlaw::HelloAwaitsRead) {
+            let now = e.clock.now();
+            let reuse = e
+                .state()
+                .own_reads
+                .get(&key)
+                .is_some_and(|(at, ..)| *at == now);
+            if !reuse && e.has_reads(key) {
+                e.net.round_trip().await; // counted only once it is back
+                if let Some(learnt) = e.learn_read(Some(key), None) {
+                    e.learn_apply(&learnt, Learner::Hello);
+                    e.record_read(key, now, None, learnt.covers(), ReadState::Back);
+                }
+            }
+        } else {
+            e.learn_own(key, None, None, floor).await;
+        }
+        let mut st = e.state();
+        if took_over && e.has(SeederFlaw::TakeoverHelloStaysCounted) {
+            wait.counted = false; // its place kept, for good
+        } else {
+            wait.done(&mut st);
+        }
+        let waited = floor.is_some() || took_over;
+        // It took a dead turn over as it arrived, with no wait.
+        let late = took_over && floor.is_none();
+        if e.has(SeederFlaw::HelloRecheckBanNotAged)
+            || (st.dropped.contains(&video) && e.has(SeederFlaw::DroppedVideoRecheckBanNotAged))
+            || (!waited && e.has(SeederFlaw::UnwaitedRecheckBanNotAged))
+            || (wait.waited && e.has(SeederFlaw::WaitedRecheckBanNotAged))
+            || (late && e.has(SeederFlaw::LateTakeoverRecheckBanNotAged))
+            || slip == Some(HelloSlip::BanNotAged)
+        {
+            let bans = st.banned.clone(); // its debt ages, its bans do not
+            e.age(&mut st);
+            st.banned = bans;
+        } else {
+            e.age(&mut st);
+        }
+        // The ban again, as it answers: after its wait and its reads.
+        let dropped = st.dropped.contains(&video);
+        if dropped
+            && e.has(SeederFlaw::DroppedVideoRechecksAccount)
+            && !st.accounts.contains_key(&key)
+            && !st.unknown.iter().any(|u| u.pay.key == key)
+        {
+            return Err(rej(RejCode::UnknownVideo, "no longer served here"));
+        }
+        let recheck = slip != Some(HelloSlip::NoBanRecheck)
+            && !(!waited && e.has(SeederFlaw::HelloRecheckOnlyAfterWait))
+            && !(dropped && e.has(SeederFlaw::DroppedVideoNoBanRecheck))
+            && !(dropped && !waited && e.has(SeederFlaw::DroppedVideoUnwaitedNoBanRecheck))
+            && !e.has(SeederFlaw::HelloNoBanRecheck)
+            && !e.has(SeederFlaw::HelloBanCheckBeforeRead)
+            && !(took_over && e.has(SeederFlaw::HelloTakeoverSkipsBanRecheck))
+            && !(took_over && dropped && e.has(SeederFlaw::DroppedVideoTakeoverNoBanRecheck));
+        if (e.has(SeederFlaw::RecheckIdBeforeBan)
+            || (!waited && e.has(SeederFlaw::UnwaitedRecheckIdBeforeBan))
+            || (took_over && e.has(SeederFlaw::TakeoverRecheckIdBeforeBan))
+            || (late && e.has(SeederFlaw::LateTakeoverRecheckIdBeforeBan))
+            || slip == Some(HelloSlip::IdBeforeBan))
+            && st.open.contains_key(&hello.session)
+        {
+            return Err(rej(RejCode::BadSession, "that session is open"));
+        }
+        if recheck && e.peer_banned(&st, key) {
+            if e.has(SeederFlaw::BannedHelloRecheckRenewsBan) {
+                e.ban(&mut st, key);
+            }
+            if e.has(SeederFlaw::BannedHelloCounted)
+                || (late && e.has(SeederFlaw::LateTakeoverBannedHelloCounted))
+            {
+                *st.hellos_waiting.entry(*peer).or_default() += 1;
+            }
+            if e.has(SeederFlaw::BannedHelloKeepsId)
+                || (late && e.has(SeederFlaw::LateTakeoverBannedHelloKeepsId))
+            {
+                st.open.insert(hello.session.clone(), key);
+            }
+            if e.has(SeederFlaw::BannedHelloCreatesAccount)
+                || (!waited && e.has(SeederFlaw::UnwaitedBannedHelloCreatesAccount))
+                || (took_over && e.has(SeederFlaw::TakeoverBannedHelloCreatesAccount))
+                || (late && e.has(SeederFlaw::LateTakeoverBannedHelloCreatesAccount))
+            {
+                e.account(&mut st, key);
+            }
+            return Err(rej(RejCode::Banned, "this peer is banned"));
+        }
+        let id_open = st
+            .open
+            .get(&hello.session)
+            .is_some_and(|k| !e.has(SeederFlaw::SessionIdPerVideo) || k.1 == video)
+            && !(dropped
+                && (e.has(SeederFlaw::DroppedVideoSkipsIdCheck)
+                    || e.has(SeederFlaw::DroppedVideoNoIdRecheck)
+                    || (!waited && e.has(SeederFlaw::DroppedVideoUnwaitedNoIdRecheck))))
+            && slip != Some(HelloSlip::NoIdRecheck);
+        if id_open
+            && !e.has(SeederFlaw::SessionIdAnyPeer)
+            && !e.has(SeederFlaw::HelloNoSessionRecheck)
+            && !(!waited && e.has(SeederFlaw::IdRecheckOnlyAfterWait))
+        {
+            if e.has(SeederFlaw::RecheckIdCounted)
+                || (took_over && e.has(SeederFlaw::TakeoverRecheckIdCounted))
+                || (late && e.has(SeederFlaw::LateTakeoverRecheckIdCounted))
+            {
+                *st.hellos_waiting.entry(*peer).or_default() += 1;
+            }
+            if e.has(SeederFlaw::RecheckIdTakesId)
+                || (took_over && e.has(SeederFlaw::TakeoverRecheckIdTakesId))
+                || (late && e.has(SeederFlaw::LateTakeoverRecheckIdTakesId))
+            {
+                st.open.insert(hello.session.clone(), key);
+            }
+            if e.has(SeederFlaw::RecheckIdCreatesAccount)
+                || (!waited && e.has(SeederFlaw::UnwaitedRecheckIdCreatesAccount))
+                || (took_over && e.has(SeederFlaw::TakeoverRecheckIdCreatesAccount))
+                || (late && e.has(SeederFlaw::LateTakeoverRecheckIdCreatesAccount))
+            {
+                e.account(&mut st, key);
+            }
+            return Err(rej(RejCode::BadSession, "that session is open"));
+        }
+        st.open.insert(hello.session.clone(), key);
+        *st.open_count.entry(count_key).or_default() += 1;
+        *st.open_accounts.entry(key).or_default() += 1;
+        if e.has(SeederFlaw::SessionCapLifetime) {
+            *st.ever.entry(*peer).or_default() += 1;
+        }
+        if e.has(SeederFlaw::FreshWindowPerHello) {
+            st.accounts.remove(&key);
+        }
+        if e.has(SeederFlaw::HelloCreatesAccount)
+            || (dropped && e.has(SeederFlaw::DroppedVideoHelloCreatesAccount))
+        {
+            e.account(&mut st, key);
+        }
+        // A hello creates no account: a new one quotes zeros.
+        let mut position = st
+            .accounts
+            .get(&key)
+            .map_or((0, 0, 0), |a| (a.admitted, a.acked, a.spent));
+        if e.has(SeederFlaw::QuoteAtFirstWake)
+            && let Some(noted) = st.first_wake_position.remove(&key)
+        {
+            position = noted;
+        }
+        let (mut served, accepted_upto, mut spent_total) = position;
+        let peer_wide = |f: fn(&Account) -> u64| -> u64 {
+            st.accounts
+                .iter()
+                .filter(|(k, _)| k.0 == *peer)
+                .map(|(_, a)| f(a))
+                .sum()
+        };
+        if e.has(SeederFlaw::QuoteServedPeerWide) {
+            served = peer_wide(|a| a.admitted);
+        }
+        if e.has(SeederFlaw::QuoteSpentPeerWide) {
+            spent_total = peer_wide(|a| a.spent);
+        }
+        drop(st);
+        let forget = e.has(SeederFlaw::QuoteForgetsAccount);
+        let quote = Quote {
+            price_per_chunk: e.config.price_per_chunk,
+            mints: e.config.mints.clone(),
+            window: e.config.window,
+            served: if forget { 0 } else { served },
+            accepted_upto: if forget { 0 } else { accepted_upto },
+            spent_total: if forget { 0 } else { spent_total },
+        };
+        Ok(MockSession {
+            e: self.0.clone(),
+            key,
+            count_key,
+            session: hello.session.clone(),
+            quote,
+            session_spent: Arc::new(AtomicU64::new(0)),
+            opened_served: !dropped,
+        })
+    }
+}
+
+/// One open session of a [`MockEngine`]. Dropping it closes it.
+pub struct MockSession {
+    e: Arc<Inner>,
+    key: Key,
+    count_key: (PeerId, Option<usize>),
+    session: String,
+    quote: Quote,
+    session_spent: Arc<AtomicU64>,
+    /// The video was served when this session opened
+    /// ([`SeederFlaw::DroppedVideoOpenSessionAdmits`] only).
+    opened_served: bool,
+}
+
+impl Drop for MockSession {
+    fn drop(&mut self) {
+        let (e, key, count_key, session) = (
+            self.e.clone(),
+            self.key,
+            self.count_key,
+            self.session.clone(),
+        );
+        let spawn = e.closes_on_a_task();
+        let close = move || {
+            let now = e.clock.now();
+            let from_close = !e.has(SeederFlaw::ForgetsFromLastAdmission);
+            let mut st = e.state();
+            if st.open.get(&session) == Some(&key) && !e.has(SeederFlaw::SessionIdLeaks) {
+                st.open.remove(&session);
+            }
+            if let Some(n) = st.open_count.get_mut(&count_key) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    st.open_count.remove(&count_key);
+                }
+            }
+            if let Some(n) = st.open_accounts.get_mut(&key) {
+                *n = n.saturating_sub(1);
+                if *n == 0 || e.has(SeederFlaw::ForgetsOnFirstClose) {
+                    st.open_accounts.remove(&key);
+                }
+            }
+            // An account is idle from its last session's close.
+            if from_close && let Some(a) = st.accounts.get_mut(&key) {
+                a.last_active = now;
+            }
+        };
+        match spawn {
+            // On a task of the seeder's own, a turn of the runtime later, as of then.
+            Some(spawn) => spawn(Box::pin(async move {
+                next_poll().await;
+                close();
+            })),
+            None => close(),
+        }
+    }
+}
+
+impl MockSession {
+    /// What a flawed engine does on refusing a decoded token of `amount`.
+    fn on_refusal(&mut self, token: &str, upto: u64, amount: u64, amount_refusal: bool) {
+        let e = self.e.clone();
+        let mut st = e.state();
+        if e.has(SeederFlaw::RefusalCreatesAccount) {
+            e.account(&mut st, self.key);
+        }
+        if e.has(SeederFlaw::RefusalCredits) {
+            e.credit(&mut st, self.key, (upto, 0), &[], false);
+        }
+        if amount_refusal && e.has(SeederFlaw::RefusalAdvancesAcked) {
+            let a = e.account(&mut st, self.key);
+            a.acked = a.acked.max(upto);
+        }
+        if e.has(SeederFlaw::SpentTotalCountsRefused) {
+            e.account(&mut st, self.key).spent += amount;
+        }
+        drop(st);
+        if e.has(SeederFlaw::ClaimsOnRefusal) {
+            e.net.claim_first(token);
+        }
+    }
+
+    /// Step 4 alone, for the flaws that run it early.
+    fn check_amount(&self, pay: &Pay, acked: u64, amount: u64) -> Result<(), Rej> {
+        let due = pay
+            .upto_chunk
+            .saturating_sub(acked)
+            .checked_mul(self.e.config.price_per_chunk)
+            .filter(|d| *d <= MAX_INT);
+        if due.is_none_or(|d| amount < d) {
+            return Err(rej(RejCode::Underpaid, "short of the chunks claimed"));
+        }
+        if due.is_some_and(|d| amount > d) {
+            return Err(rej(RejCode::Overpaid, "more than the chunks claimed"));
+        }
+        Ok(())
+    }
+
+    /// What the defects planted on a payment whose turn did not come by its deadline do
+    /// with it (`held`: another payment holds the turn still): checks run, whose refusal
+    /// this is, a keyset listing or keys asked for, or a read sent. An honest seeder does
+    /// none of it.
+    async fn untaken_turn(&self, pay: &Pay, held: bool) -> Option<Rej> {
+        let e = &self.e;
+        if held && e.has(SeederFlaw::TurnNeverComeBanStale) {
+            let mut st = e.state();
+            e.age(&mut st);
+            if e.peer_banned(&st, self.key) {
+                return Some(rej(RejCode::Banned, "this peer is banned"));
+            }
+            if pay.upto_chunk <= st.accounts.get(&self.key).map_or(0, |a| a.acked) {
+                return Some(rej(RejCode::Stale, "already paid up to there"));
+            }
+        }
+        let info = e.net.read(&pay.token);
+        if held && e.has(SeederFlaw::TurnNeverComeStructureMint) {
+            match &info {
+                None => return Some(rej(RejCode::BadToken, "unreadable token")),
+                Some(i) if i.mints.first().is_none_or(|m| !e.config.mints.contains(m)) => {
+                    return Some(rej(RejCode::BadMint, "not a quoted mint"));
+                }
+                Some(_) => {}
+            }
+        }
+        if e.has(SeederFlaw::TurnTimeoutAsksListing) {
+            e.ask_listing_unneeded();
+        }
+        let proofs = info.map_or_else(Vec::new, |i| i.proofs);
+        if e.has(SeederFlaw::TurnTimeoutAsksKeys)
+            && let Some(mint) = e.config.mints.first()
+        {
+            let named = e.net.keysets_named(&proofs);
+            let _ = e.net.fetch_keys(mint, &named, true, &mut 0, Waker::noop());
+        }
+        if e.has(SeederFlaw::TurnTimeoutReads) {
+            e.learn_own(self.key, Some(proofs), None, None).await;
+        }
+        None
+    }
+
+    fn settle_now(&self, upto: u64, amount: u64, outcome: Swap) -> Result<Ack, Rej> {
+        let settle = Settle {
+            key: self.key,
+            upto,
+            amount,
+            snapshot: Vec::new(),
+            session_spent: self.session_spent.clone(),
+        };
+        self.e.settle(&mut self.e.state(), &settle, outcome)
+    }
+
+    /// Payment `id`, its turn come as `came` says (its wait took the turn over from a
+    /// payment past its deadline, or not): its checks, its read and its swap.
+    async fn pay_in_turn(&mut self, pay: &Pay, id: u64, came: Came) -> Result<Ack, Rej> {
+        let e = self.e.clone();
+        let took_over = matches!(came, Came::WaitedTakeover | Came::LateTakeover);
+        let turn_came = e.clock.now();
+        if e.has(SeederFlaw::ListingArrivalAtTurn) {
+            // The flaw: the listings asked for so far counted as its turn comes.
+            let mut st = e.state();
+            let asked = st.listings_asked;
+            if let Some(r) = st.pays.get_mut(&id) {
+                r.listings_seen = asked;
+            }
+        }
+        if e.has(SeederFlaw::KeysetFirst) && e.keyset_too_soon() {
+            return Err(unavailable("the mint's keyset expires too soon to swap to"));
+        }
+        if e.has(SeederFlaw::ClaimsBeforeChecking) {
+            let _ = e.net.swap_now(&pay.token);
+        }
+        let read_first = (took_over && e.has(SeederFlaw::TakeoverReadsBeforeChecks))
+            || e.reads_at(ReadAt::Ban, came);
+        if read_first {
+            let proofs = e.net.read(&pay.token).map_or_else(Vec::new, |i| i.proofs);
+            let deadline = e.state().pays.get(&id).map_or(0, |r| r.deadline);
+            e.learn_here(self.key, proofs, deadline).await;
+        }
+        // The structure checks (step 1), on the token as it reads.
+        let structure = || -> Result<TokenInfo, Rej> {
+            let Some(info) = e.net.read(&pay.token) else {
+                if e.has(SeederFlaw::BadTokenCreatesAccount) {
+                    e.account(&mut e.state(), self.key);
+                }
+                if e.has(SeederFlaw::UnreadablePayAsksListing) {
+                    e.ask_listing_unneeded();
+                }
+                return Err(rej(RejCode::BadToken, "unreadable token"));
+            };
+            // The flaws: the first or the last proof's DLEQ proof or lock taken for every
+            // proof's, the last's on a turn waited for or taken over, or the first three's.
+            let state_of =
+                |p: Option<&u64>| p.map_or((Dleq::Valid, false), |p| e.net.proof_state(*p));
+            let (first, last) = (state_of(info.proofs.first()), state_of(info.proofs.last()));
+            let after_wait = came != Came::Unwaited;
+            let three: Vec<(Dleq, bool)> = info
+                .proofs
+                .iter()
+                .take(3)
+                .map(|p| e.net.proof_state(*p))
+                .collect();
+            let missing = if e.has(SeederFlaw::MissingDleqOfFirstProofOnly) {
+                first.0 == Dleq::Missing
+            } else if e.has(SeederFlaw::MissingDleqOfLastProofOnly)
+                || (after_wait && e.has(SeederFlaw::AfterWaitMissingDleqOfLastProofOnly))
+            {
+                last.0 == Dleq::Missing
+            } else if e.has(SeederFlaw::MissingDleqOfFirstThreeProofsOnly) {
+                three.iter().any(|s| s.0 == Dleq::Missing)
+            } else {
+                info.dleq == Dleq::Missing
+            };
+            let locked = if e.has(SeederFlaw::LockOfFirstProofOnly) {
+                first.1
+            } else if e.has(SeederFlaw::LockOfLastProofOnly)
+                || (after_wait && e.has(SeederFlaw::AfterWaitLockOfLastProofOnly))
+            {
+                last.1
+            } else if e.has(SeederFlaw::LockOfFirstThreeProofsOnly) {
+                three.iter().any(|s| s.1)
+            } else {
+                info.locked
+            };
+            let no_dleq = missing && !e.has(SeederFlaw::NoDleqAccepted);
+            let too_many = if e.has(SeederFlaw::ProofCapOffByOne) {
+                info.proofs.len() >= MAX_PROOFS
+            } else {
+                info.proofs.len() > MAX_PROOFS && !e.has(SeederFlaw::TooManyProofsAccepted)
+            };
+            let shape_bad =
+                info.unit != "sat" || info.mints.len() != 1 || locked || no_dleq || too_many;
+            if shape_bad && !e.has(SeederFlaw::AcceptsBadTokens) {
+                if e.has(SeederFlaw::BadTokenCreatesAccount) {
+                    e.account(&mut e.state(), self.key);
+                }
+                if e.has(SeederFlaw::ShapePayAsksListing) {
+                    e.ask_listing_unneeded();
+                }
+                return Err(rej(
+                    RejCode::BadToken,
+                    "not a single-mint sat token with DLEQs",
+                ));
+            }
+            Ok(info)
+        };
+        if e.has(SeederFlaw::TurnAtDeadlineSecondStructure)
+            && e.state()
+                .pays
+                .get(&id)
+                .is_some_and(|r| turn_came >= r.deadline)
+        {
+            structure()?;
+            return Err(unavailable("the account's turn did not come within 60 s"));
+        }
+        let in_deadline_second = e
+            .state()
+            .pays
+            .get(&id)
+            .is_some_and(|r| turn_came >= r.deadline);
+        if took_over && in_deadline_second && e.has(SeederFlaw::TakeoverAtDeadlineSecondStructure) {
+            // The flaw: its structure and its mint checked, and nothing more.
+            let info = structure()?;
+            if !e.config.mints.contains(&info.mints[0]) {
+                return Err(rej(RejCode::BadMint, "not a quoted mint"));
+            }
+            return Err(unavailable("the account's turn did not come within 60 s"));
+        }
+        if !took_over && in_deadline_second && e.has(SeederFlaw::FreedAtDeadlineSecondBanStale) {
+            // The flaw: its ban and the watermark checked, and nothing more.
+            let mut st = e.state();
+            e.age(&mut st);
+            if e.peer_banned(&st, self.key) {
+                return Err(rej(RejCode::Banned, "this peer is banned"));
+            }
+            if pay.upto_chunk <= st.accounts.get(&self.key).map_or(0, |a| a.acked) {
+                return Err(rej(RejCode::Stale, "already paid up to there"));
+            }
+            return Err(unavailable("the account's turn did not come within 60 s"));
+        }
+        if e.has(SeederFlaw::StructureBeforeBan) || e.runs_early(Early::StructureBeforeBan, came) {
+            structure()?;
+        }
+        // The ban first: a banned peer's payment is refused `banned`, whatever it offers.
+        let ban_now = !e.has(SeederFlaw::BanCheckedLast)
+            && !e.has(SeederFlaw::PayIgnoresBan)
+            && !e.has(SeederFlaw::BanCheckedBeforeTurn)
+            && !(took_over && e.has(SeederFlaw::PayTakeoverSkipsBan));
+        let (acked, spent, snapshot) = {
+            let mut st = e.state();
+            if !e.has(SeederFlaw::PayBanNotAged)
+                && !(took_over && e.has(SeederFlaw::TakeoverBanNotAged))
+            {
+                e.age(&mut st);
+            }
+            let (acked, snapshot) = st.accounts.get(&self.key).map_or((0, Vec::new()), |a| {
+                (a.acked, a.unpaid.iter().copied().collect())
+            });
+            let stale_first =
+                e.has(SeederFlaw::StaleBeforeBan) || e.runs_early(Early::StaleBeforeBan, came);
+            if stale_first && pay.upto_chunk <= acked {
+                return Err(rej(RejCode::Stale, "already paid up to there"));
+            }
+            if ban_now && e.peer_banned(&st, self.key) {
+                if e.has(SeederFlaw::BannedPayCreatesAccount) {
+                    e.account(&mut st, self.key);
+                }
+                drop(st);
+                if e.has(SeederFlaw::BannedPayAsksListing) {
+                    e.ask_listing_unneeded();
+                }
+                return Err(rej(RejCode::Banned, "this peer is banned"));
+            }
+            let spent = if e.has(SeederFlaw::SpentTotalPeerWide) {
+                st.accounts
+                    .iter()
+                    .filter(|(k, _)| k.0 == self.key.0)
+                    .map(|(_, a)| a.spent)
+                    .sum()
+            } else {
+                st.accounts.get(&self.key).map_or(0, |a| a.spent)
+            };
+            (acked, spent, snapshot)
+        };
+        if e.runs_early(Early::StructureBeforeStale, came) {
+            structure()?;
+        }
+        // The flaws: the mint of a token step 1 passes checked before the watermark; or, of
+        // any token that can be read, before step 1. Nothing is fetched for it.
+        let foreign = || {
+            e.net
+                .read(&pay.token)
+                .is_some_and(|i| i.mints.first().is_some_and(|m| !e.config.mints.contains(m)))
+        };
+        if e.runs_early(Early::MintBeforeStale, came) && foreign() && structure().is_ok() {
+            return Err(rej(RejCode::BadMint, "not a quoted mint"));
+        }
+        let read_before_stale = (took_over && e.has(SeederFlaw::TakeoverReadsBeforeStale))
+            || e.reads_at(ReadAt::Stale, came);
+        if read_before_stale {
+            let proofs = e.net.read(&pay.token).map_or_else(Vec::new, |i| i.proofs);
+            let deadline = e.state().pays.get(&id).map_or(0, |r| r.deadline);
+            e.learn_here(self.key, proofs, deadline).await;
+        }
+        if pay.upto_chunk <= acked
+            && !e.has(SeederFlaw::IgnoresStale)
+            && !(took_over && e.has(SeederFlaw::TakeoverStaleSkipped))
+        {
+            if e.has(SeederFlaw::StalePayAsksListing) {
+                e.ask_listing_unneeded();
+            }
+            return Err(rej(RejCode::Stale, "already paid up to there"));
+        }
+        let read_before_structure = e.reads_at(ReadAt::Structure, came);
+        if read_before_structure {
+            let proofs = e.net.read(&pay.token).map_or_else(Vec::new, |i| i.proofs);
+            let deadline = e.state().pays.get(&id).map_or(0, |r| r.deadline);
+            e.learn_here(self.key, proofs, deadline).await;
+        }
+        if e.runs_early(Early::MintBeforeStructure, came) && foreign() {
+            return Err(rej(RejCode::BadMint, "not a quoted mint"));
+        }
+        // 1. Structure.
+        let info = structure()?;
+        let mint = info.mints[0].clone();
+        if e.has(SeederFlaw::DleqAtTokenMint) {
+            e.net.dial(&mint);
+            if info.dleq == Dleq::Invalid {
+                return Err(rej(RejCode::BadToken, "an invalid DLEQ"));
+            }
+        }
+        if e.runs_early(Early::TokenMintDialled, came) {
+            e.net.dial(&mint);
+        }
+        if e.has(SeederFlaw::AmountBeforeMint) || e.runs_early(Early::AmountBeforeMint, came) {
+            self.check_amount(pay, acked, info.amount)?;
+        }
+        let read_before_mint = e.reads_at(ReadAt::Mint, came);
+        if read_before_mint {
+            let deadline = e.state().pays.get(&id).map_or(0, |r| r.deadline);
+            e.learn_here(self.key, info.proofs.clone(), deadline).await;
+        }
+        // 2. The mint: exactly a quoted URL, before anything is fetched.
+        let quoted = if e.has(SeederFlaw::PrefixMint) {
+            e.config.mints.iter().any(|q| mint.starts_with(q.as_str()))
+        } else {
+            e.config.mints.contains(&mint)
+        };
+        if !quoted && !e.has(SeederFlaw::AcceptsForeignMint) {
+            self.on_refusal(&pay.token, pay.upto_chunk, info.amount, false);
+            if e.has(SeederFlaw::BadMintPayAsksListing) {
+                e.ask_listing_unneeded();
+            }
+            return Err(rej(RejCode::BadMint, "not a quoted mint"));
+        }
+        let read_before_keys = e.reads_at(ReadAt::Keys, came);
+        if e.has(SeederFlaw::ReadsBeforeKeyFetch) || read_before_keys {
+            let deadline = e.state().pays.get(&id).map_or(0, |r| r.deadline);
+            e.learn_here(self.key, info.proofs.clone(), deadline).await;
+        }
+        if e.has(SeederFlaw::AmountBeforeDleq) || e.runs_early(Early::AmountBeforeKeys, came) {
+            self.check_amount(pay, acked, info.amount)?;
+        }
+        if e.has(SeederFlaw::KeysetListingBeforeChecks) {
+            e.keyset_listing(&mint, id, turn_came, false).await?;
+        }
+        let listings_before = e.state().listings_asked;
+        if e.has(SeederFlaw::ListingAskedUnneeded) {
+            // The quoted mint's listing, asked for at every payment's step 3 at most once a
+            // second, whether a check needs it or not.
+            e.keyset_listing(&mint, id, e.clock.now(), false).await?;
+        }
+        // 3. DLEQ, against the quoted mint's keys of the keysets its proofs name, fetched
+        // within the deadline.
+        let named = e.net.keysets_named(&info.proofs);
+        // The flaw: an older keyset it holds no keys for, fetched not, and trusted.
+        let trusted = e.has(SeederFlaw::UnfetchedKeysetTrusted) && {
+            let active = e.net.active_keyset();
+            let st = e.state();
+            let held = st.keys.get(&mint);
+            named
+                .iter()
+                .any(|k| *k != active && !held.is_some_and(|h| h.keysets.contains(k)))
+        };
+        let fetched = if e.has(SeederFlaw::KeysOfFirstProofOnly) {
+            e.net
+                .keysets_named(&info.proofs[..info.proofs.len().min(1)])
+        } else if e.has(SeederFlaw::KeysOfLastProofOnly) {
+            e.net
+                .keysets_named(&info.proofs[info.proofs.len().saturating_sub(1)..])
+        } else if e.has(SeederFlaw::KeysOfEndProofsOnly) {
+            let ends: Vec<u64> = info
+                .proofs
+                .first()
+                .into_iter()
+                .chain(info.proofs.last())
+                .copied()
+                .collect();
+            e.net.keysets_named(&ends)
+        } else {
+            named.clone()
+        };
+        let keys = if trusted {
+            None
+        } else {
+            match e.fetch_keys(&mint, &fetched, id).await {
+                Ok(keys) => Some(keys),
+                Err(r) if r.code == RejCode::MintUnavailable => {
+                    if e.has(SeederFlaw::NoKeysCreatesAccount) {
+                        e.account(&mut e.state(), self.key);
+                    }
+                    return Err(r);
+                }
+                Err(r) => {
+                    // A keyset the mint does not list, or whose keys it answers 12001:
+                    // bad-token, and no ban. The flaws, everywhere or at a quoted mint other
+                    // than the first: mint-unavailable, or a ban.
+                    let other = e.other_mint(&mint);
+                    let (as_outage, there_as_outage, bans, there_bans) =
+                        if Check::of(&r, false) == Some(Check::KeysRefused) {
+                            (
+                                SeederFlaw::KeysRefusedUnavailable,
+                                SeederFlaw::KeysRefusedUnavailableAtOtherMints,
+                                SeederFlaw::KeysRefusedBans,
+                                SeederFlaw::KeysRefusedBansAtOtherMints,
+                            )
+                        } else {
+                            (
+                                SeederFlaw::UnlistedKeysetUnavailable,
+                                SeederFlaw::UnlistedKeysetUnavailableAtOtherMints,
+                                SeederFlaw::UnlistedKeysetBans,
+                                SeederFlaw::UnlistedKeysetBansAtOtherMints,
+                            )
+                        };
+                    if e.has(as_outage) || (other && e.has(there_as_outage)) {
+                        return Err(unavailable("no keys from the mint within 60 s"));
+                    }
+                    if e.has(bans) || (other && e.has(there_bans)) {
+                        let mut st = e.state();
+                        e.ban(&mut st, self.key);
+                    }
+                    return Err(r);
+                }
+            }
+        };
+        // Whether its step 3 asked for a listing
+        // ([`SeederFlaw::KeysetListingAfterStep3Asked`] only).
+        let step3_asked = e.state().listings_asked > listings_before;
+        let read_before_amount = (took_over && e.has(SeederFlaw::TakeoverReadsBeforeAmount))
+            || e.reads_at(ReadAt::Dleq, came);
+        if read_before_amount {
+            let deadline = e.state().pays.get(&id).map_or(0, |r| r.deadline);
+            e.learn_here(self.key, info.proofs.clone(), deadline).await;
+        }
+        // The flaws: the first or the last proof's DLEQ proof verified for every proof's.
+        let one = if e.has(SeederFlaw::DleqOfFirstProofOnly) {
+            Some(info.proofs.first())
+        } else if e.has(SeederFlaw::DleqOfLastProofOnly)
+            || (came != Came::Unwaited && e.has(SeederFlaw::AfterWaitDleqOfLastProofOnly))
+        {
+            Some(info.proofs.last())
+        } else {
+            None
+        };
+        let mut checked = info.clone();
+        if let Some(p) = one {
+            checked.dleq = p.map_or(Dleq::Valid, |p| e.net.proof_state(*p).0);
+        }
+        if e.has(SeederFlaw::DleqOfFirstThreeProofsOnly) {
+            let invalid = info
+                .proofs
+                .iter()
+                .take(3)
+                .any(|p| e.net.proof_state(*p).0 == Dleq::Invalid);
+            checked.dleq = if invalid { Dleq::Invalid } else { Dleq::Valid };
+        }
+        let verified = trusted || keys.is_some_and(|k| k.verify(&checked, &named));
+        if !verified && !e.has(SeederFlaw::AcceptsBadTokens) {
+            if e.has(SeederFlaw::BadDleqCreatesAccount) {
+                e.account(&mut e.state(), self.key);
+            }
+            return Err(rej(RejCode::BadToken, "an invalid DLEQ"));
+        }
+        let read_before_check_amount = e.reads_at(ReadAt::Amount, came);
+        if e.has(SeederFlaw::ReadsBeforeAmount) || read_before_check_amount {
+            let deadline = e.state().pays.get(&id).map_or(0, |r| r.deadline);
+            e.learn_here(self.key, info.proofs.clone(), deadline).await;
+        }
+        if e.runs_early(Early::KeysetBeforeAmount, came) && e.keyset_too_soon() {
+            return Err(unavailable("the mint's keyset expires too soon to swap to"));
+        }
+        // 4. The exact face value; a product beyond 2^53-1 can never be paid.
+        let chunks = pay.upto_chunk.saturating_sub(acked);
+        let due = if e.has(SeederFlaw::WrappingMul) {
+            Some(chunks.wrapping_mul(e.config.price_per_chunk))
+        } else {
+            chunks
+                .checked_mul(e.config.price_per_chunk)
+                .filter(|d| *d <= MAX_INT || e.has(SeederFlaw::NoMaxIntFilter))
+                .filter(|d| *d < MAX_INT || !e.has(SeederFlaw::ExactMaxIntUnderpaid))
+        };
+        // The account's `spent_total` stays at most 2^53-1, so its `ack` can carry it: an
+        // exact payment that would take it past is `overpaid`.
+        let total = spent.checked_add(info.amount);
+        let past_bound = if e.has(SeederFlaw::SpentTotalBoundOffByOne) {
+            total.is_none_or(|t| t >= MAX_INT)
+        } else {
+            total.is_none_or(|t| t > MAX_INT) && !e.has(SeederFlaw::SpentTotalUnbounded)
+        };
+        let bound_code = if e.has(SeederFlaw::SpentTotalUnderpaid) {
+            RejCode::Underpaid
+        } else {
+            RejCode::Overpaid
+        };
+        if past_bound && e.has(SeederFlaw::SpentTotalBeforeAmount) {
+            self.on_refusal(&pay.token, pay.upto_chunk, info.amount, true);
+            return Err(rej(bound_code, "spent_total would pass 2^53-1"));
+        }
+        // On a video it no longer serves (flaws take a wrong amount there).
+        let lax = |f| e.has(f) && e.state().dropped.contains(&self.key.1);
+        if due.is_none_or(|d| info.amount < d) && !lax(SeederFlaw::DroppedVideoAcceptsUnderpaid) {
+            self.on_refusal(&pay.token, pay.upto_chunk, info.amount, true);
+            return Err(rej(RejCode::Underpaid, "short of the chunks claimed"));
+        }
+        if due.is_some_and(|d| info.amount > d)
+            && !e.has(SeederFlaw::AcceptsOverpay)
+            && !lax(SeederFlaw::DroppedVideoAcceptsOverpaid)
+        {
+            self.on_refusal(&pay.token, pay.upto_chunk, info.amount, true);
+            return Err(rej(RejCode::Overpaid, "more than the chunks claimed"));
+        }
+        if past_bound {
+            self.on_refusal(&pay.token, pay.upto_chunk, info.amount, true);
+            return Err(rej(bound_code, "spent_total would pass 2^53-1"));
+        }
+        // 5. Swap, then acknowledge.
+        let (upto, amount) = (pay.upto_chunk, info.amount);
+        if e.has(SeederFlaw::AckBeforeSwap) {
+            let (e2, key) = (e.clone(), self.key);
+            e.net.swap_later(
+                &pay.token,
+                Box::new(move |outcome| {
+                    if outcome == Swap::Spent {
+                        let mut st = e2.state();
+                        e2.ban(&mut st, key);
+                    }
+                }),
+            );
+            return self.settle_now(upto, amount, Swap::Claimed);
+        }
+        let immediate = if e.has(SeederFlaw::SpentCheckLastProof) {
+            Some(e.net.swap_checking_last_only(&pay.token))
+        } else if e.has(SeederFlaw::SwapsUnspentSubset) {
+            Some(if e.net.steal(&pay.token) {
+                Swap::Claimed
+            } else {
+                Swap::Spent
+            })
+        } else {
+            None
+        };
+        if let Some(outcome) = immediate {
+            return self.settle_now(upto, amount, outcome);
+        }
+        if e.has(SeederFlaw::ClaimThenAwaitCredit) {
+            let submitted = e.net.submit(&pay.token, 0, Box::new(|_| {}));
+            let outcome = poll_fn(|cx| match e.net.try_answer(submitted, cx.waker()) {
+                Some(a) => Poll::Ready(a),
+                None => Poll::Pending,
+            })
+            .await;
+            return self.settle_now(upto, amount, outcome);
+        }
+        let settle = Settle {
+            key: self.key,
+            upto,
+            amount,
+            snapshot,
+            session_spent: self.session_spent.clone(),
+        };
+        // Outputs only from a keyset that outlives any wait to decide this swap: none whose
+        // listed `final_expiry` is sooner than twice `account_ttl` away, by the mint's keyset
+        // listing asked for in the second its turn came or later. With none, no swap: the
+        // seeder's own keyset error, read nothing for.
+        let keyset_after_read =
+            e.has(SeederFlaw::KeysetAfterRead) || e.reads_at(ReadAt::KeysetAfter, came);
+        let listed_too_soon = if keyset_after_read || e.has(SeederFlaw::KeysetFirst) {
+            false
+        } else if e.has(SeederFlaw::KeysetRuleWithoutListing) {
+            e.keyset_too_soon()
+        } else {
+            // The flaws: a listing of any second, of the payment's arrival's or of the second
+            // it judges, on one path.
+            let since = if e.judges(Judged::Stale, came) {
+                0
+            } else if e.judges(Judged::FromArrival, came) {
+                let st = e.state();
+                st.pays
+                    .get(&id)
+                    .map_or(0, |r| r.deadline.saturating_sub(SEEDER_DEADLINE.as_secs()))
+            } else if e.judges(Judged::OfJudgingSecond, came) {
+                e.clock.now()
+            } else {
+                turn_came
+            };
+            if step3_asked
+                && e.has(SeederFlaw::KeysetListingAfterStep3Asked)
+                && let Some(r) = e.state().pays.get_mut(&id)
+            {
+                r.force_listing = true;
+            }
+            let stale_held = e.judges(Judged::HeldStale, came);
+            let final_expiry = e.keyset_listing(&mint, id, since, stale_held).await?;
+            // The flaws: the margin from the turn's second, or from its listing's.
+            let from = if e.has(SeederFlaw::KeysetHorizonFromTurn) {
+                Some(turn_came)
+            } else if e.has(SeederFlaw::KeysetHorizonFromListing) {
+                let st = e.state();
+                st.listings.get(e.listing_key(&mint)).map(|l| l.at)
+            } else {
+                None
+            };
+            if let Some(from) = from {
+                let horizon = from + 2 * e.config.account_ttl.as_secs();
+                final_expiry.is_some_and(|t| t < horizon)
+            } else {
+                e.too_soon(final_expiry)
+            }
+        };
+        if listed_too_soon {
+            if e.has(SeederFlaw::KeysetCreatesAccount) {
+                e.account(&mut e.state(), self.key);
+            }
+            return Err(unavailable("the mint's keyset expires too soon to swap to"));
+        }
+        // The swap's outputs, derived for it alone (NUT-13): its retries reuse them, and
+        // a restore of them finds this swap and no other.
+        let outputs = e.net.fresh_outputs();
+        // Send the swap, unless the deadline has passed: its completion settles it (in
+        // time, or late) and releases the turn, whether or not this future still waits.
+        // Past the deadline nothing more is judged: it is answered `mint-unavailable`.
+        // The watermark is read again as it is sent: a late claim may have moved it
+        // during the key fetch.
+        // While this account's earlier swap has an unknown outcome, nothing more is swapped
+        // for it: what the seeder must learn stays one swap per account.
+        // Its account's own unknown swaps are read once, now: after its checks, so a
+        // payment the seeder would refuse anyway costs the mint nothing, and by its
+        // deadline. A payment that took the turn over reads the abandoned swap so.
+        // The watermark is read again after it: a late claim it learns may cover this
+        // payment.
+        let proofs = e.net.read(&pay.token).map_or_else(Vec::new, |i| i.proofs);
+        let deadline = if took_over && e.has(SeederFlaw::TakeoverReadsWithoutDeadline) {
+            u64::MAX
+        } else if e.has(SeederFlaw::ReadDeadlineFromRead) {
+            e.clock.now() + SEEDER_DEADLINE.as_secs()
+        } else if e.has(SeederFlaw::ReadDeadlineFromTurn) {
+            turn_came + SEEDER_DEADLINE.as_secs()
+        } else {
+            e.state().pays.get(&id).map_or(0, |r| r.deadline)
+        };
+        let recheck = |acked_now: u64| -> Result<(), Rej> {
+            if acked_now == acked || e.has(SeederFlaw::NoRecheckAtSend) {
+                return Ok(());
+            }
+            if pay.upto_chunk <= acked_now {
+                return Err(rej(RejCode::Stale, "already paid up to there"));
+            }
+            let due_now = (pay.upto_chunk - acked_now)
+                .checked_mul(e.config.price_per_chunk)
+                .filter(|d| *d <= MAX_INT || e.has(SeederFlaw::NoMaxIntFilter));
+            let by_amount = !e.has(SeederFlaw::RecheckStaleOnly);
+            if by_amount && due_now.is_none_or(|d| amount < d) {
+                return Err(rej(RejCode::Underpaid, "short of the chunks claimed"));
+            }
+            if by_amount && due_now.is_some_and(|d| amount > d) {
+                return Err(rej(RejCode::Overpaid, "more than the chunks claimed"));
+            }
+            Ok(())
+        };
+        if e.has(SeederFlaw::RecheckBeforeRead) {
+            recheck(e.state().accounts.get(&self.key).map_or(0, |a| a.acked))?;
+        }
+        if e.has(SeederFlaw::BanCheckedLast) {
+            let mut st = e.state();
+            e.age(&mut st);
+            if e.peer_banned(&st, self.key) {
+                return Err(rej(RejCode::Banned, "this peer is banned"));
+            }
+        }
+        let read_already = read_first
+            || read_before_stale
+            || read_before_structure
+            || read_before_mint
+            || read_before_keys
+            || read_before_amount
+            || read_before_check_amount;
+        if !read_already && !(took_over && e.has(SeederFlaw::PayTakeoverSkipsRead)) {
+            let marked = e.has(SeederFlaw::DropInReadCreatesAccount)
+                || e.has(SeederFlaw::DropInReadWakesNone)
+                || e.has(SeederFlaw::DropInReadNoFloor)
+                || e.has(SeederFlaw::WaitedDropInReadCreatesAccount)
+                || e.has(SeederFlaw::WaitedDropInReadWakesNone)
+                || e.has(SeederFlaw::WaitedDropInReadNoFloor)
+                || e.has(SeederFlaw::TakeoverDropInReadCreatesAccount)
+                || e.flaw.and_then(SeederFlaw::drop_slip).is_some();
+            if marked && let Some(r) = e.state().pays.get_mut(&id) {
+                r.reading = true;
+            }
+            if let Some(r) = e.state().pays.get_mut(&id) {
+                r.read = true;
+            }
+            e.learn_here(self.key, proofs, deadline).await;
+            if marked && let Some(r) = e.state().pays.get_mut(&id) {
+                r.reading = false;
+            }
+        }
+        if keyset_after_read && e.keyset_too_soon() {
+            return Err(unavailable("the mint's keyset expires too soon to swap to"));
+        }
+        {
+            let mut st = e.state();
+            let now = e.clock.now();
+            // The flaws: an unknown swap stops only the payments that overlap it; or only
+            // those at its own mint.
+            let beyond = e.has(SeederFlaw::UnknownBlocksOnlyOverlap)
+                && st.unknown.iter().any(|u| u.pay.key == self.key)
+                && st
+                    .unknown
+                    .iter()
+                    .filter(|u| u.pay.key == self.key)
+                    .all(|u| u.pay.upto < pay.upto_chunk)
+                && !st
+                    .pays
+                    .iter()
+                    .any(|(p, r)| *p != id && r.key == self.key && r.sent && !r.landed);
+            let other_mints_only = e.has(SeederFlaw::UnknownPerMint) && {
+                let at = |t: &str| e.net.read(t).and_then(|i| i.mints.first().cloned());
+                st.unknown
+                    .iter()
+                    .filter(|u| u.pay.key == self.key)
+                    .all(|u| at(u.token.as_str()).as_ref() != Some(&mint))
+                    && st
+                        .pays
+                        .iter()
+                        .filter(|(p, r)| **p != id && r.key == self.key && r.sent && !r.landed)
+                        .all(|(_, r)| {
+                            r.swap
+                                .as_ref()
+                                .is_none_or(|s| at(s.1.as_str()).as_ref() != Some(&mint))
+                        })
+            };
+            if e.unknown_swap(&st, self.key, id)
+                && !e.has(SeederFlaw::UnknownUnbounded)
+                && !beyond
+                && !other_mints_only
+            {
+                if e.has(SeederFlaw::PayDropsDebtLog) {
+                    let key = self.key;
+                    st.debt.retain(|(debt, _)| debt.0 != key);
+                }
+                return Err(unavailable("an earlier payment's outcome is not known yet"));
+            }
+            let acked_now = st.accounts.get(&self.key).map_or(0, |a| a.acked);
+            let recheck_first = e.has(SeederFlaw::RecheckPastDeadline);
+            if recheck_first && !e.has(SeederFlaw::RecheckBeforeRead) {
+                recheck(acked_now)?;
+            }
+            let Some(r) = st.pays.get_mut(&id) else {
+                return Err(unavailable("no record of this payment"));
+            };
+            if e.has(SeederFlaw::SentBeforeExpiry) {
+                r.sent = true;
+            }
+            let expired = now >= r.deadline
+                && !e.has(SeederFlaw::NoDeadline)
+                && !e.has(SeederFlaw::SendIgnoresDeadline);
+            if r.abandoned || expired {
+                let wake = e.abandon(&mut st, self.key, id);
+                if e.has(SeederFlaw::UnsentCreatesAccount) {
+                    e.account(&mut st, self.key);
+                }
+                drop(st);
+                wake_all(wake);
+                return Err(unavailable("no answer from the mint within 60 s"));
+            }
+            if !recheck_first && !e.has(SeederFlaw::RecheckBeforeRead) {
+                let checked = recheck(acked_now);
+                if checked.is_err()
+                    && (e.has(SeederFlaw::RecheckWakesNone) || e.has(SeederFlaw::RecheckKeepsTurn))
+                {
+                    r.rechecked = true;
+                }
+                checked?;
+            }
+            r.sent = true;
+            r.swap = Some((settle.clone(), pay.token.clone(), outputs));
+            if e.has(SeederFlaw::DeadlineFromSwap) {
+                let deadline = now + SEEDER_DEADLINE.as_secs();
+                r.deadline = deadline;
+                if let Some(h) = st.paying.get_mut(&self.key)
+                    && h.pay == id
+                {
+                    h.deadline = deadline;
+                }
+            }
+        }
+        let e2 = e.clone();
+        let token = pay.token.clone();
+        e.net.submit(
+            &pay.token,
+            outputs,
+            Box::new(move |outcome| {
+                let spawn = e2.net.ledger().timing.spawn.clone();
+                let net = e2.net.clone();
+                let e3 = e2.clone();
+                // The flaws: on a task of its own, it wakes the payment before it settles.
+                if let Some(spawn) = spawn
+                    .clone()
+                    .filter(|_| e3.flaw.is_some_and(SeederFlaw::settles_after_a_wake))
+                {
+                    let landing = Landing::begun(net);
+                    spawn(Box::pin(async move {
+                        next_poll().await;
+                        e3.land_woken_early(id, &settle, &token, outputs, outcome)
+                            .await;
+                        drop(landing);
+                    }));
+                    return;
+                }
+                let land = move || {
+                    let outcome = e2.after_swap(id, &token, outputs, outcome);
+                    e2.land(id, &settle, &token, outputs, outcome);
+                };
+                if e3.has(SeederFlaw::OutcomeLandsOnPoll) {
+                    let mut st = e3.state();
+                    if let Some(r) = st.pays.get_mut(&id).filter(|r| !r.finished) {
+                        r.on_poll = Some(Box::new(land));
+                        let w = r.waker.take();
+                        drop(st);
+                        wake_all(w.into_iter().collect());
+                    }
+                    return;
+                }
+                match spawn {
+                    Some(spawn) => {
+                        let landing = Landing::begun(net);
+                        spawn(Box::pin(async move {
+                            next_poll().await;
+                            land();
+                            drop(landing);
+                        }));
+                    }
+                    None => land(),
+                }
+            }),
+        );
+        e.dawdle().await;
+        poll_fn(|cx| e.answer(id, cx)).await
+    }
+}
+
+impl SeederSession for MockSession {
+    fn quote(&self) -> &Quote {
+        &self.quote
+    }
+
+    fn admit(&mut self, sha256: &str) -> bool {
+        let e = self.e.clone();
+        let mut st = e.state();
+        if e.has(SeederFlaw::AdmitBanNotAged) {
+            let bans = st.banned.clone(); // its debt ages, its bans do not
+            e.age(&mut st);
+            st.banned = bans;
+        } else {
+            e.age(&mut st);
+        }
+        if e.peer_banned(&st, self.key) && !e.has(SeederFlaw::AdmitIgnoresBan) {
+            if e.has(SeederFlaw::BannedAdmitRenewsBan) {
+                e.ban(&mut st, self.key);
+            }
+            if e.has(SeederFlaw::BannedAdmitCreatesAccount) {
+                e.account(&mut st, self.key);
+            }
+            if e.has(SeederFlaw::BannedAdmitCounts) || e.has(SeederFlaw::BannedAdmitCountsToAccount)
+            {
+                let now = e.clock.now();
+                let a = e.account(&mut st, self.key);
+                a.admitted += 1;
+                let (n, generation) = (a.admitted, a.generation);
+                a.unpaid.push_back(n);
+                if e.has(SeederFlaw::BannedAdmitCounts) {
+                    let debt = e.debt_key(self.key, generation, n);
+                    st.debt.push_back((debt, now));
+                    st.live.insert(debt);
+                }
+            }
+            return false;
+        }
+        // A video it no longer serves has no file it serves, pre-paid or not (flaws admit
+        // some).
+        let prepaid = st
+            .accounts
+            .get(&self.key)
+            .is_some_and(|a| a.admitted < a.acked);
+        let member = e.videos[self.key.1].members.contains(sha256)
+            && (!st.dropped.contains(&self.key.1)
+                || e.has(SeederFlaw::DroppedVideoAdmits)
+                || (self.opened_served && e.has(SeederFlaw::DroppedVideoOpenSessionAdmits))
+                || (prepaid && e.has(SeederFlaw::DroppedVideoAdmitsPrepaid)));
+        if !member && !e.has(SeederFlaw::AdmitsForeignChunks) {
+            if e.has(SeederFlaw::ForeignCreatesAccount) {
+                e.account(&mut st, self.key);
+            }
+            if e.has(SeederFlaw::ForeignAdmitCounts) {
+                // Under a generation of its own: it collides with no account's chunk.
+                let generation = st.next_generation;
+                st.next_generation += 1;
+                let debt = e.debt_key(self.key, generation, 1);
+                st.debt.push_back((debt, e.clock.now()));
+                st.live.insert(debt);
+            }
+            return false;
+        }
+        let covered = if e.has(SeederFlaw::CoveredPeerWide) {
+            st.accounts
+                .iter()
+                .any(|(k, a)| k.0 == self.key.0 && a.admitted < a.acked)
+        } else {
+            st.accounts
+                .get(&self.key)
+                .is_some_and(|a| a.admitted < a.acked)
+        };
+        if !covered || e.has(SeederFlaw::CapBeforeCredit) {
+            if !covered {
+                let unpaid = e.window_count(&st, self.key);
+                let full = if e.has(SeederFlaw::WindowOffByOne) {
+                    unpaid > e.config.window
+                } else {
+                    unpaid >= e.config.window
+                };
+                if full {
+                    return false;
+                }
+            }
+            let global = e.global_unpaid(&st);
+            let capped = if e.has(SeederFlaw::GlobalCapGt) {
+                global > e.config.global_cap
+            } else {
+                global >= e.config.global_cap
+            };
+            if capped && !e.has(SeederFlaw::NoGlobalCap) {
+                if e.has(SeederFlaw::CapRefusalCreatesAccount) {
+                    e.account(&mut st, self.key);
+                }
+                return false;
+            }
+        }
+        let mut st = if e.has(SeederFlaw::AdmitSplitLock) {
+            drop(st); // the checks and the count in two steps: another admission between
+            e.net.meet_admissions();
+            e.state()
+        } else {
+            st
+        };
+        let now = e.clock.now();
+        let a = e.account(&mut st, self.key);
+        if e.has(SeederFlaw::CountsDistinctFiles) && !a.files.insert(sha256.to_owned()) {
+            return true;
+        }
+        a.admitted += 1;
+        if !covered || e.has(SeederFlaw::CoveredLoggedAsDebt) {
+            let (n, generation) = (a.admitted, a.generation);
+            a.unpaid.push_back(n);
+            let debt = e.debt_key(self.key, generation, n);
+            st.debt.push_back((debt, now));
+            st.live.insert(debt);
+            st.flawed_count = st.flawed_count.wrapping_add(1);
+        }
+        true
+    }
+
+    async fn pay(&mut self, pay: &Pay) -> Result<Ack, Rej> {
+        let e = self.e.clone();
+        e.through_tasks(true, self.pay_now(pay)).await
+    }
+
+    fn banned(&self) -> bool {
+        let mut st = self.e.state();
+        if !self.e.has(SeederFlaw::BannedNotAged) {
+            self.e.age(&mut st);
+        }
+        self.e.peer_banned(&st, self.key)
+    }
+}
+
+impl MockSession {
+    /// A `pay`, at the seeder ([`SeederSession::pay`]).
+    async fn pay_now(&mut self, pay: &Pay) -> Result<Ack, Rej> {
+        self.e.dawdle().await;
+        if self.e.has(SeederFlaw::BanCheckedBeforeTurn) && self.banned() {
+            return Err(rej(RejCode::Banned, "this peer is banned"));
+        }
+        if self.e.has(SeederFlaw::DroppedVideoRefusesPay)
+            && self.e.state().dropped.contains(&self.key.1)
+        {
+            return Err(rej(RejCode::UnknownVideo, "no longer served here"));
+        }
+        // The deadline counts from here, the payment's arrival.
+        let id = self.e.arrive(self.key);
+        let mut record = PayGuard {
+            e: self.e.clone(),
+            id,
+            answered: false,
+            kept: false,
+            quiet: false,
+            took: false,
+            waited: false,
+            unfloored: false,
+            came: Came::Unwaited,
+            taken: false,
+        };
+        let mut took_over = false;
+        if !self.e.has(SeederFlaw::ConcurrentPays) {
+            let (came, floor, taken) = self.e.wait_turn_at(self.key, Some(id)).await;
+            record.waited = floor.is_some() && !taken;
+            record.came = Came::of(taken, floor.is_some());
+            if let Some(r) = self.e.state().pays.get_mut(&id) {
+                r.came = Some(record.came);
+            }
+            if !came {
+                // Another payment holds the turn still.
+                let held = !taken && self.e.state().paying.contains_key(&self.key);
+                let creates = self.e.has(SeederFlaw::TurnTimeoutCreatesAccount)
+                    || (taken && self.e.has(SeederFlaw::TakenTurnTimeoutCreatesAccount))
+                    || (!taken && !held && self.e.has(SeederFlaw::FreedTurnTimeoutCreatesAccount))
+                    || (held && self.e.has(SeederFlaw::HeldTurnTimeoutCreatesAccount));
+                if creates {
+                    self.e.account(&mut self.e.state(), self.key);
+                }
+                if let Some(refusal) = self.untaken_turn(pay, held).await {
+                    record.answered = true;
+                    return Err(refusal);
+                }
+                if self.e.has(SeederFlaw::TimeoutFreesAnyTurn) {
+                    let wake = {
+                        let mut st = self.e.state();
+                        self.e.free_turn(&mut st, self.key);
+                        st.waiting.remove(&self.key).unwrap_or_default()
+                    };
+                    wake_all(wake);
+                }
+                record.answered = true;
+                return Err(unavailable("the account's turn did not come within 60 s"));
+            }
+            took_over = taken;
+            record.took = taken;
+        }
+        let answer = self.pay_in_turn(pay, id, record.came).await;
+        record.answered = true;
+        let e = &self.e;
+        let read = e.state().pays.get(&id).is_some_and(|r| r.read);
+        let check = answer.as_ref().err().and_then(|r| Check::of(r, read));
+        let came = record.came;
+        let slips = |slip: Slip| e.slips(slip, came, check);
+        let rechecked = answer.is_err() && e.state().pays.get(&id).is_some_and(|r| r.rechecked);
+        let took_refused = took_over && answer.is_err();
+        let waited_refused = record.waited && answer.is_err();
+        let unsent = answer.is_err() && !e.state().pays.get(&id).is_some_and(|r| r.sent);
+        let by_check = answer
+            .as_ref()
+            .is_err_and(|r| r.code != RejCode::MintUnavailable);
+        let detail = answer.as_ref().err().and_then(|r| r.detail.as_deref());
+        let creates = (record.waited && by_check && e.has(SeederFlaw::WaitedRefusalCreatesAccount))
+            || (took_over && by_check && e.has(SeederFlaw::TakeoverRefusalCreatesAccount))
+            || (record.waited
+                && detail == Some("no keys from the mint within 60 s")
+                && e.has(SeederFlaw::WaitedNoKeysCreatesAccount))
+            || (record.waited
+                && detail == Some("no answer from the mint within 60 s")
+                && e.has(SeederFlaw::WaitedUnsentCreatesAccount))
+            || (took_over
+                && detail == Some("no keys from the mint within 60 s")
+                && e.has(SeederFlaw::TakeoverNoKeysCreatesAccount))
+            || (took_over
+                && detail == Some("an earlier payment's outcome is not known yet")
+                && e.has(SeederFlaw::TakeoverUnknownRefusalCreatesAccount))
+            || (record.waited
+                && detail == Some("an earlier payment's outcome is not known yet")
+                && e.has(SeederFlaw::WaitedUnknownRefusalCreatesAccount))
+            || answer.as_ref().is_err_and(|r| {
+                let (waited, code) = (record.waited, &r.code);
+                (waited
+                    && *code == RejCode::Banned
+                    && e.has(SeederFlaw::WaitedBannedPayCreatesAccount))
+                    || (took_over
+                        && *code == RejCode::Banned
+                        && e.has(SeederFlaw::TakeoverBannedPayCreatesAccount))
+                    || (waited
+                        && *code == RejCode::BadMint
+                        && e.has(SeederFlaw::WaitedBadMintCreatesAccount))
+                    || (waited
+                        && *code == RejCode::Overpaid
+                        && e.has(SeederFlaw::WaitedOverpaidCreatesAccount))
+                    || (took_over
+                        && detail == Some("an invalid DLEQ")
+                        && e.has(SeederFlaw::TakeoverBadDleqCreatesAccount))
+                    || (waited
+                        && detail == Some("the mint's keyset expires too soon to swap to")
+                        && e.has(SeederFlaw::WaitedKeysetTooSoonCreatesAccount))
+            });
+        if unsent && (creates || slips(Slip::CreatesAccount)) {
+            e.account(&mut e.state(), self.key);
+        }
+        // The flaw: a ban for keys the mint refuses, where an earlier swap is still out.
+        let swap_out = check == Some(Check::KeysRefused)
+            && e.has(SeederFlaw::KeysRefusedBansWithSwapOut)
+            && !e.to_learn(Some(self.key)).1.is_empty();
+        if slips(Slip::Bans) || swap_out {
+            let mut st = e.state();
+            e.ban(&mut st, self.key);
+        }
+        record.kept = slips(Slip::KeepsTurn)
+            || (rechecked && e.has(SeederFlaw::RecheckKeepsTurn))
+            || (took_refused && e.has(SeederFlaw::TakeoverRefusalKeepsTurn))
+            || (waited_refused && e.has(SeederFlaw::WaitedRefusalKeepsTurn))
+            || answer.as_ref().is_err_and(|r| {
+                (r.code == RejCode::Stale && e.has(SeederFlaw::StaleKeepsTurn))
+                    || (record.waited
+                        && r.code == RejCode::Stale
+                        && e.has(SeederFlaw::WaitedStaleKeepsTurn))
+                    || (r.code == RejCode::Banned && e.has(SeederFlaw::BannedKeepsTurn))
+            });
+        record.quiet = slips(Slip::WakesNone)
+            || (rechecked && e.has(SeederFlaw::RecheckWakesNone))
+            || (took_refused && e.has(SeederFlaw::TakeoverRefusalWakesNone))
+            || (waited_refused && e.has(SeederFlaw::WaitedRefusalWakesNone))
+            || answer.as_ref().is_err_and(|r| {
+                let detail = r.detail.as_deref();
+                (r.code == RejCode::Overpaid && e.has(SeederFlaw::OverpaidWakesNone))
+                    || (detail == Some("an invalid DLEQ") && e.has(SeederFlaw::BadDleqWakesNone))
+                    || (detail == Some("the mint's keyset expires too soon to swap to")
+                        && e.has(SeederFlaw::KeysetWakesNone))
+                    || (detail == Some("an earlier payment's outcome is not known yet")
+                        && e.has(SeederFlaw::UnknownOutcomeWakesNone))
+                    || (record.waited
+                        && detail == Some("an earlier payment's outcome is not known yet")
+                        && e.has(SeederFlaw::WaitedUnknownRefusalWakesNone))
+                    || (record.waited
+                        && detail == Some("the mint's keyset expires too soon to swap to")
+                        && e.has(SeederFlaw::WaitedKeysetWakesNone))
+                    || (took_over
+                        && r.code == RejCode::Overpaid
+                        && e.has(SeederFlaw::TakeoverOverpaidWakesNone))
+            });
+        record.unfloored = slips(Slip::NoFloor)
+            || answer.as_ref().is_err_and(|r| {
+                let detail = r.detail.as_deref();
+                (r.code == RejCode::Overpaid && e.has(SeederFlaw::OverpaidNoFloor))
+                    || (detail == Some("an invalid DLEQ") && e.has(SeederFlaw::BadDleqNoFloor))
+                    || (detail == Some("the mint's keyset expires too soon to swap to")
+                        && e.has(SeederFlaw::KeysetRefusalNoFloor))
+                    || (r.code == RejCode::Stale && e.has(SeederFlaw::StaleRefusalNoFloor))
+                    || (r.code == RejCode::Banned && e.has(SeederFlaw::BannedRefusalNoFloor))
+            });
+        answer
+    }
+}
+
+/// A payment sent and not yet settled.
+#[derive(Debug, Clone)]
+struct Pending {
+    upto: u64,
+    amount: u64,
+    token: String,
+    sent_at: u64,
+    /// Its ledger's spent when it was sent, which stays so until it is settled (read by
+    /// flaws that settle another video's payment by its numbers).
+    spent: u64,
+    /// When its ledger sent the last request before it
+    /// ([`ViewerFlaw::OtherSessionCatchUpFromLastRequest`] and the like only: the 180 s run
+    /// from sending).
+    requested_at: u64,
+    /// It was a session's last payment ([`ViewerFlaw::LastPayCatchUpFromRequest`] only).
+    last: bool,
+    /// A closed session left it, and its reclaim at 180 s could not be served yet; it was
+    /// answered by an ack that does not match ([`ViewerFlaw::NoSessionLateReclaimPayInUnitProofs`],
+    /// [`ViewerFlaw::WrongAckSpentForgotten`] and the like only).
+    caught_up: bool,
+    by_ack: bool,
+}
+
+/// A watcher's standing with one seeder, shared by its ledgers for that seeder's videos
+/// (NFX-07 §3a). Entries name the ledger they belong to.
+#[derive(Default)]
+struct Standing {
+    /// The watcher has stopped paying this seeder.
+    stopped: bool,
+    /// The ledger with the payment in flight toward the seeder, unsettled ones included.
+    in_flight: Option<u64>,
+    /// Payments closed sessions left unsettled.
+    unsettled: Vec<(u64, Pending)>,
+    /// Payments whose reclaim the mint could not serve yet.
+    reclaiming: Vec<(u64, Pending)>,
+    /// Payments whose proofs were found spent, each awaiting a quote on its ledger.
+    lost: Vec<(u64, Pending)>,
+    /// `mint-unavailable` answers in a row since the last ack or quote.
+    unavailable: u32,
+    next_ledger: u64,
+    /// Proofs the mint lists under an expired keyset, kept to pay with again
+    /// ([`ViewerFlaw::PaysWithExpiredProofs`] only: an honest wallet drops them).
+    expired_kept: Vec<u64>,
+    /// Payments in flight on live sessions, as their ledgers hold them; the ledgers whose
+    /// payment another video's input settled (true) or reclaimed (false); and when another
+    /// video's input started one's 180 s again ([`ViewerFlaw::AckSettlesOtherLive`] and the
+    /// like only: only its own session's answer, or its own timeout 180 s after sending,
+    /// ends a live session's payment).
+    live: Vec<(u64, Pending)>,
+    taken_live: Vec<(u64, bool)>,
+    live_restarts: Vec<(u64, u64)>,
+    /// The next payment is made in one-sat proofs, and when a payment was last found spent
+    /// ([`ViewerFlaw::RepayAfterReclaimInUnitProofs`], [`ViewerFlaw::StopSkippedWhileAwaiting`]
+    /// and the like only).
+    units_next: bool,
+    lost_at: u64,
+    /// Requests not refused on every ledger, and each ledger's requests sent and
+    /// `accepted_upto` ([`ViewerFlaw::ServedCountsSiblingRequests`] and the like only:
+    /// `served` is bounded by the quote's own video's).
+    requested_all: u64,
+    sent_by: Vec<(u64, u64)>,
+    acked_by: Vec<(u64, u64)>,
+    /// What each ledger has been through, each ledger's requests not refused and
+    /// `accepted_upto`, and whether the reclaim under way found a proof listed expired
+    /// ([`ViewerFlaw::NoSessionReclaimPayInUnitProofs`],
+    /// [`ViewerFlaw::PayAheadLessOtherLedgersCredit`] and the like only).
+    pasts: Vec<(u64, Past)>,
+    positions: Vec<(u64, u64, u64)>,
+    lost_to_expiry: bool,
+    /// The price of the quote taken last, on whichever ledger
+    /// ([`ViewerFlaw::PriceOfLastQuoteTaken`] only: the price is the session's quote's).
+    last_price: Option<u64>,
+    /// A reclaim was refused as pending since the last timeout began
+    /// ([`ViewerFlaw::TimeoutPendingNoStop`] only: an incomplete reclaim is one, whyever).
+    refused_pending: bool,
+}
+
+/// An honest viewer's ledger with one seeder for one video, holding tokens from one mint
+/// (NFX-07 §3a); its standing with the seeder is shared with its siblings. With a
+/// [`ViewerFlaw`] it is deliberately not honest.
+pub struct MockViewer {
+    net: MockNetwork,
+    clock: Clock,
+    flaw: Option<ViewerFlaw>,
+    mint: String,
+    max_price: u64,
+    /// This ledger, in its standing.
+    id: u64,
+    standing: Arc<Mutex<Standing>>,
+    /// This ledger's own stop ([`ViewerFlaw::StopPerVideo`] and
+    /// [`ViewerFlaw::BannedHelloStopsLedger`] only).
+    halted: bool,
+    /// The open session's quote.
+    quote: Option<Quote>,
+    requested: u64,
+    acked: u64,
+    spent: u64,
+    /// The payment in flight on this session.
+    pending: Option<Pending>,
+    /// A refusal since the last payment: the next one may pay ahead.
+    pay_ahead: bool,
+    /// `mint-unavailable` answers counted here ([`ViewerFlaw::UnavailablePerLedger`] only).
+    unavailable_here: u32,
+    /// When this session's quote was taken, and when the seeder last answered on it (the
+    /// quote, or the last ack taken) ([`ViewerFlaw::LiveWaitFromQuote`] and the like only:
+    /// the 180 s run from sending).
+    quoted_at: u64,
+    answered_at: u64,
+    /// When the last request was sent, and when each request still owed was, oldest first;
+    /// every request sent, refused or not; when the last refusal came, and the last `rej`
+    /// since the last payment ([`ViewerFlaw::WaitFromLastRequest`] and the like only: the
+    /// 180 s run from sending, and `served` is bounded by the requests not refused).
+    last_request_at: u64,
+    request_times: Vec<u64>,
+    sent_requests: u64,
+    refused_at: u64,
+    rej_at: Option<u64>,
+    /// The first session's quote's window, and whether the ledger has held credit
+    /// ([`ViewerFlaw::DueWindowOfFirstQuote`] and [`ViewerFlaw::CreditPayInUnitProofs`] only).
+    first_window: Option<u64>,
+    held_credit: bool,
+    /// The open session resumed the account ([`ViewerFlaw::DueRoundsDownOnResume`] only).
+    resumed: bool,
+    /// The payment now due waited behind another video's payment in flight; requests refused
+    /// after they were paid for; the windows of the sessions it first paid and first sent a
+    /// request on; a closed session's payment was unsettled when this ledger was made; and
+    /// `mint-unavailable` answers in a row to this ledger's own payments
+    /// ([`ViewerFlaw::BehindOtherVideoPayInUnitProofs`], [`ViewerFlaw::ServedCountsPaidRefused`],
+    /// [`ViewerFlaw::DueWindowOfFirstPayment`], [`ViewerFlaw::NewLedgerCatchUpIgnoresWait`],
+    /// [`ViewerFlaw::OwnDishonestQuoteOutOfTriesNoStop`] and the like only).
+    behind_other: bool,
+    paid_refused: u64,
+    first_pay_window: Option<u64>,
+    first_request_window: Option<u64>,
+    made_with_unsettled: bool,
+    tries_here: u32,
+    /// The price of the first quote this ledger took ([`ViewerFlaw::PriceOfFirstQuote`]
+    /// only: the price is the session's quote's).
+    first_price: Option<u64>,
+    /// A `hello` refused `banned` came on this ledger while its payment was in flight
+    /// ([`ViewerFlaw::OwnStopAckNotSettled`] only).
+    banned_in_flight: bool,
+}
+
+impl MockViewer {
+    #[must_use]
+    pub fn new(
+        net: MockNetwork,
+        clock: Clock,
+        mint: &str,
+        max_price: u64,
+        flaw: Option<ViewerFlaw>,
+    ) -> Self {
+        Self::ledger(
+            net,
+            clock,
+            mint,
+            max_price,
+            flaw,
+            0,
+            Arc::new(Mutex::new(Standing::default())),
+        )
+    }
+
+    fn ledger(
+        net: MockNetwork,
+        clock: Clock,
+        mint: &str,
+        max_price: u64,
+        flaw: Option<ViewerFlaw>,
+        id: u64,
+        standing: Arc<Mutex<Standing>>,
+    ) -> Self {
+        Self {
+            net,
+            clock,
+            flaw,
+            mint: mint.to_owned(),
+            max_price,
+            id,
+            standing,
+            halted: false,
+            quote: None,
+            requested: 0,
+            acked: 0,
+            spent: 0,
+            pending: None,
+            pay_ahead: false,
+            unavailable_here: 0,
+            quoted_at: 0,
+            answered_at: 0,
+            last_request_at: 0,
+            request_times: Vec::new(),
+            sent_requests: 0,
+            refused_at: 0,
+            rej_at: None,
+            first_window: None,
+            held_credit: false,
+            resumed: false,
+            behind_other: false,
+            paid_refused: 0,
+            first_pay_window: None,
+            first_request_window: None,
+            made_with_unsettled: false,
+            tries_here: 0,
+            first_price: None,
+            banned_in_flight: false,
+        }
+    }
+
+    fn has(&self, f: ViewerFlaw) -> bool {
+        self.flaw == Some(f)
+    }
+
+    /// Whether a payment is in flight on a live session, this ledger's or another's (read by
+    /// [`ViewerFlaw::SiblingWhileLiveClearsStop`] and the like only).
+    fn live_in_flight(&self) -> bool {
+        let st = self.standing();
+        st.in_flight
+            .is_some_and(|l| !st.unsettled.iter().any(|(x, _)| *x == l))
+    }
+
+    /// Undo the standing's stop, for `flaw`, while another video's payment is in flight on
+    /// its live session ([`ViewerFlaw::OtherEndWhileLiveClearsStop`] and the like only:
+    /// nothing undoes a stop).
+    fn clears_stop_beside_live(&self, flaw: ViewerFlaw) {
+        if self.has(flaw) && self.pending.is_none() && self.live_in_flight() {
+            self.standing().stopped = false;
+        }
+    }
+
+    /// Undo the standing's stop, for `flaw`, while this ledger's payment is in flight on its
+    /// session ([`ViewerFlaw::RequestInFlightClearsStop`] and the like only).
+    fn clears_stop_in_flight(&self, flaw: ViewerFlaw) {
+        if self.has(flaw) && self.pending.is_some() {
+            self.standing().stopped = false;
+        }
+    }
+
+    fn standing(&self) -> MutexGuard<'_, Standing> {
+        lock(&self.standing)
+    }
+
+    /// Note that `ledger` has been through `past` (read by the defects planted on one
+    /// history only).
+    fn note(&self, ledger: u64, past: Past) {
+        let mut st = self.standing();
+        if !st.pasts.contains(&(ledger, past)) {
+            st.pasts.push((ledger, past));
+        }
+    }
+
+    /// Note this ledger's position in the standing (read by the same defects only).
+    fn note_position(&self) {
+        let (id, requested, acked) = (self.id, self.requested, self.acked);
+        let mut st = self.standing();
+        st.positions.retain(|(l, _, _)| *l != id);
+        st.positions.push((id, requested, acked));
+    }
+
+    /// The chunks the standing's other ledgers owe, and the credit they hold.
+    fn others(&self) -> (u64, u64) {
+        let id = self.id;
+        let st = self.standing();
+        let others = st.positions.iter().filter(|(l, _, _)| *l != id);
+        others.fold((0, 0), |(unpaid, credit), (_, requested, acked)| {
+            (
+                unpaid + requested.saturating_sub(*acked),
+                credit + acked.saturating_sub(*requested),
+            )
+        })
+    }
+
+    /// Whether the planted defect does `slip` to the payment this ledger makes now: its own
+    /// history, or another ledger's, is the one the defect is planted on.
+    fn slips(&self, slip: PaySlip) -> bool {
+        let Some((whose, past, does)) = self.flaw.and_then(ViewerFlaw::past_slip) else {
+            return false;
+        };
+        if does != slip {
+            return false;
+        }
+        let id = self.id;
+        match (whose, past) {
+            (_, Past::BehindOther) => self.behind_other,
+            (Whose::Other, Past::Credit) => self.others().1 > 0,
+            (Whose::Other, Past::Owes) => self.others().0 > 0,
+            (Whose::Own, _) => self.standing().pasts.contains(&(id, past)),
+            (Whose::Other, _) => {
+                let st = self.standing();
+                st.pasts.iter().any(|(l, p)| *l != id && *p == past)
+            }
+        }
+    }
+
+    /// Whether the planted defect skips the stop `cause` brings on this ledger.
+    fn own_stop_skipped(&self, cause: Cause) -> bool {
+        let Some((skipped, waits)) = self.flaw.and_then(ViewerFlaw::own_stop) else {
+            return false;
+        };
+        skipped == cause
+            && match waits {
+                Waits::Awaiting => self.awaiting(true),
+                Waits::OutOfTries => self.out_of_tries() && self.tries_here >= UNAVAILABLE_BUDGET,
+            }
+    }
+
+    /// Where this ledger reclaims a closed session's payment of `ledger`.
+    fn place_of(&self, ledger: u64) -> Place {
+        match (ledger == self.id, self.quote.is_some()) {
+            (true, true) => Place::Session,
+            (true, false) => Place::NoSession,
+            (false, true) => Place::Other,
+            (false, false) => Place::OtherNoSession,
+        }
+    }
+
+    /// Stop paying this seeder.
+    fn halt(&mut self) {
+        if self.has(ViewerFlaw::LostForgottenOnStop) {
+            self.standing().lost.clear();
+        }
+        if self.has(ViewerFlaw::StopSkippedWhileAwaiting)
+            && self.awaiting(false)
+            && self.standing().lost_at < self.clock.now()
+        {
+            return;
+        }
+        if self.has(ViewerFlaw::StopPerVideo) {
+            self.halted = true;
+        } else {
+            self.standing().stopped = true;
+        }
+    }
+
+    fn halted(&self) -> bool {
+        if self.has(ViewerFlaw::StopPerVideo) {
+            self.halted
+        } else {
+            self.standing().stopped || self.halted
+        }
+    }
+
+    fn reclaim_incomplete(&self) -> bool {
+        let own = self.has(ViewerFlaw::ReclaimPerVideo);
+        self.standing()
+            .reclaiming
+            .iter()
+            .any(|(l, _)| !own || *l == self.id)
+    }
+
+    /// Whether a payment awaits a quote: any of the standing's, or this ledger's only.
+    fn awaiting(&self, own_only: bool) -> bool {
+        self.standing()
+            .lost
+            .iter()
+            .any(|(l, _)| !own_only || *l == self.id)
+    }
+
+    fn set_pending(&mut self, p: Pending) {
+        let mut st = self.standing();
+        st.live.push((self.id, p.clone()));
+        st.in_flight = Some(self.id);
+        drop(st);
+        self.pending = Some(p);
+    }
+
+    /// This ledger's payment is no longer in flight on its live session.
+    fn off_live(&self) {
+        let id = self.id;
+        self.standing().live.retain(|(l, _)| *l != id);
+    }
+
+    /// Free the standing's in-flight slot if `ledger` holds it.
+    fn free_slot(&self, ledger: u64) {
+        let mut st = self.standing();
+        if st.in_flight == Some(ledger) {
+            st.in_flight = None;
+        }
+    }
+
+    fn take_pending(&mut self) -> Option<Pending> {
+        let p = self.pending.take();
+        if p.is_some() {
+            self.free_slot(self.id);
+            self.off_live();
+        }
+        p
+    }
+
+    /// Take `accepted_upto` and `spent_total` as settling another video's payment in flight
+    /// on its live session, if they show it: its `upto`, and its ledger's spent plus its
+    /// amount. Its ledger takes it as acknowledged at its next input
+    /// ([`ViewerFlaw::AckSettlesOtherLive`] and the like only).
+    fn settles_other_live(&self, accepted_upto: u64, spent_total: u64) -> bool {
+        let id = self.id;
+        let mut st = self.standing();
+        let Some(i) = st.live.iter().position(|(l, p)| {
+            *l != id && accepted_upto == p.upto && spent_total == p.spent + p.amount
+        }) else {
+            return false;
+        };
+        let (ledger, _) = st.live.remove(i);
+        st.taken_live.push((ledger, true));
+        if st.in_flight == Some(ledger) {
+            st.in_flight = None;
+        }
+        true
+    }
+
+    /// Reclaim the other videos' payments in flight on their live sessions at once, however
+    /// young ([`ViewerFlaw::OtherTimeoutReclaimsLiveNow`] and the like only).
+    fn reclaims_other_live(&mut self) {
+        let id = self.id;
+        let now: Vec<(u64, Pending)> = {
+            let mut st = self.standing();
+            let (now, keep) = std::mem::take(&mut st.live)
+                .into_iter()
+                .partition(|(l, _)| *l != id);
+            st.live = keep;
+            now
+        };
+        for (ledger, p) in now {
+            self.free_slot(ledger);
+            self.standing().taken_live.push((ledger, false));
+            self.reclaim(ledger, p, false);
+        }
+    }
+
+    /// Start the 180 s of the other videos' payments in flight on their live sessions again
+    /// ([`ViewerFlaw::OtherTimeoutRestartsLiveWait`] and the like only).
+    fn restarts_other_live(&self) {
+        let (id, now) = (self.id, self.clock.now());
+        let mut st = self.standing();
+        let others: Vec<u64> = st
+            .live
+            .iter()
+            .filter(|(l, _)| *l != id)
+            .map(|(l, _)| *l)
+            .collect();
+        st.live_restarts
+            .extend(others.into_iter().map(|l| (l, now)));
+    }
+
+    /// Take what another video's input did to this ledger's payment in flight: settled it,
+    /// reclaimed it, or started its 180 s again ([`ViewerFlaw::AckSettlesOtherLive`] and the
+    /// like only).
+    fn taken_by_another(&mut self) {
+        let id = self.id;
+        let (taken, restarted) = {
+            let mut st = self.standing();
+            let taken = st
+                .taken_live
+                .iter()
+                .find(|(l, _)| *l == id)
+                .map(|(_, s)| *s);
+            st.taken_live.retain(|(l, _)| *l != id);
+            let restarted = st
+                .live_restarts
+                .iter()
+                .filter(|(l, _)| *l == id)
+                .map(|(_, t)| *t)
+                .max();
+            st.live_restarts.retain(|(l, _)| *l != id);
+            (taken, restarted)
+        };
+        if let Some(settled) = taken
+            && let Some(p) = self.pending.take()
+            && settled
+        {
+            self.acked = p.upto;
+            self.spent += p.amount;
+        }
+        if let (Some(t), Some(p)) = (restarted, self.pending.as_mut()) {
+            p.sent_at = t;
+        }
+    }
+
+    /// Take `accepted_upto` and `spent_total` as settling another video's payment they show
+    /// by its own ledger's position: its `upto`, and that ledger's spent plus its amount.
+    /// In flight, left unsettled, awaiting a quote or being reclaimed, it is dropped
+    /// ([`ViewerFlaw::TakenQuoteSettlesOtherVideos`] only).
+    fn settles_other_by_position(&self, accepted_upto: u64, spent_total: u64) {
+        self.settles_other_live(accepted_upto, spent_total);
+        let id = self.id;
+        let shows = |(l, p): &(u64, Pending)| {
+            *l != id && accepted_upto == p.upto && spent_total == p.spent + p.amount
+        };
+        let mut st = self.standing();
+        if let Some(i) = st.unsettled.iter().position(shows) {
+            let (l, _) = st.unsettled.remove(i);
+            if st.in_flight == Some(l) {
+                st.in_flight = None;
+            }
+        }
+        st.lost.retain(|e| !shows(e));
+        st.reclaiming.retain(|e| !shows(e));
+    }
+
+    /// What a flawed viewer does on a quote it refuses for `why`, which settles nothing: it
+    /// lets go of what it waits on, takes the word of the quote, pays ahead, restores the
+    /// standing's tries, or starts a closed session's 180 s again. The honest viewer does
+    /// none of it.
+    fn on_refused_quote(&mut self, why: Refusal, quote: &Quote) {
+        use ViewerFlaw as F;
+        self.note(self.id, Past::RefusedQuote);
+        // A second quote restoring the tries is `QuoteResetsFirst`, which acts on every quote.
+        let (flaws, restores) = match why {
+            Refusal::Price => (
+                [
+                    F::PriceRefusalForgivesLost,
+                    F::PriceRefusalDropsReclaim,
+                    F::PriceRefusalFreesSlot,
+                    F::PriceRefusalClearsStop,
+                    F::PriceRefusalSettles,
+                    F::PriceRefusalPaysAhead,
+                ],
+                Some(F::PriceRefusalRestoresTries),
+            ),
+            Refusal::Window => (
+                [
+                    F::WindowRefusalForgivesLost,
+                    F::WindowRefusalDropsReclaim,
+                    F::WindowRefusalFreesSlot,
+                    F::WindowRefusalClearsStop,
+                    F::WindowRefusalSettles,
+                    F::WindowRefusalPaysAhead,
+                ],
+                Some(F::WindowRefusalRestoresTries),
+            ),
+            Refusal::Mint => (
+                [
+                    F::MintRefusalForgivesLost,
+                    F::MintRefusalDropsReclaim,
+                    F::MintRefusalFreesSlot,
+                    F::MintRefusalClearsStop,
+                    F::MintRefusalSettles,
+                    F::MintRefusalPaysAhead,
+                ],
+                Some(F::MintRefusalRestoresTries),
+            ),
+            Refusal::Second => (
+                [
+                    F::SecondQuoteForgivesLost,
+                    F::SecondQuoteDropsReclaim,
+                    F::SecondQuoteFreesSlot,
+                    F::SecondQuoteClearsStop,
+                    F::SecondQuoteSettles,
+                    F::SecondQuotePaysAhead,
+                ],
+                None,
+            ),
+        };
+        let [lost, reclaim, slot, stop, settles, ahead] = flaws.map(|f| self.has(f));
+        self.lets_go(lost, reclaim, slot, stop);
+        // Beyond this ledger's: every video's, from a new video's ledger, or the other
+        // videos'; and the 180 s of closed sessions' payments.
+        let fresh = self.requested == 0 && self.acked == 0;
+        let id = self.id;
+        if matches!(why, Refusal::Second) {
+            self.lets_go_of(
+                |_| true,
+                fresh && self.has(F::FreshSecondQuoteForgivesAll),
+                false,
+                false,
+                false,
+            );
+            self.lets_go_of(
+                |l| l != id,
+                false,
+                self.has(F::SecondQuoteDropsOtherReclaims),
+                false,
+                false,
+            );
+            if self.has(F::SecondQuoteRestartsWait) {
+                self.restart_wait(false);
+            }
+        } else {
+            if fresh {
+                self.lets_go_of(
+                    |_| true,
+                    self.has(F::FreshRefusalForgivesAll),
+                    self.has(F::FreshRefusalDropsAllReclaims),
+                    self.has(F::FreshRefusalFreesAnySlot),
+                    self.has(F::FreshRefusalClearsStop),
+                );
+            }
+            self.lets_go_of(
+                |l| l != id,
+                self.has(F::OtherRefusalForgivesLost),
+                self.has(F::OtherRefusalDropsReclaims),
+                self.has(F::RefusalFreesOtherSlot),
+                false,
+            );
+            if self.has(F::RefusedQuoteRestartsWait) {
+                self.restart_wait(true);
+            }
+        }
+        if settles {
+            if self.settle_by_quote(quote, |st| &mut st.unsettled, false, false, false, false) {
+                self.free_slot(self.id);
+            }
+            self.settle_by_quote(quote, |st| &mut st.lost, false, false, false, false);
+            self.settle_by_quote(quote, |st| &mut st.reclaiming, false, false, false, false);
+        }
+        let others = if restores.is_some() {
+            F::RefusedQuoteSettlesAnyLedger
+        } else {
+            F::SecondQuoteSettlesAnyLedger
+        };
+        if self.has(others) {
+            self.settles_other_videos(quote.accepted_upto, quote.spent_total);
+        }
+        if self.has(F::RefusedQuoteSettlesOtherLive) {
+            self.settles_other_live(quote.accepted_upto, quote.spent_total);
+        }
+        if ahead {
+            self.pay_ahead = true;
+        }
+        if restores.is_some_and(|f| self.has(f)) {
+            self.standing().unavailable = 0;
+        }
+        if restores.is_some() && self.has(F::RefusedQuoteCountsATry) {
+            self.standing().unavailable += 1;
+        }
+    }
+
+    /// Take `accepted_upto` and `spent_total`, shown against this ledger, as settling
+    /// another video's payment ([`ViewerFlaw::RefusedQuoteSettlesAnyLedger`] and the like
+    /// only: a quote or an ack settles nothing of another video's).
+    fn settles_other_videos(&self, accepted_upto: u64, spent_total: u64) {
+        let (id, spent) = (self.id, self.spent);
+        let shows = |(l, p): &(u64, Pending)| {
+            *l != id && accepted_upto == p.upto && spent_total == spent + p.amount
+        };
+        let mut st = self.standing();
+        if let Some(i) = st.unsettled.iter().position(shows) {
+            let (l, _) = st.unsettled.remove(i);
+            if st.in_flight == Some(l) {
+                st.in_flight = None;
+            }
+        }
+        st.lost.retain(|e| !shows(e));
+        st.reclaiming.retain(|e| !shows(e));
+    }
+
+    /// Reclaim closed sessions' payments at once, this ledger's or every one's
+    /// ([`ViewerFlaw::HelloRefusalReclaims`] and the like only: the honest viewer waits 180 s
+    /// from sending).
+    fn reclaim_unsettled_now(&mut self, all: bool) {
+        let id = self.id;
+        let now: Vec<(u64, Pending)> = {
+            let mut st = self.standing();
+            let (now, keep) = std::mem::take(&mut st.unsettled)
+                .into_iter()
+                .partition(|(l, _)| all || *l == id);
+            st.unsettled = keep;
+            now
+        };
+        for (ledger, p) in now {
+            self.free_slot(ledger);
+            self.reclaim(ledger, p, false);
+        }
+    }
+
+    /// Free the standing's slot while this session's payment is still in flight
+    /// ([`ViewerFlaw::RefusalFreesLiveSlot`] and the like only).
+    fn frees_live_slot(&self, flaw: ViewerFlaw) {
+        if self.pending.is_some() && self.has(flaw) {
+            self.standing().in_flight = None;
+        }
+    }
+
+    /// Start the 180 s of the payment in flight on this session again
+    /// ([`ViewerFlaw::RefusalRestartsLiveWait`] and the like only).
+    fn restart_live_wait(&mut self) {
+        let now = self.clock.now();
+        if let Some(p) = &mut self.pending {
+            p.sent_at = now;
+        }
+    }
+
+    /// What a flawed viewer lets go of on an input that settles nothing (a quote it refuses
+    /// or finds dishonest, a refused request, an unsolicited ack or `rej`, a ledger made for
+    /// another video, a timeout with no payment on the session): this ledger's payment found
+    /// spent, its incomplete reclaim, the slot its closed session's payment holds, or the
+    /// standing's stop. The honest viewer lets go of none of them.
+    fn lets_go(&self, lost: bool, reclaim: bool, slot: bool, stop: bool) {
+        let id = self.id;
+        let unsettled = self.pending.is_none();
+        let mut st = self.standing();
+        if lost {
+            st.lost.retain(|(l, _)| *l != id);
+        }
+        if reclaim {
+            st.reclaiming.retain(|(l, _)| *l != id);
+        }
+        if slot && unsettled && st.in_flight == Some(id) {
+            st.in_flight = None;
+        }
+        if stop {
+            st.stopped = false;
+        }
+    }
+
+    /// As [`MockViewer::lets_go`], for the entries of every ledger `of` picks: the slot is
+    /// freed when one of them holds it with a closed session's payment.
+    fn lets_go_of(
+        &self,
+        of: impl Fn(u64) -> bool,
+        lost: bool,
+        reclaim: bool,
+        slot: bool,
+        stop: bool,
+    ) {
+        let mut st = self.standing();
+        if lost {
+            st.lost.retain(|(l, _)| !of(*l));
+        }
+        if reclaim {
+            st.reclaiming.retain(|(l, _)| !of(*l));
+        }
+        if slot
+            && let Some(l) = st.in_flight
+            && of(l)
+            && st.unsettled.iter().any(|(x, _)| *x == l)
+        {
+            st.in_flight = None;
+        }
+        if stop {
+            st.stopped = false;
+        }
+    }
+
+    /// Start the 180 s of this ledger's closed session's payment again, or of every
+    /// ledger's ([`ViewerFlaw::RefusedQuoteRestartsWait`] and the like only: the honest
+    /// viewer counts them from sending).
+    fn restart_wait(&self, all: bool) {
+        let (now, id) = (self.clock.now(), self.id);
+        for (l, p) in &mut self.standing().unsettled {
+            if all || *l == id {
+                p.sent_at = now;
+            }
+        }
+    }
+
+    /// Take `token`'s proofs back, as this viewer does.
+    fn take_back(&self, token: &str, retry: bool) -> Reclaim {
+        if self.has(ViewerFlaw::NoReclaim) {
+            return Reclaim::All;
+        }
+        if self.has(ViewerFlaw::ReclaimsFirstProofOnly) {
+            self.net.claim_first(token);
+            return Reclaim::All;
+        }
+        let (first, expired_code) = self
+            .net
+            .reclaim_as(token, self.has(ViewerFlaw::ExpiredCheckDownIsUnspent));
+        let outcome = match first {
+            // Refused 12003 with an input pending: the request that reserved it may still
+            // sign, so the reclaim is incomplete (below), never lost to the expiry.
+            Reclaim::Pending if expired_code && self.has(ViewerFlaw::ExpiredPendingIsLost) => {
+                Reclaim::Expired
+            }
+            Reclaim::Pending
+                if !expired_code
+                    && self.has(ViewerFlaw::PendingBesideSpentAwaits)
+                    && self.net.claimed_any(token) =>
+            {
+                Reclaim::SomeSpent
+            }
+            // Spent may be this watcher's own reclaim, gone through unanswered: a restore
+            // of its outputs shows which.
+            Reclaim::SomeSpent
+                if !self.has(ViewerFlaw::ReclaimNoRestore)
+                    && !(self.quote.is_none() && self.has(ViewerFlaw::NoSessionSkipsRestore)) =>
+            {
+                match self
+                    .net
+                    .restore_reclaim(token, self.has(ViewerFlaw::ReclaimRestoreAny))
+                {
+                    Some(true) => Reclaim::All,
+                    // Refused because a keyset expired, with every spent input its own (its
+                    // reclaim of the good proofs, answer lost): the rest, every one unspent,
+                    // are decided per proof, below.
+                    Some(false)
+                        if expired_code
+                            && !self.has(ViewerFlaw::ExpiredRestoreNeedsEveryProof)
+                            && (self.net.restore_spent_own(token) == Some(true)
+                                || (self.has(ViewerFlaw::ExpiredSpentAnyOwn)
+                                    && self.net.restore_reclaim(token, true) == Some(true))) =>
+                    {
+                        Reclaim::Expired
+                    }
+                    // Refused because a keyset expired, with a spent input not its own: it
+                    // awaits a quote, and still takes back the inputs left unspent and not
+                    // listed expired, as it does when no keyset has expired. While those
+                    // cannot be taken back yet, the reclaim is incomplete.
+                    Some(false)
+                        if expired_code && !self.has(ViewerFlaw::ExpiredForeignKeepsRest) =>
+                    {
+                        match self.net.reclaim_unexpired(token) {
+                            Reclaim::Pending if self.has(ViewerFlaw::ForeignPendingAwaits) => {
+                                Reclaim::SomeSpent
+                            }
+                            Reclaim::Blocked | Reclaim::Pending
+                                if !self.has(ViewerFlaw::ExpiredForeignBlockedAwaits) =>
+                            {
+                                Reclaim::Blocked
+                            }
+                            _ => Reclaim::SomeSpent,
+                        }
+                    }
+                    Some(false) => Reclaim::SomeSpent,
+                    None if self.quote.is_none()
+                        && self.has(ViewerFlaw::NoSessionRestoreDownIsBack) =>
+                    {
+                        Reclaim::All
+                    }
+                    None if self.quote.is_none()
+                        && self.has(ViewerFlaw::NoSessionRestoreDownIsSpent) =>
+                    {
+                        Reclaim::SomeSpent
+                    }
+                    None if self.has(ViewerFlaw::ReclaimRestoreDownIsBack) => Reclaim::All,
+                    None if self.has(ViewerFlaw::ReclaimRestoreDownIsSpent) => Reclaim::SomeSpent,
+                    None => Reclaim::Blocked,
+                }
+            }
+            outcome => outcome,
+        };
+        let no_session = self.quote.is_none();
+        match outcome {
+            Reclaim::Expired if no_session && self.has(ViewerFlaw::NoSessionExpiredIsSpent) => {
+                Reclaim::SomeSpent
+            }
+            Reclaim::Pending if no_session && self.has(ViewerFlaw::NoSessionPendingIsSpent) => {
+                Reclaim::SomeSpent
+            }
+            Reclaim::Expired if no_session && self.has(ViewerFlaw::NoSessionExpiredRetried) => {
+                Reclaim::Blocked
+            }
+            Reclaim::SomeSpent
+                if self.has(ViewerFlaw::IgnoresReclaimOutcome)
+                    || (retry && self.has(ViewerFlaw::RetryIgnoresSpent)) =>
+            {
+                Reclaim::All
+            }
+            // Refused as pending: nothing was taken back yet, and nothing is lost yet
+            // either. It is retried like a reclaim the mint did not answer.
+            Reclaim::Pending if self.has(ViewerFlaw::ReclaimPendingIsSpent) => Reclaim::SomeSpent,
+            Reclaim::Expired if self.has(ViewerFlaw::ExpiredReclaimRetried) => Reclaim::Blocked,
+            // Decided per proof, by the mint's listing: those under an expired keyset are
+            // lost to the expiry, the rest taken back in a reclaim of their own. None listed
+            // expired: the 12003 was the reclaim's outputs' (an expired active keyset), so
+            // it is incomplete, retried once the mint has a keyset to take them back to.
+            Reclaim::Expired if !self.has(ViewerFlaw::ExpiredByCodeAlone) => {
+                let (expired, good) = self.net.proofs_listing(token);
+                if expired > 0 && self.has(ViewerFlaw::RepayAfterExpiryInUnitProofs) {
+                    self.standing().units_next = true;
+                }
+                if expired > 0 {
+                    self.standing().lost_to_expiry = true;
+                }
+                let outputs_first =
+                    self.has(ViewerFlaw::OutputsExpiryFirst) && self.net.active_expired();
+                let decided = if outputs_first || expired == 0 {
+                    Reclaim::Blocked
+                } else if good == 0
+                    || self.has(ViewerFlaw::ExpiredTokenWhole)
+                    || (no_session && self.has(ViewerFlaw::NoSessionExpiredTokenWhole))
+                {
+                    Reclaim::Expired
+                } else if self.has(ViewerFlaw::ExpiredNeedsEveryProof) {
+                    Reclaim::Blocked
+                } else if self.has(ViewerFlaw::MixedActiveExpiredWritesOff)
+                    && self.net.active_expired()
+                {
+                    Reclaim::Expired
+                } else {
+                    self.net.reclaim_unexpired(token)
+                };
+                if decided == Reclaim::Expired && self.has(ViewerFlaw::PaysWithExpiredProofs) {
+                    let lost = self.net.proofs_listed_expired(token);
+                    self.standing().expired_kept.extend(lost);
+                }
+                decided
+            }
+            Reclaim::Pending => {
+                self.standing().refused_pending = true;
+                Reclaim::Blocked
+            }
+            outcome => outcome,
+        }
+    }
+
+    /// Reclaim payment `p` of `ledger`, and say how it ended. Proofs found spent leave it
+    /// awaiting a quote on that ledger; a mint that is down leaves the reclaim to finish
+    /// later. Either way nothing is paid to the seeder until then.
+    fn reclaim(&mut self, ledger: u64, p: Pending, retry: bool) -> Reclaim {
+        let no_session = self.quote.is_none();
+        let outcome = self.take_back(&p.token, retry);
+        match outcome {
+            Reclaim::All | Reclaim::Expired
+                if no_session && self.has(ViewerFlaw::NoSessionReclaimRestoresTries) =>
+            {
+                self.standing().unavailable = 0;
+            }
+            // Expired: lost to the expiry, not taken by the seeder. Nothing is left to wait
+            // for, and the seeder is owed no blame: the watcher pays again.
+            Reclaim::All | Reclaim::Expired => {}
+            Reclaim::SomeSpent if no_session && self.has(ViewerFlaw::NoSessionSpentIsBack) => {}
+            Reclaim::SomeSpent if no_session && self.has(ViewerFlaw::NoSessionLostUnderSelf) => {
+                self.standing().lost.push((self.id, p));
+            }
+            Reclaim::Blocked | Reclaim::Pending
+                if no_session && self.has(ViewerFlaw::NoSessionBlockedDropped) => {}
+            Reclaim::Blocked | Reclaim::Pending
+                if no_session
+                    && self.halted()
+                    && self.has(ViewerFlaw::StoppedNoSessionBlockedDropped) => {}
+            Reclaim::SomeSpent if self.has(ViewerFlaw::LostIsFinal) => self.halt(),
+            Reclaim::SomeSpent => {
+                let now = self.clock.now();
+                let mut st = self.standing();
+                st.lost_at = now;
+                st.lost.push((ledger, p));
+            }
+            Reclaim::Blocked | Reclaim::Pending => {
+                let mut st = self.standing();
+                if retry && self.has(ViewerFlaw::RetryCountsATry) {
+                    st.unavailable += 1;
+                }
+                st.reclaiming.push((ledger, p));
+            }
+        }
+        outcome
+    }
+
+    fn waited(&self, p: &Pending) -> bool {
+        let wait = if self.has(ViewerFlaw::TimeoutAt179) {
+            ANSWER_WAIT.as_secs() - 1
+        } else {
+            ANSWER_WAIT.as_secs()
+        };
+        self.clock.now() >= p.sent_at + wait
+    }
+
+    /// Finish incomplete reclaims, and reclaim payments closed sessions left unsettled
+    /// once they are 180 s old, whichever of the standing's ledgers they belong to.
+    fn catch_up(&mut self, last: bool) {
+        let own = self.has(ViewerFlaw::ReclaimPerVideo)
+            || (self.quote.is_none() && self.has(ViewerFlaw::NoSessionRetriesOwnOnly))
+            || (self.halted() && self.has(ViewerFlaw::StoppedRetriesOwnOnly));
+        let retry: Vec<(u64, Pending)> = {
+            let mut st = self.standing();
+            let (retry, keep) = std::mem::take(&mut st.reclaiming)
+                .into_iter()
+                .partition(|(l, _)| !own || *l == self.id);
+            st.reclaiming = keep;
+            retry
+        };
+        for (ledger, p) in retry {
+            let ledger = if self.has(ViewerFlaw::RetryAsSelf)
+                || (self.quote.is_none() && self.has(ViewerFlaw::NoSessionRetryAsSelf))
+            {
+                self.id
+            } else {
+                ledger
+            };
+            if self.has(ViewerFlaw::RetryResetsBudget) {
+                match self.take_back(&p.token, true) {
+                    Reclaim::All | Reclaim::Expired => self.standing().unavailable = 0,
+                    Reclaim::SomeSpent => self.standing().lost.push((ledger, p)),
+                    Reclaim::Blocked | Reclaim::Pending => {
+                        self.standing().reclaiming.push((ledger, p));
+                    }
+                }
+                continue;
+            }
+            let (caught_up, by_ack, token) = (p.caught_up, p.by_ack, p.token.clone());
+            self.standing().lost_to_expiry = false;
+            let outcome = self.reclaim(ledger, p, true);
+            if outcome == Reclaim::All && self.has(ViewerFlaw::RepayAfterRetryInUnitProofs) {
+                self.standing().units_next = true;
+            }
+            if caught_up && outcome == Reclaim::All {
+                let place = self.place_of(ledger);
+                self.note(ledger, Past::Caught(place, Outcome::Late));
+            }
+            if by_ack
+                && outcome == Reclaim::SomeSpent
+                && self.has(ViewerFlaw::WrongAckSpentForgotten)
+            {
+                self.standing().lost.retain(|(_, q)| q.token != token);
+            }
+        }
+        if self.has(ViewerFlaw::StoppedSkipsUnsettled) && self.halted() {
+            return;
+        }
+        if self.has(ViewerFlaw::StoppedNoSessionSkipsUnsettled)
+            && self.halted()
+            && self.quote.is_none()
+        {
+            return;
+        }
+        let own = self.has(ViewerFlaw::CatchUpOwnOnly)
+            || (self.quote.is_none() && self.has(ViewerFlaw::NoSessionReclaimsOwnOnly));
+        let early = self.has(ViewerFlaw::CatchUpIgnoresWait)
+            || (last && self.has(ViewerFlaw::LastPayCatchUpIgnoresWait))
+            || (self.made_with_unsettled && self.has(ViewerFlaw::NewLedgerCatchUpIgnoresWait))
+            || (self.has(ViewerFlaw::StoppedIgnoresWait) && self.halted());
+        // Early for this ledger's own payments, or for the other videos' (flaws).
+        let early_own = (self.has(ViewerFlaw::StoppedIgnoresOwnWait) && self.halted())
+            || (self.has(ViewerFlaw::StoppedCatchUpFromQuote)
+                && self.halted()
+                && self.clock.now() >= self.quoted_at + ANSWER_WAIT.as_secs())
+            || (self.has(ViewerFlaw::StoppedCatchUpFromLastRequest)
+                && self.halted()
+                && self.clock.now() >= self.last_request_at + ANSWER_WAIT.as_secs())
+            || (self.quote.is_none()
+                && !self.halted()
+                && ((self.has(ViewerFlaw::NoSessionCatchUpFromLastRequest)
+                    && self.clock.now() >= self.last_request_at + ANSWER_WAIT.as_secs())
+                    || (self.has(ViewerFlaw::NoSessionCatchUpFromQuote)
+                        && self.clock.now() >= self.quoted_at + ANSWER_WAIT.as_secs())));
+        let early_own = early_own
+            || (self.has(ViewerFlaw::OwnSessionCatchUpFromRefusal)
+                && self.quote.is_some()
+                && !self.halted()
+                && self.refused_at > 0
+                && self.clock.now() >= self.refused_at + ANSWER_WAIT.as_secs());
+        let own_from_request = self.has(ViewerFlaw::OwnSessionCatchUpFromLastRequest)
+            && self.quote.is_some()
+            && !self.halted();
+        // Another video's payment counted from its last request (flaws).
+        let others_from_request = !self.halted()
+            && if self.quote.is_some() {
+                self.has(ViewerFlaw::OtherSessionCatchUpFromLastRequest)
+            } else {
+                self.has(ViewerFlaw::OtherNoSessionCatchUpFromLastRequest)
+            };
+        let early_others = (self.has(ViewerFlaw::NoSessionIgnoresOthersWait)
+            && self.quote.is_none())
+            || (self.quoted_at > 0
+                && self.clock.now() >= self.quoted_at + ANSWER_WAIT.as_secs()
+                && match (self.halted(), self.quote.is_some()) {
+                    (true, true) => self.has(ViewerFlaw::StoppedOtherCatchUpFromQuote),
+                    (true, false) => self.has(ViewerFlaw::StoppedOtherNoSessionCatchUpFromQuote),
+                    (false, true) => self.has(ViewerFlaw::OtherSessionCatchUpFromQuote),
+                    (false, false) => self.has(ViewerFlaw::OtherNoSessionCatchUpFromQuote),
+                });
+        let old: Vec<(u64, Pending)> = {
+            let mut st = self.standing();
+            let (old, keep) = std::mem::take(&mut st.unsettled)
+                .into_iter()
+                .partition(|(l, p)| {
+                    let early = early
+                        || (p.last
+                            && self.has(ViewerFlaw::LastPayCatchUpFromRequest)
+                            && self.clock.now() >= p.requested_at + ANSWER_WAIT.as_secs())
+                        || if *l == self.id {
+                            early_own
+                                || (own_from_request
+                                    && self.clock.now() >= p.requested_at + ANSWER_WAIT.as_secs())
+                        } else {
+                            early_others
+                                || (others_from_request
+                                    && self.clock.now() >= p.requested_at + ANSWER_WAIT.as_secs())
+                        };
+                    (!own || *l == self.id) && (early || self.waited(p))
+                });
+            st.unsettled = keep;
+            old
+        };
+        for (ledger, p) in old {
+            if !(self.quote.is_none() && self.has(ViewerFlaw::NoSessionReclaimKeepsSlot)) {
+                self.free_slot(ledger);
+            }
+            let owner = if self.has(ViewerFlaw::CatchUpFilesUnderSelf) {
+                self.id
+            } else {
+                ledger
+            };
+            if self.has(ViewerFlaw::CatchUpBlockedAsSelf) {
+                match self.take_back(&p.token, false) {
+                    Reclaim::All | Reclaim::Expired => {}
+                    Reclaim::SomeSpent => self.standing().lost.push((owner, p)),
+                    Reclaim::Blocked | Reclaim::Pending => {
+                        self.standing().reclaiming.push((self.id, p));
+                    }
+                }
+                continue;
+            }
+            // An unanswered payment with every proof back, or lost to the expiry, uses no try,
+            // and restores none (flaws do).
+            let (place, token) = (self.place_of(ledger), p.token.clone());
+            self.standing().lost_to_expiry = false;
+            let outcome = self.reclaim(owner, p, false);
+            if outcome == Reclaim::All && self.has(ViewerFlaw::RepayAfterReclaimInUnitProofs) {
+                self.standing().units_next = true;
+            }
+            // How it ended, and where (read by the defects planted on one history only).
+            let lost = std::mem::take(&mut self.standing().lost_to_expiry);
+            match outcome {
+                Reclaim::All | Reclaim::Expired if lost => {
+                    self.note(ledger, Past::Caught(place, Outcome::Expired));
+                }
+                Reclaim::All => self.note(ledger, Past::Caught(place, Outcome::Whole)),
+                Reclaim::Blocked | Reclaim::Pending => {
+                    for (_, q) in &mut self.standing().reclaiming {
+                        q.caught_up |= q.token == token;
+                    }
+                }
+                Reclaim::Expired | Reclaim::SomeSpent => {}
+            }
+            if matches!(outcome, Reclaim::All | Reclaim::Expired) {
+                if self.has(ViewerFlaw::UnansweredBackCountsATry)
+                    || (outcome == Reclaim::Expired
+                        && self.has(ViewerFlaw::UnansweredExpiredCountsATry))
+                {
+                    self.standing().unavailable += 1;
+                }
+                if self.has(ViewerFlaw::UnsettledBackResetsTries) {
+                    self.standing().unavailable = 0;
+                }
+            }
+        }
+    }
+
+    /// Whether the standing has used its `mint-unavailable` tries for this session.
+    fn out_of_tries(&self) -> bool {
+        let used = if self.has(ViewerFlaw::UnavailablePerLedger) {
+            self.unavailable_here
+        } else {
+            self.standing().unavailable
+        };
+        used >= UNAVAILABLE_BUDGET && !self.has(ViewerFlaw::NoUnavailableBudget)
+    }
+
+    /// The payment to make now, if any: `licensed` to pay ahead by a refusal, or `last`, at
+    /// the session's end.
+    fn pay_when(
+        &mut self,
+        threshold: u64,
+        last: bool,
+        licensed: bool,
+    ) -> Result<Option<Pay>, String> {
+        self.taken_by_another();
+        let stop_holds = !(last && self.has(ViewerFlaw::LastPayIgnoresStop));
+        if self.halted() && stop_holds && self.has(ViewerFlaw::StoppedSkipsReclaim) {
+            return Ok(None);
+        }
+        if self.has(ViewerFlaw::OutOfTriesSkipsReclaim) && self.out_of_tries() {
+            return Ok(None);
+        }
+        // Reclaiming is not paying: a stopped viewer still catches up, and so does one that
+        // holds no session's quote (between sessions, or its `hello` or quote refused).
+        if self.quote.is_some() || !self.has(ViewerFlaw::CatchUpOnlyInSession) {
+            self.catch_up(last);
+        }
+        let Some(q) = self.quote.clone() else {
+            return Ok(None);
+        };
+        let may_ahead = licensed && !last && !self.has(ViewerFlaw::NoPayAhead);
+        let reclaim_blocks = self.reclaim_incomplete()
+            && !(may_ahead && self.has(ViewerFlaw::PayAheadIgnoresReclaim))
+            && !(last && self.has(ViewerFlaw::LastPayIgnoresReclaim));
+        // The standing's one slot: this ledger's payment in flight or left unsettled, or
+        // another video's.
+        let slot = self.standing().in_flight;
+        let own = slot == Some(self.id) || self.pending.is_some();
+        let own_blocks = own && !(last && self.has(ViewerFlaw::LastPayIgnoresOwnPending));
+        let other_blocks = slot.is_some_and(|l| l != self.id)
+            && !self.has(ViewerFlaw::InFlightPerVideo)
+            && !(last && self.has(ViewerFlaw::LastPayIgnoresOtherInFlight));
+        let pending_blocks = (own_blocks || other_blocks)
+            && !(may_ahead && self.has(ViewerFlaw::PayAheadIgnoresPending));
+        let awaiting = self.awaiting(self.has(ViewerFlaw::StopPerVideo));
+        let out_of_tries = self.out_of_tries()
+            && !(may_ahead && self.has(ViewerFlaw::PayAheadSkipsBudget))
+            && !(last && self.has(ViewerFlaw::LastPayIgnoresBudget));
+        let stop_blocks = self.halted()
+            && stop_holds
+            && !(may_ahead && self.has(ViewerFlaw::PayAheadIgnoresStop));
+        if other_blocks && (may_ahead || self.requested.saturating_sub(self.acked) >= threshold) {
+            self.behind_other = true;
+        }
+        if stop_blocks || awaiting || reclaim_blocks || pending_blocks {
+            // The licence ended as this call began (flaws keep it, by what stopped it paying).
+            let closed =
+                slot.is_some_and(|l| self.standing().unsettled.iter().any(|(x, _)| *x == l));
+            let keeps = (self.pending.is_some() && self.has(ViewerFlaw::LicenceOutlivesOwnPayment))
+                || (other_blocks && !closed && self.has(ViewerFlaw::LicenceOutlivesOtherPayment))
+                || (closed && self.has(ViewerFlaw::LicenceOutlivesUnsettled))
+                || (reclaim_blocks && self.has(ViewerFlaw::LicenceOutlivesReclaim))
+                || (awaiting && self.has(ViewerFlaw::LicenceOutlivesAwaiting));
+            self.pay_ahead |= licensed && keeps;
+            return Ok(None);
+        }
+        if out_of_tries {
+            self.pay_ahead |= licensed && self.has(ViewerFlaw::LicenceOutlivesTries);
+            return Ok(None);
+        }
+        let unpaid = self.requested.saturating_sub(self.acked);
+        let credit = self.acked.saturating_sub(self.requested);
+        let credit = if self.slips(PaySlip::AheadLessOthersCredit) {
+            credit + self.others().1
+        } else {
+            credit
+        };
+        if credit > 0 && !last && self.has(ViewerFlaw::DueErrsOnCredit) {
+            return Err("the ledger holds credit".into());
+        }
+        // Half the session's quote's window (the first session's, for a flaw).
+        let q = match self.first_window {
+            Some(window) if self.has(ViewerFlaw::PayAheadWindowOfFirstQuote) => {
+                Quote { window, ..q }
+            }
+            _ => q,
+        };
+        let q = match self.first_pay_window {
+            Some(window) if self.has(ViewerFlaw::PayAheadWindowOfFirstPayment) => {
+                Quote { window, ..q }
+            }
+            _ => q,
+        };
+        let unavailable = self.standing().unavailable > 0;
+        let ahead = if !may_ahead {
+            0
+        } else if self.has(ViewerFlaw::PayAheadUnbounded)
+            || (self.id != 0 && self.has(ViewerFlaw::PayAheadIgnoresCreditOnSibling))
+            || (self.resumed && self.has(ViewerFlaw::ResumedCreditAheadIgnoresCredit))
+        {
+            q.window / 2
+        } else if self.has(ViewerFlaw::PayAheadRoundsUp)
+            || (unavailable && self.has(ViewerFlaw::PayAheadRoundsUpAfterUnavailable))
+            || (self.id != 0 && self.has(ViewerFlaw::PayAheadRoundsUpOnSibling))
+            || self.slips(PaySlip::AheadRoundsUp)
+        {
+            q.window.div_ceil(2).saturating_sub(credit)
+        } else {
+            (q.window / 2).saturating_sub(credit)
+        };
+        if ahead == 0 && (unpaid == 0 || unpaid < threshold) {
+            self.pay_ahead |= licensed && self.has(ViewerFlaw::LicenceOutlivesCredit);
+            return Ok(None);
+        }
+        let extra = u64::from(self.has(ViewerFlaw::PaysAhead));
+        let upto = self.requested.max(self.acked) + ahead + extra;
+        if upto <= self.acked {
+            return Ok(None);
+        }
+        let price = if self.has(ViewerFlaw::PaysAtCap)
+            || (ahead > 0 && self.has(ViewerFlaw::PayAheadAtCap))
+            || (self.id != 0 && self.has(ViewerFlaw::SiblingPaysAtCap))
+            || (self.resumed && self.has(ViewerFlaw::ResumedPaysAtCap))
+        {
+            self.max_price.max(q.price_per_chunk)
+        } else if let (Some(first), true) =
+            (self.first_price, self.has(ViewerFlaw::PriceOfFirstQuote))
+        {
+            first
+        } else if let (Some(last), true) = (
+            self.standing().last_price,
+            self.has(ViewerFlaw::PriceOfLastQuoteTaken),
+        ) {
+            last
+        } else {
+            q.price_per_chunk
+        };
+        let amount = (upto - self.acked)
+            .checked_mul(price)
+            .ok_or("amount overflows")?;
+        let kept = if self.has(ViewerFlaw::PaysWithExpiredProofs) {
+            std::mem::take(&mut self.standing().expired_kept)
+        } else {
+            Vec::new()
+        };
+        let (mut token, mut older) = self.net.draw(&self.mint, amount, &kept);
+        // Proofs the mint lists under an expired keyset are worth nothing: never paid with.
+        // It drops those it holds, keeps the good ones it drew, and pays with the rest; with
+        // too few good ones (the mint's active keyset expired), it pays nothing until the
+        // mint rotates, and keeps them.
+        let checks = !self.has(ViewerFlaw::PaysWithExpiredProofs)
+            && !(last && self.has(ViewerFlaw::LastPayWithExpiredProofs))
+            && !(self.has(ViewerFlaw::ListingOnlyWhileActiveExpired) && !self.net.active_expired())
+            && !(last
+                && self.has(ViewerFlaw::LastPayListingOnlyWhileActiveExpired)
+                && !self.net.active_expired());
+        if checks && self.net.proofs_listing(&token).0 > 0 {
+            self.net.put_back(older);
+            if self.has(ViewerFlaw::DropsHeldOlderOnAnyExpired) {
+                self.net.drop_older_held();
+            }
+            self.net.drop_expired_held();
+            (token, older) = self.net.draw(&self.mint, amount, &[]);
+            if self.net.proofs_listing(&token).0 > 0 {
+                self.net.put_back(older);
+                self.pay_ahead |= licensed && self.has(ViewerFlaw::LicenceOutlivesExpiredProofs);
+                return Ok(None);
+            }
+        }
+        // At most 64 proofs (NFX-07 §3 step 1): a selection holding more is swapped to fewer
+        // first, here to fresh proofs, one per set bit. The flaws pay one-sat proofs, as a
+        // wallet holding only small ones selects them.
+        let units = (self.answered_at > self.quoted_at
+            && self.has(ViewerFlaw::AckedPayInUnitProofs))
+            || (last && self.resumed && self.has(ViewerFlaw::LastPayOnResumeInUnitProofs))
+            || (ahead > 0
+                && unavailable
+                && self.has(ViewerFlaw::AheadAfterUnavailableInUnitProofs))
+            || (ahead > 0 && self.id != 0 && self.has(ViewerFlaw::AheadOnSiblingInUnitProofs))
+            || std::mem::take(&mut self.standing().units_next)
+            || (self.held_credit && self.has(ViewerFlaw::CreditPayInUnitProofs))
+            || (self.id != 0 && self.has(ViewerFlaw::SiblingPaysInUnitProofs))
+            || self.has(ViewerFlaw::PaysInUnitProofs)
+            || (last && self.has(ViewerFlaw::LastPayInUnitProofs))
+            || (ahead > 0 && self.has(ViewerFlaw::PayAheadInUnitProofs))
+            || (amount <= 65 && self.has(ViewerFlaw::SixtyFiveProofs))
+            || self.slips(PaySlip::Units);
+        if units && older == 0 && kept.is_empty() {
+            token = self.net.unit_token(&self.mint, amount);
+        } else if self.net.proof_count(&token)
+            > MAX_PROOFS + usize::from(self.has(ViewerFlaw::MixedSelectionPastSixtyFive))
+            && !self.has(ViewerFlaw::MixedSelectionUnswapped)
+            && !(last && self.has(ViewerFlaw::LastPayMixedUnswapped))
+            && !(ahead > 0 && self.has(ViewerFlaw::AheadMixedUnswapped))
+            && !(self.id != 0 && self.has(ViewerFlaw::SiblingMixedUnswapped))
+        {
+            self.net.put_back(older);
+            token = self.net.issue(&self.mint, amount);
+        }
+        let sent_at = match self.anchor(ahead > 0, last) {
+            Some(t) => {
+                self.rej_at = None;
+                t
+            }
+            None => self.stamp(threshold, ahead > 0),
+        };
+        // From the session's quote, or the last request, for a defect planted on one history.
+        let sent_at = if self.slips(PaySlip::WaitFromQuote) {
+            self.quoted_at
+        } else if self.slips(PaySlip::WaitFromRequest) {
+            self.last_request_at
+        } else {
+            sent_at
+        };
+        self.behind_other = false;
+        if last && self.has(ViewerFlaw::LastPaymentEndsLicence) {
+            self.pay_ahead = false;
+        }
+        if self.first_pay_window.is_none() {
+            self.first_pay_window = Some(q.window);
+        }
+        self.set_pending(Pending {
+            upto,
+            amount,
+            token: token.clone(),
+            sent_at,
+            spent: self.spent,
+            requested_at: self.last_request_at,
+            last,
+            caught_up: false,
+            by_ack: false,
+        });
+        Ok(Some(Pay {
+            upto_chunk: upto,
+            token,
+        }))
+    }
+
+    /// An earlier input the flaws stamp a payment with by how it is made (`ahead`, `last`)
+    /// and where: the last request, or the session's quote.
+    fn anchor(&self, ahead: bool, last: bool) -> Option<u64> {
+        let due = !ahead && !last;
+        let unavailable = self.standing().unavailable > 0;
+        let from_request = (due && self.has(ViewerFlaw::DueWaitFromLastRequest))
+            || (last && self.has(ViewerFlaw::LastPayWaitFromLastRequest))
+            || (ahead && self.has(ViewerFlaw::AheadWaitFromLastRequest))
+            || (self.id != 0 && self.has(ViewerFlaw::SiblingPayWaitFromLastRequest))
+            || (self.held_credit && self.has(ViewerFlaw::CreditPayWaitFromLastRequest));
+        let from_quote = (self.resumed && self.has(ViewerFlaw::ResumedPayWaitFromQuote))
+            || (unavailable && self.has(ViewerFlaw::RepayWaitFromQuote))
+            || (last && self.has(ViewerFlaw::LastPayWaitFromQuote));
+        if from_request {
+            Some(self.last_request_at)
+        } else if from_quote {
+            Some(self.quoted_at)
+        } else {
+            None
+        }
+    }
+
+    /// When a payment made now is sent: now. The flaws stamp it with an earlier input: the
+    /// last request, the one that brought the unpaid count to `threshold`, the `rej` of the
+    /// payment before, or the refusal it pays ahead after.
+    fn stamp(&mut self, threshold: u64, ahead: bool) -> u64 {
+        let now = self.clock.now();
+        let rej_at = self.rej_at.take();
+        if self.has(ViewerFlaw::WaitFromLastRequest) {
+            self.last_request_at
+        } else if self.has(ViewerFlaw::WaitFromDueRequest) {
+            usize::try_from(self.acked + threshold)
+                .ok()
+                .and_then(|n| self.request_times.get(n.saturating_sub(1)))
+                .copied()
+                .unwrap_or(now)
+        } else if let Some(t) = rej_at.filter(|_| self.has(ViewerFlaw::WaitFromLastRej)) {
+            t
+        } else if ahead && self.has(ViewerFlaw::WaitFromRefusal) {
+            self.refused_at
+        } else {
+            now
+        }
+    }
+
+    /// Settle this ledger's entry in `list` (of the standing) if `quote` shows it exactly.
+    fn settle_by_quote(
+        &mut self,
+        quote: &Quote,
+        pick: fn(&mut Standing) -> &mut Vec<(u64, Pending)>,
+        upto_alone: bool,
+        spent_alone: bool,
+        any_ledger: bool,
+        upto_above: bool,
+    ) -> bool {
+        let found = {
+            let mut st = self.standing();
+            pick(&mut st)
+                .iter()
+                .find(|(l, _)| any_ledger || *l == self.id)
+                .map(|(l, p)| (*l, p.clone()))
+        };
+        let Some((ledger, p)) = found else {
+            return false;
+        };
+        let upto_ok = quote.accepted_upto == p.upto || (upto_above && quote.accepted_upto > p.upto);
+        let spent_ok = if self.has(ViewerFlaw::SettleIgnoresLedgerSpent) {
+            quote.spent_total >= p.amount
+        } else {
+            quote.spent_total == self.spent + p.amount
+        };
+        let settles = if upto_alone {
+            upto_ok
+        } else if spent_alone {
+            spent_ok
+        } else {
+            upto_ok && spent_ok
+        };
+        if !settles {
+            return false;
+        }
+        self.acked = quote.accepted_upto;
+        self.spent = quote.spent_total;
+        pick(&mut self.standing()).retain(|(l, _)| *l != ledger);
+        true
+    }
+}
+
+impl Viewer for MockViewer {
+    fn sibling(&self) -> Self {
+        self.frees_live_slot(ViewerFlaw::SiblingFreesLiveSlot);
+        if self.has(ViewerFlaw::SiblingWhileLiveClearsStop) && self.live_in_flight() {
+            self.standing().stopped = false;
+        }
+        self.lets_go(
+            self.has(ViewerFlaw::SiblingForgivesLost),
+            self.has(ViewerFlaw::SiblingDropsReclaim),
+            self.has(ViewerFlaw::SiblingFreesSlot),
+            false,
+        );
+        if self.has(ViewerFlaw::SiblingRestartsWait) {
+            self.restart_wait(true);
+        }
+        let id = {
+            let mut st = self.standing();
+            st.next_ledger += 1;
+            if self.has(ViewerFlaw::SiblingRestoresTries) {
+                st.unavailable = 0;
+            }
+            st.next_ledger
+        };
+        let mut other = Self::ledger(
+            self.net.clone(),
+            self.clock.clone(),
+            &self.mint,
+            self.max_price,
+            self.flaw,
+            id,
+            if self.has(ViewerFlaw::SiblingAfterStopUnstopped) && self.standing().stopped {
+                Arc::new(Mutex::new(Standing::default()))
+            } else {
+                self.standing.clone()
+            },
+        );
+        other.pay_ahead = self.has(ViewerFlaw::SiblingPaysAhead);
+        other.made_with_unsettled = !self.standing().unsettled.is_empty();
+        other
+    }
+
+    fn quote(&mut self, quote: &Quote) -> Result<(), String> {
+        if self.has(ViewerFlaw::QuoteResetsFirst) {
+            self.standing().unavailable = 0;
+        }
+        let read_first = self.has(ViewerFlaw::SecondQuoteReadFirst);
+        if self.quote.is_some() && !self.has(ViewerFlaw::AcceptsSecondQuote) && !read_first {
+            if self.has(ViewerFlaw::SecondQuoteRestartsLiveWait) {
+                self.restart_live_wait();
+            }
+            self.clears_stop_in_flight(ViewerFlaw::SecondQuoteInFlightClearsStop);
+            if self.has(ViewerFlaw::SecondQuoteEndsLicence) {
+                self.pay_ahead = false;
+            }
+            let (adopts_window, adopts_price) = (
+                self.has(ViewerFlaw::SecondQuoteAdoptsWindow),
+                self.has(ViewerFlaw::SecondQuoteAdoptsPrice)
+                    && quote.price_per_chunk <= self.max_price,
+            );
+            if let Some(q) = self.quote.as_mut() {
+                if adopts_window {
+                    q.window = quote.window;
+                }
+                if adopts_price {
+                    q.price_per_chunk = quote.price_per_chunk;
+                }
+            }
+            self.on_refused_quote(Refusal::Second, quote);
+            return Err("one quote per session".into());
+        }
+        let resumed = self.requested > 0 || self.acked > 0;
+        let skip_cap = resumed && self.has(ViewerFlaw::SkipsCapOnResume);
+        if quote.price_per_chunk > self.max_price && !skip_cap {
+            if self.has(ViewerFlaw::CapRefusalStops)
+                || (resumed && self.has(ViewerFlaw::ResumedCapRefusalStops))
+            {
+                self.halt();
+            }
+            self.clears_stop_beside_live(ViewerFlaw::OtherPriceRefusalWhileLiveClearsStop);
+            self.on_refused_quote(Refusal::Price, quote);
+            return Err("price above this viewer's cap".into());
+        }
+        let skip_ceiling = resumed && self.has(ViewerFlaw::SkipsCeilingOnResume);
+        if quote.window > WINDOW_CEILING && !self.has(ViewerFlaw::NoWindowCeiling) && !skip_ceiling
+        {
+            if resumed && self.has(ViewerFlaw::ResumedCeilingRefusalStops) {
+                self.halt();
+            }
+            self.on_refused_quote(Refusal::Window, quote);
+            return Err("window above this viewer's ceiling".into());
+        }
+        // Its mint's URL, byte for byte (NFX-07 §2), or as a flaw reads it.
+        let loose = |u: &str| {
+            u.to_ascii_lowercase()
+                .trim_end_matches('/')
+                .replace(":443", "")
+        };
+        let names = |m: &String| {
+            if self.has(ViewerFlaw::QuoteMintByPrefix) {
+                m.starts_with(&self.mint) || self.mint.starts_with(m.as_str())
+            } else if self.has(ViewerFlaw::QuoteMintNormalised) {
+                loose(m) == loose(&self.mint)
+            } else {
+                *m == self.mint
+            }
+        };
+        let holds = if self.has(ViewerFlaw::QuoteNeedsEveryMint) {
+            quote.mints.iter().all(names)
+        } else {
+            quote.mints.iter().any(names)
+        };
+        if !holds && !(resumed && self.has(ViewerFlaw::MintCheckFirstOnly)) {
+            if resumed && self.has(ViewerFlaw::ResumedMintRefusalStops) {
+                self.halt();
+            }
+            self.on_refused_quote(Refusal::Mint, quote);
+            return Err("no mint this viewer holds tokens from".into());
+        }
+        // Stopped or not (a flaw settles nothing once stopped).
+        let settles = !(self.has(ViewerFlaw::StoppedQuoteSettlesNothing) && self.halted());
+        // A quote showing an unsettled payment accepted, both fields, settles it.
+        let unsettled = settles
+            && self.settle_by_quote(
+                quote,
+                |st| &mut st.unsettled,
+                self.has(ViewerFlaw::SettleOnUptoOnly),
+                self.has(ViewerFlaw::SettleOnSpentOnly),
+                self.has(ViewerFlaw::SettleUnsettledAnyLedger),
+                self.has(ViewerFlaw::SettleOnUptoAbove),
+            );
+        if unsettled {
+            self.free_slot(self.id);
+            if self.has(ViewerFlaw::UnsettledSettlingQuoteClearsStop) {
+                self.standing().stopped = false;
+            }
+        }
+        // So does one showing a payment that awaits a quote; one equal to the ledger
+        // leaves it waiting.
+        let lost = settles
+            && self.settle_by_quote(
+                quote,
+                |st| &mut st.lost,
+                self.has(ViewerFlaw::SettleLostOnUpto),
+                self.has(ViewerFlaw::SettleLostOnSpentOnly),
+                self.has(ViewerFlaw::SettleLostAnyLedger),
+                self.has(ViewerFlaw::SettleLostOnUptoAbove),
+            );
+        let mut settled = unsettled || lost;
+        if lost && self.has(ViewerFlaw::SettledLostPayInUnitProofs) {
+            self.standing().units_next = true;
+        }
+        // And one showing a payment whose reclaim is incomplete: the seeder has it, and
+        // the reclaim is cancelled.
+        if !self.has(ViewerFlaw::QuoteIgnoresReclaiming) && settles {
+            let keep = self.has(ViewerFlaw::ReclaimSettleKeepsEntry);
+            let before = keep.then(|| self.standing().reclaiming.clone());
+            let reclaimed = self.settle_by_quote(
+                quote,
+                |st| &mut st.reclaiming,
+                self.has(ViewerFlaw::SettleReclaimingOnUpto),
+                self.has(ViewerFlaw::SettleReclaimingOnSpentOnly),
+                self.has(ViewerFlaw::SettleReclaimingAnyLedger),
+                self.has(ViewerFlaw::SettleReclaimingOnUptoAbove),
+            );
+            settled |= reclaimed;
+            if reclaimed && self.has(ViewerFlaw::ReclaimSettlingQuoteClearsStop) {
+                self.standing().stopped = false;
+            }
+            if reclaimed && self.has(ViewerFlaw::SettledReclaimPayInUnitProofs) {
+                self.standing().units_next = true;
+            }
+            if let Some(entries) = before {
+                self.standing().reclaiming = entries;
+            }
+            if self.has(ViewerFlaw::QuoteAtLedgerDropsReclaim)
+                && (quote.accepted_upto, quote.spent_total) == (self.acked, self.spent)
+            {
+                let id = self.id;
+                self.standing().reclaiming.retain(|(l, _)| *l != id);
+            }
+        }
+        // At most the chunks requested and not refused, whatever was paid for (flaws take
+        // more).
+        let served = if self.has(ViewerFlaw::ServedUpToAcked) {
+            self.requested.max(self.acked)
+        } else if self.has(ViewerFlaw::ServedCountsRefused) {
+            self.sent_requests
+        } else if self.has(ViewerFlaw::ServedCountsSiblingRequests) {
+            self.requested.max(self.standing().requested_all)
+        } else if self.has(ViewerFlaw::ServedUpToOtherAcked) {
+            let id = self.id;
+            let others = self
+                .standing()
+                .acked_by
+                .iter()
+                .filter(|(l, _)| *l != id)
+                .map(|(_, a)| *a)
+                .max();
+            self.requested.max(others.unwrap_or(0))
+        } else if self.has(ViewerFlaw::ServedCountsOtherSent) {
+            let id = self.id;
+            let others: u64 = self
+                .standing()
+                .sent_by
+                .iter()
+                .filter(|(l, _)| *l != id)
+                .map(|(_, n)| *n)
+                .sum();
+            self.requested.max(others)
+        } else if self.has(ViewerFlaw::ServedCountsOtherLive) {
+            let id = self.id;
+            let others = self
+                .standing()
+                .live
+                .iter()
+                .filter(|(l, _)| *l != id)
+                .map(|(_, p)| p.upto)
+                .max();
+            self.requested.max(others.unwrap_or(0))
+        } else if self.has(ViewerFlaw::ServedCountsPaidRefused) {
+            self.requested + self.paid_refused
+        } else if settled && self.has(ViewerFlaw::ServedWithinSettled) {
+            self.requested.max(quote.accepted_upto)
+        } else if settled && self.has(ViewerFlaw::ServedUncheckedWhenSettling) {
+            quote.served
+        } else {
+            self.requested
+        };
+        let mut honest = quote.served <= served + u64::from(self.has(ViewerFlaw::ServedOffByOne))
+            && quote.accepted_upto == self.acked
+            && quote.spent_total == self.spent;
+        if !honest
+            && self.has(ViewerFlaw::ResyncsDown)
+            && quote.accepted_upto <= self.acked
+            && quote.spent_total <= self.spent
+        {
+            (self.acked, self.spent) = (quote.accepted_upto, quote.spent_total);
+            honest = true;
+        }
+        if !honest && !self.has(ViewerFlaw::TrustsQuote) {
+            self.lets_go(
+                false,
+                self.has(ViewerFlaw::DishonestQuoteDropsReclaim),
+                false,
+                false,
+            );
+            if self.has(ViewerFlaw::DishonestQuoteForgetsUnsettled) {
+                let id = self.id;
+                self.standing().unsettled.retain(|(l, _)| *l != id);
+                self.free_slot(id);
+            }
+            if self.has(ViewerFlaw::DishonestQuoteSettlesAnyLedger) {
+                self.settles_other_videos(quote.accepted_upto, quote.spent_total);
+            }
+            if self.has(ViewerFlaw::DishonestQuoteSettlesOtherLive) {
+                self.settles_other_live(quote.accepted_upto, quote.spent_total);
+            }
+            if self.has(ViewerFlaw::DishonestQuoteReclaimsNow) {
+                self.reclaim_unsettled_now(false);
+            }
+            if self.has(ViewerFlaw::DishonestQuoteReclaimsAllNow) {
+                self.reclaim_unsettled_now(true);
+            }
+            if !(self.has(ViewerFlaw::DishonestQuoteWhileAwaitingNoStop) && self.awaiting(false))
+                && !(self.has(ViewerFlaw::DishonestQuoteOutOfTriesNoStop) && self.out_of_tries())
+                && !self.own_stop_skipped(Cause::DishonestQuote)
+            {
+                self.halt();
+            }
+            return Err("the quote disagrees with this viewer's ledger".into());
+        }
+        if read_first && self.quote.is_some() {
+            return Err("one quote per session".into());
+        }
+        if self.has(ViewerFlaw::TakenQuoteSettlesOtherVideos) {
+            self.settles_other_by_position(quote.accepted_upto, quote.spent_total);
+        }
+        if !resumed && self.has(ViewerFlaw::FreshTakenFreesLiveSlot) {
+            let mut st = self.standing();
+            let live = st
+                .in_flight
+                .is_some_and(|l| !st.unsettled.iter().any(|(x, _)| *x == l));
+            if live {
+                st.in_flight = None;
+            }
+        }
+        if !resumed {
+            self.lets_go_of(
+                |_| true,
+                self.has(ViewerFlaw::FreshTakenForgivesAll),
+                self.has(ViewerFlaw::FreshTakenDropsAllReclaims),
+                false,
+                false,
+            );
+        }
+        if self.has(ViewerFlaw::ForgivesLost) {
+            let id = self.id;
+            self.standing().lost.retain(|(l, _)| *l != id);
+        }
+        if self.has(ViewerFlaw::QuoteClearsStop)
+            || (lost && self.has(ViewerFlaw::SettlingQuoteClearsStop))
+        {
+            self.standing().stopped = false;
+            self.halted = false;
+        }
+        self.clears_stop_beside_live(ViewerFlaw::OtherQuoteWhileLiveClearsStop);
+        self.resumed = resumed;
+        if resumed && self.has(ViewerFlaw::ResumedPayInUnitProofs) {
+            self.standing().units_next = true;
+        }
+        if self.first_window.is_none() {
+            self.first_window = Some(quote.window);
+        }
+        // What the ledger has been through (read by the defects planted on one history).
+        if resumed && !settled && self.acked <= self.requested {
+            self.note(self.id, Past::PlainResume);
+        }
+        if settled {
+            self.note(self.id, Past::Settled);
+        }
+        if self.standing().unavailable >= UNAVAILABLE_BUDGET {
+            self.note(self.id, Past::TriesRestored);
+        }
+        // A new session: `mint-unavailable` answers are counted afresh (flaws keep the
+        // count: where the quote settled a payment, or short of the three).
+        let keeps = (settled && self.has(ViewerFlaw::SettlingQuoteKeepsTries))
+            || (self.has(ViewerFlaw::QuoteKeepsPartialTries)
+                && self.standing().unavailable < UNAVAILABLE_BUDGET);
+        if !keeps {
+            self.standing().unavailable = 0;
+        }
+        if self.first_price.is_none() {
+            self.first_price = Some(quote.price_per_chunk);
+        }
+        self.standing().last_price = Some(quote.price_per_chunk);
+        self.unavailable_here = 0;
+        self.tries_here = 0;
+        self.quote = Some(quote.clone());
+        (self.quoted_at, self.answered_at) = (self.clock.now(), self.clock.now());
+        self.note_position();
+        Ok(())
+    }
+
+    fn hello_refused(&mut self, rej: &Rej) {
+        if rej.code != RejCode::Banned && self.has(ViewerFlaw::OtherHelloRefusedReclaimsLiveNow) {
+            self.reclaims_other_live();
+        }
+        if rej.code == RejCode::Banned && self.has(ViewerFlaw::BannedHelloRestartsLiveWait) {
+            self.restart_live_wait();
+        }
+        if rej.code == RejCode::Banned && self.pending.is_some() {
+            self.banned_in_flight = true;
+        }
+        if rej.code != RejCode::Banned && self.has(ViewerFlaw::OwnHelloRefusedRestartsLiveWait) {
+            self.restart_live_wait();
+        }
+        if self.has(ViewerFlaw::OwnHelloRefusedFreesLiveSlot) && rej.code != RejCode::Banned {
+            self.frees_live_slot(ViewerFlaw::OwnHelloRefusedFreesLiveSlot);
+        }
+        if rej.code != RejCode::Banned && self.has(ViewerFlaw::HelloRefusedEndsLicence) {
+            self.pay_ahead = false;
+        }
+        if rej.code != RejCode::Banned {
+            self.clears_stop_beside_live(ViewerFlaw::OtherHelloRefusedWhileLiveClearsStop);
+            self.note(self.id, Past::RefusedHello);
+            if self.has(ViewerFlaw::HelloRefusalRestartsWait) {
+                self.restart_wait(false);
+            }
+            if self.has(ViewerFlaw::HelloRefusalPaysAhead) {
+                self.pay_ahead = true;
+            }
+            let id = self.id;
+            if self.has(ViewerFlaw::HelloRefusedClearsStop) {
+                self.standing().stopped = false;
+            }
+            if self.has(ViewerFlaw::HelloRefusedForgivesLost) {
+                self.standing().lost.retain(|(l, _)| *l != id);
+            }
+            if self.has(ViewerFlaw::HelloRefusedDropsReclaim) {
+                self.standing().reclaiming.retain(|(l, _)| *l != id);
+            }
+        }
+        if self.has(ViewerFlaw::HelloRefusalReclaims) {
+            self.reclaim_unsettled_now(false);
+        }
+        if rej.code != RejCode::Banned
+            && self.halted()
+            && self.has(ViewerFlaw::StoppedHelloRefusedReclaimsNow)
+        {
+            self.reclaim_unsettled_now(true);
+        }
+        if self.has(ViewerFlaw::HelloRefusedFreesSlot) {
+            self.standing().in_flight = None;
+        }
+        if self.has(ViewerFlaw::HelloRefusedResetsBudget) {
+            self.standing().unavailable = 0;
+        }
+        if rej.code == RejCode::MintUnavailable
+            && self.has(ViewerFlaw::HelloMintUnavailableCountsTry)
+        {
+            self.standing().unavailable += 1;
+        }
+        if rej.code == RejCode::Banned && self.has(ViewerFlaw::BannedHelloRestartsWait) {
+            self.restart_wait(false);
+        }
+        let stops = if self.has(ViewerFlaw::HelloRefusalStops) {
+            rej.code != RejCode::BadSession
+        } else if self.has(ViewerFlaw::UnknownHelloRefusalStops) {
+            matches!(rej.code, RejCode::Banned | RejCode::Other(_))
+        } else {
+            rej.code == RejCode::Banned && !self.has(ViewerFlaw::BannedHelloIgnored)
+        };
+        let stops = stops
+            && !(self.has(ViewerFlaw::BannedHelloWhileAwaitingNoStop) && self.awaiting(false))
+            && !(self.has(ViewerFlaw::BannedHelloOutOfTriesNoStop) && self.out_of_tries())
+            && !(rej.code == RejCode::Banned && self.own_stop_skipped(Cause::BannedHello));
+        if stops && self.has(ViewerFlaw::BannedHelloStopsLedger) {
+            self.halted = true;
+        } else if stops {
+            self.halt();
+        }
+    }
+
+    fn requested(&mut self) {
+        if self.has(ViewerFlaw::OtherRequestRestartsLiveWait) {
+            self.restarts_other_live();
+        }
+        if self.has(ViewerFlaw::RequestedRestartsLiveWait) {
+            self.restart_live_wait();
+        }
+        self.frees_live_slot(ViewerFlaw::RequestedFreesLiveSlot);
+        self.clears_stop_in_flight(ViewerFlaw::RequestInFlightClearsStop);
+        if self.id != 0 {
+            self.clears_stop_in_flight(ViewerFlaw::SiblingRequestInFlightClearsStop);
+        }
+        self.clears_stop_beside_live(ViewerFlaw::OtherRequestWhileLiveClearsStop);
+        if (self.has(ViewerFlaw::RequestWhileAwaitingClearsStop) && self.awaiting(false))
+            || (self.has(ViewerFlaw::RequestWhileReclaimingClearsStop) && self.reclaim_incomplete())
+        {
+            self.standing().stopped = false;
+        }
+        if self.has(ViewerFlaw::RequestEndsLicence) {
+            self.pay_ahead = false;
+        }
+        self.requested += 1;
+        {
+            let id = self.id;
+            let mut st = self.standing();
+            st.requested_all += 1;
+            match st.sent_by.iter_mut().find(|(l, _)| *l == id) {
+                Some(sent) => sent.1 += 1,
+                None => st.sent_by.push((id, 1)),
+            }
+        }
+        let now = self.clock.now();
+        self.last_request_at = now;
+        self.request_times.push(now);
+        self.sent_requests += 1;
+        if self.first_request_window.is_none() {
+            self.first_request_window = self.quote.as_ref().map(|q| q.window);
+        }
+        self.note_position();
+    }
+
+    fn refused(&mut self) {
+        if self.has(ViewerFlaw::OtherRefusedRequestReclaimsLiveNow) {
+            self.reclaims_other_live();
+        }
+        if self.has(ViewerFlaw::PaysForRefused) {
+            return;
+        }
+        self.clears_stop_in_flight(ViewerFlaw::RefusalInFlightClearsStop);
+        if self.requested > 0 && self.requested <= self.acked {
+            self.paid_refused += 1;
+        }
+        if self.has(ViewerFlaw::RefusedNoCredit) {
+            if self.requested > self.acked {
+                self.requested -= 1;
+            }
+        } else if self.has(ViewerFlaw::RefusedTwice) {
+            self.requested = self.requested.saturating_sub(2);
+        } else {
+            self.requested = self.requested.saturating_sub(1);
+        }
+        self.request_times.pop();
+        {
+            let mut st = self.standing();
+            st.requested_all = st.requested_all.saturating_sub(1);
+        }
+        self.refused_at = self.clock.now();
+        self.held_credit |= self.acked > self.requested;
+        // The refusal licenses the `due` that follows it on this ledger, and no other.
+        self.pay_ahead = true;
+        self.note_position();
+        if self.has(ViewerFlaw::RefusalRestartsWait) {
+            self.restart_wait(false);
+        }
+        if self.has(ViewerFlaw::RefusalRestartsLiveWait) {
+            self.restart_live_wait();
+        }
+        self.frees_live_slot(ViewerFlaw::RefusalFreesLiveSlot);
+        self.lets_go(
+            self.has(ViewerFlaw::RefusalForgivesLost),
+            false,
+            self.has(ViewerFlaw::RefusalFreesSlot),
+            false,
+        );
+        if self.has(ViewerFlaw::RefusalClearsStop) {
+            self.standing().stopped = false;
+        }
+        if self.has(ViewerFlaw::RefusalResetsUnavailable) {
+            self.standing().unavailable = 0;
+        }
+    }
+
+    async fn due(&mut self) -> Result<Option<Pay>, String> {
+        // Pay at half the window, rounded up, so the seeder never has to stall.
+        let window = match (self.quote.as_ref(), self.first_window) {
+            (Some(_), Some(first)) if self.has(ViewerFlaw::DueWindowOfFirstQuote) => first,
+            (q, _) => q.map_or(2, |q| q.window),
+        };
+        // That of the session it first paid on, or first sent a request on (flaws).
+        let window = match (self.first_pay_window, self.first_request_window) {
+            (Some(first), _)
+                if self.quote.is_some() && self.has(ViewerFlaw::DueWindowOfFirstPayment) =>
+            {
+                first
+            }
+            (_, Some(first))
+                if self.quote.is_some() && self.has(ViewerFlaw::DueWindowOfFirstRequest) =>
+            {
+                first
+            }
+            _ => window,
+        };
+        let when = if self.has(ViewerFlaw::PaysAtTheWindow) {
+            window + 1
+        } else if self.has(ViewerFlaw::PaysAtFullWindow)
+            || (window % 2 == 1 && self.has(ViewerFlaw::DueFullOnOdd))
+        {
+            window
+        } else if self.has(ViewerFlaw::DueRoundsDown)
+            || (self.resumed && self.has(ViewerFlaw::DueRoundsDownOnResume))
+            || (self.id != 0 && self.has(ViewerFlaw::DueRoundsDownOnSibling))
+            || (self.held_credit && self.has(ViewerFlaw::DueRoundsDownWithCredit))
+            || (self.id != 0 && self.resumed && self.has(ViewerFlaw::SiblingResumedDueRoundsDown))
+            || (self.standing().unavailable > 0
+                && self.has(ViewerFlaw::DueRoundsDownAfterUnavailable))
+            || (self.standing().lost_at > 0 && self.has(ViewerFlaw::DueRoundsDownAfterSpent))
+            || self.slips(PaySlip::DueRoundsDown)
+        {
+            window / 2
+        } else {
+            window.div_ceil(2)
+        };
+        // A refusal licenses this call to pay ahead, and no other (NFX-07 §3a): the licence
+        // ends here, whether or not this call pays.
+        let licensed = if self.has(ViewerFlaw::PayAheadSticky) {
+            self.pay_ahead
+        } else {
+            std::mem::take(&mut self.pay_ahead)
+        };
+        self.pay_when(when.max(1), false, licensed)
+    }
+
+    async fn last_pay(&mut self) -> Result<Option<Pay>, String> {
+        // It pays nothing ahead, and leaves a refusal's licence to the `due` that follows.
+        self.pay_when(1, true, false)
+    }
+
+    fn ack(&mut self, ack: &Ack) -> Result<(), String> {
+        self.taken_by_another();
+        if self.has(ViewerFlaw::AckEndsLicence) {
+            self.pay_ahead = false;
+        }
+        if (self.has(ViewerFlaw::StoppedAckNotSettled)
+            || (self.banned_in_flight && self.has(ViewerFlaw::OwnStopAckNotSettled)))
+            && self.halted()
+            && self.pending.as_ref().is_some_and(|p| {
+                ack.accepted_upto == p.upto && ack.spent_total == self.spent + p.amount
+            })
+        {
+            self.take_pending();
+            return Ok(());
+        }
+        if self.has(ViewerFlaw::AckSettlesUnsettled) && self.pending.is_none() {
+            let (id, spent) = (self.id, self.spent);
+            let found = self.standing().unsettled.iter().position(|(l, p)| {
+                *l == id && ack.accepted_upto == p.upto && ack.spent_total == spent + p.amount
+            });
+            if let Some(i) = found {
+                let (_, p) = self.standing().unsettled.remove(i);
+                self.free_slot(id);
+                self.acked = p.upto;
+                self.spent += p.amount;
+                return Ok(());
+            }
+        }
+        if self.has(ViewerFlaw::AckRefusesPayAhead)
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.upto > self.requested)
+        {
+            self.take_pending();
+            self.halt();
+            return Err("an ack that does not match what was paid".into());
+        }
+        let expected = self.take_pending();
+        // Short of the payment's upto, though above the ledger.
+        let short = |p: &Pending| ack.accepted_upto > self.acked && ack.accepted_upto < p.upto;
+        // Short of the payment in both fields, at its price.
+        let partial = expected.as_ref().is_some_and(|p| {
+            self.has(ViewerFlaw::AckAcceptsPartial)
+                && short(p)
+                && ack.spent_total.checked_sub(self.spent).is_some_and(|d| {
+                    d * (p.upto - self.acked) == (ack.accepted_upto - self.acked) * p.amount
+                })
+        });
+        // At its ledger in both fields, or below it in both (the flaws).
+        let at_ledger = self.has(ViewerFlaw::AckAcceptsLedger)
+            && (ack.accepted_upto, ack.spent_total) == (self.acked, self.spent);
+        let below = self.has(ViewerFlaw::AckResyncsDownBoth)
+            && ack.accepted_upto < self.acked
+            && ack.spent_total < self.spent;
+        let ok = match &expected {
+            Some(_) if partial || at_ledger || below => true,
+            Some(p) if self.has(ViewerFlaw::AckAcceptsInflated) => {
+                ack.accepted_upto >= p.upto && ack.spent_total >= self.spent + p.amount
+            }
+            Some(p) => {
+                (ack.accepted_upto == p.upto
+                    || (self.has(ViewerFlaw::AckAcceptsShort) && short(p))
+                    || (self.has(ViewerFlaw::AckResyncsDown) && ack.accepted_upto < self.acked))
+                    && (ack.spent_total == self.spent + p.amount
+                        || self.has(ViewerFlaw::IgnoresSpentTotal)
+                        || (self.has(ViewerFlaw::AckAcceptsShortSpent)
+                            && ack.accepted_upto == p.upto
+                            && ack.spent_total > self.spent
+                            && ack.spent_total < self.spent + p.amount)
+                        || (self.has(ViewerFlaw::AckAcceptsSpentBelowLedger)
+                            && ack.accepted_upto == p.upto
+                            && ack.spent_total < self.spent)
+                        || (self.has(ViewerFlaw::AckSpentAtLedger)
+                            && ack.accepted_upto == p.upto
+                            && ack.spent_total == self.spent))
+            }
+            None => {
+                self.lets_go(
+                    false,
+                    self.has(ViewerFlaw::UnsolicitedAckDropsReclaim),
+                    false,
+                    false,
+                );
+                if self.has(ViewerFlaw::UnsolicitedAckSettlesAnyLedger) {
+                    self.settles_other_videos(ack.accepted_upto, ack.spent_total);
+                }
+                if self.has(ViewerFlaw::AckSettlesOtherLive)
+                    && self.settles_other_live(ack.accepted_upto, ack.spent_total)
+                {
+                    return Ok(());
+                }
+                if self.has(ViewerFlaw::UnsolicitedAckReclaimsNow) {
+                    self.reclaim_unsettled_now(false);
+                }
+                self.has(ViewerFlaw::AcceptsUnsolicitedAck)
+            }
+        };
+        if ok || self.has(ViewerFlaw::IgnoresBadAck) {
+            if ok && self.has(ViewerFlaw::AckClearsStop) {
+                self.standing().stopped = false;
+            }
+            self.acked = ack.accepted_upto;
+            {
+                let (id, acked) = (self.id, self.acked);
+                let mut st = self.standing();
+                st.acked_by.retain(|(l, _)| *l != id);
+                st.acked_by.push((id, acked));
+            }
+            self.held_credit |= self.acked > self.requested;
+            if partial || below {
+                self.spent = ack.spent_total;
+            } else if let Some(p) = expected {
+                self.spent += p.amount;
+            }
+            let others = self.tries_here < self.standing().unavailable;
+            if !self.has(ViewerFlaw::AckKeepsUnavailable)
+                && !(others && self.has(ViewerFlaw::OtherVideosAckKeepsTries))
+            {
+                self.standing().unavailable = 0;
+                self.unavailable_here = 0;
+                self.tries_here = 0;
+            }
+            if ok {
+                self.answered_at = self.clock.now();
+                self.note(self.id, Past::Acked);
+            }
+            self.note_position();
+            return Ok(());
+        }
+        // An ack that does not match the payment it answers refuses that payment (NFX-07
+        // §3a): its proofs are reclaimed as any refused payment's, with no 180 s wait, by the
+        // calls that finish an incomplete reclaim. It is held as one until then. An
+        // unsolicited ack answers no payment, and reclaims nothing.
+        if let Some(mut p) = expected {
+            p.by_ack = true;
+            // Dropped, by the field that does not match (flaws).
+            let (upto, spent) = (
+                ack.accepted_upto == p.upto,
+                ack.spent_total == self.spent + p.amount,
+            );
+            let dropped = self.has(ViewerFlaw::WrongAckNoReclaim)
+                || (upto && !spent && self.has(ViewerFlaw::WrongAckBySpentNoReclaim))
+                || (spent && !upto && self.has(ViewerFlaw::WrongAckByUptoNoReclaim));
+            if self.has(ViewerFlaw::WrongAckReclaimWaits) {
+                self.standing().unsettled.push((self.id, p));
+            } else if !dropped {
+                self.standing().reclaiming.push((self.id, p));
+            }
+        }
+        self.halt();
+        Err("an ack that does not match what was paid".into())
+    }
+
+    async fn rej(&mut self, rej: &Rej) {
+        self.taken_by_another();
+        let was_halted = self.halted();
+        if was_halted && self.has(ViewerFlaw::RejSkipsWhenStopped) {
+            return;
+        }
+        if self.has(ViewerFlaw::NoReclaimUnlessSpent) && rej.code != RejCode::Spent {
+            self.take_pending();
+            self.halt();
+            return;
+        }
+        let Some(p) = self.take_pending() else {
+            // It answers no payment of this session: unsolicited.
+            if self.has(ViewerFlaw::UnsolicitedRejReclaimsUnsettled) {
+                self.reclaim_unsettled_now(false);
+                return;
+            }
+            self.lets_go(
+                false,
+                self.has(ViewerFlaw::UnsolicitedRejDropsReclaim),
+                false,
+                false,
+            );
+            if !self.has(ViewerFlaw::UnsolicitedRejIgnored)
+                && !(self.has(ViewerFlaw::UnsolicitedRejWhileAwaitingNoStop)
+                    && self.awaiting(false))
+                && !(self.has(ViewerFlaw::UnsolicitedRejOutOfTriesNoStop) && self.out_of_tries())
+                && !self.own_stop_skipped(Cause::UnsolicitedRej)
+            {
+                self.halt();
+            }
+            return;
+        };
+        self.rej_at = Some(self.clock.now());
+        let was_last = p.last;
+        let outcome = if was_halted && self.has(ViewerFlaw::RejNoReclaimWhenStopped) {
+            None
+        } else {
+            Some(self.reclaim(self.id, p, false))
+        };
+        if self.has(ViewerFlaw::UnavailableClearsStop)
+            && rej.code == RejCode::MintUnavailable
+            && !self.reclaim_incomplete()
+            && !self.awaiting(false)
+        {
+            self.standing().stopped = false;
+        }
+        // A code another spec uses, or one pay/1 sends only for a `hello`, taken as an
+        // outage that counts no try (flaws).
+        let pays_on = match rej.code {
+            RejCode::UnknownVideo => self.has(ViewerFlaw::UnknownVideoRejContinues),
+            RejCode::PaymentRequired => self.has(ViewerFlaw::PaymentRequiredRejContinues),
+            RejCode::BelowFee => self.has(ViewerFlaw::BelowFeeRejContinues),
+            RejCode::BadLock => self.has(ViewerFlaw::BadLockRejContinues),
+            RejCode::BadVoucher => self.has(ViewerFlaw::BadVoucherRejContinues),
+            RejCode::RootMismatch => self.has(ViewerFlaw::RootMismatchRejContinues),
+            _ => false,
+        };
+        if pays_on {
+            return;
+        }
+        if rej.code != RejCode::MintUnavailable
+            && outcome == Some(Reclaim::SomeSpent)
+            && self.has(ViewerFlaw::RejSpentAwaitsQuote)
+        {
+            return;
+        }
+        if rej.code == RejCode::MintUnavailable
+            && outcome == Some(Reclaim::All)
+            && self.has(ViewerFlaw::RepayAfterUnavailableInUnitProofs)
+        {
+            self.standing().units_next = true;
+        }
+        if rej.code == RejCode::MintUnavailable && self.has(ViewerFlaw::UnavailableEndsLicence) {
+            self.pay_ahead = false;
+        }
+        // Every such answer to a payment uses a try (flaws count none for some).
+        let uncounted = (was_last && self.has(ViewerFlaw::LastPayUnavailableUncounted))
+            || (outcome == Some(Reclaim::Expired)
+                && self.has(ViewerFlaw::UnavailableExpiredUncounted));
+        if rej.code != RejCode::MintUnavailable || self.has(ViewerFlaw::StopsOnOutage) {
+            self.halt();
+        } else if self.has(ViewerFlaw::UnavailablePerLedger) {
+            self.unavailable_here += 1;
+        } else if !uncounted {
+            self.standing().unavailable += 1;
+            self.tries_here += 1;
+            self.note(self.id, Past::Unavailable);
+        }
+    }
+
+    async fn timeout(&mut self) {
+        self.taken_by_another();
+        let was_halted = self.halted();
+        if was_halted && self.has(ViewerFlaw::TimeoutSkipsWhenStopped) {
+            return;
+        }
+        if self.has(ViewerFlaw::TimeoutTouchesUnsettled) && self.pending.is_none() {
+            let id = self.id;
+            let mine = {
+                let st = self.standing();
+                st.unsettled.iter().any(|(l, p)| *l == id && self.waited(p))
+            };
+            if mine {
+                self.halt();
+            }
+            return;
+        }
+        let Some(p) = &self.pending else {
+            // No payment on this session: nothing is this call's.
+            self.note(self.id, Past::IdleTimeout);
+            self.clears_stop_beside_live(ViewerFlaw::OtherIdleTimeoutWhileLiveClearsStop);
+            if self.has(ViewerFlaw::IdleTimeoutEndsLicence) {
+                self.pay_ahead = false;
+            }
+            self.lets_go(
+                self.has(ViewerFlaw::TimeoutForgivesLost),
+                self.has(ViewerFlaw::TimeoutDropsReclaim),
+                self.has(ViewerFlaw::TimeoutFreesSlot),
+                self.has(ViewerFlaw::TimeoutClearsStop),
+            );
+            if self.has(ViewerFlaw::TimeoutRestoresTries) {
+                self.standing().unavailable = 0;
+            }
+            if self.has(ViewerFlaw::OtherTimeoutReclaimsLiveNow) {
+                self.reclaims_other_live();
+            }
+            if self.has(ViewerFlaw::OtherTimeoutRestartsLiveWait) {
+                self.restarts_other_live();
+            }
+            return;
+        };
+        let early = self.has(ViewerFlaw::TimeoutEarly)
+            || (was_halted && self.has(ViewerFlaw::StoppedTimeoutEarly));
+        // From sending (from the session's quote, or the seeder's last answer, for flaws).
+        let from = if self.has(ViewerFlaw::LiveWaitFromQuote) {
+            Some(self.quoted_at)
+        } else if self.has(ViewerFlaw::LiveWaitFromLastAnswer)
+            || (was_halted && self.has(ViewerFlaw::StoppedLiveWaitFromLastAnswer))
+        {
+            Some(self.answered_at)
+        } else if (was_halted && self.has(ViewerFlaw::StoppedLiveWaitFromLastRequest))
+            || (self.id != 0 && self.has(ViewerFlaw::SiblingTimeoutFromLastRequest))
+        {
+            Some(self.last_request_at)
+        } else if self.resumed && self.has(ViewerFlaw::ResumedTimeoutFromQuote) {
+            Some(self.quoted_at)
+        } else {
+            None
+        };
+        let waited = from.map_or_else(
+            || self.waited(p),
+            |t| self.clock.now() >= t + ANSWER_WAIT.as_secs(),
+        );
+        if !waited && !early {
+            // Before 180 s from sending, nothing is this call's (but for flaws).
+            self.clears_stop_in_flight(ViewerFlaw::EarlyTimeoutClearsStop);
+            self.frees_live_slot(ViewerFlaw::TimeoutFreesLiveSlot);
+            if self.has(ViewerFlaw::TimeoutBeforeWaitRestoresTries) {
+                self.standing().unavailable = 0;
+            }
+            if self.has(ViewerFlaw::TimeoutBeforeWaitCountsATry) {
+                self.standing().unavailable += 1;
+            }
+            if self.has(ViewerFlaw::EarlyTimeoutEndsLicence) {
+                self.pay_ahead = false;
+            }
+            return;
+        }
+        if let Some(p) = self.take_pending()
+            && !(was_halted && self.has(ViewerFlaw::TimeoutNoReclaimWhenStopped))
+        {
+            let token = p.token.clone();
+            self.standing().refused_pending = false;
+            let outcome = self.reclaim(self.id, p, false);
+            let pending = self.standing().refused_pending;
+            if matches!(outcome, Reclaim::Blocked | Reclaim::Pending)
+                && self.has(ViewerFlaw::TimeoutDropsBlockedReclaim)
+            {
+                self.standing().reclaiming.retain(|(_, q)| q.token != token);
+            }
+            if outcome == Reclaim::SomeSpent && self.has(ViewerFlaw::TimeoutSpentAwaitsQuote) {
+                return;
+            }
+            if (matches!(outcome, Reclaim::Blocked | Reclaim::Pending)
+                && self.has(ViewerFlaw::TimeoutBlockedNoStop))
+                || (outcome == Reclaim::Expired && self.has(ViewerFlaw::TimeoutExpiredNoStop))
+                || (pending && self.has(ViewerFlaw::TimeoutPendingNoStop))
+            {
+                return;
+            }
+        }
+        if !self.has(ViewerFlaw::KeepsPayingAfterTimeout) {
+            self.halt();
+        }
+    }
+
+    fn end(&mut self) {
+        self.taken_by_another();
+        self.clears_stop_beside_live(ViewerFlaw::OtherEndWhileLiveClearsStop);
+        self.quote = None;
+        // The session's end ends a refusal's licence to pay ahead (the flaws that take a
+        // quote they refuse for a refused request keep theirs for the next session).
+        if !(self.has(ViewerFlaw::PriceRefusalPaysAhead)
+            || self.has(ViewerFlaw::WindowRefusalPaysAhead)
+            || self.has(ViewerFlaw::MintRefusalPaysAhead)
+            || self.has(ViewerFlaw::LicenceOutlivesEnd))
+        {
+            self.pay_ahead = false;
+        }
+        if self.has(ViewerFlaw::EndCountsATry) {
+            self.standing().unavailable += 1;
+        }
+        if self.has(ViewerFlaw::EndPaysAhead) {
+            self.pay_ahead = true;
+        }
+        if self.has(ViewerFlaw::EndClearsStop) {
+            self.standing().stopped = false;
+        }
+        if self.has(ViewerFlaw::EndResetsBudget) {
+            self.standing().unavailable = 0;
+        }
+        if let Some(mut p) = self.pending.take() {
+            self.off_live();
+            if self.has(ViewerFlaw::EndWaitFromLastAnswer) {
+                p.sent_at = self.answered_at;
+            }
+            if self.has(ViewerFlaw::EndWaitFromQuote) {
+                p.sent_at = self.quoted_at;
+            }
+            if self.has(ViewerFlaw::EndRestartsWait) {
+                p.sent_at = self.clock.now();
+            }
+            if self.has(ViewerFlaw::EndWaitFromLastRequest) {
+                p.sent_at = self.last_request_at;
+            }
+            if self.has(ViewerFlaw::EndReclaimsNow) {
+                self.free_slot(self.id);
+                self.reclaim(self.id, p, false);
+                self.halt();
+            } else if self.has(ViewerFlaw::EndForgetsPending)
+                || (self.has(ViewerFlaw::StoppedEndForgetsPending) && self.halted())
+            {
+                self.free_slot(self.id);
+            } else {
+                if self.has(ViewerFlaw::EndClearsInFlight) {
+                    self.free_slot(self.id);
+                }
+                self.standing().unsettled.push((self.id, p));
+            }
+        }
+        if self.has(ViewerFlaw::ForgetsLedger) {
+            (self.requested, self.acked, self.spent) = (0, 0, 0);
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.halted() || self.awaiting(self.has(ViewerFlaw::StopPerVideo))
+    }
+
+    fn awaiting_quote(&self) -> bool {
+        let tries_used = self.out_of_tries() && !self.has(ViewerFlaw::BudgetNotSignalled);
+        let any = self.has(ViewerFlaw::AwaitingQuoteAnyLedger)
+            || (self.quote.is_none() && self.has(ViewerFlaw::NoSessionAwaitingAnyLedger));
+        let lost = self.awaiting(!any);
+        if self.has(ViewerFlaw::AwaitingLostWhenStopped) {
+            return lost || (!self.halted() && tries_used);
+        }
+        (!self.halted() || self.has(ViewerFlaw::AwaitingQuoteWhenStopped)) && (lost || tries_used)
+    }
+}
+
+/// The mock behind the adversary suite.
+pub struct MockHarness {
+    net: MockNetwork,
+    mint: String,
+    videos: [VideoAddr; 3],
+    unknown: VideoAddr,
+    sessions: AtomicU64,
+    clock: Clock,
+    seeder_flaw: Option<SeederFlaw>,
+    viewer_flaw: Option<ViewerFlaw>,
+}
+
+fn addr(s: &str) -> VideoAddr {
+    VideoAddr::parse(s).unwrap_or_else(|_| unreachable!("a valid literal"))
+}
+
+impl Default for MockHarness {
+    fn default() -> Self {
+        Self {
+            net: MockNetwork::default(),
+            mint: "https://mint.mock.example".into(),
+            videos: [
+                addr("nfx:testnet:1:adversary-suite"),
+                addr("nfx:testnet:1:adversary-suite-two"),
+                addr("nfx:testnet:1:adversary-suite-three"),
+            ],
+            unknown: addr("nfx:testnet:1:not-served-here"),
+            sessions: AtomicU64::new(0),
+            clock: Clock::default(),
+            seeder_flaw: None,
+            viewer_flaw: None,
+        }
+    }
+}
+
+impl MockHarness {
+    /// A harness whose engines carry `flaw` (the suite must fail against it).
+    #[must_use]
+    pub fn with_seeder_flaw(flaw: SeederFlaw) -> Self {
+        Self {
+            seeder_flaw: Some(flaw),
+            ..Self::default()
+        }
+    }
+
+    /// An honest harness whose mint answers each read of swap state on its reader's next
+    /// poll: the read spans polls of its entry, which the suite can then act between, with
+    /// no time passing.
+    #[must_use]
+    pub fn with_round_trip_reads() -> Self {
+        let h = Self::default();
+        h.net.ledger().answering = Answers::NextPoll;
+        h
+    }
+
+    /// An honest harness whose mint answers each call the seeder's entries and sweeps await
+    /// (a read of swap state, a swap, a key request or a keyset listing) from another
+    /// thread, a few milliseconds after it reaches the mint, and wakes its caller, as a real
+    /// mint's answer comes back (`Answers::Woken`): at no count of polls, and with the
+    /// engine's own state changing off the suite's thread (a swap's completion runs there).
+    /// An engine whose calls are real round trips passes the suite so.
+    #[must_use]
+    pub fn with_woken_answers() -> Self {
+        let h = Self::default();
+        h.net.ledger().answering = Answers::Woken;
+        h
+    }
+
+    /// An honest harness whose seeders ask every quoted mint for its keyset listing
+    /// (NUT-02) at their start too: a payment of a keyset a mint started in that second
+    /// then waits for the next second's listing (NFX-07 §3 step 3).
+    #[must_use]
+    pub fn with_listings_at_start() -> Self {
+        let h = Self::default();
+        h.net.ledger().listings = Listings::AtStart;
+        h
+    }
+
+    /// A round-trip harness ([`MockHarness::with_round_trip_reads`]) whose seeders carry
+    /// `flaw`. Most defects registered against it (`tests/mutants.rs`) are registered
+    /// against [`MockHarness::with_seeder_flaw`] too, and must fail the suite on round trips
+    /// as well; the rest the suite can show only where a read spans polls of its entry.
+    /// A read is abandoned only as its entry is dropped between sending it and its return,
+    /// and a synchronous read returns in the poll that sends it. A payment that took a dead
+    /// turn over waits on no read but its own: of its second, only a `hello`'s read can come
+    /// before it, and that serves no payment. And a read back while a later second's read
+    /// is still out needs one held read to return before another: reads the mint holds on
+    /// threads ([`Harness::gather_state_reads`]) go on together, or each as its own wait
+    /// ends, in an order real time alone sets.
+    #[must_use]
+    pub fn with_seeder_flaw_round_trip(flaw: SeederFlaw) -> Self {
+        let h = Self::with_seeder_flaw(flaw);
+        h.net.ledger().answering = Answers::NextPoll;
+        h
+    }
+
+    /// An honest harness whose seeder and mint take their time as `timing` says: the suite
+    /// must pass it as it passes the others.
+    #[must_use]
+    pub fn with_timing(timing: Timing) -> Self {
+        let h = Self::default();
+        {
+            let mut l = h.net.ledger();
+            if timing.woken {
+                l.answering = Answers::Woken;
+            }
+            l.timing = timing;
+            l.clock = Some(h.clock.clone());
+        }
+        h
+    }
+
+    /// A harness whose mint answers every call from another thread
+    /// ([`MockHarness::with_woken_answers`]) and whose seeders carry `flaw`: the suite must
+    /// fail against it too. Most defects fail there at the check they fail where the mint
+    /// answers on a later poll; a few fail at another, where an answer that comes by a wake
+    /// leaves a different check first; and a few are registered there and not where the mint
+    /// answers on a later poll, among them each read sent without asking to be woken
+    /// ([`SeederFlaw::ReadUnwoken`] and the like): answered on a later poll, such a read is
+    /// back at its reader's next poll all the same (`tests/mutants.rs` registers each with
+    /// the scenario that catches it).
+    #[must_use]
+    pub fn with_seeder_flaw_woken(flaw: SeederFlaw) -> Self {
+        let h = Self::with_seeder_flaw(flaw);
+        h.net.ledger().answering = Answers::Woken;
+        h
+    }
+
+    /// The same, the seeders settling each swap's outcome on a task of their own, started
+    /// with `spawn` ([`Timing::spawn`]): for defects that can arise only where the seeder
+    /// has such tasks (it wakes an entry from one before it settles what the wake
+    /// announces), and for those of a wake that never comes which `tests/mutants.rs`
+    /// registers there too: they must fail the suite there as where the seeder has no
+    /// such tasks.
+    #[must_use]
+    pub fn with_seeder_flaw_on_tasks(flaw: SeederFlaw, spawn: Spawner) -> Self {
+        let h = Self::with_seeder_flaw_woken(flaw);
+        h.net.ledger().timing = Timing {
+            woken: true,
+            spawn: Some(spawn),
+            ..Timing::default()
+        };
+        h
+    }
+
+    /// A harness whose seeders ask every quoted mint for its keyset listing at their start
+    /// too ([`MockHarness::with_listings_at_start`]) and carry `flaw`: for the defects of
+    /// keys, keyset listings and the keyset rule, which must fail the suite there as where
+    /// a seeder asks only as a check needs, and for those only a seeder that asks at its
+    /// start can show.
+    #[must_use]
+    pub fn with_seeder_flaw_at_start(flaw: SeederFlaw) -> Self {
+        let h = Self::with_seeder_flaw(flaw);
+        h.net.ledger().listings = Listings::AtStart;
+        h
+    }
+
+    /// A harness whose viewers carry `flaw` (the suite must fail against it).
+    #[must_use]
+    pub fn with_viewer_flaw(flaw: ViewerFlaw) -> Self {
+        Self {
+            viewer_flaw: Some(flaw),
+            ..Self::default()
+        }
+    }
+
+    /// A token worth `amount` sat from the mint at `mint`, as `edit` leaves it: its DLEQ
+    /// proofs and its lock are then each proof's.
+    fn token_with(&self, mint: &str, amount: u64, edit: impl FnOnce(&mut TokenInfo)) -> String {
+        let mut info = TokenInfo {
+            proofs: self.net.proofs_for(mint, amount),
+            mints: vec![mint.to_owned()],
+            amount,
+            unit: "sat",
+            locked: false,
+            dleq: Dleq::Valid,
+        };
+        edit(&mut info);
+        self.net.mark(&info.proofs, info.dleq, info.locked);
+        self.net.mint_token(info)
+    }
+
+    fn videos(&self) -> Vec<(VideoAddr, HashSet<String>)> {
+        (0..3u8)
+            .map(|v| {
+                let members = (0..1024).map(|n| self.chunk_of(v, n)).collect();
+                (self.videos[usize::from(v)].clone(), members)
+            })
+            .collect()
+    }
+}
+impl Harness for MockHarness {
+    type Engine = MockEngine;
+    type Viewer = MockViewer;
+
+    fn engine(&self, price: u64, window: u64, global_cap: u64) -> MockEngine {
+        self.engine_checked(EngineParams {
+            price,
+            window,
+            global_cap,
+            debt_ttl: DEBT_TTL,
+            account_ttl: ACCOUNT_TTL,
+            ban_ttl: BAN_TTL,
+            mints: 1,
+            extra_mint: None,
+        })
+        .unwrap_or_else(|why| panic!("a seeder refuses this configuration: {why}"))
+    }
+
+    fn engine_checked(&self, params: EngineParams) -> Result<MockEngine, String> {
+        MockEngine::try_new(
+            EngineConfig {
+                price_per_chunk: params.price,
+                mints: (0..params.mints)
+                    .map(|i| {
+                        if i == 0 {
+                            self.mint.clone()
+                        } else {
+                            format!("https://mint{i}.mock.example")
+                        }
+                    })
+                    .chain(params.extra_mint.map(str::to_owned))
+                    .collect(),
+                window: params.window,
+                global_cap: params.global_cap,
+                debt_ttl: params.debt_ttl,
+                account_ttl: params.account_ttl,
+                ban_ttl: params.ban_ttl,
+            },
+            self.videos(),
+            self.net.clone(),
+            self.clock.clone(),
+            self.seeder_flaw,
+        )
+    }
+
+    fn identities_held(&self, engine: &MockEngine) -> usize {
+        engine.identities_held()
+    }
+
+    fn hello_for(&self, v: u8) -> Hello {
+        let n = self.sessions.fetch_add(1, Ordering::Relaxed);
+        Hello {
+            video: self.videos[usize::from(v)].clone(),
+            session: format!("{n:032x}"),
+        }
+    }
+
+    fn unknown_hello(&self) -> Hello {
+        Hello {
+            video: self.unknown.clone(),
+            ..self.hello()
+        }
+    }
+
+    fn session_cap(&self) -> usize {
+        MAX_OPEN_SESSIONS_PER_PEER
+    }
+
+    fn peer(&self, n: u8) -> PeerId {
+        [n; 32]
+    }
+
+    fn chunk_of(&self, v: u8, n: u16) -> String {
+        format!("{v:02x}{n:062x}")
+    }
+
+    fn foreign_chunk(&self) -> String {
+        "f".repeat(64)
+    }
+
+    fn drop_video(&self, engine: &MockEngine, v: u8) {
+        engine.drop_video(usize::from(v));
+    }
+
+    fn window_ceiling(&self) -> u64 {
+        WINDOW_CEILING
+    }
+
+    fn viewer(&self, max_price: u64) -> MockViewer {
+        MockViewer::new(
+            self.net.clone(),
+            self.clock.clone(),
+            &self.mint,
+            max_price,
+            self.viewer_flaw,
+        )
+    }
+
+    fn mint(&self) -> String {
+        self.mint.clone()
+    }
+
+    async fn token(&self, amount: u64) -> String {
+        self.net.issue(&self.mint, amount)
+    }
+
+    async fn token_at(&self, url: &str, amount: u64) -> String {
+        self.net.issue(url, amount)
+    }
+
+    async fn bad_token(&self, kind: BadToken, amount: u64) -> String {
+        self.bad_token_at(&self.mint, kind, amount).await
+    }
+
+    async fn bad_token_at(&self, url: &str, kind: BadToken, amount: u64) -> String {
+        match kind {
+            BadToken::Garbage => "cashuBgarbage-not-a-token".into(),
+            BadToken::WrongUnit => self.token_with(url, amount, |i| i.unit = "msat"),
+            BadToken::TwoMints => self.token_with(url, amount, |i| {
+                i.mints.push("https://other.mock.example".into())
+            }),
+            BadToken::Locked => self.token_with(url, amount, |i| i.locked = true),
+            BadToken::NoDleq => self.token_with(url, amount, |i| i.dleq = Dleq::Missing),
+            BadToken::BadDleq => self.token_with(url, amount, |i| i.dleq = Dleq::Invalid),
+            BadToken::OlderBadDleq => {
+                let (token, _) = self.net.draw(url, amount, &[]);
+                let info = self
+                    .net
+                    .read(&token)
+                    .unwrap_or_else(|| unreachable!("a token just drawn"));
+                self.net.mark(&info.proofs, Dleq::Invalid, false);
+                self.net.mint_token(info)
+            }
+            BadToken::UnknownKeyset => {
+                let token = self.token_with(url, amount, |_| {});
+                let mut l = self.net.ledger();
+                l.unknown_keysets += 1;
+                let keyset = UNKNOWN_KEYSETS + l.unknown_keysets;
+                let proofs = l.tokens.get(&token).map(|i| i.proofs.clone());
+                for p in proofs.unwrap_or_default() {
+                    l.keyset_of.insert(p, keyset);
+                }
+                drop(l);
+                token
+            }
+            BadToken::OtherMintsKeyset => {
+                let token = self.token_with(url, amount, |_| {});
+                let mut l = self.net.ledger();
+                let keyset = l
+                    .own_active
+                    .iter()
+                    .filter(|(m, _)| m.as_str() != url)
+                    .map(|(_, k)| *k)
+                    .max()
+                    .unwrap_or_else(|| unreachable!("asked for after another mint's start"));
+                let proofs = l.tokens.get(&token).map(|i| i.proofs.clone());
+                for p in proofs.unwrap_or_default() {
+                    l.keyset_of.insert(p, keyset);
+                }
+                drop(l);
+                token
+            }
+            BadToken::TooManyProofs => {
+                let proofs = self.net.fresh_proofs(url, MAX_PROOFS + 1);
+                self.token_with(url, amount, |i| i.proofs = proofs)
+            }
+            BadToken::Forged => {
+                let token = self.token_with(url, amount, |_| {});
+                let proofs = self.net.read(&token).map(|i| i.proofs).unwrap_or_default();
+                self.net.ledger().forged.extend(proofs);
+                token
+            }
+        }
+    }
+
+    async fn reencode(&self, token: &str) -> String {
+        let info = self
+            .net
+            .read(token)
+            .unwrap_or_else(|| unreachable!("the suite re-encodes its own tokens"));
+        self.net.mint_token(info)
+    }
+
+    async fn combine(&self, tokens: &[&str]) -> String {
+        let infos: Vec<TokenInfo> = tokens
+            .iter()
+            .map(|t| {
+                self.net
+                    .read(t)
+                    .unwrap_or_else(|| unreachable!("the suite combines its own tokens"))
+            })
+            .collect();
+        let mut mints: Vec<String> = Vec::new();
+        for m in infos.iter().flat_map(|i| &i.mints) {
+            if !mints.contains(m) {
+                mints.push(m.clone());
+            }
+        }
+        self.net.mint_token(TokenInfo {
+            proofs: infos.iter().flat_map(|i| i.proofs.clone()).collect(),
+            mints,
+            amount: infos.iter().map(|i| i.amount).sum(),
+            unit: "sat",
+            locked: false,
+            dleq: Dleq::Valid,
+        })
+    }
+
+    async fn claimed_any(&self, token: &str) -> bool {
+        self.net.claimed_any(token)
+    }
+
+    async fn claimed_all(&self, token: &str) -> bool {
+        self.net.claimed_all(token)
+    }
+
+    async fn steal(&self, token: &str) -> bool {
+        self.net.steal(token)
+    }
+
+    fn dialled(&self, url: &str) -> bool {
+        self.net.ledger().dialled.contains(url)
+    }
+
+    fn hold_swaps(&self) {
+        self.net.ledger().hold = true;
+    }
+
+    fn hold_swap_responses(&self) {
+        self.net.ledger().hold_responses = true;
+    }
+
+    fn hold_key_fetches(&self) {
+        self.net.ledger().hold_keys = true;
+    }
+
+    fn refuse_keys(&self, url: &str, refused: bool) {
+        let mut l = self.net.ledger();
+        if refused {
+            l.keys_refused.insert(url.to_owned());
+        } else {
+            l.keys_refused.remove(url);
+        }
+    }
+
+    fn forget_keys(&self, engine: &MockEngine) {
+        engine.0.state().keys.clear();
+    }
+
+    fn hold_next_swap(&self) {
+        self.net.ledger().hold_next = true;
+    }
+
+    async fn release_oldest_swap(&self) {
+        self.net.release_oldest();
+    }
+
+    async fn release_swaps(&self) {
+        self.net.release();
+    }
+
+    fn race_release_with_clock(&self, by: Duration) {
+        // One of the two starts after the other: the release in one pair of races and the
+        // clock in the next (a pair is a claim's race and a refusal's, which the suite runs
+        // in turn), by a lag that grows from none to 32 ms and comes round again. A mint's
+        // answer to a released swap comes back at once or within some 10 ms under every
+        // honest timing, so an outcome is settled before the deadline in some races and
+        // after it in others, for a claim and a refusal alike.
+        const LAGS_MS: [u64; 7] = [0, 1, 2, 4, 8, 16, 32];
+        let (release_lag, clock_lag) = {
+            let mut l = self.net.ledger();
+            l.under_way += 1;
+            let pair = usize::try_from(l.races / 2).unwrap_or(0);
+            l.races += 1;
+            let lag = Duration::from_millis(LAGS_MS[pair / 2 % LAGS_MS.len()]);
+            if pair.is_multiple_of(2) {
+                (lag, Duration::ZERO)
+            } else {
+                (Duration::ZERO, lag)
+            }
+        };
+        let (net, clock) = (self.net.clone(), self.clock.clone());
+        std::thread::spawn(move || {
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let b = barrier.clone();
+            let n = net.clone();
+            let release = std::thread::spawn(move || {
+                crate::adversary::keep_panic(|| {
+                    b.wait();
+                    std::thread::sleep(release_lag);
+                    n.release();
+                })
+            });
+            let moved = std::thread::spawn(move || {
+                barrier.wait();
+                std::thread::sleep(clock_lag);
+                clock.advance(by);
+            });
+            let raised = match release.join() {
+                Ok(Ok(())) => None,
+                Ok(Err(raised)) => Some(raised),
+                Err(payload) => Some(crate::adversary::Raised::elsewhere(payload)),
+            };
+            let _ = moved.join();
+            let mut l = net.ledger();
+            if l.raised.is_none() {
+                l.raised = raised;
+            }
+            l.under_way -= 1;
+        });
+    }
+
+    fn spawn_thread(&self, side: Box<dyn FnOnce() + Send>) {
+        let enter = self.net.ledger().timing.enter.clone();
+        std::thread::spawn(move || match enter {
+            Some(enter) => enter(side),
+            None => side(),
+        });
+    }
+
+    fn mint_outage(&self, down: bool) {
+        self.net.ledger().down = down;
+    }
+
+    fn lose_next_swap_response(&self) {
+        self.net.ledger().lose_swap = true;
+    }
+
+    fn lose_next_reclaim_response(&self) {
+        self.net.ledger().lose_reclaim = true;
+    }
+
+    async fn steal_one(&self, token: &str) -> bool {
+        self.net.steal_one(token)
+    }
+
+    async fn reserve_rest(&self, token: &str) -> bool {
+        self.net.reserve_rest(token)
+    }
+
+    fn restore_outage(&self, down: bool) {
+        self.net.ledger().restore_down = down;
+    }
+
+    fn time_out_next_swap(&self) {
+        self.net.ledger().time_out_next = true;
+    }
+
+    fn process_timed_out_mid_read(&self) {
+        self.net.ledger().mid_read = true;
+    }
+
+    fn deliver_responses_mid_read(&self) {
+        self.net.ledger().deliver_mid_read = true;
+    }
+
+    fn state_check_outage(&self, down: bool) {
+        self.net.ledger().state_down = down;
+    }
+
+    fn hold_next_swap_reserving(&self) {
+        self.net.ledger().reserve_next = true;
+    }
+
+    fn roll_back_reserved(&self) {
+        self.net.roll_back_reserved();
+    }
+
+    fn state_reads(&self) -> u64 {
+        self.net.ledger().reads
+    }
+
+    fn reads_out(&self) -> usize {
+        self.net.ledger().reads_out
+    }
+
+    fn key_requests(&self) -> u64 {
+        self.net.ledger().key_requests
+    }
+
+    fn listing_requests(&self) -> u64 {
+        self.net.ledger().listing_requests
+    }
+
+    fn answers_under_way(&self) -> bool {
+        let mut l = self.net.ledger();
+        if let Some(raised) = l.raised.take() {
+            drop(l);
+            crate::adversary::rejoin(Ok::<Result<(), _>, _>(Err(raised)));
+            return false;
+        }
+        l.under_way > 0
+    }
+
+    fn limit_state_reads(&self, max: Option<usize>) {
+        self.net.ledger().read_limit = max;
+    }
+
+    fn unanswered_reads_take(&self, wait: Duration) {
+        self.net.ledger().read_timeout = wait.as_secs();
+    }
+
+    fn gather_admissions(&self, n: usize, wait: Duration) {
+        let mut l = self.net.ledger();
+        l.admit_gather = (n, wait);
+        l.admit_gathered = 0;
+    }
+
+    fn advance_during_next_land(&self, by: Duration) {
+        self.net.ledger().advance_during_land = by.as_secs();
+    }
+
+    fn advanced_during_land(&self) -> bool {
+        self.net.ledger().advance_during_land == 0
+    }
+
+    fn gather_state_reads(&self, n: usize, wait: Duration) {
+        let mut l = self.net.ledger();
+        l.gather = (n, wait);
+        l.gathered = 0;
+    }
+
+    fn start_keyset_at(&self, url: &str, final_expiry: Option<Duration>) {
+        let now = self.clock.now();
+        let mut l = self.net.ledger();
+        let k = OWN_KEYSETS + l.own_keysets.len() as u64 + 1;
+        l.own_keysets.insert(k, url.to_owned());
+        l.own_active.insert(url.to_owned(), k);
+        l.own_expiry
+            .insert(url.to_owned(), final_expiry.map(|d| now + d.as_secs()));
+    }
+
+    fn rotate_keyset(&self) {
+        let mut l = self.net.ledger();
+        l.active_keyset += 1;
+        l.retired_outputs = l.next;
+        if let Some(x) = l.active_expired_since.take() {
+            let upto = l.next;
+            l.expired_ranges.push((x + 1, upto));
+            l.final_expiry = None;
+        }
+    }
+
+    fn expire_keyset_of(&self, token: &str, proofs: usize) {
+        let mut l = self.net.ledger();
+        if let Some(i) = l.tokens.get(token).cloned() {
+            l.expire_inputs(i.proofs.into_iter().take(proofs));
+        }
+    }
+
+    fn expire_older_keyset(&self) {
+        self.net.ledger().expire_older();
+    }
+
+    fn expire_active_keyset(&self) {
+        let mut l = self.net.ledger();
+        l.final_expiry = Some(self.clock.now());
+        // Everything it issued since the last rotation: proofs a wallet already holds too.
+        l.active_expired_since = Some(l.retired_outputs);
+    }
+
+    fn fund_older_keyset(&self, amount: u64) {
+        let mut l = self.net.ledger();
+        l.older_balance = amount;
+        if l.older_expired {
+            // Another older keyset: the expired one's proofs stay expired.
+            l.older_expired = false;
+            l.older_now.clear();
+            l.older_keyset = None;
+        }
+        if l.older_keyset.is_none() {
+            l.older_keysets += 1;
+            l.older_keyset = Some(OLDER_KEYSETS + l.older_keysets);
+        }
+    }
+
+    fn keyset_expires_in(&self, after: Option<Duration>) {
+        self.net.ledger().final_expiry = after.map(|d| self.clock.now() + d.as_secs());
+    }
+
+    fn expire_keyset(&self) {
+        let mut l = self.net.ledger();
+        l.expired_upto = l.next;
+        l.active_keyset += 1;
+    }
+
+    fn before_next_swap(&self, event: MintEvent) {
+        self.net.ledger().before_swap.push(event);
+    }
+
+    fn clock_secs(&self) -> u64 {
+        self.clock.now()
+    }
+
+    fn sweep_during_next_read(&self, engine: &MockEngine) {
+        let e = engine.0.clone();
+        self.net.ledger().during_read = Some(Box::new(move || {
+            e.learn(None, None, Learner::Sweep);
+        }));
+    }
+
+    fn advance(&self, by: Duration) {
+        self.clock.advance(by);
+    }
+
+    fn debt_ttl(&self) -> Duration {
+        DEBT_TTL
+    }
+
+    fn account_ttl(&self) -> Duration {
+        ACCOUNT_TTL
+    }
+
+    fn ban_ttl(&self) -> Duration {
+        BAN_TTL
+    }
+}

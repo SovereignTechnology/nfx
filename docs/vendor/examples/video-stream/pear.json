@@ -1,7 +1,0 @@
-{
-  "multisig": {
-    "publicKeys": ["<PUBKEY_HERE>", "<PUBKEY_HERE>", "<PUBKEY_HERE>"],
-    "namespace": "holepunchto/pear-video-stream",
-    "quorum": 2
-  }
-}

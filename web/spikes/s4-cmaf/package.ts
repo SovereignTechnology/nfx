@@ -3,7 +3,8 @@
  * L8 ladder and argv planning (2 s aligned GOP, `-sc_threshold 0`), with every file renamed
  * to its sha256?
  *
- * The L8 functions are imported unchanged from the read-only `packages/` mirror. The only
+ * The L8 functions are the demo's, unchanged: `l8.ts` beside this file is a copy of them
+ * from the demo's snapshot at the tag `demo-base` (`packages/core/src/media/`). The only
  * change is the container tail: L8 writes progressive MP4 (`-movflags +faststart -f mp4`),
  * NFX-05 wants CMAF, so the argv is cut at `-movflags` and given HLS/fMP4 output options.
  *
@@ -14,9 +15,15 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-import { renditionArgv, renditionDimensions, thumbnailArgv } from '../../../packages/core/src/media/argv.ts';
-import { ffprobeArgv, parseFfprobeJson } from '../../../packages/core/src/media/ffprobe.ts';
-import { GOP_SECONDS, planLadder } from '../../../packages/core/src/media/ladder.ts';
+import {
+  GOP_SECONDS,
+  ffprobeArgv,
+  parseFfprobeJson,
+  planLadder,
+  renditionArgv,
+  renditionDimensions,
+  thumbnailArgv,
+} from './l8.ts';
 
 const NAMESPACE = 'nfx:testnet:1';
 const DURATION_S = Number(process.env.NFX_DURATION ?? 12);

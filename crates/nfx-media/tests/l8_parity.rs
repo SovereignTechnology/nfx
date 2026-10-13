@@ -1,4 +1,5 @@
-//! The demo's L8 unit tests (`packages/core/src/media/__tests__/{ladder,argv,ffprobe}.test.ts`),
+//! The demo's L8 unit tests (`packages/core/src/media/__tests__/{ladder,argv,ffprobe}.test.ts`
+//! in the demo's snapshot at the tag `demo-base`),
 //! ported case by case, so the Rust planning code is held to the same expectations as the
 //! TypeScript it replaces.
 

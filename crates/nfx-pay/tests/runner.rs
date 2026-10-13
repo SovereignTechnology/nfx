@@ -1,0 +1,676 @@
+//! The suite's runner (`nfx_pay::adversary::run_on_a_thread`), which the suite and the
+//! mutants both use: a body that blocks its thread is timed out, and a panic is reported
+//! with where it was raised, on a thread a scenario spawned too, so the mutants count only
+//! a failed check of the suite: never a panic at a line of it that makes no check, nor one
+//! Rust raises of its own at a line that does. And a run under a panic hook that replaced
+//! the runner's is never reported as finished.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use nfx_pay::adversary::{Ran, code_lines, keep_panic, makes_a_check, rejoin};
+use std::hint::black_box as bb;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
+
+/// The suite's own text, as the runner reads it.
+const SUITE: &str = include_str!("../src/adversary.rs");
+
+/// The process's panic hook is one for every test of this binary, which run on threads at
+/// once, and one test here replaces it for a while. Every run of the runner's here holds
+/// this shared ([`run_on_a_thread`]); that test holds it alone, so the hook is replaced
+/// under no other test's run, and is back before the next begins.
+static THE_HOOK: RwLock<()> = RwLock::new(());
+
+/// The runner (`nfx_pay::adversary::run_on_a_thread`), as every test of this file runs it
+/// but the one that replaces the panic hook: not while that one has it replaced.
+fn run_on_a_thread(secs: u64, body: impl FnOnce() + Send + 'static) -> Ran {
+    let _shared = THE_HOOK.read().unwrap_or_else(PoisonError::into_inner);
+    nfx_pay::adversary::run_on_a_thread(secs, body)
+}
+
+/// The process's panic hook, as `std::panic::take_hook` gives it.
+type Hook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+#[test]
+fn a_body_that_returns_finishes() {
+    assert!(matches!(run_on_a_thread(5, || {}), Ran::Finished));
+}
+
+#[test]
+fn a_body_that_blocks_its_thread_is_timed_out() {
+    let ran = run_on_a_thread(1, || {
+        loop {
+            std::thread::park();
+        }
+    });
+    assert!(matches!(ran, Ran::Hung));
+}
+
+#[test]
+fn a_panic_outside_the_suite_is_not_the_suite_failing() {
+    let ran = run_on_a_thread(5, || panic!("raised in a test file, not in the suite"));
+    let Ran::Panicked { file, .. } = &ran else {
+        panic!("it panicked");
+    };
+    assert!(file.ends_with("nfx-pay/tests/runner.rs"), "{file}");
+    assert!(!ran.failed_the_suite());
+    // Nor in another file of the crate, at a line that makes a check in the suite.
+    let at = suite_line(|l| l.starts_with("assert_eq!("));
+    let Ran::Panicked { payload, .. } = run_on_a_thread(5, a_behaviour) else {
+        panic!("it panicked");
+    };
+    let ran = Ran::Panicked {
+        file: "nfx-pay/src/mock.rs".into(),
+        line: at,
+        payload,
+    };
+    assert!(!ran.failed_the_suite(), "counted in the mock");
+}
+
+#[test]
+fn a_panic_on_a_spawned_thread_is_judged_where_it_was_raised() {
+    static RAISED: AtomicU32 = AtomicU32::new(0);
+    let ran = run_on_a_thread(5, || {
+        std::thread::scope(|scope| {
+            let t = scope.spawn(|| {
+                keep_panic(|| {
+                    RAISED.store(line!(), Ordering::SeqCst);
+                    panic!("raised on the spawned thread");
+                })
+            });
+            rejoin::<()>(t.join());
+        });
+    });
+    let Ran::Panicked { file, line, .. } = &ran else {
+        panic!("it panicked");
+    };
+    assert!(file.ends_with("nfx-pay/tests/runner.rs"), "{file}");
+    assert_eq!(
+        *line,
+        RAISED.load(Ordering::SeqCst) + 1,
+        "where it was raised, not rejoined"
+    );
+}
+
+#[test]
+fn a_panic_caught_on_the_way_is_the_one_reported() {
+    // An engine panics on a task of its own, and its runtime catches that. The scenario
+    // then fails a check of the suite, the entry that task was to answer never answered;
+    // or it returns. Either way the first panic raised on its thread is the one reported,
+    // where it was raised and with what it said: never the check, and never a pass.
+    static RAISED: AtomicU32 = AtomicU32::new(0);
+    for then_fails in [true, false] {
+        let ran = run_on_a_thread(5, move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let task = tokio::spawn(async {
+                    RAISED.store(line!(), Ordering::SeqCst);
+                    panic!("raised on a task of the engine's own");
+                });
+                assert!(task.await.is_err(), "the runtime caught it");
+                assert!(!bb(then_fails), "a behaviour");
+            });
+        });
+        let Ran::Panicked { file, line, .. } = &ran else {
+            panic!("a panic is reported (the scenario then fails a check: {then_fails})");
+        };
+        assert!(file.ends_with("nfx-pay/tests/runner.rs"), "{file}");
+        assert_eq!(
+            *line,
+            RAISED.load(Ordering::SeqCst) + 1,
+            "where the first was raised (the scenario then fails a check: {then_fails})"
+        );
+        assert_eq!(message(&ran), "raised on a task of the engine's own");
+    }
+    // The same in a file of the engine's: at no line is it a check of the suite's.
+    let at = suite_line(|l| l.starts_with("assert_eq!("));
+    let Ran::Panicked { payload, .. } = run_on_a_thread(5, || {
+        let _ = std::panic::catch_unwind(|| panic!("raised in the engine"));
+        a_behaviour();
+    }) else {
+        panic!("it panicked");
+    };
+    let ran = Ran::Panicked {
+        file: "nfx-pay/src/mock.rs".into(),
+        line: at,
+        payload,
+    };
+    assert_eq!(message(&ran), "raised in the engine");
+    assert!(!ran.failed_the_suite(), "counted in the mock");
+}
+
+#[test]
+fn a_run_under_a_replaced_panic_hook_is_never_finished() {
+    // Alone in this binary: no other test's run goes on while the hook is replaced here,
+    // and each replacement is undone before anything is asserted.
+    let _alone = THE_HOOK.write().unwrap_or_else(PoisonError::into_inner);
+    use nfx_pay::adversary::run_on_a_thread as run;
+    // The runner sets its hook at its first run in the process.
+    assert!(matches!(run(5, || {}), Ran::Finished));
+
+    // A harness made in a scenario's body replaces the hook (with an error report of its
+    // own, say). The scenario then passes every check; or its engine panics on the way and
+    // something catches that, which nothing notes now; or it fails a check. None is a
+    // finished run, and none a failed check of the suite's: the run is not judged.
+    let then: [fn(); 3] = [
+        || {},
+        || {
+            let caught = std::panic::catch_unwind(|| panic!("raised in the engine"));
+            assert!(caught.is_err(), "it was caught");
+        },
+        a_behaviour,
+    ];
+    for (case, then) in then.into_iter().enumerate() {
+        let taken: Arc<Mutex<Option<Hook>>> = Arc::default();
+        let kept = taken.clone();
+        let ran = run(5, move || {
+            *kept.lock().unwrap() = Some(std::panic::take_hook());
+            std::panic::set_hook(Box::new(|info| eprintln!("the harness's own hook: {info}")));
+            then();
+        });
+        let runners = taken.lock().unwrap().take();
+        std::panic::set_hook(runners.expect("the body took the runner's hook"));
+        not_judged(&ran, &format!("replaced in the body (case {case})"));
+    }
+
+    // Replaced before the run, by whatever else the process holds: the body is not run.
+    static RAN: AtomicBool = AtomicBool::new(false);
+    let runners = std::panic::take_hook();
+    let ran = run(5, || RAN.store(true, Ordering::SeqCst));
+    std::panic::set_hook(runners);
+    not_judged(&ran, "replaced before the run");
+    assert!(
+        !RAN.load(Ordering::SeqCst),
+        "the body ran with no hook to judge it by"
+    );
+
+    // A hook set over the runner's that hands every panic on to it leaves it standing: the
+    // run is judged as ever, by the first panic raised on its thread, caught or not.
+    static RAISED: AtomicU32 = AtomicU32::new(0);
+    let under: Arc<Hook> = Arc::new(std::panic::take_hook());
+    let handed = under.clone();
+    std::panic::set_hook(Box::new(move |info| handed(info)));
+    let ran = run(5, || {
+        let caught = std::panic::catch_unwind(|| {
+            RAISED.store(line!(), Ordering::SeqCst);
+            panic!("raised in the engine");
+        });
+        assert!(caught.is_err(), "it was caught");
+    });
+    drop(std::panic::take_hook());
+    let runners = Arc::try_unwrap(under)
+        .unwrap_or_else(|_| panic!("the hook set over the runner's holds it still"));
+    std::panic::set_hook(runners);
+    let Ran::Panicked { file, line, .. } = &ran else {
+        panic!("the panic caught on the way is reported under a hook that hands it on");
+    };
+    assert!(file.ends_with("nfx-pay/tests/runner.rs"), "{file}");
+    assert_eq!(*line, RAISED.load(Ordering::SeqCst) + 1);
+    assert_eq!(message(&ran), "raised in the engine");
+
+    // With the runner's hook back, a run is judged as ever.
+    assert!(matches!(run(5, || {}), Ran::Finished));
+    let ran = run(5, a_behaviour);
+    let said = message(&ran);
+    assert!(
+        said.starts_with("assertion `left == right` failed: a behaviour"),
+        "{said}"
+    );
+}
+
+/// `ran` is reported as run under a panic hook that did not stand: panicked at no place,
+/// with a message that says so, and so no failed check of the suite's.
+fn not_judged(ran: &Ran, when: &str) {
+    let Ran::Panicked { file, line, .. } = ran else {
+        panic!("a run under a replaced hook is never finished, nor hung ({when})");
+    };
+    assert_eq!((file.as_str(), *line), ("", 0), "no place ({when})");
+    assert!(
+        message(ran).starts_with("the runner's panic hook was replaced"),
+        "it says why ({when}): {}",
+        message(ran)
+    );
+    assert!(!ran.failed_the_suite(), "counted ({when})");
+}
+
+#[test]
+fn the_runners_looks_at_its_hook_leave_a_run_as_it_was() {
+    // Before a body and after it the runner raises a panic of its own on the body's thread,
+    // and catches it, to see that its hook stands. Neither is that thread's first panic: a
+    // body that returns has finished, time after time, and a body's own panic, caught on
+    // the way or not, is the one reported, where it was raised and with what it said.
+    static RAISED: AtomicU32 = AtomicU32::new(0);
+    fn raise() {
+        RAISED.store(line!(), Ordering::SeqCst);
+        panic!("raised in the body");
+    }
+    for _ in 0..3 {
+        assert!(matches!(run_on_a_thread(5, || {}), Ran::Finished));
+    }
+    for caught in [false, true] {
+        let ran = run_on_a_thread(5, move || {
+            if bb(caught) {
+                assert!(std::panic::catch_unwind(raise).is_err(), "it was caught");
+            } else {
+                raise();
+            }
+        });
+        let Ran::Panicked { file, line, .. } = &ran else {
+            panic!("the body's panic is reported (caught on the way: {caught})");
+        };
+        assert!(file.ends_with("nfx-pay/tests/runner.rs"), "{file}");
+        assert_eq!(
+            *line,
+            RAISED.load(Ordering::SeqCst) + 1,
+            "where the body raised it (caught on the way: {caught})"
+        );
+        assert_eq!(message(&ran), "raised in the body");
+        assert!(matches!(run_on_a_thread(5, || {}), Ran::Finished));
+    }
+}
+
+#[test]
+fn the_suites_checks_are_the_suite_failing() {
+    // Each kind of check the suite makes, raised for real, at a line of the suite that
+    // makes a check.
+    let at = suite_line(|l| l.starts_with("assert_eq!("));
+    let checks: [fn(); 8] = [
+        || assert!(bb(false), "a behaviour"),
+        || assert_eq!(bb(1), 2, "a behaviour"),
+        || assert_ne!(bb(1), 1, "a behaviour"),
+        || {
+            bb(bb(None::<u8>).expect("a hello"));
+        },
+        || {
+            bb(bb(Err::<u8, &str>("refused")).expect("accepted"));
+        },
+        || {
+            bb(bb(Ok::<u8, &str>(1)).expect_err("refused"));
+        },
+        || panic!("never answered"),
+        || unreachable!("{}", bb("a behaviour")),
+    ];
+    for raise in checks {
+        let ran = in_the_suite(run_on_a_thread(5, raise), at);
+        assert!(ran.failed_the_suite(), "not counted: {}", message(&ran));
+    }
+    // A failed assertion counts at a line of each kind of check the suite makes (not the
+    // runner's own list of them, in strings).
+    let kinds: [fn(&str) -> bool; 6] = [
+        |l| l.starts_with("assert!("),
+        |l| l.starts_with("assert_eq!("),
+        |l| l.starts_with("assert_ne!("),
+        |l| !l.starts_with('"') && l.contains(".expect(\""),
+        |l| !l.starts_with('"') && l.contains(".expect_err(\""),
+        |l| !l.starts_with('"') && l.contains("panic!(\""),
+    ];
+    for kind in kinds {
+        let at = suite_line(kind);
+        let ran = in_the_suite(run_on_a_thread(5, a_behaviour), at);
+        assert!(ran.failed_the_suite(), "not counted at line {at}");
+    }
+}
+
+#[test]
+fn a_panic_at_a_line_that_makes_no_check_is_not_the_suite_failing() {
+    // A failed assertion's own panic, reported at lines of the suite that make no check:
+    // plain code, a comment, a check named only in a string, and no line at all.
+    let lines = [
+        suite_line(|l| l.starts_with("let e = h.engine(")),
+        1,
+        suite_line(|l| l == "\"assert!(\","),
+        0,
+        u32::MAX,
+    ];
+    for at in lines {
+        assert!(!makes_a_check(SUITE, at), "line {at} makes a check");
+        let ran = in_the_suite(run_on_a_thread(5, a_behaviour), at);
+        assert!(!ran.failed_the_suite(), "counted at line {at}");
+    }
+}
+
+#[test]
+fn a_runtime_panic_at_a_check_of_the_suite_is_not_the_suite_failing() {
+    // Rust's own panics, raised for real, each reported at the line that caused it, then as
+    // raised at a line of the suite that makes a check: one can sit on a check's line.
+    let runtime: [fn(); 44] = [
+        || {
+            bb(bb(0u64) - 1);
+        },
+        || {
+            bb(1 / bb(0u64));
+        },
+        || {
+            bb([0u8; 2][bb(2)]);
+        },
+        || {
+            bb(bb(None::<u8>).unwrap());
+        },
+        || {
+            bb(bb(Err::<u8, &str>("refused")).unwrap());
+        },
+        || {
+            bb(bb(Ok::<u8, &str>(1)).unwrap_err());
+        },
+        || {
+            bb(&bb([0u8; 2])[..bb(3)]);
+        },
+        || {
+            bb(&bb([0u8; 2])[bb(3)..]);
+        },
+        || {
+            bb(&bb([0u8; 2])[bb(2)..bb(1)]);
+        },
+        || {
+            bb(&bb("abc")[..bb(10)]);
+        },
+        || {
+            bb(&bb("abc")[bb(10)..]);
+        },
+        || {
+            bb(&bb("abc")[bb(2)..bb(1)]);
+        },
+        || {
+            let cell = std::cell::RefCell::new(0u8);
+            let _held = cell.borrow_mut();
+            bb(cell.borrow_mut());
+        },
+        || {
+            bb(bb(vec![1u8]).remove(bb(3)));
+        },
+        || bb(vec![1u8]).insert(bb(3), 1),
+        || {
+            bb(bb(vec![1u8]).split_off(bb(3)));
+        },
+        || {
+            use std::future::Future;
+            let mut done = std::pin::pin!(async {});
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            let _ = done.as_mut().poll(&mut cx);
+            let _ = done.as_mut().poll(&mut cx);
+        },
+        || {
+            bb(bb(std::collections::HashMap::<u8, u8>::new())[&bb(1)]);
+        },
+        || {
+            bb(bb(std::collections::BTreeMap::<u8, u8>::new())[&bb(1)]);
+        },
+        || {
+            bb(bb(std::collections::VecDeque::<u8>::new())[bb(1)]);
+        },
+        || {
+            bb(bb(std::time::Duration::from_secs(1)) / bb(0u32));
+        },
+        || {
+            bb(bb(&[1u8; 2][..]).split_at(bb(3)));
+        },
+        || [0u8; 2].copy_from_slice(bb(&[1u8; 3][..])),
+        || [0u8; 2].swap_with_slice(bb(&mut [1u8; 3][..])),
+        || {
+            bb(bb(&[1u8; 2][..]).chunks(bb(0)).count());
+        },
+        || {
+            bb(bb(&[1u8; 2][..]).windows(bb(0)).count());
+        },
+        || {
+            bb(bb(0u64).ilog2());
+        },
+        || {
+            bb(bb(5u64).ilog(bb(1)));
+        },
+        || {
+            bb(bb(-1i64).isqrt());
+        },
+        || {
+            bb(bb(1u64).clamp(bb(3), bb(2)));
+        },
+        || {
+            bb(std::time::Instant::now() + bb(std::time::Duration::MAX));
+        },
+        || {
+            bb(std::time::Instant::now() - bb(std::time::Duration::MAX));
+        },
+        || bb(String::from("a")).insert(bb(3), 'x'),
+        || {
+            // Poisoned on another thread: the first panic on this one is the one reported.
+            let once = std::sync::Once::new();
+            std::thread::scope(|scope| {
+                let _ = scope
+                    .spawn(|| once.call_once(|| panic!("poisons it")))
+                    .join();
+            });
+            once.call_once(|| {});
+        },
+        || {
+            std::thread::scope(|scope| {
+                scope.spawn(|| panic!("the scoped thread's own"));
+            });
+        },
+        || {
+            bb(bb(String::from("a")).remove(bb(1)));
+        },
+        || bb(String::from("é")).replace_range(bb(1)..2, "x"),
+        || bb(String::from("é")).replace_range(bb(0)..1, "x"),
+        || [1u8, 2, 3].copy_within(bb(0..2), bb(2)),
+        || {
+            bb(std::time::Duration::from_nanos_u128(bb(u128::MAX)));
+        },
+        || {
+            bb(std::time::SystemTime::now() + bb(std::time::Duration::MAX));
+        },
+        || {
+            bb(std::time::SystemTime::UNIX_EPOCH - bb(std::time::Duration::MAX));
+        },
+        || {
+            bb(bb(std::iter::repeat(bb(1u8))).count());
+        },
+        || {
+            bb(format!("{:1$}", 1, bb(70_000usize)));
+        },
+    ];
+    let at = suite_line(|l| l.starts_with("assert_eq!("));
+    for raise in runtime {
+        let ran = run_on_a_thread(5, raise);
+        let Ran::Panicked { file, .. } = &ran else {
+            panic!("it panicked");
+        };
+        assert!(
+            file.ends_with("nfx-pay/tests/runner.rs"),
+            "reported at the line that caused it: {file}: {}",
+            message(&ran)
+        );
+        let ran = in_the_suite(ran, at);
+        assert!(!message(&ran).is_empty(), "a runtime panic has a message");
+        assert!(!ran.failed_the_suite(), "counted: {}", message(&ran));
+    }
+    // Nor does a panic that names nothing: no message, or `panic!()` and `unreachable!()`
+    // bare.
+    let nameless: [fn(); 3] = [
+        || std::panic::panic_any(7u8),
+        || panic!(),
+        || unreachable!(),
+    ];
+    for raise in nameless {
+        let ran = in_the_suite(run_on_a_thread(5, raise), at);
+        assert!(!ran.failed_the_suite(), "counted: {}", message(&ran));
+    }
+}
+
+#[test]
+fn only_the_code_of_a_line_makes_a_check() {
+    let made = [
+        "assert!(x);",
+        "    assert_eq!(a, b, \"a behaviour\");",
+        "assert_ne!(a, b);",
+        "let x = y.expect(\"named\");",
+        "let x = y.expect_err(\"named\");",
+        "_ => panic!(\"round {round}\"),",
+        "unreachable!(\"named\")",
+        "let s = \"\\\\\"; assert!(x);",
+        "let s = \"\\\"\"; assert!(x);",
+        "let q = '\"'; assert!(x);",
+        "let q = '\\''; assert!(x);",
+        "let s = r#\"a \" b\"#; assert!(x);",
+        "fn f<'a>(x: &'a str) { assert!(x.is_empty()) }",
+        "/* a comment */ assert!(x);",
+    ];
+    for source in made {
+        assert!(makes_a_check(source, 1), "no check found: {source}");
+    }
+    let not_made = [
+        "let x = y.unwrap();",
+        "let x = y; // assert!(x)",
+        "/// assert!(x)",
+        "let s = \"assert!(x)\";",
+        "let s = \"\\\" assert!(x)\";",
+        "let q = '\\n'// assert!(x)",
+        "let s = b\"assert!(x)\";",
+        "let s = r#\"assert!(\"#;",
+        "let s = r\"\\\"; let t = \"assert!(\";",
+        "let q = '\"'; let s = \"assert!(\";",
+        "/* assert!(x) */ let y = 1;",
+        "/* /* */ assert!(x) */ let y = 1;",
+        "let x = todo!();",
+    ];
+    for source in not_made {
+        assert!(!makes_a_check(source, 1), "a check found: {source}");
+    }
+    // Literals and comments run across lines: a line inside one makes no check.
+    let across = [
+        "let s = \"a\nassert!(x)\";",
+        "let s = \"a \\\nassert!(x)\";",
+        "let s = r#\"a\nassert!(x)\"#;",
+        "/* a\nassert!(x) */",
+        "/* a /* b */\nassert!(x) */",
+    ];
+    for source in across {
+        assert!(!makes_a_check(source, 2), "a check found: {source}");
+    }
+    let after = "let s = \"a\nb\"; assert!(x);";
+    assert!(makes_a_check(after, 2), "no check after a string ends");
+    assert!(
+        !makes_a_check("assert!(x);", 2),
+        "a line that does not exist"
+    );
+    assert!(!makes_a_check("assert!(x);", 0), "no line at all");
+}
+
+#[test]
+fn the_suite_makes_no_bare_unwrap() {
+    // clippy denies an `unwrap` call in the suite, but not one passed as a function
+    // (`map(Option::unwrap)`): its panic is raised in core, where no check counts it. So
+    // the suite's code, read as the line rule reads it, names neither word at all.
+    assert_eq!(
+        code_lines(SUITE).len(),
+        SUITE.lines().count(),
+        "the code of every line of the suite"
+    );
+    let found = bare_unwraps(SUITE);
+    assert!(
+        found.is_empty(),
+        "a bare unwrap in the suite, at lines {found:?}"
+    );
+    // Found as a call and as a function, never in a comment, a literal or a longer word.
+    let found = [
+        "let x = y.unwrap();",
+        "let n = [o].into_iter().map(Option::unwrap).sum::<u8>();",
+        "let f: fn(Option<u8>) -> u8 = Option::unwrap;",
+        "let x = Result::unwrap(r);",
+        "let e = r.unwrap_err();",
+        "let e = [r].map(Result::unwrap_err);",
+        "let x = <Option<u8>>::unwrap(o);",
+        "let x = y.r#unwrap();",
+    ];
+    for source in found {
+        assert!(bare_unwraps(source) == [1], "not found: {source}");
+    }
+    let not_found = [
+        "let x = y.unwrap_or(0);",
+        "let x = y.unwrap_or_else(f).unwrap_or_default();",
+        "let x = y.expect(\"named\"); // not y.unwrap()",
+        "/* y.unwrap() */ let x = 1;",
+        "let s = \"y.unwrap()\";",
+        "let s = r#\"Option::unwrap\"#;",
+        "let s = \"a\ny.unwrap()\";",
+        "/* a\nmap(Option::unwrap) */",
+    ];
+    for source in not_found {
+        assert!(bare_unwraps(source).is_empty(), "found: {source}");
+    }
+}
+
+#[test]
+fn the_suite_closes_connections_through_its_helper() {
+    // From its scenarios' helpers on, the suite's code writes `drop(` on no session and no
+    // entry: `close` stands there, and lets the close land before the suite goes on. A bare
+    // `drop` there is a `Drop` impl's, or the guard's that lets the mint's held reads go on,
+    // which is no connection. This reads the text for `drop(` and no more: a session or an
+    // entry that closes as it goes out of scope, or is moved into a call, passes it.
+    let from = suite_line(|l| l.starts_with("const SECOND: Duration")) as usize;
+    let bare: Vec<usize> = (1..)
+        .zip(code_lines(SUITE))
+        .skip(from)
+        .filter(|(_, code)| {
+            code.contains("drop(")
+                && !code.contains("fn drop(")
+                && !code.contains("drop(go_on)")
+                && !code.contains("drop(_go_on)")
+        })
+        .map(|(at, _)| at)
+        .collect();
+    assert!(
+        bare.is_empty(),
+        "a session or an entry dropped without `close`, at lines {bare:?}"
+    );
+}
+
+/// The lines (from 1) of `source` whose code names `unwrap` or `unwrap_err` as a word.
+fn bare_unwraps(source: &str) -> Vec<usize> {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    (1..)
+        .zip(code_lines(source))
+        .filter(|(_, code)| {
+            code.split(|c| !is_ident(c))
+                .any(|w| w == "unwrap" || w == "unwrap_err")
+        })
+        .map(|(at, _)| at)
+        .collect()
+}
+
+fn a_behaviour() {
+    assert_eq!(bb(1), 2, "a behaviour");
+}
+
+/// The first line of the suite whose text, trimmed, `matches`.
+fn suite_line(matches: impl Fn(&str) -> bool) -> u32 {
+    let at = SUITE
+        .lines()
+        .position(|l| matches(l.trim()))
+        .expect("such a line in the suite");
+    u32::try_from(at + 1).expect("a line number")
+}
+
+/// `ran`'s panic, reported as raised at line `line` of the suite's file.
+fn in_the_suite(ran: Ran, line: u32) -> Ran {
+    let Ran::Panicked { payload, .. } = ran else {
+        panic!("it panicked");
+    };
+    Ran::Panicked {
+        file: "nfx-pay/src/adversary.rs".into(),
+        line,
+        payload,
+    }
+}
+
+fn message(ran: &Ran) -> String {
+    let Ran::Panicked { payload, .. } = ran else {
+        return String::new();
+    };
+    payload
+        .downcast_ref::<&str>()
+        .map(|m| (*m).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default()
+}

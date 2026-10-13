@@ -26,6 +26,9 @@ to its sha256?
 
 `planLadder`, `renditionArgv`, `renditionDimensions`, `thumbnailArgv`, `ffprobeArgv` and
 `parseFfprobeJson` are imported **unchanged** from the read-only `packages/` mirror.
+(Since 2026-10-11 the mirror is removed, and the spike carries its own copy of them,
+`web/spikes/s4-cmaf/l8.ts`, taken unchanged from the demo's snapshot at the tag
+`demo-base`.)
 - The ladder: 1080p @ 5000k, 720p @ 2500k, 360p @ 800k, H.264 High + AAC.
 - L8 ends its argv with progressive-MP4 options (`-movflags +faststart -f mp4`). The
   packager cuts the argv at `-movflags` and appends HLS/CMAF options:
