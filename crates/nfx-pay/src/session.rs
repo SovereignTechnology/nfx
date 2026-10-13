@@ -242,7 +242,8 @@ pub trait Viewer {
     /// session's quote's, whatever an earlier session's or another video's was and whatever
     /// the viewer's own cap: so for every payment, ahead after a refusal and at a session's
     /// end included, on whichever ledger and whatever came before), made
-    /// once the unpaid count reaches half the session's quoted window, rounded up, so a
+    /// once the unpaid count reaches half the open session's quoted window (whatever an
+    /// earlier session's or another video's was), rounded up, so a
     /// payment in flight never stalls the seeder, or pays ahead after a refusal half the
     /// window, rounded down, less the credit the ledger holds: what another video's ledger
     /// owes or holds counts for nothing. It pays ahead only as the first `due` after a
@@ -267,7 +268,8 @@ pub trait Viewer {
     /// - after three `mint-unavailable` answers to its payments in a row, until a new
     ///   session's accepted quote. Each such answer uses a try, however its payment was
     ///   made (due, ahead, or at a session's end) and however its reclaim ends (every proof
-    ///   back, at once or late, or lost to the expiry). Nothing else uses a try: not a reclaim, retried while the
+    ///   back, at once or late, or lost to the expiry, every one of them or some and the
+    ///   rest taken back). Nothing else uses a try: not a reclaim, retried while the
     ///   mint is down or not, a closed session's payment reclaimed with every proof back or
     ///   lost to the expiry, a refused `hello` or quote, a session's end, nor a timeout. Only
     ///   an ack or a new session's accepted quote restores them, and each restores them
@@ -472,7 +474,10 @@ pub struct EngineParams {
 /// with tasks still ready (tokio's current-thread runtime does after 61), so the suite
 /// queues a task of its own as a turn begins, and the turn ends as that task runs: the
 /// runtime a runner gives the suite takes up its ready tasks in the order they became
-/// ready, as that one does. So:
+/// ready, as that one does. A turn is not ended on real time, so no thread of an engine's
+/// or a harness's keeps making tasks of that runtime ready without pause: a thread wakes a
+/// task as an answer comes, and while several woke or started tasks with no pause at all a
+/// turn would not end, and the run would be timed out as hung. So:
 /// - it waits for an answer, or checks that a future still waits, by polling it until it is
 ///   ready, or until the engine has settled with the future pending, which then waits on
 ///   the suite (a clock move, a release, another entry). It lets a future it drives beside
@@ -559,6 +564,24 @@ pub struct EngineParams {
 /// raised, and one lost there would leave a check of the suite's to fail in its stead. An
 /// engine may spawn tasks on the runtime it was made in (the suite makes each engine on its
 /// own task), never on whatever thread polls its futures.
+///
+/// **Its mints.** A seeder quotes the harness's own mint and whatever others the suite
+/// names ([`EngineParams`]), and the suite pays at each ([`Harness::token_at`]): the cases
+/// in which it pays a seeder itself it runs at the second of two quoted mints as at the
+/// one. (A watcher of the harness's pays at the harness's own mint: [`Harness::viewer`]
+/// names none.) So a harness backs every mint its seeders quote, and a fault or an event
+/// that a method here brings about with no mint named, it brings about at each of them: an
+/// outage, a request held, lost or given up, a read left unanswered or limited, a
+/// [`MintEvent`], a keyset rotated, expired or listed to expire. (One mint is apart for the
+/// last: a mint that has started a keyset of its own, [`Harness::start_keyset_at`], issues
+/// from that one, and [`Harness::rotate_keyset`], [`Harness::expire_keyset`],
+/// [`Harness::keyset_expires_in`] and [`Harness::expire_active_keyset`] are of the keyset
+/// the other mints issue from: its own keyset's start and expiry are brought about by the
+/// method that names it.) What such a method counts
+/// or reports ([`Harness::key_requests`], [`Harness::listing_requests`],
+/// [`Harness::state_reads`], [`Harness::reads_out`], [`Harness::answers_under_way`]) is
+/// over all of them. No scenario has one mint down while another answers: that takes
+/// faults that name a mint, which a harness does not have.
 ///
 /// **The panic hook.** The runner notes the first panic raised on a scenario's thread with
 /// a panic hook of its own, set over the hook that stood and handing every panic on to it

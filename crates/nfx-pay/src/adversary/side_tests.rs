@@ -182,3 +182,73 @@ fn a_side_dropped_unjoined_ends_its_thread() {
         );
     }
 }
+
+/// The list of a watcher's inputs is the `Viewer` trait's: [`VIEWER_METHODS`] names every
+/// method the trait declares, in the trait's order, so a method added to the trait fails
+/// here until the tables' list of inputs has it.
+#[test]
+fn the_list_of_a_watchers_inputs_is_the_viewer_traits() {
+    let session = include_str!("../session.rs");
+    let from = session
+        .find("pub trait Viewer {")
+        .expect("the Viewer trait is in session.rs");
+    let body = &session[from..];
+    let body = &body[..body.find("\n}\n").expect("the trait ends")];
+    let declared: Vec<&str> = body
+        .lines()
+        .filter_map(|line| {
+            let line = line.strip_prefix("    ")?;
+            let line = line.strip_prefix("async ").map_or(line, |rest| rest);
+            line.strip_prefix("fn ")?.split('(').next()
+        })
+        .collect();
+    assert_eq!(
+        declared, VIEWER_METHODS,
+        "the methods the Viewer trait declares are the ones the tables' inputs are listed from"
+    );
+}
+
+/// A table whose set-up failed, and no check of its rule, fails its scenario at no check of
+/// the suite's: a planted defect that only keeps a state from being brought about is not
+/// caught by it ([`Tally::ends`], `SetUpFailed`).
+#[test]
+fn a_tables_set_up_failure_is_no_check_of_the_suite() {
+    let ran = run_on_a_thread(PATIENCE.as_secs(), || {
+        let mut tally = Tally::default();
+        let cell: Result<Result<(), &'static str>, String> =
+            Err(format!("{SET_UP}a step of the state failed"));
+        tally.take("a rule", cell, || "an input, with a state".to_owned());
+        tally.take("a rule", Ok(Ok(())), String::new);
+        tally.ends("a rule", (1, 0));
+    });
+    assert!(
+        matches!(ran, Ran::Panicked { .. }) && !ran.failed_the_suite(),
+        "a table whose set-up failed fails its scenario, and at no check of the suite's"
+    );
+}
+
+/// A table one of whose cells failed a check of its rule fails a check of the suite's, and
+/// one that ran as pinned finishes.
+#[test]
+fn a_tables_rule_failure_is_a_check_of_the_suite() {
+    let ran = run_on_a_thread(PATIENCE.as_secs(), || {
+        let mut tally = Tally::default();
+        let cell: Result<Result<(), &'static str>, String> =
+            Err("the rule's own check failed".to_owned());
+        tally.take("a rule", cell, || "an input, with a state".to_owned());
+    });
+    assert!(
+        ran.failed_the_suite(),
+        "a table whose rule's check failed has failed a check of the suite's"
+    );
+    let ran = run_on_a_thread(PATIENCE.as_secs(), || {
+        let mut tally = Tally::default();
+        tally.take("a rule", Ok(Ok(())), String::new);
+        tally.take::<()>("a rule", Ok(Err("it cannot come")), String::new);
+        tally.ends("a rule", (1, 1));
+    });
+    assert!(
+        matches!(ran, Ran::Finished),
+        "a table that ran as pinned finishes"
+    );
+}

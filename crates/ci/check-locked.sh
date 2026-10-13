@@ -33,7 +33,10 @@ fi
 #   LOCKED_DIRS_UNLOCKED=1 check-locked.sh --pin
 #                                the security stage, after sovtech has read the diff:
 #                                re-pin both, the compiled facts first (their file is one
-#                                of the pinned files). Never in CI.
+#                                of the pinned files). Refused wherever CI, GITLAB_CI or
+#                                CI_JOB_ID is set, so no CI job can make it: the pin is
+#                                made by hand, on a machine or in a manually dispatched
+#                                probe run whose command unsets those for this script.
 #
 # crates/ci/locked.sha256 pins, by git mode and content:
 #   - the locked paths (stubs until the security stage);
@@ -99,8 +102,47 @@ fi
 #   - a test target of a money crate added, removed or renamed without a re-pin (read from
 #     cargo metadata, before any build); a test binary that did not run, that the build did
 #     not make, or that reported another number of tests than the one pinned for it (or, for
-#     the suite's files, than its sources declare); a test ignored or filtered out. The
-#     lock runs every target of the two crates as a test binary, and their doctests.
+#     the suite's files and nfx-pay's unit tests, than its sources declare); a test ignored
+#     or filtered out. The lock runs every target of the two crates as a test binary, and
+#     their doctests;
+#   - the adversary suite's macro (`adversary_suite`) named in the code of any file but the
+#     suite's own and the test files locked.py names as running it (read before any build
+#     in a check; at a re-pin before the build too, and again before the tests run). Each
+#     of those is held to a number of tests the suite's list of scenarios gives: the whole
+#     list for a harness file, whose code is inner `allow` attributes, plain `use` items
+#     and one invocation of the macro with no `@` arm, and nothing else; every use counted
+#     for the file that runs the honest timings, whose code holds the uses its lines show. A scenario can be run one by one, so it is this, not
+#     the macro, that holds a harness file to the whole list: a new one cannot be pinned
+#     at whatever number of tests ran, and the engine's (M2.1) is named in locked.py when
+#     it is written;
+#   - the suite's second list (`scenarios_at_every_quoted_mint`: each scenario whose
+#     seeders are paid, and its name at a second quoted mint) named in the code of any file
+#     but the suite's own and tests/mutants.rs, or there otherwise than on two lines of
+#     the suite's own (defined, and used once) and one of the mutants' (used once); a name
+#     of the suite's list at a second mint that is no row of it, or a row that is none of
+#     the list's;
+#   - a number of tests declared that differs from its pin (before any build) or from what
+#     ran: for a harness file the names in the suite's list; for the honest timings that
+#     number for each use of the whole suite and one for each scenario named one by one;
+#     for the mutants one for each entry of the two registries (at every mint, at other
+#     mints) and one for each row of the suite's second list; for the runner, the pay/1
+#     vector tests and nfx-pay's unit tests (src/adversary/) their test attributes. A test
+#     attribute where the count does not look (outside the mutants' three macros, in
+#     another source of the library, in a harness file or the honest timings' file, in any
+#     other file of the money crates, written otherwise than as a line of its own), a use
+#     of a registry's macro beside the registry, or a line of a registry or of a list
+#     that is no entry of it, fails rather than go uncounted;
+#   - a file of the money crates that is neither its crate's manifest nor a Rust source the
+#     lock can read as code. locked.py reads each with a lexer of its own (line comments,
+#     nested block comments, string, raw string, byte string and character literals,
+#     lifetimes): a comment or literal that does not end, a carriage return, a character in
+#     code that is not printable ASCII, or a line that begins `//` and holds code (it ends
+#     a block comment or a string) fails by name, never guessed at. On that code the name
+#     `test` anywhere but in a line that reads `#[test]`, in `cfg(test)`, as a macro's
+#     variable or in the pay/1 vector tests' one renaming for wasm fails (so a path that
+#     ends in it, `cfg_attr`, `# [test]`, a renamed or handed attribute); so does
+#     `include!`; and so does a macro defined, or anything compiled on a condition, in the
+#     runner, the mutants (beyond their three macros) or the library's test modules.
 #
 # CI is recognised by CI, GITLAB_CI or CI_JOB_ID. The pinned .github/workflows/ci.yml runs
 # this with CI=true: its lock job under env -i, its check job with LOCKED_DIRS_UNLOCKED
