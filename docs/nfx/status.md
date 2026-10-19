@@ -14,7 +14,7 @@ This repository is public, and since `c07be45` (2026-09-28) its CI runs on GitHu
 two jobs for GitLab and is a dormant twin: it runs nothing. What the sections below say of the private
 GitLab project, of GitLab CI and of its shared runner is as it stood before that.
 
-Updated 2026-10-11 · `main` = `c07be45` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
+Updated 2026-10-12 · `main` = `c07be45` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
 
 ## Where things stand
 
@@ -378,11 +378,15 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    wallet. It gets the locked-directory rule and its own security stage (ADR 0008 §4).
    Plan and decisions: [`m2-plan.md`](m2-plan.md). sovtech chose the demo's staging, and a
    persistent testnet mint.
-   - **M2.0 is built and reworked thirty times** on branch `m2/contracts`, not yet
-     pushed. It holds the pay/1 wire and vectors, the session contracts, the mock, and
-     the adversary suite. Thirty independent audits found 19, 30, 28, 20, 19, 22,
-     23, 8, 12, 17, 9, 7, 8, 8, 9, 7, 10, 8, 8, 7, 7, 9, 23, 22, 22, 20, 15, 23, 26 and
-     26 gaps (the thirtieth's are its confirmed findings: two more were refuted); the
+   - **M2.0 is built and reworked thirty-one times**, on branch `m2/audit-loop` (begun on
+     `m2/contracts`, which stops at the twenty-ninth record's draft), pushed and not yet
+     merged to `main`. (Until the thirty-first audit this line named `m2/contracts` and
+     said "not yet pushed".) It holds the pay/1 wire and vectors, the session contracts,
+     the mock, and the adversary suite. Thirty-one independent audits found 19, 30, 28,
+     20, 19, 22, 23, 8, 12, 17, 9, 7, 8, 8, 9, 7, 10, 8, 8, 7, 7, 9, 23, 22, 22, 20, 15,
+     23, 26, 26 and 33 gaps (the thirtieth's are its confirmed findings: two more were
+     refuted; all 33 of the thirty-first's were confirmed, one of them, another's again,
+     through that other's verdict); the
      resolutions are recorded in each audit's file, and the next audit checks them
      ([first](reviews/2026-09-24-m2.0-independent-audit.md),
      [second](reviews/2026-09-24-m2.0-second-audit.md),
@@ -414,7 +418,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
      [twenty-seventh](reviews/2026-09-24-m2.0-twenty-seventh-audit.md),
      [twenty-eighth](reviews/2026-09-24-m2.0-twenty-eighth-audit.md),
      [twenty-ninth](reviews/2026-09-24-m2.0-twenty-ninth-audit.md),
-     [thirtieth](reviews/2026-09-24-m2.0-thirtieth-audit.md)). **sovtech's bar for the push
+     [thirtieth](reviews/2026-09-24-m2.0-thirtieth-audit.md),
+     [thirty-first](reviews/2026-09-24-m2.0-thirty-first-audit.md)). **sovtech's bar for the push
      is zero findings** (re-confirmed after the sixth). The lock's guarantee is now
      stated in `crates/ci/check-locked.sh`: the money crates' files and build inputs, and
      every target of theirs, failing closed; other crates are out of scope. With sovtech's OK, the minimum role for GitLab pipeline variables on
@@ -428,7 +433,10 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
          cap is a rate (`debt_ttl`).
        - `quote` carries the account's position, so a watcher can resume.
        - HTTPS origins take one payment per request.
-     - The suite has 101 scenarios, run on four harnesses (the mint answering at once;
+     - The suite has 149 scenarios (101 until the thirty-first audit: eight tables of the
+       watcher over one shared list of its inputs, 39 seeder scenarios run again at a
+       second quoted mint, and one in which a seeder's two mints hold its swaps at once),
+       run on four harnesses (the mint answering at once;
        its reads as round trips; every call an entry or a sweep awaits answered by a
        wake from another thread; every quoted mint's keyset listing asked for at the
        engine's start) and under 22 honest timings (answers late, out of order or woken
@@ -444,19 +452,29 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        the answers an engine awaits and by its settling, never by one poll or one turn:
        an engine has settled after 100 turns of the runtime with no answer under way,
        and an entry on a thread of its own waits once it has stood idle through 100 such
-       turns or been polled 100 times more. It never blocks its runtime's thread. 1,415
-       planted defects (915 of the seeder, 500 of the watcher) are registered in 3,122
+       turns or been polled 100 times more. It never blocks its runtime's thread. 1,495
+       planted defects (942 of the seeder, 553 of the watcher) are registered in 3,599
        entries, each entry one defect on one harness against one scenario, and each to
        fail an assertion of the suite (a hang, a panic raised elsewhere, or a runtime
-       panic of Rust's own, is not a catch). On `a2e0ecc`, the tree with the thirtieth
+       panic of Rust's own, is not a catch); 239 of the entries are of a defect that acts
+       only at a seeder's quoted mints other than the first. The timings' file holds 3,279
+       tests. On `c60f864`, the thirty-first audit's tree before its last five commits,
+       each of the 3,599 entries fails a check of the suite, and the honest mock passes
+       all 149 scenarios on the four harnesses and all 3,279 tests under the timings; what
+       ran on the final code tree, `1030738`, is in that audit's record, with what had not
+       yet run when it was written, the lock's re-pin among it. Before that round the figures were 101
+       scenarios, 1,415 defects (915 and 500), 3,122 entries and 2,223 tests: on `a2e0ecc`, the tree with the thirtieth
        audit's resolutions and those of the review before the push, each of the 3,122
        does, and the honest mock passes all 101 scenarios on the four harnesses and all
        2,223 tests under the timings. On that tree one of the 2,223 tests failed once, at `opt-level` 1, and passed
        when its part was run again: the suite could take an engine to have settled with
        tasks of the runtime still unrun, and `a22fdf5`, the final code tree, ends a turn
        of the suite's waiting only once every task ready as it began has run. On
-       `a22fdf5` every binary passed twice without optimisation, the second time in the
-       lock's re-pin (the runs are in the thirtieth audit's record).
+       `a22fdf5` each of nfx-pay's eight test binaries passed twice without optimisation,
+       the second time in the lock's re-pin; nfx-pay-wire's two and the two crates'
+       doctests, unchanged in the round, ran there once, in the re-pin (the runs are in
+       the thirtieth audit's record; until the thirty-first audit this said "every binary
+       passed twice").
      - A swap with no answer is decided by reading its inputs (NUT-07), then its outputs
        (NUT-09), outside the engine's lock: unsigned outputs are nothing only once an
        input is spent (a `PENDING` input is not), so a request the mint holds before
@@ -521,13 +539,45 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        unanswered at a time (the true bound is half the window plus the requests
        unanswered at once, less one). The decision is sovtech's, between three courses,
        and none is taken yet. A review before the push found nothing private and no check
-       weakened; what it found in the tree, none above Low, is resolved on `a2e0ecc`. One
+       weakened. What it found, none above Low, is resolved: in the code by `a2e0ecc`, in
+       README and CONTRIBUTING in the documents' commit; four Info items were left as they
+       are, and the record names them (until the thirty-first audit this said all of it
+       was resolved on `a2e0ecc`). One
        test of `honest_timings` failed once on that tree and passed when run again: the
        fault was in how the suite waits a turn, and `a22fdf5` resolves it.
        The audit's [record](reviews/2026-09-24-m2.0-thirtieth-audit.md) has the runs and
        what stays open;
-     - sovtech's decision on the half-window credit bound;
-     - then a thirty-first independent audit, until one reports nothing;
+     - the thirty-first independent audit (2026-10-12, of `f7b10be`) reported 33
+       findings, and all 33 were confirmed (2 Medium, 15 Low and 16 Info; one of them
+       is another's again and stands on that one's verdict). No money bound is broken in the honest mock, and no auditor found
+       a sentence of NFX-07 that the honest mock contradicts. Both Mediums were gaps of the
+       suite. The thirtieth record's "every outcome now runs at a second quoted mint" was
+       not so: nine defects that act only at a second quoted mint passed, four of them
+       keeping an honest payer's proofs without credit. And a watcher that pays again over
+       its own unanswered payment every 60 s, without bound, passed. The thirtieth round
+       had closed its findings cell by cell and the auditors planted beside the cells, so
+       this round resolves by structure, on `m2/audit-loop`: one list of a watcher's
+       inputs, made from the `Viewer` trait and shared by eight tables; every scenario
+       whose seeders a case pays run whole at each quoted mint from one list, with a
+       registered form for a defect that acts at the other mints only; unit tests that pin
+       what a turn of the suite's waiting is; and a lock that refuses a file which uses
+       the suite's macro without being named in it, and reads the money crates' sources as
+       code. 101 scenarios became 149, and 3,122 planted entries 3,599 (1,415 planted
+       defects became 1,495). Two of the three groups removed existing coverage while they
+       added the new structures; a review of what was removed found it before any push,
+       one requirement asserted nowhere among it (a late invalid outcome bans nobody), and
+       everything removed was restored. **Not fixed, and sovtech's:** the half-window
+       credit bound, as before; a fault that takes one quoted mint down while another
+       answers, which needs a new method of the locked `Harness` trait; and five
+       requirements this round wrote into NFX-07 or the pinned contract, each stricter
+       than what stood, which sovtech has not yet decided. The suite has about half as
+       many scenarios again, and what CI's check job takes on this tree, having taken 112 min 6 s of
+       its 180 on the audited one, is in the audit's
+       [record](reviews/2026-09-24-m2.0-thirty-first-audit.md) once it has run, with the
+       runs and what stays open;
+     - sovtech's decisions: on the half-window credit bound, on the five new requirements,
+       and on a fault that names a mint;
+     - then a thirty-second independent audit, until one reports nothing;
      - sovtech's OK to push M2.0 (given, once the audits are clean);
      - the testnet mint: sovtech approved its deployment once its runbook's checks
        are clean (a private record);
