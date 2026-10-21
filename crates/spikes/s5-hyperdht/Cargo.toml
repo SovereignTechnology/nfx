@@ -1,0 +1,21 @@
+[package]
+name = "s5-hyperdht"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Spike S5': can a pure-Rust HyperDHT (peeroxide 1.7.3) speak NFX-12 with Node hyperdht 6.34?"
+license = "AGPL-3.0-or-later"
+
+# Its own workspace: spike dependencies stay out of the main crates/ graph, its lock and CI.
+# Nothing here may name nfx-pay or nfx-pay-wire (ADR 0101 §4).
+[workspace]
+
+[dependencies]
+anyhow = "1"
+hex = "0.4.3"
+libudx = "=1.7.3"
+peeroxide = "=1.7.3"
+peeroxide-dht = "=1.7.3"
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
