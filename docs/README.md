@@ -38,7 +38,7 @@ to rely on. Labels and statuses are as of 2026-10-12.
 | [`nfx/freeze-m1-candidate.md`](nfx/freeze-m1-candidate.md) | Superseded record | Candidate record behind the M1 freeze of NFX-02..06 |
 | [`nfx/nfx-10-m1-plan.md`](nfx/nfx-10-m1-plan.md) | Superseded record | Plan for the free browser mesh, tracker and bridge at M1 |
 | [`nfx/reviews/`](nfx/reviews/) | Record | Reviews and security audits, one file per piece of work |
-| [`nfx/spikes/`](nfx/spikes/) | Record | Spikes S1 to S4: iroh, Tauri playback, web mesh, CMAF packaging; S5′: a Rust HyperDHT for NFX-12 |
+| [`nfx/spikes/`](nfx/spikes/) | Record | Spikes S1 to S4: iroh, Tauri playback, web mesh, CMAF packaging; S5′: a Rust HyperDHT for NFX-12 (FAIL) |
 | [ADR 0001](decisions/0001-record-architecture-decisions.md) | Record | Record architecture decisions |
 | [ADR 0002](decisions/0002-stack-and-architecture.md) | Superseded record | Stack and architecture: Hypercore transport, Nostr catalog, Cashu payment, one React UI |
 | [ADR 0003](decisions/0003-stage-0-spike-resolutions.md) | Record | Stage 0 spike resolutions: A4, A8, A9, transcode path, desktop shell shape |
