@@ -5,7 +5,8 @@
 # matrix needs root network namespaces and nftables.
 #
 # The spike's checks (interop, NAT, cargo deny) each record a verdict and do not stop the
-# others; the summary step fails the run if any of them failed.
+# others. The summary step fails the run if the interop or NAT matrix failed; cargo deny's
+# verdict is reported there and in results/deny.txt as a finding of the spike, not a gate.
 name: spike-s5
 
 on:
@@ -94,7 +95,7 @@ jobs:
               print("| %s | %s | `%s` |" % (d.get("check"), d.get("ok"), json.dumps(keep)))' "$f"
             done
           } >> "$GITHUB_STEP_SUMMARY"
-          [ "$DENY" = success ] && [ "$LOCAL" = success ] && [ "$NAT" = success ]
+          [ "$LOCAL" = success ] && [ "$NAT" = success ]
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:

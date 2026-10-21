@@ -105,6 +105,10 @@ fn topic() -> [u8; 32] {
 fn dht_config(o: &Opts) -> Result<HyperDhtConfig> {
     let mut dht = DhtConfig::default();
     dht.bootstrap = vec![get(o, "bootstrap")?.to_owned()];
+    // --host: the bind address; a loopback testnet needs 127.0.0.1 (see node/peer.js).
+    if let Some(host) = o.get("host") {
+        dht.host = host.clone();
+    }
     let mut config = HyperDhtConfig::default();
     config.dht = dht;
     Ok(config)

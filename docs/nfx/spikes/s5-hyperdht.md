@@ -27,7 +27,7 @@ the versions nutflix-pear locks. The answer gates nfx Phase 1.
 | 5 | Symmetric NAT → blind relay | CI: `symmetric-symmetric-*` without and with `--relay` |
 | 6 | Throughput | CI: `mbit_s` per pairing (loopback 64 MiB, NAT 8 MiB). The iroh baseline is not in this run (below) |
 | 7 | Noise and secret-stream review | **Done by reading: not suitable as is** (below) |
-| 8 | `cargo deny` / RustSec | CI: `results/deny.txt`, no ignores |
+| 8 | `cargo deny` / RustSec | **Advisories fail:** RUSTSEC-2023-0037, `xsalsa20poly1305` unmaintained (renamed `crypto_secretbox`), which peeroxide uses for holepunch payloads. Bans, licences and sources pass (CI run 1, `results/deny.txt`; no ignores) |
 | 9 | Release cadence; pin or fork | **Done** (below) |
 
 ## What the API lacks (read from the source, file:line in `peeroxide-dht-1.7.3`)

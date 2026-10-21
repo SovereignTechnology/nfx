@@ -4,7 +4,7 @@
 // nfx/pay/1 (type 0, one JSON message) on Protomux, channel id = the video address.
 //
 //   node peer.js testnet --host H --port P [--size 3]
-//   node peer.js relay   --bootstrap H:P --seed S
+//   node peer.js relay   --bootstrap H:P --seed S        (every role but testnet takes [--host IP])
 //   node peer.js serve   --bootstrap H:P --seed S --bytes N [--allow HEX] [--relay HEX]
 //                        [--timeout-ms T]
 //   node peer.js fetch   --bootstrap H:P --seed S --peer HEX --sha HEX --bytes N
@@ -42,6 +42,12 @@ function out(obj) {
 
 function keyPair(seed) {
   return DHT.keyPair(crypto.createHash('sha256').update(seed).digest())
+}
+
+// --host: the address this DHT node binds. A loopback testnet needs 127.0.0.1, as hyperdht's
+// own testnet helper does; otherwise peers dial each other over a LAN address.
+function dhtOpts(o, extra = {}) {
+  return { bootstrap: bootstrap(o), ...(o.host ? { host: o.host } : {}), ...extra }
 }
 
 function bootstrap(o) {
@@ -82,7 +88,7 @@ async function testnet(o) {
 }
 
 async function relay(o) {
-  const dht = new DHT({ bootstrap: bootstrap(o) })
+  const dht = new DHT(dhtOpts(o))
   const kp = keyPair(o.seed)
   const relayServer = new RelayServer({
     createStream(opts) {
@@ -98,7 +104,7 @@ async function relay(o) {
 }
 
 async function serve(o) {
-  const dht = new DHT({ bootstrap: bootstrap(o) })
+  const dht = new DHT(dhtOpts(o))
   const kp = keyPair(o.seed)
   const file = fileOf(Number(o.bytes))
   const allow = o.allow ? b4a.from(o.allow, 'hex') : null
@@ -152,7 +158,7 @@ function onConnection(socket, file, o) {
 }
 
 async function fetch(o) {
-  const dht = new DHT({ bootstrap: bootstrap(o), ephemeral: true })
+  const dht = new DHT(dhtOpts(o, { ephemeral: true }))
   const kp = keyPair(o.seed)
   const started = Date.now()
   const socket = dht.connect(b4a.from(o.peer, 'hex'), {

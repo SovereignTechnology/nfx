@@ -45,17 +45,19 @@ peer() { # netns impl args...
     node) ip netns exec "$ns" "$NODE" "$here/node/peer.js" "$@" ;;
   esac
 }
-start() { # name netns impl args...  (prints the ready line)
+# In this shell, never inside $(…) (its subshell would keep the pid); ready NAME prints the line.
+start() { # name netns impl args...
   local name=$1
   shift
   peer "$@" > "$out/$name.out" 2> "$out/$name.err" &
   pids+=($!)
   for _ in $(seq 1 600); do
-    [ -s "$out/$name.out" ] && { head -1 "$out/$name.out"; return 0; }
+    [ -s "$out/$name.out" ] && return 0
     sleep 0.1
   done
-  echo "{\"ok\":false,\"error\":\"$name: no ready line in 60 s\"}"
+  echo "{\"ok\":false,\"error\":\"$name: no ready line in 60 s\"}" > "$out/$name.out"
 }
+ready() { head -1 "$out/$1.out"; }
 field() { python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get(sys.argv[2], ""))' "$1" "$2"; }
 
 failed=0
@@ -78,13 +80,13 @@ router() { # a|b consistent|symmetric
   ip netns exec "s5r$r" nft -f - <<EOF
 flush ruleset
 table ip nat {
-  chain post {
+  chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
     oifname "up-$r" masquerade $flags
   }
 }
 table inet filter {
-  chain fwd {
+  chain forward {
     type filter hook forward priority filter; policy drop;
     ct state established,related accept
     iifname "down-$r" oifname "up-$r" accept
@@ -120,8 +122,9 @@ topology() { # mode-a mode-b
   done
   router a "$1"
   router b "$2"
-  start "testnet-$1-$2" s5pub node testnet --host 10.200.0.1 --port 49737 --size 5 >/dev/null
-  RELAY=$(field "$(start "relay-$1-$2" s5pub node relay --bootstrap "$BOOT" --seed s5-relay)" relay)
+  start "testnet-$1-$2" s5pub node testnet --host 10.200.0.1 --port 49737 --size 5
+  start "relay-$1-$2" s5pub node relay --bootstrap "$BOOT" --seed s5-relay
+  RELAY=$(field "$(ready "relay-$1-$2")" relay)
 }
 
 pairings() { # scenario judged expect [--relay]
@@ -130,8 +133,9 @@ pairings() { # scenario judged expect [--relay]
   for server in node rust; do
     for client in node rust; do
       name="$scenario-$client-from-$server${4:+-relayed}"
-      ready=$(start "serve-$name" s5ha "$server" serve --bootstrap "$BOOT" --seed "server-$name" \
-        --bytes "$BYTES" "${relay_flag[@]}")
+      start "serve-$name" s5ha "$server" serve --bootstrap "$BOOT" --seed "server-$name" \
+        --bytes "$BYTES" "${relay_flag[@]}"
+      ready=$(ready "serve-$name")
       # Both peers bound their own runs (node 90 s; rust 60 s to connect, 120 s to finish).
       res=$(peer s5hb "$client" fetch --bootstrap "$BOOT" --seed "client-$name" \
         --peer "$(field "$ready" peer)" --sha "$(field "$ready" sha)" --bytes "$BYTES" \
