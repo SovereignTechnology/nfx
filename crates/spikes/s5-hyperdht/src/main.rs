@@ -173,6 +173,11 @@ async fn serve(o: Opts) -> Result<()> {
 
     let file = std::sync::Arc::new((buf, sha));
     while let Some(conn) = conns.recv().await {
+        // Diagnostics for run 4: does the swarm deliver connections, and what happens on them?
+        eprintln!(
+            "serve: connection from {}",
+            hex::encode(conn.remote_public_key())
+        );
         if allow.is_some_and(|a| a != *conn.remote_public_key()) {
             // No firewall callback in peeroxide: the handshake already happened.
             drop(conn);
@@ -210,8 +215,14 @@ async fn on_connection(
             }
         };
         let Some((is_pay, event)) = event else {
+            eprintln!("serve: a channel ended");
             return Ok(());
         };
+        eprintln!(
+            "serve: {} {:?}",
+            if is_pay { "pay" } else { "files" },
+            kind(&event)
+        );
         let ChannelEvent::Message { message_type, data } = event else {
             continue;
         };
@@ -362,6 +373,9 @@ async fn fetch(o: Opts) -> Result<Value> {
             e = files.recv() => match e {
                 Some(ChannelEvent::Message { message_type: DATA, data }) if req_of(&data) == Some(1) => {
                     received += (data.len() - 4) as u64;
+                    if received % (1 << 20) < FRAME as u64 {
+                        eprintln!("fetch: {received} bytes at {} ms", t0.elapsed().as_millis());
+                    }
                     if received > bytes {
                         return Ok(merge(result, json!({ "ok": false, "error": "more bytes than the size" })));
                     }
@@ -430,6 +444,18 @@ async fn wait_for(ch: &mut Channel, want: impl Fn(&str, &Value) -> bool) -> Resu
     })
     .await;
     found.map_err(|_| anyhow!("no answer in 30 s"))?
+}
+
+fn kind(e: &ChannelEvent) -> String {
+    match e {
+        ChannelEvent::Opened { .. } => "opened".into(),
+        ChannelEvent::Message { message_type, data } => {
+            format!("message type {message_type}, {} bytes", data.len())
+        }
+        ChannelEvent::Closed { is_remote } => format!("closed (remote: {is_remote})"),
+        #[allow(unreachable_patterns)]
+        _ => "other".into(),
+    }
 }
 
 fn merge(mut a: Value, b: Value) -> Value {

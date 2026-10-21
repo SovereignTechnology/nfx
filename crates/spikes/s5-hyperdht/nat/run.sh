@@ -74,9 +74,14 @@ record() { # check-name judged(yes|no) expect(ok|fail) json
   fi
 }
 
-router() { # a|b consistent|symmetric
+router() { # a|b consistent|symmetric|open
   local r=$1 flags=""
   [ "$2" = symmetric ] && flags="fully-random"
+  if [ "$2" = open ]; then
+    # No NAT: plain routing, every LAN host reachable (the baseline).
+    ip netns exec "s5r$r" nft flush ruleset
+    return
+  fi
   ip netns exec "s5r$r" nft -f - <<EOF
 flush ruleset
 table ip nat {
@@ -126,6 +131,11 @@ topology() { # mode-a mode-b
     ip netns exec "s5r$r" sysctl -qw net.ipv4.ip_forward=1
     ip netns exec "s5r$r" sysctl -qw net.ipv4.conf.all.rp_filter=0
   done
+  # Routes for the open/open baseline, where the LANs are routed instead of masqueraded.
+  ip -n s5pub route add 192.168.10.0/24 via 10.200.0.11
+  ip -n s5pub route add 192.168.20.0/24 via 10.200.0.12
+  ip -n s5ra route add 192.168.20.0/24 via 10.200.0.12
+  ip -n s5rb route add 192.168.10.0/24 via 10.200.0.11
   router a "$1"
   router b "$2"
   start "testnet-$1-$2" s5pub node testnet --host 10.200.0.1 --port 49737 --size 5
@@ -149,13 +159,16 @@ pairings() { # scenario judged expect [--relay]
       res=${res:-$NOOUT}
       res=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); d["server_nat"]=json.loads(sys.argv[2] or "{}").get("nat"); print(json.dumps(d))' "$res" "$ready")
       # Record which path the connection took: through the relay, or straight to router A.
-      res=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); h=d.get("remote_host") or ""; d["path"]="relay" if h.startswith(sys.argv[2]) else ("direct" if h else "unknown"); print(json.dumps(d))' "$res" "$RELAY_IP")
+      res=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); h=d.get("remote_host") or ""; d["path"]="relay" if h == sys.argv[2] else ("direct" if h else "unknown"); print(json.dumps(d))' "$res" "$RELAY_IP")
       record "$name" "$judged" "$expect" "$res"
       kill "${pids[-1]}" 2>/dev/null || true
       unset 'pids[-1]'
     done
   done
 }
+
+topology open open
+pairings open-open yes ok
 
 topology consistent consistent
 pairings consistent-consistent yes ok
