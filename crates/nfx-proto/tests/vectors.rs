@@ -214,7 +214,11 @@ fn every_invalid_beacon_is_rejected_and_unknown_endpoints_are_skipped() {
 fn hyperdht_beacons_are_skipped_by_a_reader_without_nfx_12() {
     let v = vector!("beacon-hyperdht.json");
     let now = v["now"].as_u64().unwrap();
-    let cases = v["valid"].as_array().unwrap().iter().chain(v["invalid"].as_array().unwrap());
+    let cases = v["valid"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(v["invalid"].as_array().unwrap());
     let mut seen = 0;
     for case in cases {
         let name = str_of(case, "name");
