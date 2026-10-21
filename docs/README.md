@@ -49,6 +49,7 @@ to rely on. Labels and statuses are as of 2026-10-12.
 | [ADR 0008](decisions/0008-multi-network-master-plan.md) | Record | The multi-network master plan (nfx): a second track beside the Pear demo, add-only until a harvest gate |
 | [ADR 0100](decisions/0100-creator-managed-mode.md) | Record | Funding on standard mints: the keyholder, and two ways to pay a seeder |
 | [ADR 0101](decisions/0101-nutflix-pear-interop.md) | Record | nutflix-pear and nfx on one network: both speak NFX, NFX-12 becomes files over Protomux on HyperDHT |
+| [ADR 0102](decisions/0102-creator-share.md) | Record | A creator share on open videos: the creator's receipt before `ack`, a carve-out of the price |
 | [NFX-01](../spec/nfx-01-networks.md) | Spec | Networks and versions |
 | [NFX-02](../spec/nfx-02-manifest.md) | Spec | Catalog manifest (kind 38504) |
 | [NFX-03](../spec/nfx-03-beacons.md) | Spec | Availability beacons (kind 20464) |

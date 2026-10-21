@@ -4,6 +4,10 @@ Date: 2026-09-25
 
 ## Status
 
+Amended 2026-10-21 by [ADR 0102](0102-creator-share.md): open videos may declare a creator share,
+paid through the creator's receipt before the seeder's `ack` (§1's "free, with zaps" and §10's
+two-token split row).
+
 Accepted 2026-09-27 (decisions below). Proposed (sovtech's model, reached 2026-09-25 across four revisions; this record is
 the fourth and replaces the earlier three). Master-plan ADRs are numbered from 0100 so
 that a harvest merge of the demo's 0009 onward never collides.
