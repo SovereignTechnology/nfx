@@ -11,6 +11,11 @@ is described in the present tense: it is **still being built** as the Pear-runti
 demo. The wire token is `nfx`, not `nutflix` (NFX-01 re-freeze). The text below is
 otherwise the 2026-09-16 record.
 
+Amended 2026-10-21 by [ADR 0101](0101-nutflix-pear-interop.md): the TypeScript app
+(`nutflix-pear`) becomes a second NFX implementation beside its legacy protocol. It is written
+from the specs, not evolved piecemeal, so "any production implementation of NFX is a new
+codebase" now reads: a new code path, built against the specs and their vectors.
+
 Amended 2026-10-11 by the [ADR 0008](0008-multi-network-master-plan.md) amendment of
 that date: the v0 prototype is no longer mirrored in this repository. Where the text
 below names `packages/`, `core/src/payment`, `docs/status.md`, the demo's threat model

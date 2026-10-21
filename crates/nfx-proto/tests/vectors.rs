@@ -207,6 +207,27 @@ fn every_invalid_beacon_is_rejected_and_unknown_endpoints_are_skipped() {
     assert!(Beacon::from_event(&good, good.created_at - 901).is_err());
 }
 
+/// nfx-proto does not implement NFX-12 yet, so it is a reader that skips `hyperdht` (NFX-03 §4):
+/// every beacon in the vector parses, the endpoint skipped. When `Endpoint::Hyperdht` lands, the
+/// valid beacons keep parsing with it and every invalid one is rejected whole (NFX-12 §2).
+#[test]
+fn hyperdht_beacons_are_skipped_by_a_reader_without_nfx_12() {
+    let v = vector!("beacon-hyperdht.json");
+    let now = v["now"].as_u64().unwrap();
+    let cases = v["valid"].as_array().unwrap().iter().chain(v["invalid"].as_array().unwrap());
+    let mut seen = 0;
+    for case in cases {
+        let name = str_of(case, "name");
+        let ev = event(&case["event"]);
+        ev.verify()
+            .unwrap_or_else(|e| panic!("{name}: signature should be valid, got {e}"));
+        let b = Beacon::from_event(&ev, now).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(b.content.skipped, ["hyperdht"], "{name}");
+        seen += 1;
+    }
+    assert_eq!(seen, 12);
+}
+
 #[test]
 fn hashlist_bytes_root_files_and_playlists() {
     let v = vector!("hashlist.json");

@@ -1,0 +1,108 @@
+{
+  "description": "NFX-12 §4 nfx/files/1 and §5 nfx/pay/1 on Protomux. Each message is its raw bytes under the pinned type index; u32 = 4-byte little endian. 'transfer' fetches the hash-list vector's init file: the payloads of its 'data' frames, in order, are the file, whose sha256 is the get's sha and whose length is its files[].size. Every 'invalid' message MUST make the receiver close the channel; it is on nfx/files/1 unless its 'protocol' is 'pay', and one given by 'length' has that many bytes.",
+  "video": "nfx:mainnet:1:salt-flats-dusk",
+  "protocols": {
+    "files": "nfx/files/1",
+    "pay": "nfx/pay/1"
+  },
+  "channel_id_hex": "6e66783a6d61696e6e65743a313a73616c742d666c6174732d6475736b",
+  "types": {
+    "files": [
+      "get",
+      "data",
+      "end",
+      "missing"
+    ],
+    "pay": [
+      "msg"
+    ]
+  },
+  "transfer": {
+    "file": "init-720.mp4",
+    "sha256": "0445210eb8755a75f545c3ae58de1162d6ec6490ad8d197ed613d7bbe17f3569",
+    "size": 53,
+    "messages": [
+      {
+        "index": 0,
+        "name": "get",
+        "hex": "070000000445210eb8755a75f545c3ae58de1162d6ec6490ad8d197ed613d7bbe17f3569"
+      },
+      {
+        "index": 1,
+        "name": "data",
+        "hex": "070000004e46582d564543544f5220696e6974207365676d656e7420627974657320286e6f742061207265616c20664d503420696e6974290a"
+      },
+      {
+        "index": 2,
+        "name": "end",
+        "hex": "07000000"
+      }
+    ]
+  },
+  "free_mode_missing": {
+    "index": 3,
+    "name": "missing",
+    "hex": "07000000"
+  },
+  "pay": {
+    "index": 0,
+    "name": "msg",
+    "hex": "7b2274223a2268656c6c6f222c22766964656f223a226e66783a6d61696e6e65743a313a73616c742d666c6174732d6475736b222c2273657373696f6e223a223031323334353637383961626364656630313233343536373839616263646566227d"
+  },
+  "max_pay_message_bytes": 32767,
+  "max_data_payload_bytes": 65536,
+  "invalid": [
+    {
+      "name": "get-35-bytes",
+      "index": 0,
+      "hex": "070000000445210eb8755a75f545c3ae58de1162d6ec6490ad8d197ed613d7bbe17f35"
+    },
+    {
+      "name": "get-37-bytes",
+      "index": 0,
+      "hex": "070000000445210eb8755a75f545c3ae58de1162d6ec6490ad8d197ed613d7bbe17f356900"
+    },
+    {
+      "name": "data-empty-payload",
+      "index": 1,
+      "hex": "07000000"
+    },
+    {
+      "name": "data-payload-over-64-kib",
+      "index": 1,
+      "length": 65541
+    },
+    {
+      "name": "end-3-bytes",
+      "index": 2,
+      "hex": "070000"
+    },
+    {
+      "name": "end-5-bytes",
+      "index": 2,
+      "hex": "0700000000"
+    },
+    {
+      "name": "missing-5-bytes",
+      "index": 3,
+      "hex": "0700000000"
+    },
+    {
+      "name": "unknown-files-index",
+      "index": 4,
+      "hex": "07000000"
+    },
+    {
+      "name": "pay-with-newline",
+      "index": 0,
+      "protocol": "pay",
+      "hex": "7b2274223a2268656c6c6f222c22766964656f223a226e66783a6d61696e6e65743a313a73616c742d666c6174732d6475736b222c2273657373696f6e223a223031323334353637383961626364656630313233343536373839616263646566227d0a"
+    },
+    {
+      "name": "pay-over-32767-bytes",
+      "index": 0,
+      "protocol": "pay",
+      "length": 32768
+    }
+  ]
+}

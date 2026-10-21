@@ -23,6 +23,8 @@ SCHEMA_REJECTS_HASHLISTS = {"version-2", "meta-rendition-id", "bad-sha256", "unk
 SCHEMA_REJECTS_BEACONS = {
     "content-not-json", "paying-without-mints", "paying-empty-mints", "no-endpoints", "chunks-missing",
 }
+# The schema checks a bind's shape, never its signature (NFX-12 §2).
+SCHEMA_ACCEPTS_HYPERDHT = {"bind-by-another-key", "bind-for-another-network", "bind-for-another-seeder"}
 
 
 def load(name: str):
@@ -66,6 +68,14 @@ def main() -> int:
             content = None  # not JSON at all: no schema can accept it
         got = content is not None and conforms(content, beacon_schema)
         expect(f"beacon-invalid/{case['name']}", got, case["name"] not in SCHEMA_REJECTS_BEACONS)
+
+    hd = json.loads((VECTORS / "beacon-hyperdht.json").read_text())
+    for case in hd["valid"]:
+        got = conforms(json.loads(case["event"]["content"]), beacon_schema)
+        expect(f"beacon-hyperdht/valid/{case['name']}", got, True)
+    for case in hd["invalid"]:
+        got = conforms(json.loads(case["event"]["content"]), beacon_schema)
+        expect(f"beacon-hyperdht/invalid/{case['name']}", got, case["name"] in SCHEMA_ACCEPTS_HYPERDHT)
 
     if failures:
         print(f"\n{len(failures)} schema/vector disagreement(s)", file=sys.stderr)

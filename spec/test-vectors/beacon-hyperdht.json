@@ -1,0 +1,344 @@
+{
+  "description": "NFX-12 §2 hyperdht endpoints in correctly signed kind-20464 beacons, checked at 'now'. 'bind' = Ed25519(peer key, utf8(\"nfx/hyperdht/1:\" + seeder + \":\" + namespace)), RFC 8032. A reader implementing NFX-12 MUST accept 'valid' and MUST reject every 'invalid' beacon whole; a reader that does not implement it skips the endpoint and accepts them all (NFX-03 §4). 'gossip_budget' counts the renditions whose tickets fit in one NFX-06 §4 envelope with and without the endpoint.",
+  "secret_keys_DO_NOT_USE": {
+    "seeder": "115ac24798fa94a35206459d31583a3ad9c57955a9e9784f749cb38327714683",
+    "hyperdht_peer": "1a8b12355a2e854f703c4b512ebe86761c6a0f5061f2396faa80eb984f79ac93",
+    "hyperdht_other": "dfe8ff7e223b80ba84adc3d763597667ddae5ef521cd7b9239c441131720b083"
+  },
+  "now": 1790000030,
+  "bind": {
+    "seeder": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+    "namespace": "nfx:mainnet:1",
+    "peer": "b089f756ccc0d5102061c210a88b199ccb1858a532956dc9ddd1077ebb16739e",
+    "message_utf8": "nfx/hyperdht/1:84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb:nfx:mainnet:1",
+    "sig": "a0258876b6a9404facc669fc41249890037788b2634321d1e8ff8735029e32a4c4a27abbc69282037a05b8ba74365b75f492edf6e79d320cda331b12d7dfd503"
+  },
+  "valid": [
+    {
+      "name": "paid-hyperdht-and-https",
+      "event": {
+        "id": "d45663000630b7d9b096ebcd182043062a826c51360543028196b729f04c829c",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"hyperdht\",\"peer\":\"b089f756ccc0d5102061c210a88b199ccb1858a532956dc9ddd1077ebb16739e\",\"bind\":\"a0258876b6a9404facc669fc41249890037788b2634321d1e8ff8735029e32a4c4a27abbc69282037a05b8ba74365b75f492edf6e79d320cda331b12d7dfd503\"},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "28796ecf99b6635aca791da403eac627130fe7cce128a538d748c7985a8a504e9f7d15f171b6d1b2c93f771e4e4259d748da188e4d533eab6bbfa4aefc8b57fe"
+      }
+    },
+    {
+      "name": "free-hyperdht-only",
+      "event": {
+        "id": "4a7f6399eea1eacb61aac2033022a272084e12f7f64860e2b026e1f3c0e0c5b7",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"hyperdht\",\"peer\":\"b089f756ccc0d5102061c210a88b199ccb1858a532956dc9ddd1077ebb16739e\",\"bind\":\"a0258876b6a9404facc669fc41249890037788b2634321d1e8ff8735029e32a4c4a27abbc69282037a05b8ba74365b75f492edf6e79d320cda331b12d7dfd503\"}],\"chunks\":\"all\",\"price_hint\":0,\"free\":true}",
+        "sig": "7bc6e5f05ae67adcdad3452244b7e60ce41dddf715b286e4b056e132b554bab100c9a0b8812ad37d45cb4b8c25e5608fe0663fb4ab38c2a54efec9ad3388fe33"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "peer-uppercase",
+      "reason": "peer is 64 lowercase hex",
+      "event": {
+        "id": "6636a38d91312a7dec318ea8123ffd66f2055fbcb62a258e24f8e030061aa261",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"hyperdht\",\"peer\":\"B089F756CCC0D5102061C210A88B199CCB1858A532956DC9DDD1077EBB16739E\",\"bind\":\"a0258876b6a9404facc669fc41249890037788b2634321d1e8ff8735029e32a4c4a27abbc69282037a05b8ba74365b75f492edf6e79d320cda331b12d7dfd503\"},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "546b8ad26ab1c651785be8fbe2ece1709587c7f7e6c0f452311f23c095f7e3af13e671a75170f3ac9fafae717c69fd83f05e3f8c53c7bafdf3762b30869f35b0"
+      }
+    },
+    {
+      "name": "peer-63-hex",
+      "reason": "peer is 64 lowercase hex",
+      "event": {
+        "id": "2072b1714f1d0057948a5834a05741b63c4b0b7cc901a6f6efb5f485925f7288",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"hyperdht\",\"peer\":\"b089f756ccc0d5102061c210a88b199ccb1858a532956dc9ddd1077ebb16739\",\"bind\":\"a0258876b6a9404facc669fc41249890037788b2634321d1e8ff8735029e32a4c4a27abbc69282037a05b8ba74365b75f492edf6e79d320cda331b12d7dfd503\"},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "452e9a17b96012dde959d2cc2edceb060d1181bda39eaa5b9e968b1682909425c62903e0e2bc06abfaab22f068908e404f118ab7544e159ba074dd4268d04555"
+      }
+    },
+    {
+      "name": "peer-missing",
+      "reason": "a hyperdht endpoint has a peer",
+      "event": {
+        "id": "46b32ab5fe6137ff44e7bb22907994b834dd516efc217fbbb5e9de686d640709",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"hyperdht\",\"bind\":\"a0258876b6a9404facc669fc41249890037788b2634321d1e8ff8735029e32a4c4a27abbc69282037a05b8ba74365b75f492edf6e79d320cda331b12d7dfd503\"},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "230f2856c886987055cf523d84cb31a659488194b58d78e0ec72c2fca539e8630b8f44973b23700cc5b41a2f6f60b24295e870b9450fd99e9fd2ec30b7b11640"
+      }
+    },
+    {
+      "name": "peer-not-a-string",
+      "reason": "peer is 64 lowercase hex",
+      "event": {
+        "id": "753c5216073e38c8f3e84445a92f6d88ec74f9743d63eac28ff3fbafedc6d8ee",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"hyperdht\",\"peer\":7,\"bind\":\"a0258876b6a9404facc669fc41249890037788b2634321d1e8ff8735029e32a4c4a27abbc69282037a05b8ba74365b75f492edf6e79d320cda331b12d7dfd503\"},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "1c7558eea4e57123cd77d8a752b68fa57226a5d8acb807c0b5ab4437c76901a8797362e892d01e2a047b49bcae17943222be2d905ad4fa44bb695f9e482a1049"
+      }
+    },
+    {
+      "name": "bind-missing",
+      "reason": "a hyperdht endpoint has a bind",
+      "event": {
+        "id": "78242254c6bf9e95ba4a69fa1710ba2ed7c4839efb8ac6e39dffd42aec5530cd",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"hyperdht\",\"peer\":\"b089f756ccc0d5102061c210a88b199ccb1858a532956dc9ddd1077ebb16739e\"},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "d83edff5bde025517fd0a31ffef6b44f7f369fa7e92d1b5eb14d7f5d8470733d48c532a68dd0d40dff4ffc38af2d8d38a7a310cf466444dbca9f2101b6080902"
+      }
+    },
+    {
+      "name": "bind-127-hex",
+      "reason": "bind is 128 lowercase hex",
+      "event": {
+        "id": "83175f47d04cd0edc74ba7fec66993a6d6b055e764cbb2a27ec575af12e26226",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"hyperdht\",\"peer\":\"b089f756ccc0d5102061c210a88b199ccb1858a532956dc9ddd1077ebb16739e\",\"bind\":\"a0258876b6a9404facc669fc41249890037788b2634321d1e8ff8735029e32a4c4a27abbc69282037a05b8ba74365b75f492edf6e79d320cda331b12d7dfd50\"},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "400188a40383ddf3c6f7346a026ed6f3d5cb19946de16d5bd4c8b9289fd5be994f24c377c57e6226531f578643f7f19c353480b5b3596c3a5ab326093d19973c"
+      }
+    },
+    {
+      "name": "bind-uppercase",
+      "reason": "bind is 128 lowercase hex",
+      "event": {
+        "id": "d0753cd9e7686ae50bac1cdbea1737a0a8c2ba132af189d17e06dbe314c68277",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"hyperdht\",\"peer\":\"b089f756ccc0d5102061c210a88b199ccb1858a532956dc9ddd1077ebb16739e\",\"bind\":\"A0258876B6A9404FACC669FC41249890037788B2634321D1E8FF8735029E32A4C4A27ABBC69282037A05B8BA74365B75F492EDF6E79D320CDA331B12D7DFD503\"},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "2d7455ac025fcc33bf9e26882ddc957941fb32131bb7f89499aa187660a7538d93230e862efb8313482d73d105f174bae49389491cb9579826471d0b19bc2a4a"
+      }
+    },
+    {
+      "name": "bind-by-another-key",
+      "reason": "bind verifies against peer",
+      "event": {
+        "id": "741fe8284a9edbbb087e28098831b4aa93d422b41a2f4970b5305949f7b0805f",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"hyperdht\",\"peer\":\"b089f756ccc0d5102061c210a88b199ccb1858a532956dc9ddd1077ebb16739e\",\"bind\":\"e44c3b7aa9c1aae82e70a538e9146718199fd316cbebfba7b51c4a2afaa30437b0b2919e3762ee35f76ee5ad4cb798d9766fc3211c305331d91720f62455c90d\"},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "92ad116299d07fd5a61ac88fe053b9f4fde6d3e7427ea74161069818146b35cca5e8b884820a2b2c2cd4b47c54be2c28c17f2991ab6c532af1a9ed3d892896cc"
+      }
+    },
+    {
+      "name": "bind-for-another-network",
+      "reason": "bind's namespace is the beacon's n",
+      "event": {
+        "id": "4db183c8d3053456c6c7e52707f51294fc6c8f8e2342299feb48b1acb818e22c",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"hyperdht\",\"peer\":\"b089f756ccc0d5102061c210a88b199ccb1858a532956dc9ddd1077ebb16739e\",\"bind\":\"bf3931af71b8e9d7b15bb4d90f30391fa6eb64e9b7a664879a48ecee743862ee872e2bbcf36087b5a0adbc807090cb4248296a6b05218b2582f66d438dd8c50b\"},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "3dc774d089dda224d4575beeaa6ebceaa7c729f391fa75fca44ba02451d4376f8accddb9b7770e8d0f1fb8b67d6a7f3bd90d6bf27fc6622273281e04f4ddd948"
+      }
+    },
+    {
+      "name": "bind-for-another-seeder",
+      "reason": "bind's seeder is the beacon's pubkey: an endpoint copied from another seeder's beacon does not verify",
+      "event": {
+        "id": "d3c7f1d0ca9ef2a7b2cecbd0440e379c6498925a0e2b9cea830fda5523158b5e",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000000,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000120"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"hyperdht\",\"peer\":\"b089f756ccc0d5102061c210a88b199ccb1858a532956dc9ddd1077ebb16739e\",\"bind\":\"e1f605b9b9fc5795eec7158bd255d104cdfd28b421437cb3604bbbf9592e04ed7a8d0c67d35d2dcf758a7c7a2414a214769e7d716207680fc9e8632dc89b7508\"},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "a55b3ae5fd489408c6dedbad830ab6e8bfb44b254f12b130d1e1b9056c2e6690dc3b52e6b16c18e58a12e48360fa07c554457c426f6a2f686520c6b855bb3341"
+      }
+    }
+  ],
+  "gossip_budget": {
+    "layout": "compact (canon) envelope: an iroh endpoint with one ticket per rendition plus 'meta', and optionally the hyperdht endpoint above",
+    "hyperdht_endpoint_bytes": 229,
+    "limits": {
+      "4096": {
+        "without_hyperdht": 18,
+        "with_hyperdht": 17
+      },
+      "4032": {
+        "without_hyperdht": 18,
+        "with_hyperdht": 17
+      }
+    }
+  }
+}

@@ -28,11 +28,27 @@
         "required": [
           "t"
         ],
+        "if": {
+          "properties": {
+            "t": {
+              "const": "hyperdht"
+            }
+          },
+          "required": [
+            "t"
+          ]
+        },
+        "then": {
+          "required": [
+            "peer",
+            "bind"
+          ]
+        },
         "properties": {
           "t": {
             "type": "string",
             "pattern": "^[a-z0-9-]{1,32}$",
-            "description": "endpoint type; known values in NFX-11 §3 (iroh, https, webrtc, hyper); readers skip unknown types"
+            "description": "endpoint type; known values in NFX-11 §3 (iroh, https, webrtc, hyperdht; hyper deprecated); readers skip unknown types"
           },
           "node": {
             "type": "string",
@@ -68,6 +84,16 @@
           "drive": {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
+          },
+          "peer": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "hyperdht: the seeder's Noise peer key (NFX-12 §2)"
+          },
+          "bind": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{128}$",
+            "description": "hyperdht: Ed25519 signature by peer over nfx/hyperdht/1:<seeder>:<namespace> (NFX-12 §2); the schema checks its shape only"
           },
           "renditions": {
             "type": "array",
