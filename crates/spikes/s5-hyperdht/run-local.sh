@@ -57,6 +57,15 @@ record() { # check-name json
 
 start testnet node testnet --host 127.0.0.1 --port 49737 --size 3
 
+# A 1 MiB Node-to-Node control: whether a failed bulk fetch depends on its size (run 2).
+name=fetch-small-node-from-node
+start "serve-$name" node serve --host 127.0.0.1 --bootstrap "$BOOT" --seed "server-$name" --bytes 1048576
+ready=$(ready "serve-$name")
+res=$(peer node fetch --host 127.0.0.1 --bootstrap "$BOOT" --seed "client-$name" \
+  --peer "$(field "$ready" peer)" --sha "$(field "$ready" sha)" --bytes 1048576 2>> "$out/$name.err" || true)
+record "$name" "${res:-$NOOUT}"
+stop
+
 for server in node rust; do
   for client in node rust; do
     name="fetch-$client-from-$server"

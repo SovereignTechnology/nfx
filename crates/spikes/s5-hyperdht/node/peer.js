@@ -82,6 +82,12 @@ async function drained(socket, writable) {
   await new Promise((resolve) => socket.once('drain', resolve))
 }
 
+// What hyperdht thinks of this node's NAT: its public address and whether it is firewalled
+// or behind a randomizing (symmetric) NAT.
+function natInfo(dht) {
+  return { host: dht.host, port: dht.port, firewalled: dht.firewalled, randomized: dht.randomized }
+}
+
 async function testnet(o) {
   const t = await createTestnet(Number(o.size || 3), { host: o.host, port: Number(o.port) })
   out({ role: 'testnet', bootstrap: `${o.host}:${o.port}`, nodes: t.nodes.length })
@@ -118,7 +124,8 @@ async function serve(o) {
     (socket) => onConnection(socket, file, o)
   )
   await server.listen(kp)
-  out({ role: 'serve', impl: 'node', peer: b4a.toString(kp.publicKey, 'hex'), sha: file.sha, bytes: file.buf.length })
+  await dht.fullyBootstrapped()
+  out({ role: 'serve', impl: 'node', peer: b4a.toString(kp.publicKey, 'hex'), sha: file.sha, bytes: file.buf.length, nat: natInfo(dht) })
 }
 
 function onConnection(socket, file, o) {
@@ -160,17 +167,20 @@ function onConnection(socket, file, o) {
 async function fetch(o) {
   const dht = new DHT(dhtOpts(o, { ephemeral: true }))
   const kp = keyPair(o.seed)
+  await dht.fullyBootstrapped()
   const started = Date.now()
   const socket = dht.connect(b4a.from(o.peer, 'hex'), {
     keyPair: kp,
     ...(o.relay ? { relayThrough: b4a.from(o.relay, 'hex') } : {})
   })
-  const result = { role: 'fetch', impl: 'node', ok: false }
+  // stage and received say how far a failed run got (CI run 2: ETIMEDOUT mid-fetch).
+  const result = { role: 'fetch', impl: 'node', ok: false, stage: 'connect', received: 0, nat: natInfo(dht) }
   let reported = false
   const done = (extra) => {
     if (reported) return // one JSON line per run, whichever path finishes first
     reported = true
     Object.assign(result, extra)
+    result.elapsed_ms = Date.now() - started
     out(result)
     socket.destroy()
     dht.destroy().then(() => process.exit(result.ok ? 0 : 1))
@@ -207,6 +217,7 @@ async function fetch(o) {
   result.connect_ms = Date.now() - started
   result.remote_key_ok = b4a.toString(socket.remotePublicKey, 'hex') === o.peer
   result.remote_host = socket.rawStream ? socket.rawStream.remoteHost : null
+  result.stage = 'opened'
   if (o['keepalive-ms'] !== undefined) socket.setKeepAlive(Number(o['keepalive-ms']))
 
   if (o['idle-ms']) {
@@ -246,6 +257,7 @@ async function fetch(o) {
     onmessage(buf) {
       if (buf.readUInt32LE(0) !== 1) return
       received += buf.length - 4
+      result.received = received
       if (received > bytes) return done({ error: 'more bytes than the size' })
       hash.update(buf.subarray(4))
     }
@@ -269,7 +281,9 @@ async function fetch(o) {
   pay.open()
 
   msg.send(b4a.from(JSON.stringify({ t: 'hello', video: VIDEO, session: '0123456789abcdef0123456789abcdef' })))
+  result.stage = 'quote'
   await quote
+  result.stage = 'transfer'
   const t0 = Date.now()
   get.send(b4a.concat([u32(1), b4a.from(o.sha, 'hex')]))
   // A pay/1 message sent while the file streams: its round trip shows whether pay waits
@@ -280,6 +294,7 @@ async function fetch(o) {
     msg.send(b4a.from(JSON.stringify({ t: 'pay', upto_chunk: 1, token: 'cashuBspike' })))
   }, 50)
   await finished
+  result.stage = 'missing'
   const ms = Date.now() - t0
   const pay_rtt_ms = await Promise.race([payRtt, new Promise((resolve) => setTimeout(() => resolve(null), 10000))])
   get.send(b4a.concat([u32(2), b4a.alloc(32, 0xab)]))

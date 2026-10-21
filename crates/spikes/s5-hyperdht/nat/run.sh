@@ -86,6 +86,11 @@ table ip nat {
   }
 }
 table inet filter {
+  # A real NAT answers nothing unsolicited: drop it, so no ICMP unreachable goes back.
+  chain input {
+    type filter hook input priority filter; policy accept;
+    iifname "up-$r" ct state new drop
+  }
   chain forward {
     type filter hook forward priority filter; policy drop;
     ct state established,related accept
@@ -119,6 +124,7 @@ topology() { # mode-a mode-b
     ip -n "s5h$r" link set eth0 up
     ip -n "s5h$r" route add default via "$lan.1"
     ip netns exec "s5r$r" sysctl -qw net.ipv4.ip_forward=1
+    ip netns exec "s5r$r" sysctl -qw net.ipv4.conf.all.rp_filter=0
   done
   router a "$1"
   router b "$2"
@@ -141,6 +147,7 @@ pairings() { # scenario judged expect [--relay]
         --peer "$(field "$ready" peer)" --sha "$(field "$ready" sha)" --bytes "$BYTES" \
         2>> "$out/$name.err" || true)
       res=${res:-$NOOUT}
+      res=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); d["server_nat"]=json.loads(sys.argv[2] or "{}").get("nat"); print(json.dumps(d))' "$res" "$ready")
       # Record which path the connection took: through the relay, or straight to router A.
       res=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); h=d.get("remote_host") or ""; d["path"]="relay" if h.startswith(sys.argv[2]) else ("direct" if h else "unknown"); print(json.dumps(d))' "$res" "$RELAY_IP")
       record "$name" "$judged" "$expect" "$res"

@@ -168,7 +168,7 @@ async fn serve(o: Opts) -> Result<()> {
     swarm.flush().await?;
     out(
         json!({ "role": "serve", "impl": "rust", "peer": hex::encode(kp.public_key), "sha": sha,
-                "bytes": buf.len() }),
+                "bytes": buf.len(), "nat": nat_info(swarm.dht()).await }),
     );
 
     let file = std::sync::Arc::new((buf, sha));
@@ -254,18 +254,22 @@ async fn fetch(o: Opts) -> Result<Value> {
     let (_task, dht, _server_rx) = hyperdht::spawn(&rt, dht_config(&o)?).await?;
     dht.bootstrapped().await?;
 
+    let nat = nat_info(&dht).await;
     let started = Instant::now();
     let conn = timeout(Duration::from_secs(60), dht.connect(&kp, peer, &rt)).await;
     let expect_refused = o.contains_key("expect-refused");
     let conn = match conn {
-        Err(_) => return Ok(json!({ "ok": false, "error": "connect timed out after 60 s" })),
+        Err(_) => {
+            return Ok(json!({ "ok": false, "error": "connect timed out after 60 s", "nat": nat }));
+        }
         Ok(Err(e)) if expect_refused => {
             return Ok(json!({ "ok": true, "refused": "handshake", "error": e.to_string() }));
         }
-        Ok(Err(e)) => return Ok(json!({ "ok": false, "error": e.to_string() })),
+        Ok(Err(e)) => return Ok(json!({ "ok": false, "error": e.to_string(), "nat": nat })),
         Ok(Ok(conn)) => conn,
     };
     let mut result = json!({
+        "nat": nat,
         "connect_ms": started.elapsed().as_millis() as u64,
         "remote_key_ok": conn.remote_public_key == peer,
         "remote_host": conn.remote_addr.map(|a| a.ip().to_string()),
@@ -399,6 +403,17 @@ async fn fetch(o: Opts) -> Result<Value> {
             "pay_rtt_ms": pay_rtt_ms,
         }),
     ))
+}
+
+/// What peeroxide thinks of this node's NAT (the NAT class, 0 unknown to 3 random) and its
+/// public address.
+async fn nat_info(dht: &peeroxide_dht::hyperdht::HyperDhtHandle) -> Value {
+    let addr = dht.remote_address().await.ok().flatten();
+    json!({
+        "firewall": dht.firewalled().await.ok(),
+        "host": addr.as_ref().map(|a| a.host.clone()),
+        "port": addr.map(|a| a.port),
+    })
 }
 
 async fn wait_for(ch: &mut Channel, want: impl Fn(&str, &Value) -> bool) -> Result<Value> {
