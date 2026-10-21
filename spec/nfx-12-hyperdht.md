@@ -130,7 +130,10 @@ closes the channel.
   have it" included, is a pay/1 **`refuse`** naming the file, and nothing on `nfx/files/1`. The
   watcher closes the request when the `refuse` arrives. A seeder in paid mode never sends
   `missing`: NFX-07 §3a makes a watcher owe every request not answered with `refuse`, and the
-  web profile does the same (NFX-10 §3).
+  web profile does the same (NFX-10 §3). A watcher that receives `missing` in paid mode treats
+  it as a protocol error: it closes the `nfx/files/1` channel and stops paying that seeder, and
+  the request is owed like any other not refused (NFX-07 §3a), so a seeder gains nothing by
+  sending it.
 
 **Receiver duties.**
 
@@ -224,6 +227,10 @@ An implementation is conformant when it passes those fixtures and the cross-impl
   the seeders of that video, as its beacons already do. A watcher that dials by key reveals itself
   only to the seeder it dials.
 - **A seeder is no content oracle** (§4): it answers only for files of the channel's video.
+- **Keys are free.** A watcher can dial with any number of fresh keys, so the per-connection
+  limits of §4 bound one connection, not one attacker. A seeder SHOULD also cap connections per
+  remote key and in total (local policy); NFX-07 §3's global cap per `debt_ttl` is what bounds
+  its unpaid service, on this transport as on every other.
 
 ## 10. Open issues (before any freeze)
 
