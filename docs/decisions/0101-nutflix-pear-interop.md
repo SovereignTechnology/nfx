@@ -99,7 +99,7 @@ because the files and their sha256 are the same on every transport (NFX-05 §4).
 
 ### 6. Order
 
-- **Phase 0:** this record, the creator-share decision (ADR 0102), NFX-12 and its vectors, spike
+- **Phase 0:** this record, the creator-share decision ([ADR 0102](0102-creator-share.md)), NFX-12 and its vectors, spike
   S5′, and the `seedersOnline` fix in `nutflix-pear` (its issue #23).
 - **Phase 1, free interop:** both sides publish kind 38504 and beacons and fetch from each other
   on `nfx:testnet:1`. Only videos their creators mark free go to NFX from `nutflix-pear`, so the
