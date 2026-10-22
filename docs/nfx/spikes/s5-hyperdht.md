@@ -29,7 +29,9 @@ nfx Phase 1 is re-planned before it starts (ADR 0101 §4); the options are at th
 - `run-local.sh`: the same pairings on a loopback testnet, plus firewall, keepalive and timeout
   checks. Informative only (below).
 - CI only: `.github/workflows/spike-s5.yml`, runs 1–4 on 2026-10-21. Run 4 is
-  [39663397861](https://github.com/SovereignTechnology/nfx/actions/runs/39663397861).
+  [39663397861](https://github.com/SovereignTechnology/nfx/actions/runs/39663397861). Since the
+  verdict the workflow runs only by hand (`workflow_dispatch`), so it does not go red on every
+  change to the spike.
 - Resolved versions: peeroxide 1.7.3, peeroxide-dht 1.7.3, libudx 1.7.3, tokio 1.54.0. The
   `.crate` sha256 equals the crates.io checksum.
 
