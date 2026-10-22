@@ -1,0 +1,21 @@
+{
+  "name": "s5-hyperdht-node",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Spike S5': the Node side (the versions nutflix-pear locks) of the Rust HyperDHT interop run",
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@hyperswarm/secret-stream": "6.9.1",
+    "b4a": "1.8.1",
+    "blind-relay": "1.6.1",
+    "compact-encoding": "3.4.0",
+    "hyperdht": "6.34.0",
+    "protomux": "3.11.0"
+  },
+  "overrides": {
+    "@hyperswarm/secret-stream": "6.9.1"
+  }
+}

@@ -1,0 +1,104 @@
+# Spike S5': peeroxide 1.7.3 (a pure-Rust HyperDHT) against Node hyperdht 6.34,
+# @hyperswarm/secret-stream 6.9.1 and protomux 3.11, the versions nutflix-pear locks
+# (ADR 0101 §4; record: docs/nfx/spikes/s5-hyperdht.md). It builds nothing of the main
+# workspace and names no money crate. It runs on the runner VM, not in a container: the NAT
+# matrix needs root network namespaces and nftables.
+#
+# The spike's checks (interop, NAT, cargo deny) each record a verdict and do not stop the
+# others. The summary step fails the run if the interop or NAT matrix failed; cargo deny's
+# verdict is reported there and in results/deny.txt as a finding of the spike, not a gate.
+name: spike-s5
+
+on:
+  push:
+    paths:
+      - "crates/spikes/s5-hyperdht/**"
+      - ".github/workflows/spike-s5.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.98.0"
+  NODE_VERSION: "v24.21.0"
+  NODE_SHA256: "fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6"
+  CARGO_DENY_VERSION: "0.20.2"
+  CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  s5:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+        working-directory: crates/spikes/s5-hyperdht
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: toolchains (each download checked against its pinned sha256)
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          curl -sSfLo /tmp/node.tar.xz "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz"
+          echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c -
+          sudo tar -xJf /tmp/node.tar.xz -C /opt
+          echo "/opt/node-${NODE_VERSION}-linux-x64/bin" >> "$GITHUB_PATH"
+          curl -sSfLo /tmp/deny.tgz "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "${CARGO_DENY_SHA256}  /tmp/deny.tgz" | sha256sum -c -
+          tar -xzf /tmp/deny.tgz -C /tmp
+          sudo install -m 0755 "/tmp/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny" /usr/local/bin/
+          command -v nft >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq nftables; }
+      - name: build (Rust peer)
+        run: cargo build --release --locked
+      - name: install (Node peer, no install scripts)
+        working-directory: crates/spikes/s5-hyperdht/node
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: cargo deny (RustSec, licences, sources)
+        id: deny
+        continue-on-error: true
+        run: |
+          mkdir -p results
+          set -o pipefail
+          cargo deny check 2>&1 | tee results/deny.txt
+      - name: local interop matrix
+        id: local
+        continue-on-error: true
+        run: OUT="$PWD/results" ./run-local.sh
+      - name: NAT matrix (root, network namespaces)
+        id: nat
+        continue-on-error: true
+        run: sudo env "PATH=$PATH" OUT="$PWD/results" ./nat/run.sh
+      - name: summary
+        if: always()
+        env:
+          DENY: ${{ steps.deny.outcome }}
+          LOCAL: ${{ steps.local.outcome }}
+          NAT: ${{ steps.nat.outcome }}
+        run: |
+          {
+            echo "## Spike S5′"
+            echo "cargo deny: $DENY · local matrix: $LOCAL · NAT matrix: $NAT"
+            echo
+            echo '| check | ok | detail |'
+            echo '|---|---|---|'
+            for f in results/local.jsonl results/nat.jsonl; do
+              [ -f "$f" ] || continue
+              python3 -c 'import json,sys
+          for line in open(sys.argv[1]):
+              d = json.loads(line)
+              keep = {k: d[k] for k in ("path", "mbit_s", "connect_ms", "pay_rtt_ms", "refused", "error", "judged", "expect") if k in d}
+              print("| %s | %s | `%s` |" % (d.get("check"), d.get("ok"), json.dumps(keep)))' "$f"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$LOCAL" = success ] && [ "$NAT" = success ]
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: s5-results
+          path: crates/spikes/s5-hyperdht/results/
+          retention-days: 30
