@@ -70,7 +70,8 @@ ignore tags they do not know (NFX-01 §4). No payments, no media.
   self-describing when mirrored off-relay).
 - `endpoints[].t`: `iroh` (NFX-06), `https` (origin-style: `url` is the origin's base
   URL, under which NFX-05 §6 serves `GET <base>/<sha256>`), `webrtc` (bridge, NFX-10
-  §2), `hyper` (optional Hypercore profile, NFX-12). Several may be present; at least
+  §2), `hyperdht` (optional HyperDHT profile, NFX-12; `hyper` is its deprecated
+  predecessor). Several may be present; at least
   one MUST be. New endpoint types are non-breaking additions (NFX-01 §4): a client MUST
   skip endpoints whose `t` it does not implement, and MUST NOT reject the beacon because
   of them. The registry of `t` values is NFX-11 §3.
@@ -135,3 +136,6 @@ edit in this spec is ever required to grow the relay set.
   `docs/nfx/reviews/2026-09-24-m2.0-twenty-ninth-audit.md`): §4 says in words that an
   `https` endpoint's `url` is the origin's base URL, which `GET <base>/<sha256>` already
   meant; NFX-05 §6 and NFX-07 §4 define an origin by that base URL.
+- 2026-10-21 (registry pointer, no behaviour change; ADR 0101): §4's list names `hyperdht`, the
+  endpoint type of the rewritten NFX-12, and marks `hyper` deprecated. A reader that does not
+  implement NFX-12 skips both, as before; the registry stays NFX-11 §3.

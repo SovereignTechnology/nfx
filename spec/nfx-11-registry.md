@@ -31,8 +31,10 @@ else; `nutflix:*` namespaces are void (NFX-01 §2).
 | swarm topic | `sha256("nfx/1/swarm/" + namespace + "/" + video-id)` (hex) — NFX-06 §4 |
 | web stream swarm ID | `nfx/1/web/<namespace>:<video-id>/<rendition-id>` (one swarm per rendition) — NFX-10 §2 |
 | web tracker infohash | `base64(sha1(stream swarm ID)[0..15])`, 20 ASCII chars (p2p-media-loader v4 `computeInfoHash`) — NFX-10 §2 |
-| Hyperswarm topic | `sha256("nfx/1/hyper/" + namespace + "/" + video-id)` — NFX-12 §3 |
-| Protomux payment protocol | `nfx/pay/1`, channel id `utf8(<namespace>:<video-id>)` — NFX-12 §5 |
+| HyperDHT topic (MAY) | `sha256("nfx/1/hyper/" + namespace + "/" + video-id)`, the 32-byte digest itself (vectors print it in hex) — NFX-12 §3 |
+| HyperDHT `bind` message | `utf8("nfx/hyperdht/1:" + seeder + ":" + namespace)`, signed with Ed25519 by the peer key — NFX-12 §2 |
+| Protomux file protocol | `nfx/files/1`, channel id `utf8(<namespace>:<video-id>)`, types 0 `get`, 1 `data`, 2 `end`, 3 `missing` — NFX-12 §4 |
+| Protomux payment protocol | `nfx/pay/1`, channel id `utf8(<namespace>:<video-id>)`, type 0 one NFX-07 §2 message — NFX-12 §5 |
 
 Beacon endpoint types (`endpoints[].t`, NFX-03 §4). Readers skip types they do not
 implement:
@@ -42,7 +44,8 @@ implement:
 | `iroh` | NFX-06 |
 | `https` | NFX-05 §6 |
 | `webrtc` | NFX-10 §2 |
-| `hyper` | NFX-12 (optional) |
+| `hyperdht` | NFX-12 §2 (optional) |
+| `hyper` | deprecated: parsed, never emitted or dialed (NFX-12 §2) |
 
 Capability keys:
 
@@ -59,7 +62,7 @@ Capability keys:
 | iroh-blobs | **0.103.x** (depends on iroh ^1) | its standard ALPN is the NFX blob wire; tickets are its `BlobTicket` string form, whose byte layout NFX-06 §2 states and `tickets.json` pins |
 | iroh-gossip | **0.101.x** (depends on iroh ^1) | carries `nfx/gossip/1` (NFX-06 §4) |
 | p2p-media-loader | **v4** (4.0.0 at pinning; upstream for the free mesh, a maintained v4 fork for the paid mesh) | NFX-10 §§1–3; its `computeInfoHash` defines the tracker infohash |
-| Hypercore stack | hypercore 11, hyperdrive 13, hyperswarm 4, protomux 3 | NFX-12 (optional) |
+| HyperDHT stack | the wire of hyperdht 6, @hyperswarm/secret-stream 6 and protomux 3 (6.34, 6.9.1 and 3.11 at pinning, 2026-10-21) | NFX-12 §8 (optional); the pin is the wire behaviour and its fixtures, not a package version |
 | Cashu protocol | NUT-00/02/03/06/07/08/11/12 | via CDK or cashu-ts; NUT-08 only for its blank outputs (NFX-09 `redeem`) |
 | Media profile | NFX-05 §1 | no external pin |
 
@@ -119,6 +122,8 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | pay/1 messages, valid and invalid (NFX-07 §2) | `test-vectors/pay1.json` |
 | Gossip envelope vector | `test-vectors/gossip.json` |
 | Derived identifiers (namespaces, topics, infohash) | `test-vectors/derived.json` |
+| `hyperdht` beacon endpoints, valid and invalid (NFX-12 §2) | `test-vectors/beacon-hyperdht.json` |
+| `nfx/files/1` messages, valid and invalid (NFX-12 §4) | `test-vectors/files1.json` |
 | Generator (source of truth) | `test-vectors/generate.py` |
 
 Vectors use throwaway keys whose *secret is published in the file* — never use them
@@ -134,10 +139,13 @@ python3 test-vectors/generate.py --verify   # byte-exact re-check
 - **L1 — catalog reader**: validates manifests per NFX-02 §4; honors `n`-tag
   isolation (NFX-01 §3); ignores unknown tags.
 - **L2 — watcher**: L1 + fetches/verifies per NFX-05 §4 + at least one of (NFX-06
-  iroh | NFX-05 §6 origin) + NFX-07 pays or handles 402 correctly.
+  iroh | NFX-12 HyperDHT | NFX-05 §6 origin) + NFX-07 pays or handles 402 correctly.
 - **L3 — seeder**: L1 + NFX-03 beacons at TTL policy + NFX-05 §5 verified pinning +
-  NFX-06 collection serving (or bridge, NFX-10 §2) + NFX-07 verification duties
-  §3 (window enforcement included).
+  NFX-06 collection serving (or bridge, NFX-10 §2, or NFX-12 file serving) + NFX-07
+  verification duties §3 (window enforcement included).
+
+A claim of L2 or L3 through NFX-12 is made against its fixtures and the cross-implementation run
+of NFX-12 §8.
 - **L4 — mint**: NFX-09 all four endpoints + NUT-03/08/11/12 interop + NUT-06
   advertisement per NFX-09 §1.
 - **L5 — scoped relay**: NFX-04 §§1–3 including NIP-40 and the rate-limit table.
@@ -223,3 +231,8 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   origin's base URL, as NFX-05 §6 and NFX-07 §4 do (was: from a host's root).
   `bad-token`'s locked proofs are open mode's: a licensed video's proofs are P2PK-locked
   and judged `bad-lock` (NFX-08 §4.1).
+- 2026-10-21 (ADR 0101) — NFX-12 becomes the HyperDHT profile: endpoint type `hyperdht` and its
+  `bind` message, the `nfx/files/1` protocol and its type indices, the pay/1 Protomux type; `hyper`
+  deprecated; the per-video topic is MAY and is the 32-byte digest (the row used to leave hex or
+  bytes open). The Hypercore stack pin becomes a HyperDHT wire pin. L2 and L3 accept NFX-12. New
+  vectors `beacon-hyperdht.json` and `files1.json`.

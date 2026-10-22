@@ -8,16 +8,16 @@ wire identifier carries that name (the wire token is `nfx`, NFX-01 §2), so a pr
 rename never touches the protocol.
 
 The suite is normative for the architecture described in ADR 0006, and ADR 0008 sets
-the multi-network build plan. The TypeScript monorepo of the demo is a different
-design: a Pear-runtime-only desktop demo that is **still being built** under its own
-plan (its web-shell lane is out of scope there), in its own repository (`nutflix-demo`;
-the snapshot once mirrored here is at the tag `demo-base`). It is not an NFX
-implementation and is not evolved toward one piecemeal; the specs cite it only where
-its operational lessons are normative.
+the multi-network build plan. The TypeScript desktop app is a different design on the
+Holepunch stack, in its own repository (`nutflix-pear`, formerly `nutflix-demo`; the
+snapshot once mirrored here is at the tag `demo-base`). Since ADR 0101 it is becoming a
+**second, independent NFX implementation** over NFX-12, beside its own legacy protocol,
+which stays as it is; the specs cite that legacy protocol only where its operational
+lessons are normative.
 
 **Scope:** NFX is a multi-platform protocol. Implementations include native clients
 (iroh), browsers (WebRTC mesh), origin HTTPS servers, scoped relays, mints and an
-optional Hypercore profile (NFX-12). No
+optional HyperDHT profile (NFX-12). No
 conformance level (L1–L5) requires Pear — or any specific runtime, app framework, or
 desktop shell.
 
@@ -36,7 +36,7 @@ desktop shell.
 | NFX-09 | Split-mint extension (mint API) | Draft | M3 |
 | NFX-10 | Web transport profile | Draft | M4 |
 | NFX-11 | Registry, schemas, test vectors, conformance | Living | per-milestone |
-| NFX-12 | Hypercore transport profile (optional) | Draft | later |
+| NFX-12 | HyperDHT transport profile (optional) | Draft | later |
 
 Lower numbers are dependencies of higher numbers. NFX-01 and NFX-05 are the two every
 implementation needs.

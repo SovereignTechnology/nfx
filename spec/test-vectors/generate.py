@@ -597,6 +597,145 @@ def main() -> int:
     gossip_canon, gossip_digest, gossip_sig = sign_canon(seeder, gossip_body)
     gossip_wire = json.dumps(dict(gossip_body, sig=gossip_sig), ensure_ascii=False)
 
+    # ---- 8a. NFX-12: the hyperdht endpoint and its bind (§2) ----
+    # A peer key is a HyperDHT Noise key pair, i.e. an ed25519 key pair.
+    peer_seed = hashlib.sha256(b"nfx-test-vector/hyperdht-peer").digest()
+    peer_pk, peer_sk = sodium.crypto_sign_seed_keypair(peer_seed)
+    other_seed = hashlib.sha256(b"nfx-test-vector/hyperdht-other").digest()
+    _, other_sk = sodium.crypto_sign_seed_keypair(other_seed)
+    seeder_hex = schnorr_id_pubkey(seeder)
+
+    def bind_message(seeder_pubkey: str, ns: str) -> bytes:
+        return f"nfx/hyperdht/1:{seeder_pubkey}:{ns}".encode()
+
+    def bind_sig(sk: bytes, msg: bytes) -> str:
+        return sodium.crypto_sign(msg, sk)[:64].hex()  # detached: crypto_sign is sig || msg
+
+    bind_msg = bind_message(seeder_hex, NAMESPACE)
+    bind = bind_sig(peer_sk, bind_msg)
+    sodium.crypto_sign_open(bytes.fromhex(bind) + bind_msg, peer_pk)
+    hyperdht_ep = {"t": "hyperdht", "peer": peer_pk.hex(), "bind": bind}
+    https_ep = {"t": "https", "url": "https://seed.example/nfx"}
+
+    def hd_beacon(endpoints, **fields):
+        c = copy.deepcopy(beacon_content)
+        c["endpoints"] = endpoints
+        for k, v in fields.items():
+            if v is None:
+                c.pop(k, None)
+            else:
+                c[k] = v
+        return nostr_event(seeder, 20464, beacon_tags, json.dumps(c, separators=(",", ":")), CREATED_AT)
+
+    hd_valid = [
+        {"name": "paid-hyperdht-and-https", "event": hd_beacon([hyperdht_ep, https_ep])},
+        {"name": "free-hyperdht-only", "event": hd_beacon([hyperdht_ep], free=True, accepts_mints=None,
+                                                          price_hint=0)},
+    ]
+
+    def hd_case(name, reason, **endpoint):
+        ep = {k: v for k, v in dict(hyperdht_ep, **endpoint).items() if v is not None}
+        return {"name": name, "reason": reason, "event": hd_beacon([ep, https_ep])}
+
+    hd_invalid = [
+        hd_case("peer-uppercase", "peer is 64 lowercase hex", peer=peer_pk.hex().upper()),
+        hd_case("peer-63-hex", "peer is 64 lowercase hex", peer=peer_pk.hex()[:63]),
+        hd_case("peer-missing", "a hyperdht endpoint has a peer", peer=None),
+        hd_case("peer-not-a-string", "peer is 64 lowercase hex", peer=7),
+        hd_case("bind-missing", "a hyperdht endpoint has a bind", bind=None),
+        hd_case("bind-127-hex", "bind is 128 lowercase hex", bind=bind[:127]),
+        hd_case("bind-uppercase", "bind is 128 lowercase hex", bind=bind.upper()),
+        hd_case("bind-by-another-key", "bind verifies against peer",
+                bind=bind_sig(other_sk, bind_msg)),
+        hd_case("bind-for-another-network", "bind's namespace is the beacon's n",
+                bind=bind_sig(peer_sk, bind_message(seeder_hex, "nfx:testnet:1"))),
+        hd_case("bind-for-another-seeder", "bind's seeder is the beacon's pubkey: an endpoint "
+                "copied from another seeder's beacon does not verify",
+                bind=bind_sig(peer_sk, bind_message(schnorr_id_pubkey(creator), NAMESPACE))),
+    ]
+
+    # How many renditions' iroh tickets fit in a gossip envelope beside a hyperdht endpoint
+    # (NFX-06 §4: 4 KiB on the wire; nfxd sends nothing above 4096 - 64). Every rendition's
+    # ticket has the 720p ticket's length, which is what a ticket for the same endpoint has.
+    rendition_ids = ["2160p", "1440p", "1080p", "720p", "540p", "480p", "360p", "240p", "144p",
+                     "audio-hi", "audio-lo", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9"]
+
+    def envelope_bytes(n: int, with_hyperdht: bool) -> int:
+        c = copy.deepcopy(beacon_content)
+        iroh_ep = copy.deepcopy(c["endpoints"][0])
+        iroh_ep["tickets"] = {rid: tickets["720p"]["string"] for rid in rendition_ids[:n]}
+        iroh_ep["tickets"]["meta"] = tickets["meta"]["string"]
+        c["endpoints"] = [iroh_ep] + ([hyperdht_ep] if with_hyperdht else [])
+        body = {"v": 1, "op": "here", "pubkey": seeder_hex, "beacon": c, "created_at": CREATED_AT}
+        _, _, sig = sign_canon(seeder, body)
+        return len(canon(dict(body, sig=sig)))
+
+    def renditions_that_fit(limit: int, with_hyperdht: bool) -> int:
+        n = 0
+        while n < len(rendition_ids) and envelope_bytes(n + 1, with_hyperdht) <= limit:
+            n += 1
+        if n == len(rendition_ids):
+            raise SystemExit("vector bug: extend rendition_ids")
+        return n
+
+    gossip_budget = {
+        "layout": "compact (canon) envelope: an iroh endpoint with one ticket per rendition plus "
+                  "'meta', and optionally the hyperdht endpoint above",
+        "hyperdht_endpoint_bytes": len(canon(hyperdht_ep)) + 1,
+        "limits": {
+            str(limit): {"without_hyperdht": renditions_that_fit(limit, False),
+                         "with_hyperdht": renditions_that_fit(limit, True)}
+            for limit in (4096, 4096 - 64)
+        },
+    }
+
+    # ---- 8a (cont.). NFX-12 nfx/files/1 and pay/1 over Protomux (§§4-5) ----
+    def u32(n: int) -> bytes:
+        return n.to_bytes(4, "little")
+
+    init_name = "init-720.mp4"
+    init_bytes = fabricated[init_name]
+    init_sha = sha256(init_bytes)
+    assert any(f["sha256"] == init_sha and f["size"] == len(init_bytes) for f in hashlist["files"])
+    req = 7
+    frame = 512  # a vector-sized frame; the limit is 65,536 bytes of payload
+    transfer = [{"index": 0, "name": "get", "hex": (u32(req) + bytes.fromhex(init_sha)).hex()}]
+    for at in range(0, len(init_bytes), frame):
+        transfer.append({"index": 1, "name": "data", "hex": (u32(req) + init_bytes[at:at + frame]).hex()})
+    transfer.append({"index": 2, "name": "end", "hex": u32(req).hex()})
+    hello = json.dumps({"t": "hello", "video": video, "session": "0123456789abcdef" * 2},
+                       separators=(",", ":")).encode()
+    files1 = {
+        "description": "NFX-12 §4 nfx/files/1 and §5 nfx/pay/1 on Protomux. Each message is its "
+                       "raw bytes under the pinned type index; u32 = 4-byte little endian. "
+                       "'transfer' fetches the hash-list vector's init file: the payloads of its "
+                       "'data' frames, in order, are the file, whose sha256 is the get's sha and "
+                       "whose length is its files[].size. Every 'invalid' message MUST make the "
+                       "receiver close the channel; it is on nfx/files/1 unless its 'protocol' "
+                       "is 'pay', and one given by 'length' has that many bytes.",
+        "video": video,
+        "protocols": {"files": "nfx/files/1", "pay": "nfx/pay/1"},
+        "channel_id_hex": video.encode().hex(),
+        "types": {"files": ["get", "data", "end", "missing"], "pay": ["msg"]},
+        "transfer": {"file": init_name, "sha256": init_sha, "size": len(init_bytes), "messages": transfer},
+        "free_mode_missing": {"index": 3, "name": "missing", "hex": u32(req).hex()},
+        "pay": {"index": 0, "name": "msg", "hex": hello.hex()},
+        "max_pay_message_bytes": 32767,
+        "max_data_payload_bytes": 65536,
+        "invalid": [
+            {"name": "get-35-bytes", "index": 0, "hex": (u32(req) + bytes.fromhex(init_sha)[:31]).hex()},
+            {"name": "get-37-bytes", "index": 0, "hex": (u32(req) + bytes.fromhex(init_sha) + b"\0").hex()},
+            {"name": "data-empty-payload", "index": 1, "hex": u32(req).hex()},
+            {"name": "data-payload-over-64-kib", "index": 1, "length": 4 + 65537},
+            {"name": "end-3-bytes", "index": 2, "hex": u32(req).hex()[:6]},
+            {"name": "end-5-bytes", "index": 2, "hex": (u32(req) + b"\0").hex()},
+            {"name": "missing-5-bytes", "index": 3, "hex": (u32(req) + b"\0").hex()},
+            {"name": "unknown-files-index", "index": 4, "hex": u32(req).hex()},
+            {"name": "pay-with-newline", "index": 0, "protocol": "pay", "hex": (hello + b"\n").hex()},
+            {"name": "pay-over-32767-bytes", "index": 0, "protocol": "pay", "length": 32768},
+        ],
+    }
+
     # ---- 8b. Licensed-mode encryption (NFX-08 §2), generated by libsodium ----
     video_key = hashlib.sha256(b"nfx-test-vector/video-key").digest()
     enc_name = "init-720.mp4"
@@ -698,6 +837,24 @@ def main() -> int:
             "cases": beacon_invalid,
             "unknown_endpoint_only": beacon_unknown_only,
         },
+        "beacon-hyperdht.json": {
+            "description": "NFX-12 §2 hyperdht endpoints in correctly signed kind-20464 beacons, "
+                           "checked at 'now'. 'bind' = Ed25519(peer key, utf8(\"nfx/hyperdht/1:\" "
+                           "+ seeder + \":\" + namespace)), RFC 8032. A reader implementing NFX-12 "
+                           "MUST accept 'valid' and MUST reject every 'invalid' beacon whole; a "
+                           "reader that does not implement it skips the endpoint and accepts them "
+                           "all (NFX-03 §4). 'gossip_budget' counts the renditions whose tickets "
+                           "fit in one NFX-06 §4 envelope with and without the endpoint.",
+            "secret_keys_DO_NOT_USE": {"seeder": secrets["seeder"], "hyperdht_peer": peer_seed.hex(),
+                                       "hyperdht_other": other_seed.hex()},
+            "now": now,
+            "bind": {"seeder": seeder_hex, "namespace": NAMESPACE, "peer": peer_pk.hex(),
+                     "message_utf8": bind_msg.decode(), "sig": bind},
+            "valid": hd_valid,
+            "invalid": hd_invalid,
+            "gossip_budget": gossip_budget,
+        },
+        "files1.json": files1,
         "canon.json": {
             "description": "NFX-11 §9 canonical JSON. 'input' is received JSON text; 'canon' "
                            "is the exact canonical text, or null when the input is "

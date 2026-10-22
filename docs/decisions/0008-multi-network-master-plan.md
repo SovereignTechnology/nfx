@@ -13,6 +13,11 @@ harvest becomes an import instead of a merge. See the Amendment at the end, and 
 correction of the same day that follows it. The text
 above it is otherwise the 2026-09-23 record and its addendum.
 
+Amended 2026-10-21 by [ADR 0101](0101-nutflix-pear-interop.md): the demo, now
+`nutflix-pear`, is reshaped in its own repository into a second NFX implementation, so §1's
+"untouched" no longer holds; §3's harvest of the Hypercore seeder as the NFX-12 sidecar and
+spike S5 are void, and NFX-12 is rewritten for HyperDHT.
+
 ## Context
 
 ADR 0006 made the NFX suite (`spec/`) normative for the redesign: iroh, content-
