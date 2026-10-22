@@ -1,5 +1,7 @@
 # NFX
 
+> **Source of truth:** [`nostr://npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx`](https://gitworkshop.dev/npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx) — issues and pull requests live there. This GitHub repository is a mirror; push to the Nostr remote, not here.
+
 A Nostr-identified, peer-seeded video network: an open standard with a Rust reference
 implementation.
 
