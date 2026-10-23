@@ -7,13 +7,12 @@
 # The spike's checks (interop, NAT, cargo deny) each record a verdict and do not stop the
 # others. The summary step fails the run if the interop or NAT matrix failed; cargo deny's
 # verdict is reported there and in results/deny.txt as a finding of the spike, not a gate.
+#
+# Manual only since the verdict (FAIL, 2026-10-21): on push it would go red on every change to
+# the spike, by design. Run it from the Actions tab to re-check a peeroxide release or a fork.
 name: spike-s5
 
 on:
-  push:
-    paths:
-      - "crates/spikes/s5-hyperdht/**"
-      - ".github/workflows/spike-s5.yml"
   workflow_dispatch:
 
 permissions:
