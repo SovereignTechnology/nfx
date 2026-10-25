@@ -637,7 +637,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        A and "that much, not merely at most" kept. **Made in the thirty-second round**, on
        `m2/r32` ([record](reviews/2026-09-24-m2.0-thirty-second-round.md)): the `Viewer`
        trait's 15 methods, `Harness::mint_outage_at`, 152 scenarios, every target passing on
-       `6c56690`, and the lock re-pinned to it (run RE-PIN-RUN). Eight points of the round's
+       `6c56690`, and the lock re-pinned to it (run 40237869943). Eight points of the round's
        own making await sovtech's reading (the record's "Awaiting sovtech's decision");
      - next, the thirty-second independent audit, repeated until one reports nothing;
      - sovtech's OK to push M2.0 (given, once the audits are clean);
