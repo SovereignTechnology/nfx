@@ -8,6 +8,9 @@ Accepted 2026-10-19 (sovtech's decisions, below). One part is conditional: nfx's
 stack waits on spike S5′ (§4). If S5′ fails, this record is revisited before any nfx Phase 1
 work; the wire profile (NFX-12) stands either way.
 
+Revisited 2026-10-25: S5′ failed, and [ADR 0103](0103-meet-over-iroh.md) records the course
+sovtech chose. nfx does not speak HyperDHT, and the two implementations meet over iroh.
+
 Amends ADR 0006 ("any production implementation of NFX is a new codebase") and ADR 0008 §1 and
 §3 (the demo is never reshaped; the harvest of the Hypercore seeder as the NFX-12 sidecar; spike
 S5).
