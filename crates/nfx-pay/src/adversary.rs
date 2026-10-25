@@ -92,6 +92,7 @@ macro_rules! adversary_suite {
             the_deadline_frees_the_account,
             racing_outcomes_settle_once,
             a_mint_outage_is_not_a_ban,
+            a_mint_outage_at_one_mint_is_not_a_ban,
             every_request_counts_whole_or_not,
             only_the_sessions_video_is_admitted,
             an_unpaid_window_stops_serving,
@@ -164,6 +165,7 @@ macro_rules! adversary_suite {
             an_honest_pair_resumes_after_a_reconnect,
             an_honest_pair_waits_out_a_slow_mint,
             an_honest_pair_rides_out_a_mint_outage,
+            an_honest_pair_rides_out_an_outage_at_one_mint,
             an_honest_pair_survives_a_dropped_connection,
             an_honest_pair_survives_a_fast_reconnect,
             an_honest_pair_survives_a_reordered_payment,
@@ -363,6 +365,11 @@ const NAMES_ITS_MINTS: &str = "it names its mints itself";
 /// ([`AT_EVERY_QUOTED_MINT`]), and why.
 pub const AT_ONE_MINT: &[(&str, &str)] = &[
     ("foreign_and_lookalike_mints_are_refused", NAMES_ITS_MINTS),
+    ("a_mint_outage_at_one_mint_is_not_a_ban", NAMES_ITS_MINTS),
+    (
+        "an_honest_pair_rides_out_an_outage_at_one_mint",
+        NAMES_ITS_MINTS,
+    ),
     ("open_sessions_are_capped_and_released", ASKS_NO_MINT),
     ("every_request_counts_whole_or_not", ASKS_NO_MINT),
     ("an_unpaid_window_stops_serving", ASKS_NO_MINT),
@@ -7205,8 +7212,9 @@ async fn an_unanswered_check_of_inputs_proves_nothing<H: Harness>(h: &H) {
 }
 
 /// Flaws `UnknownPerMint`, `InFlightUnknownPerMint`, `SweepReadsOneMintOnly`,
-/// `SweepReadsNewestMintOnly`, `SweepReadsFirstMintOnly`, `PayReadsOwnMintOnly` and
-/// `PayReadsOwnMintOnlyInFlight`. A seeder's two quoted mints hold its accounts' swaps at once, and NFX-07 §3 states the
+/// `SweepReadsNewestMintOnly`, `SweepReadsFirstMintOnly`, `PayReadsOwnMintOnly`,
+/// `PayReadsOwnMintOnlyInFlight`, `OneMintsOutageTakenForAll` and
+/// `SweepReadsDownMintAsDecided`. A seeder's two quoted mints hold its accounts' swaps at once, and NFX-07 §3 states the
 /// rules of a swap of its account, never of a mint. (What one mint's swaps come to alone,
 /// every scenario whose seeders are paid runs at each quoted mint:
 /// [`scenarios_at_every_quoted_mint!`](crate::scenarios_at_every_quoted_mint).) One seeder
@@ -7224,12 +7232,14 @@ async fn an_unanswered_check_of_inputs_proves_nothing<H: Harness>(h: &H) {
 /// - "an account's own `hello` and `pay` read that account's unknown swaps": a claim at one
 ///   mint that covers the account's next payment, a token of the other, refuses it `stale`
 ///   with nothing swapped, both ways round, the claim's answer lost or its swap abandoned
-///   in flight.
-///
-/// Not run: one mint down and the other answering. A harness's faults are every mint's it
-/// backs ([`Harness::mint_outage`] and the like name none), so "a read refused or
-/// unanswered proves nothing for the swaps it covered, and nothing more" is shown for one
-/// mint's reads at a time, never across two.
+///   in flight;
+/// - "a read refused or unanswered proves nothing for the swaps it covered, and nothing
+///   more", one mint down and the other answering ([`Harness::mint_outage_at`]): with two
+///   accounts' claims, their answers lost, one at each mint, and either mint down, a sweep
+///   reads each mint's swaps apart, learns the claim at the mint that answers and credits
+///   it, and leaves the other unknown; that account's next payment, at the mint that
+///   answers, is answered `mint-unavailable` with nothing swapped, its own read of the swap
+///   left unanswered; and once the mint is back a sweep learns that claim and credits it.
 pub async fn a_seeders_two_mints_hold_its_swaps_at_once<H: Harness>(h: &H) {
     let unpaid = "an account, two chunks unpaid";
     // An unknown swap stops its account's next payment, whichever quoted mint each is at:
@@ -7454,6 +7464,72 @@ pub async fn a_seeders_two_mints_hold_its_swaps_at_once<H: Harness>(h: &H) {
              comes, if it was held ({cell})"
         );
         close(h, s).await;
+    }
+
+    // One mint down and the other answering: each mint's swaps are read apart, and the down
+    // one's prove nothing, and nothing more. Peer 1's claim is at the mint that goes down,
+    // peer 2's at the other, both answers lost and no restore to show them then.
+    for down in QUOTED {
+        let up = other_quoted(down);
+        let cell = format!("the mint down: {down:?}");
+        let e = Quoted::Second.engine(h);
+        let mut a = open(h, &e, 1).await;
+        assert_eq!(serve(h, &mut a, 0, 2), 2, "peer 1, {unpaid} ({cell})");
+        let mut b = open(h, &e, 2).await;
+        assert_eq!(serve(h, &mut b, 0, 2), 2, "peer 2, {unpaid} ({cell})");
+        lost_claim(&down.paying(h), &mut a, 2, 2).await;
+        lost_claim(&up.paying(h), &mut b, 2, 2).await;
+        close(h, (a, b)).await;
+        advance(h, SECOND).await;
+        h.mint_outage_at(&down.mint(h), true);
+        e.sweep().await;
+        // The mint's reads down, an account's own hello can learn nothing itself.
+        h.state_check_outage(true);
+        h.restore_outage(true);
+        let q2 = open(h, &e, 2).await.quote().clone();
+        let q1 = open(h, &e, 1).await.quote().clone();
+        h.state_check_outage(false);
+        h.restore_outage(false);
+        assert_eq!(
+            (q2.accepted_upto, q2.spent_total),
+            (2, 2),
+            "a sweep reads each mint's swaps apart, and one mint down proves nothing of the \
+             other's: peer 2's claim, at the mint that answers, is learnt and credited ({cell})"
+        );
+        assert_eq!(
+            (q1.accepted_upto, q1.spent_total),
+            (0, 0),
+            "and peer 1's claim, at the mint that is down, is credited nothing: that read \
+             proved nothing ({cell})"
+        );
+        advance(h, SECOND).await;
+        let mut a = open(h, &e, 1).await;
+        advance(h, SECOND).await; // its hello's read spent none of the payment's second
+        let next = Pay {
+            upto_chunk: 2,
+            token: h.token_at(&up.mint(h), 2).await,
+        };
+        let r = a.pay(&next).await;
+        assert!(
+            is_rej(&r, &RejCode::MintUnavailable) && !h.claimed_any(&next.token).await,
+            "peer 1's swap at the mint that is down stays unknown: its next payment, at the \
+             mint that answers, reads it there, learns nothing, and is answered \
+             mint-unavailable with nothing swapped ({cell}): {r:?}"
+        );
+        close(h, a).await;
+        h.mint_outage_at(&down.mint(h), false);
+        advance(h, SECOND).await;
+        e.sweep().await;
+        h.state_check_outage(true);
+        h.restore_outage(true);
+        let q1 = open(h, &e, 1).await.quote().clone();
+        h.state_check_outage(false);
+        h.restore_outage(false);
+        assert_eq!(
+            (q1.accepted_upto, q1.spent_total),
+            (2, 2),
+            "once its mint is back, a sweep learns peer 1's claim there and credits it ({cell})"
+        );
     }
 }
 
@@ -7906,6 +7982,103 @@ pub async fn racing_outcomes_settle_once<H: Harness + Sync>(h: &H) {
     }
 
     an_outcome_in_the_deadlines_second_is_late(h).await;
+}
+
+/// What a seeder of two quoted mints asks of the mint that is down before its payment
+/// there is answered, for [`a_mint_outage_at_one_mint_is_not_a_ban`]: nothing, its keys
+/// and its listing held; its keys, forgotten; or its listing, a keyset of that mint's own
+/// started since.
+const ASKS_THE_DOWN_MINT: [&str; 3] = ["nothing", "its keys", "its listing"];
+
+/// The other of a seeder's two quoted mints.
+fn other_quoted(q: Quoted) -> Quoted {
+    match q {
+        Quoted::First => Quoted::Second,
+        Quoted::Second => Quoted::First,
+    }
+}
+
+/// Flaws `UpMintStoppedByOtherOutage` and `UnreachableKeysBadToken`. A mint that cannot be
+/// reached is `mint-unavailable` at that mint alone (NFX-07 §3): one of a seeder's two
+/// quoted mints down ([`Harness::mint_outage_at`]) and the other answering, a payment at the
+/// down one is answered `mint-unavailable`, bans nobody, claims nothing and leaves nothing
+/// unknown, while the same account's payment at the other is swapped and acknowledged; and
+/// once the mint is back the first token is acknowledged in its turn. So it goes whichever
+/// mint is down, and whatever the seeder must ask the down one for first
+/// ([`ASKS_THE_DOWN_MINT`]): keys or a keyset listing it cannot have there are
+/// `mint-unavailable` too, never a keyset the mint does not know, while the other mint's
+/// keys and listing are asked for and served as ever.
+pub async fn a_mint_outage_at_one_mint_is_not_a_ban<H: Harness>(h: &H) {
+    for down in QUOTED {
+        for asks in ASKS_THE_DOWN_MINT {
+            let up = other_quoted(down);
+            let cell = format!("the mint down: {down:?}; asked of it first: {asks}");
+            let e = Quoted::Second.engine(h);
+            let mut s = open(h, &e, 1).await;
+            // A payment at each mint first: the seeder holds both mints' keys and listings.
+            assert_eq!(serve(h, &mut s, 0, 2), 2, "within the window ({cell})");
+            for (q, upto) in [(down, 1), (up, 2)] {
+                let ack = s
+                    .pay(&Pay {
+                        upto_chunk: upto,
+                        token: h.token_at(&q.mint(h), 1).await,
+                    })
+                    .await
+                    .expect("both mints up: each mint's payment is acknowledged");
+                assert_eq!(ack.accepted_upto, upto, "({cell})");
+            }
+            match asks {
+                "its keys" => h.forget_keys(&e),
+                "its listing" => {
+                    advance(h, SECOND).await; // no listing asked for yet in this second
+                    down.start_keyset(h);
+                }
+                _ => {}
+            }
+            assert_eq!(serve(h, &mut s, 2, 4), 4, "within the window ({cell})");
+            h.mint_outage_at(&down.mint(h), true);
+            let there = Pay {
+                upto_chunk: 4,
+                token: h.token_at(&down.mint(h), 2).await,
+            };
+            refused(h, &mut s, &there, &RejCode::MintUnavailable).await;
+            assert!(
+                !landed(h, || s.banned()).await && !h.claimed_any(&there.token).await,
+                "a mint that cannot be reached is no fault of the payer's, and nothing is \
+                 swapped there ({cell})"
+            );
+            let r = s
+                .pay(&Pay {
+                    upto_chunk: 4,
+                    token: h.token_at(&up.mint(h), 2).await,
+                })
+                .await;
+            assert!(
+                matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (4, 4)),
+                "the other mint answers: the same account's payment there is swapped and \
+                 acknowledged, the down mint's outage no outage of it, and its refused payment \
+                 left nothing unknown ({cell}): {r:?}"
+            );
+            h.mint_outage_at(&down.mint(h), false);
+            advance(h, SECOND).await;
+            let r = s
+                .pay(&Pay {
+                    upto_chunk: 6,
+                    token: there.token.clone(),
+                })
+                .await;
+            assert!(
+                matches!(&r, Ok(ack) if (ack.accepted_upto, ack.spent_total) == (6, 6)),
+                "a request that never reached the mint left nothing against its token: once \
+                 the mint is back, it is acknowledged ({cell}): {r:?}"
+            );
+            assert!(
+                !landed(h, || s.banned()).await,
+                "and nobody is banned ({cell})"
+            );
+            close(h, s).await;
+        }
+    }
 }
 
 /// A mint that cannot be reached is `mint-unavailable`: no ban, no credit, no claim, and
@@ -25356,6 +25529,83 @@ pub async fn an_honest_pair_waits_out_a_slow_mint<H: Harness>(h: &H) {
     stream(h, &mut s, &mut v, 2, 20).await;
 }
 
+/// Flaw `UpMintStoppedByOtherOutage`. An honest pair rides out an outage at one of the
+/// seeder's two quoted mints ([`Harness::mint_outage_at`]); the watcher pays at the
+/// harness's own mint, the first. With the second down, nothing changes for the pair: it
+/// streams, every payment acknowledged, nobody banned and nothing stopped. With the first
+/// down and the second answering, the seeder answers `mint-unavailable`, the watcher's
+/// reclaim waits for its mint and it pays nothing more meanwhile; once its mint is back, in
+/// a later second than the one the seeder last asked it in, it pays again with fresh
+/// proofs, and streams on.
+pub async fn an_honest_pair_rides_out_an_outage_at_one_mint<H: Harness>(h: &H) {
+    let e = Quoted::Second.engine(h);
+    let mut s = open(h, &e, 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote())
+        .expect("an honest quote naming the watcher's mint among two is accepted");
+    h.mint_outage_at(SECOND_MINT, true);
+    stream(h, &mut s, &mut v, 0, 20).await;
+    pay_the_tail::<H>(&mut s, &mut v).await;
+    let fine = !v.stopped() && !landed(h, || s.banned()).await;
+    close(h, s).await;
+    let q = open(h, &e, 1).await.quote().clone();
+    h.mint_outage_at(SECOND_MINT, false);
+    assert!(
+        fine && (q.served, q.spent_total) == (20, 20),
+        "the seeder's other mint down, the watcher's answering: the pair streams, every \
+         payment acknowledged, nobody banned and nothing stopped: {q:?}"
+    );
+
+    let e = Quoted::Second.engine(h);
+    let mut s = open(h, &e, 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote())
+        .expect("an honest quote naming the watcher's mint among two is accepted");
+    for i in 0..2 {
+        assert!(s.admit(&h.chunk(i)));
+        v.fetch();
+    }
+    h.mint_outage_at(&h.mint(), true);
+    let pay = v
+        .due()
+        .await
+        .expect("due answers while its mint is down")
+        .expect("due");
+    let rej = s
+        .pay(&pay)
+        .await
+        .expect_err("the watcher's mint is down, though the seeder's other answers");
+    assert_eq!(rej.code, RejCode::MintUnavailable);
+    v.rej(&rej).await;
+    assert!(!v.stopped() && !landed(h, || s.banned()).await);
+    assert!(
+        v.due()
+            .await
+            .expect("due answers with its reclaim incomplete")
+            .is_none(),
+        "its reclaim waits for its own mint: nothing more until it completes, the seeder's \
+         other mint answering or not"
+    );
+    h.mint_outage_at(&h.mint(), false);
+    // The seeder may have asked that mint for its listing this second and not had it: it
+    // asks again only in the next (NFX-07 §3 step 3).
+    advance(h, SECOND).await;
+    let again = v
+        .due()
+        .await
+        .expect("due answers once its mint is back")
+        .expect("paid again once reclaimed");
+    assert_ne!(again.token, pay.token, "with fresh proofs");
+    assert!(
+        h.claimed_all(&pay.token).await,
+        "the first proofs came back"
+    );
+    v.ack(&s.pay(&again).await.expect("accepted"))
+        .expect("the honest ack is taken");
+    stream(h, &mut s, &mut v, 2, 20).await;
+    close(h, s).await;
+}
+
 /// An honest pair rides out a mint outage. The seeder answers `mint-unavailable`; the
 /// viewer pays nothing more until its reclaim completes, then pays again with fresh
 /// proofs once the mint is back.
@@ -33331,6 +33581,10 @@ impl<H: Harness> Harness for Paying<'_, H> {
 
     fn mint_outage(&self, down: bool) {
         self.h.mint_outage(down);
+    }
+
+    fn mint_outage_at(&self, url: &str, down: bool) {
+        self.h.mint_outage_at(url, down);
     }
 
     fn lose_next_swap_response(&self) {
