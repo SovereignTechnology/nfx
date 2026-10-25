@@ -23,6 +23,13 @@ ignore = [
     # tree that cannot be swapped without forking it. Revisit at every iroh bump.
     { id = "RUSTSEC-2024-0436", reason = "paste (proc macro) via iroh > netwatch > netdev > netlink-packet-core; unmaintained notice only" },
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error (proc macro) via iroh-blobs > bao-tree > genawaiter; unmaintained notice only" },
+    # A vulnerability with no fix on its line (2026-10-25): crypto-bigint 0.5.5 via str0m 0.24.1
+    # > dimpl 0.7 (and str0m-rust-crypto 0.6) > ecdsa/p256/p384 0.16/0.13 > elliptic-curve 0.13,
+    # the WebRTC (DTLS) path of nfx-node only; no money crate depends on it. Fixed only in
+    # crypto-bigint >= 0.7.6, which no release of dimpl (0.8.0 included) or str0m uses yet; the
+    # 0.7 copy in the tree is 0.7.6. Remove at the first str0m/dimpl release on elliptic-curve
+    # 0.14, or switch str0m's crypto backend. Revisit by 2026-12-31.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 via str0m > dimpl > elliptic-curve 0.13 (WebRTC DTLS only); no fixed 0.5 release; revisit by 2026-12-31" },
     # Tauri's tree (desktop app only): the unic-* Unicode tables via tauri-utils >
     # urlpattern are unmaintained, not vulnerable. Revisit at every tauri bump.
     { id = "RUSTSEC-2025-0075", reason = "unic-char-range via tauri-utils > urlpattern; unmaintained notice" },
