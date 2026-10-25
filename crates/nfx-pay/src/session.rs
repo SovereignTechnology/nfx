@@ -174,7 +174,10 @@ pub trait SeederSession {
 /// transport identity where it announces a long-term one (NFX-07 §3, §3a): the ledger lasts
 /// as long as the watcher's own identity toward it, which the watcher keeps while a payment
 /// of the ledger is not yet settled, and the standing as long as the wallet the watcher pays
-/// from, so a lying seeder takes one payment per seeder identity the watcher pays.
+/// from, so a lying seeder takes one payment per seeder identity the watcher pays. A ledger
+/// keeps one request unanswered at a time, and after a refusal decides what to pay before
+/// its next ([`Viewer::requested`]), so a seeder that refuses everything takes at most half
+/// a window of credit, rounded down, for each video (NFX-07 §3a).
 /// Implementations: the real wallet-backed viewer (locked until the M2 security stage) and
 /// [`crate::mock::MockViewer`]. It keeps time on the harness's clock.
 #[allow(async_fn_in_trait)]
@@ -220,22 +223,49 @@ pub trait Viewer {
     /// ledger's live session keeps its place and its 180 s from sending, `banned` or not.
     fn hello_refused(&mut self, rej: &Rej);
 
-    /// A request was sent. It is owed unless the seeder refuses it. It leaves the payment in
-    /// flight as it was, its place and its 180 s from sending included, and a stop and a
-    /// refusal's licence to pay ahead as they were: it is no decision of what to pay.
-    fn requested(&mut self);
+    /// The watcher would send a request for a file of this ledger's video. `Ok`: it is sent,
+    /// and owed unless the seeder refuses it. `Err`, and it is not sent and nothing changes,
+    /// while NFX-07 §3a holds it back, on whichever session, stopped or not:
+    /// - [`Unsent::Unanswered`]: a request of this ledger's, sent on this session or an
+    ///   earlier one, is unanswered: one at a time. Only its whole file
+    ///   ([`Viewer::served`]), its refusal ([`Viewer::refused`]) or its abandonment
+    ///   ([`Viewer::abandoned`]) answers it: no part of its file, payment, answer to a
+    ///   payment, timeout or session's end does. Each ledger keeps its own, so requests for
+    ///   the seeder's other videos, as to other seeders, go at once;
+    /// - [`Unsent::DueFirst`]: a refusal licenses a [`Viewer::due`] not yet made
+    ///   ([`Viewer::refused`]), which comes first, whether or not it pays.
+    ///
+    /// A request sent leaves the payment in flight as it was, its place and its 180 s from
+    /// sending included, and a stop as it was: it is no decision of what to pay.
+    fn requested(&mut self) -> Result<(), Unsent>;
 
-    /// The seeder answered a request with `refuse`. It is not owed, and if it was already
-    /// paid for, that payment becomes credit. It licenses the next [`Viewer::due`] on this
-    /// ledger, and no other call, to pay ahead half a window, rounded down, less the credit
-    /// already held, that much and not merely at most: that `due` uses the licence and ends
-    /// it, whether or not it pays, and so does [`Viewer::end`]; [`Viewer::last_pay`] neither
-    /// uses nor ends it, nor does anything else that comes before that `due` (a request
-    /// sent, the answer to a payment in flight, a second quote, a refused `hello`, a timeout
-    /// before a payment's 180 s or with no payment on the session, or anything on another
-    /// video's ledger), and it
-    /// licenses nothing on a ledger for another video. It settles nothing: the payment in flight, a
-    /// payment awaiting a quote, an incomplete reclaim and a stop stay as they were.
+    /// What has arrived of the file the unanswered request asks for ([`Served`]). The whole
+    /// of it answers the request, which is served, and owed. Part of it answers nothing,
+    /// and changes nothing. With no request unanswered, it changes nothing. It is no
+    /// decision of what to pay: it leaves the payment in flight, a stop, the tries and a
+    /// refusal's licence as they were.
+    fn served(&mut self, served: Served);
+
+    /// The watcher abandoned the unanswered request: that answers it, and it stays owed
+    /// (NFX-07 §3a), whatever comes for it later: a `refuse` of its file is then no answer.
+    /// With no request unanswered, it changes nothing. It is no decision of what to pay: it
+    /// leaves the payment in flight, a stop, the tries and a refusal's licence as they were.
+    fn abandoned(&mut self);
+
+    /// The seeder answered the unanswered request with `refuse`. It is not owed, and if it
+    /// was already paid for, that payment becomes credit. With no request unanswered (none
+    /// was sent, or it was served or abandoned) it is no answer, and changes nothing. It
+    /// licenses the next [`Viewer::due`] on this ledger, and no other call, to pay ahead half
+    /// a window, rounded down, less the credit already held, that much and not merely at
+    /// most: that `due` uses the licence and ends it, whether or not it pays, and so does
+    /// [`Viewer::end`]; [`Viewer::last_pay`] neither uses nor ends it, nor does anything else
+    /// that comes before that `due` (the answer to a payment in flight, a second quote, a
+    /// refused `hello`, a timeout before a payment's 180 s or with no payment on the
+    /// session, or anything on another video's ledger), and it licenses nothing on a ledger
+    /// for another video. No request is sent on this ledger before that `due`
+    /// ([`Viewer::requested`]), so credit never grows beyond half a window, rounded down. It
+    /// settles nothing: the payment in flight, a payment awaiting a quote, an incomplete
+    /// reclaim and a stop stay as they were.
     fn refused(&mut self);
 
     /// The payment due now, if any. It covers requested chunks at the quoted price (the open
@@ -249,7 +279,8 @@ pub trait Viewer {
     /// owes or holds counts for nothing. It pays ahead only as the first `due` after a
     /// refusal on this ledger's open session ([`Viewer::refused`]): if this call pays
     /// nothing, for whichever reason below or because nothing is payable, the refusal
-    /// licenses nothing later. Its token, as [`Viewer::last_pay`]'s, meets the seeder's
+    /// licenses nothing later, and either way the next request may go
+    /// ([`Viewer::requested`]). Its token, as [`Viewer::last_pay`]'s, meets the seeder's
     /// structure check (NFX-07 §3 step 1): of one mint, a quoted one by its exact URL, in
     /// `sat`, of at most 64 proofs, none locked (open mode), each with its DLEQ proof. A
     /// selection that would hold more than 64 proofs is swapped to fewer first. The due
@@ -350,7 +381,8 @@ pub trait Viewer {
     async fn timeout(&mut self);
 
     /// The session ended (its connection closed). A refusal's licence to pay ahead ends
-    /// with it. The ledger stays, and a payment in flight stays unsettled, still the
+    /// with it. A request unanswered stays so ([`Viewer::requested`]): its file may still
+    /// arrive. The ledger stays, and a payment in flight stays unsettled, still the
     /// standing's one payment in flight. This ledger's quote settles it if both its fields
     /// match. Failing that, any ledger of the standing reclaims it once it is 180 s old, and
     /// proofs found spent leave it awaiting a quote.
@@ -369,6 +401,25 @@ pub trait Viewer {
     /// holds: no new session makes it pay. A stop holds whatever the viewer waits on when it
     /// comes, a payment awaiting a quote included.
     fn awaiting_quote(&self) -> bool;
+}
+
+/// Why a watcher sends no request now ([`Viewer::requested`], NFX-07 §3a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unsent {
+    /// A request of the ledger's is unanswered: one at a time for a seeder and a video.
+    Unanswered,
+    /// A refusal licenses a [`Viewer::due`] not yet made: it comes before the next request.
+    DueFirst,
+}
+
+/// What has arrived of a requested file ([`Viewer::served`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Served {
+    /// Part of it, its first byte included, or all its bytes with a sha256 other than the
+    /// one requested: the request is still unanswered.
+    Part,
+    /// The whole file, its sha256 the one requested (NFX-05 §4): the request is served.
+    Whole,
 }
 
 /// What can happen at the mint just before a swap request reaches it

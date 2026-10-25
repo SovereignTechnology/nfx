@@ -34,7 +34,8 @@ use nfx_pay_wire::pay::{
 };
 
 use crate::session::{
-    BadToken, EngineParams, Harness, MintEvent, PeerId, SeederEngine, SeederSession, Viewer,
+    BadToken, EngineParams, Harness, MintEvent, PeerId, SeederEngine, SeederSession, Served,
+    Unsent, Viewer,
 };
 
 /// Sessions one peer may hold open at once, across all videos.
@@ -7197,7 +7198,8 @@ pub enum ViewerFlaw {
     /// A `hello` refused `banned` starts the 180 s of the payment in flight on that ledger's
     /// live session again.
     BannedHelloRestartsLiveWait,
-    /// A request sent ends a refusal's licence to pay ahead.
+    /// A request ends a refusal's licence to pay ahead, and so goes before the `due` that
+    /// licence was for.
     RequestEndsLicence,
     /// An ack ends a refusal's licence to pay ahead.
     AckEndsLicence,
@@ -7290,9 +7292,6 @@ pub enum ViewerFlaw {
     OtherSecondQuoteEndsLicence,
     /// A `last_pay` on another video's ledger ends a refusal's licence.
     OtherLastPayEndsLicence,
-    /// Every refusal licenses a `due` of its own: after two refusals, two decisions may pay
-    /// ahead.
-    LicencePerRefusal,
     /// A refusal's licence ends 200 s after the refusal.
     LicenceLapses,
     /// A `mint-unavailable` answer uses no try on a ledger that has held credit.
@@ -7335,6 +7334,25 @@ pub enum ViewerFlaw {
     LostLapses,
     /// A closed session's unsettled payment is dropped, unreclaimed, once it is 300 s old.
     UnsettledLapses,
+    /// Sends a request while one of its ledger's is unanswered.
+    SecondRequestWhileUnanswered,
+    /// Sends a request between a refusal and the `due` that refusal licenses, keeping the
+    /// licence.
+    RequestBeforeLicensedDue,
+    /// Takes part of a file, its first byte included, for its request's answer.
+    PartAnswers,
+    /// Takes a request it abandoned for un-owed, as a refused one.
+    AbandonedUnowed,
+    /// Takes no abandonment for an answer: once it abandons a request, it sends no other.
+    AbandonedKeepsSlot,
+    /// Takes a session's end for the answer to its unanswered request: the next session
+    /// sends one while that one's file may still arrive.
+    EndAnswers,
+    /// Holds a request back while another of the seeder's videos has one unanswered: one at
+    /// a time for the seeder, where it is one for a seeder and a video.
+    RequestHeldByOtherVideo,
+    /// Takes a `due` for the answer to its unanswered request.
+    DueAnswers,
 }
 
 /// What a stopped standing keeps, for the defects that undo a stop on one input only while
@@ -13607,6 +13625,9 @@ struct Standing {
     /// ([`ViewerFlaw::DueWindowOfLastQuoteTaken`] and the like only: the window is the
     /// session's quote's).
     last_window: Option<u64>,
+    /// Requests unanswered on every ledger ([`ViewerFlaw::RequestHeldByOtherVideo`] only:
+    /// each ledger keeps one of its own).
+    unanswered_all: u64,
 }
 
 /// An honest viewer's ledger with one seeder for one video, holding tokens from one mint
@@ -13633,6 +13654,10 @@ pub struct MockViewer {
     pending: Option<Pending>,
     /// A refusal since the last payment: the next one may pay ahead.
     pay_ahead: bool,
+    /// This ledger's requests unanswered, one at most (NFX-07 §3a); and a refusal's `due`
+    /// not yet made, which comes before the next request.
+    unanswered: u64,
+    due_first: bool,
     /// `mint-unavailable` answers counted here ([`ViewerFlaw::UnavailablePerLedger`] only).
     unavailable_here: u32,
     /// When this session's quote was taken, and when the seeder last answered on it (the
@@ -13675,11 +13700,8 @@ pub struct MockViewer {
     /// ([`ViewerFlaw::OwnStopAckNotSettled`] only).
     banned_in_flight: bool,
     /// Where the standing's list of inputs taken to end a licence stood at this ledger's
-    /// last refusal, and the refusals since the session's quote
-    /// ([`ViewerFlaw::OtherHelloRefusedEndsLicence`] and the like, and
-    /// [`ViewerFlaw::LicencePerRefusal`] only).
+    /// last refusal ([`ViewerFlaw::OtherHelloRefusedEndsLicence`] and the like only).
     licence_mark: usize,
-    refusals: u32,
     /// The price the payment was made at that this session's quote settled
     /// ([`ViewerFlaw::PriceOfSettledPayment`] only: the price is the session's quote's).
     settled_price: Option<u64>,
@@ -13729,6 +13751,8 @@ impl MockViewer {
             spent: 0,
             pending: None,
             pay_ahead: false,
+            unanswered: 0,
+            due_first: false,
             unavailable_here: 0,
             quoted_at: 0,
             answered_at: 0,
@@ -13749,7 +13773,6 @@ impl MockViewer {
             first_price: None,
             banned_in_flight: false,
             licence_mark: 0,
-            refusals: 0,
             settled_price: None,
         }
     }
@@ -13819,6 +13842,18 @@ impl MockViewer {
 
     fn has(&self, f: ViewerFlaw) -> bool {
         self.flaw == Some(f)
+    }
+
+    /// The unanswered request is answered, if there is one: served whole, refused or
+    /// abandoned. Whether there was one.
+    fn answer(&mut self) -> bool {
+        if self.unanswered == 0 {
+            return false;
+        }
+        self.unanswered -= 1;
+        let mut st = self.standing();
+        st.unanswered_all = st.unanswered_all.saturating_sub(1);
+        true
     }
 
     /// Whether a payment is in flight on a live session, this ledger's or another's (read by
@@ -15441,7 +15476,6 @@ impl Viewer for MockViewer {
         self.standing().last_window = Some(quote.window);
         self.settled_price = (settled && self.acked > acked_before)
             .then(|| self.spent.saturating_sub(spent_before) / (self.acked - acked_before));
-        self.refusals = 0;
         self.resumed = resumed;
         if resumed && self.has(ViewerFlaw::ResumedPayInUnitProofs) {
             self.standing().units_next = true;
@@ -15569,7 +15603,26 @@ impl Viewer for MockViewer {
         }
     }
 
-    fn requested(&mut self) {
+    fn requested(&mut self) -> Result<(), Unsent> {
+        if self.has(ViewerFlaw::RequestEndsLicence) {
+            (self.pay_ahead, self.due_first) = (false, false);
+        }
+        // One request unanswered at a time for this seeder and video, and a refusal's `due`
+        // before the next (NFX-07 §3a): held back, it is not sent, and changes nothing.
+        let others = self
+            .standing()
+            .unanswered_all
+            .saturating_sub(self.unanswered);
+        if (self.unanswered > 0 && !self.has(ViewerFlaw::SecondRequestWhileUnanswered))
+            || (others > 0 && self.has(ViewerFlaw::RequestHeldByOtherVideo))
+        {
+            return Err(Unsent::Unanswered);
+        }
+        if self.due_first && !self.has(ViewerFlaw::RequestBeforeLicensedDue) {
+            return Err(Unsent::DueFirst);
+        }
+        self.unanswered += 1;
+        self.standing().unanswered_all += 1;
         if self.has(ViewerFlaw::OtherRequestRestartsLiveWait) {
             self.restarts_other_live();
         }
@@ -15587,9 +15640,6 @@ impl Viewer for MockViewer {
             || (self.has(ViewerFlaw::RequestWhileReclaimingClearsStop) && self.reclaim_incomplete())
         {
             self.standing().stopped = false;
-        }
-        if self.has(ViewerFlaw::RequestEndsLicence) {
-            self.pay_ahead = false;
         }
         self.requested += 1;
         {
@@ -15609,9 +15659,34 @@ impl Viewer for MockViewer {
             self.first_request_window = self.quote.as_ref().map(|q| q.window);
         }
         self.note_position();
+        Ok(())
+    }
+
+    fn served(&mut self, served: Served) {
+        // Only the whole file answers the request (flaw: part of it does).
+        if served == Served::Whole || self.has(ViewerFlaw::PartAnswers) {
+            self.answer();
+        }
+    }
+
+    fn abandoned(&mut self) {
+        // It answers the request, which stays owed (flaws: it is un-owed, or no answer).
+        if self.has(ViewerFlaw::AbandonedKeepsSlot) || !self.answer() {
+            return;
+        }
+        if self.has(ViewerFlaw::AbandonedUnowed) {
+            self.requested = self.requested.saturating_sub(1);
+            self.request_times.pop();
+            let mut st = self.standing();
+            st.requested_all = st.requested_all.saturating_sub(1);
+        }
     }
 
     fn refused(&mut self) {
+        // It answers the unanswered request; with none, it is no answer.
+        if !self.answer() {
+            return;
+        }
         if self.has(ViewerFlaw::OtherRefusedRequestReclaimsLiveNow) {
             self.reclaims_other_live();
         }
@@ -15620,7 +15695,6 @@ impl Viewer for MockViewer {
         }
         self.clears_stop_in_flight(ViewerFlaw::RefusalInFlightClearsStop);
         self.clears_stop_keeping(Upon::RefusedRequest);
-        self.refusals += 1;
         let mark = self.standing().licence_ends.len();
         self.licence_mark = mark;
         if self.requested > 0 && self.requested <= self.acked {
@@ -15642,8 +15716,10 @@ impl Viewer for MockViewer {
         }
         self.refused_at = self.clock.now();
         self.held_credit |= self.acked > self.requested;
-        // The refusal licenses the `due` that follows it on this ledger, and no other.
+        // The refusal licenses the `due` that follows it on this ledger, and no other, which
+        // comes before the next request.
         self.pay_ahead = true;
+        self.due_first = true;
         self.note_position();
         if self.has(ViewerFlaw::RefusalRestartsWait) {
             self.restart_wait(false);
@@ -15667,6 +15743,12 @@ impl Viewer for MockViewer {
     }
 
     async fn due(&mut self) -> Result<Option<Pay>, String> {
+        // The decision a refusal licensed is made: the next request may go (flaw: and the
+        // unanswered request is taken for answered).
+        self.due_first = false;
+        if self.has(ViewerFlaw::DueAnswers) {
+            self.answer();
+        }
         // Pay at half the window, rounded up, so the seeder never has to stall.
         let window = match (self.quote.as_ref(), self.first_window) {
             (Some(_), Some(first)) if self.has(ViewerFlaw::DueWindowOfFirstQuote) => first,
@@ -15714,14 +15796,7 @@ impl Viewer for MockViewer {
             std::mem::take(&mut self.pay_ahead)
         };
         // One licence, whatever came on another video's ledger since the refusal and
-        // however long ago it was (flaws count the refusals, or end it early).
-        let licensed = if self.has(ViewerFlaw::LicencePerRefusal) {
-            let counted = self.refusals > 0;
-            self.refusals = self.refusals.saturating_sub(1);
-            counted
-        } else {
-            licensed
-        };
+        // however long ago it was (flaws end it early).
         let ended_by_another = {
             let id = self.id;
             let st = self.standing();
@@ -16120,8 +16195,13 @@ impl Viewer for MockViewer {
     fn end(&mut self) {
         self.taken_by_another();
         self.clears_stop_beside_live(ViewerFlaw::OtherEndWhileLiveClearsStop);
-        self.refusals = 0;
         self.quote = None;
+        // A request unanswered stays so, its file still to come (flaw: the end answers it);
+        // a refusal's `due` is no more owed first, its licence ending.
+        self.due_first = false;
+        if self.has(ViewerFlaw::EndAnswers) {
+            while self.answer() {}
+        }
         // The session's end ends a refusal's licence to pay ahead (the flaws that take a
         // quote they refuse for a refused request keep theirs for the next session).
         if !(self.has(ViewerFlaw::PriceRefusalPaysAhead)
