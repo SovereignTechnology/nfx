@@ -311,6 +311,11 @@ whatever it offers. The checks run in this order:
      and asks for the keys again for the next payment that names the keyset. A token
      naming keysets the mint never had so costs the mint at most a listing a second,
      whoever sends it.
+   - A quoted mint that cannot be reached for keys or for its listing is
+     `mint-unavailable`, as an unreachable swap is (step 5): no ban, and nothing of it is
+     kept but that the second's ask of the listing was made, so a payment that needs that
+     mint's listing in the same second is answered so without asking again. No payment at
+     another quoted mint waits for it.
 4. **The face value** exactly covers the new chunks. Short is `underpaid`, over is
    `overpaid`. A product above 2^53−1 is `underpaid`. An exact payment that would take
    the account's `spent_total` above 2^53−1 is `overpaid`: no `ack` or quote could carry
@@ -471,12 +476,13 @@ whatever it offers. The checks run in this order:
        before it is back (its entry dropped) still counts, but has no result. An entry
        whose read has not come back when its second ends reads itself, as a read of the
        new second. Its wait ends at its own deadline in any case.
-     - A background sweep reads every account's, periodically, in as few requests as the
-       mint's limits allow: a read the mint refuses as too large (CDK 11014 for a NUT-07
-       check, 11015 for a restore; its `max_inputs` and `max_outputs`) is split, and
-       every swap the mint once took fits in one request alone. A read left unanswered is
-       not split. A read refused or unanswered proves nothing for the swaps it covered,
-       and nothing more.
+     - A background sweep reads every account's, periodically, each mint's in requests
+       of their own (a request reads one mint's swaps), in as few as that mint's limits
+       allow: a read the mint refuses as too large (CDK 11014 for a NUT-07 check, 11015
+       for a restore; its `max_inputs` and `max_outputs`) is split, and every swap the
+       mint once took fits in one request alone. A read left unanswered is not split. A
+       read refused or unanswered proves nothing for the swaps it covered, and nothing
+       more: with one mint down, another's reads stand.
      - Once learnt, an outcome is final: a response that comes later changes nothing.
        The converse holds too: the reads are round trips, and a response that lands
        while they are made has settled the swap, so their result then changes nothing.
@@ -1641,3 +1647,15 @@ paths on one host are two origins.
     a video, and that the seeder's count bounds a peer that does not.
   - Unchanged, as sovtech decided: reading A of a dropped video's `hello` (2026-10-11), and
     "that much, not merely at most" of the pay-ahead after a refusal.
+- Draft 2026-10-25 (M2.0 round 32: sovtech's decisions of 2026-10-25, `docs/nfx/m2-plan.md`,
+  on the thirty-first audit's row 2: a fault that names one mint).
+  - §3 step 3: a quoted mint that cannot be reached for keys or for its keyset listing is
+    `mint-unavailable`, as an unreachable swap is: no ban, nothing kept of it but that the
+    second's ask of the listing was made (a payment that needs that mint's listing in the
+    same second is answered so without asking again), and no payment at another quoted
+    mint waits for it (was: silent, a key request that failed having no stated answer).
+  - §3, the late outcomes: a background sweep reads each mint's swaps in requests of their
+    own, a request reading one mint's swaps, and with one mint down another's reads stand
+    (was: "in as few requests as the mint's limits allow", as of one mint). What "a read
+    refused or unanswered proves nothing for the swaps it covered, and nothing more" said
+    of a seeder of several mints, now said.
