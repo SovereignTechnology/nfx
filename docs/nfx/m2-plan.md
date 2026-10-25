@@ -50,7 +50,9 @@ independent audits (the later reworks on `m2/audit-loop`)** ([first](reviews/202
 [twenty-eighth](reviews/2026-09-24-m2.0-twenty-eighth-audit.md),
 [twenty-ninth](reviews/2026-09-24-m2.0-twenty-ninth-audit.md),
 [thirtieth](reviews/2026-09-24-m2.0-thirtieth-audit.md),
-[thirty-first](reviews/2026-09-24-m2.0-thirty-first-audit.md)). sovtech's bar for the push
+[thirty-first](reviews/2026-09-24-m2.0-thirty-first-audit.md)), and the thirty-second round
+made sovtech's decisions of 2026-10-25 on `m2/r32`
+([record](reviews/2026-09-24-m2.0-thirty-second-round.md)). sovtech's bar for the push
 is zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -573,6 +575,12 @@ What the thirtieth and thirty-first audits left to sovtech, decided:
 
   The suite's case runs with a second request attempted, and the cells that pinned what the mock
   pays ahead with two or more chunks unpaid go with it.
+
+  **Done** in the thirty-second round (`c8ec101`, `deadc36`, `467d7b1`): NFX-07 §3a and
+  NFX-10 §3 say both rules, and the bound "never beyond half its window, rounded down";
+  `Viewer::requested` returns `Result<(), Unsent>`, and `served` and `abandoned` are new (15
+  methods); the scenario `a_viewer_sends_one_request_at_a_time`, the bound's case on a window
+  of 5 with a second and a third request asked for, and eight planted defects.
 - **The five requirements the thirty-first round wrote are accepted**, as written: the window
   is the open session's quote's; a harness backs every mint its seeders quote; a never-paid
   account on a video no longer served MUST be forgotten at `account_ttl`; no thread keeps the
@@ -580,10 +588,23 @@ What the thirtieth and thirty-first audits left to sovtech, decided:
 - **A fault that names one mint is added now, in M2.0:** a new required method of the locked
   `Harness` trait, and scenarios with one quoted mint down while another answers (the
   thirty-first round's row 2). The lock is re-pinned for it, and sovtech reads that diff.
+
+  **Done** in the thirty-second round (`9ab6c79`, `6b338a5`, `6c56690`):
+  `Harness::mint_outage_at(url, down)`; the mock's mints down one at a time, key requests
+  and listings included; a seeder that reads each mint's swaps apart; NFX-07 §3 on an
+  unreachable mint's keys and listing and on a sweep's reads; the scenarios
+  `a_mint_outage_at_one_mint_is_not_a_ban` and `an_honest_pair_rides_out_an_outage_at_one_mint`,
+  the one-mint-down cells of `a_seeders_two_mints_hold_its_swaps_at_once`, and four planted
+  defects.
 - **Reading A stays**, and so does "that much, not merely at most" (after a refusal the
   watcher pays ahead half the window, rounded down, less the credit held, and not less).
 
-These are the thirty-second round's work, before its audit.
+The thirty-second round made them, on `m2/r32` at `6c56690`; the five requirements and reading A
+were record only, being in the text already. Its record, with what each decision changed, every run, and eight points of the
+round's own making that await sovtech's reading, is
+[`reviews/2026-09-24-m2.0-thirty-second-round.md`](reviews/2026-09-24-m2.0-thirty-second-round.md).
+The thirty-second independent audit comes next, repeated until one reports nothing, and then
+sovtech's OK to push M2.0.
 
 ## The testnet mint
 

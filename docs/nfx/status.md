@@ -14,14 +14,23 @@ This repository is public, and since `c07be45` (2026-09-28) its CI runs on GitHu
 two jobs for GitLab and is a dormant twin: it runs nothing. What the sections below say of the private
 GitLab project, of GitLab CI and of its shared runner is as it stood before that.
 
-Updated 2026-10-25 · `main` = `85b3782` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
+Updated 2026-10-25 · `main` = `3be9eb1` · `m2/r32` = the thirty-second round · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
 
 ## Since 2026-10-19
 
-**M2's code has not moved since the thirty-first audit** (merged as `0b69f8a`). sovtech took
-the decisions it left on 2026-10-25 ([`m2-plan.md`](m2-plan.md), "Decided"); making them is the
-thirty-second round's work ([Next](#next)). What changed meanwhile is the interop with the
-desktop app and the dependency tree.
+**M2's code moved in the thirty-second round alone** (branch `m2/r32`, `6c56690`; its
+[record](reviews/2026-09-24-m2.0-thirty-second-round.md)), which makes the decisions sovtech
+took on 2026-10-25 on what the thirtieth and thirty-first audits left ([`m2-plan.md`](m2-plan.md),
+"Decided"). NFX-07 §3a: a watcher keeps one request unanswered at a time for a seeder and a
+video, and after a refusal makes the `due` it licenses before its next request, so credit on a
+video never grows beyond half its window, rounded down. The `Viewer` trait has 15 methods:
+`requested` returns `Result<(), Unsent>`, holding a request back, and `served` and `abandoned`
+are new. A fault names one mint: the `Harness` trait's new `mint_outage_at`, the mock's mints
+going down one at a time, and a seeder that reads each mint's swaps apart. The suite has 152
+scenarios, 1,506 planted defects in 3,634 entries and 3,345 honest timings, and every target
+passes on `6c56690`. Eight points of the round's own making await sovtech's reading. Before
+the round, M2's code had not moved since the thirty-first audit (merged as `0b69f8a`). What
+else changed is the interop with the desktop app and the dependency tree.
 
 - **nutflix-pear ⇄ nfx on one network** ([ADR 0101](../decisions/0101-nutflix-pear-interop.md),
   Phase 0 done):
@@ -415,7 +424,10 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    wallet. It gets the locked-directory rule and its own security stage (ADR 0008 §4).
    Plan and decisions: [`m2-plan.md`](m2-plan.md). sovtech chose the demo's staging, and a
    persistent testnet mint.
-   - **M2.0 is built and reworked thirty-one times**, on branch `m2/audit-loop` (begun on
+   - **M2.0 is built, reworked thirty-one times, and has sovtech's decisions of 2026-10-25
+     made in the thirty-second round** on `m2/r32`
+     ([record](reviews/2026-09-24-m2.0-thirty-second-round.md)). It was reworked on branch
+     `m2/audit-loop` (begun on
      `m2/contracts`, which stops at the twenty-ninth record's draft), pushed and not yet
      merged to `main`. (Until the thirty-first audit this line named `m2/contracts` and
      said "not yet pushed".) It holds the pay/1 wire and vectors, the session contracts,
@@ -470,7 +482,9 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
          cap is a rate (`debt_ttl`).
        - `quote` carries the account's position, so a watcher can resume.
        - HTTPS origins take one payment per request.
-     - The suite has 149 scenarios (101 until the thirty-first audit: eight tables of the
+     - The suite has 152 scenarios (149 until the thirty-second round, which added one for
+       the one-request rule and two with one quoted mint down while the other answers; 101
+       until the thirty-first audit: eight tables of the
        watcher over one shared list of its inputs, 39 seeder scenarios run again at a
        second quoted mint, and one in which a seeder's two mints hold its swaps at once),
        run on four harnesses (the mint answering at once;
@@ -489,13 +503,17 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        the answers an engine awaits and by its settling, never by one poll or one turn:
        an engine has settled after 100 turns of the runtime with no answer under way,
        and an entry on a thread of its own waits once it has stood idle through 100 such
-       turns or been polled 100 times more. It never blocks its runtime's thread. 1,495
-       planted defects (942 of the seeder, 553 of the watcher) are registered in 3,599
+       turns or been polled 100 times more. It never blocks its runtime's thread. 1,506
+       planted defects (946 of the seeder, 560 of the watcher) are registered in 3,634
        entries, each entry one defect on one harness against one scenario, and each to
        fail an assertion of the suite (a hang, a panic raised elsewhere, or a runtime
        panic of Rust's own, is not a catch); 239 of the entries are of a defect that acts
-       only at a seeder's quoted mints other than the first. The timings' file holds 3,279
-       tests. On `c60f864`, the thirty-first audit's tree before its last five commits,
+       only at a seeder's quoted mints other than the first. The timings' file holds 3,345
+       tests. On `6c56690`, the thirty-second round's tree, each of the 3,634 entries fails a
+       check of the suite, and the honest mock passes all 152 scenarios on the four
+       harnesses and all 3,345 tests under the timings (run 40233796063). Before that round
+       the figures were 149 scenarios, 1,495 defects (942 and 553), 3,599 entries and 3,279
+       tests: on `c60f864`, the thirty-first audit's tree before its last five commits,
        each of the 3,599 entries fails a check of the suite, and the honest mock passes
        all 149 scenarios on the four harnesses and all 3,279 tests under the timings; what
        ran on the final code tree, `1030738`, is in that audit's record, with what had not
@@ -616,9 +634,12 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        one unanswered request at a time for a seeder and a video, the licensed `due` before the
        next request after a refusal, and "answered" as served whole, refused or abandoned; the five requirements
        accepted; a fault that names one mint added now, to the locked `Harness` trait; reading
-       A and "that much, not merely at most" kept. Making them is the thirty-second round's
-       work;
-     - then a thirty-second independent audit, until one reports nothing;
+       A and "that much, not merely at most" kept. **Made in the thirty-second round**, on
+       `m2/r32` ([record](reviews/2026-09-24-m2.0-thirty-second-round.md)): the `Viewer`
+       trait's 15 methods, `Harness::mint_outage_at`, 152 scenarios, every target passing on
+       `6c56690`, and the lock re-pinned to it (run RE-PIN-RUN). Eight points of the round's
+       own making await sovtech's reading (the record's "Awaiting sovtech's decision");
+     - next, the thirty-second independent audit, repeated until one reports nothing;
      - sovtech's OK to push M2.0 (given, once the audits are clean);
      - the testnet mint: sovtech approved its deployment once its runbook's checks
        are clean (a private record);
