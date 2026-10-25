@@ -613,7 +613,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        [record](reviews/2026-09-24-m2.0-thirty-first-audit.md) once it has run, with the
        runs and what stays open;
      - sovtech's decisions, taken on 2026-10-25 ([`m2-plan.md`](m2-plan.md), "Decided"):
-       one unanswered request at a time for a seeder and a video; the five requirements
+       one unanswered request at a time for a seeder and a video, the licensed `due` before the
+       next request after a refusal, and "answered" as served whole, refused or abandoned; the five requirements
        accepted; a fault that names one mint added now, to the locked `Harness` trait; reading
        A and "that much, not merely at most" kept. Making them is the thirty-second round's
        work;

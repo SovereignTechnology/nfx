@@ -563,9 +563,15 @@ What the thirtieth and thirty-first audits left to sovtech, decided:
   costs parallel fetching from one seeder, not from several. On its own it does not restore
   NFX-07 §3a's bound as written: §3a lets a request sent between a refusal and the decision it
   licenses keep the licence, and that request, paid at the licensed `due` and then refused, takes
-  credit to half the window plus one. The thirty-second round's plan settles that order, and how
-  a watcher learns a request was answered (the locked `Viewer` trait has no such input). The
-  suite's case runs with a second request attempted, and the cells that pinned what the mock
+  credit to half the window plus one. So, sovtech decided with it (2026-10-25):
+  - **the licensed decision comes first:** after a refusal, a watcher makes the `due` that
+    refusal licenses before it sends its next request to that seeder for that video, the twin of
+    §3a's one payment in flight at a time; the bound then holds as written;
+  - **answered** means the whole file arrived and passed its sha256, or the seeder refused it,
+    or the watcher abandoned it (which stays owed, §3a); the locked `Viewer` trait gains the
+    input that says a request was served.
+
+  The suite's case runs with a second request attempted, and the cells that pinned what the mock
   pays ahead with two or more chunks unpaid go with it.
 - **The five requirements the thirty-first round wrote are accepted**, as written: the window
   is the open session's quote's; a harness backs every mint its seeders quote; a never-paid
