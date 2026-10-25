@@ -84,6 +84,9 @@ fn lists(active: u64, k: u64) -> bool {
 /// A mint's keyset listing (NUT-02), as it answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Listed {
+    /// The mint could not be reached, and answered nothing ([`Harness::mint_outage_at`]):
+    /// the rest says nothing.
+    down: bool,
     /// Its active keyset ([`lists`] says which others it lists).
     active: u64,
     /// The keysets mints alone had started by then, its own among them, run to this id
@@ -311,7 +314,10 @@ struct Ledger {
     /// The mints that answer every request for keys 12001, their listings naming their
     /// keysets as before ([`Harness::refuse_keys`]).
     keys_refused: HashSet<String>,
+    /// Every mint is down ([`Harness::mint_outage`]); and the mints down alone
+    /// ([`Harness::mint_outage_at`]), whose key requests and listings go unserved too.
     down: bool,
+    down_at: HashSet<String>,
     dialled: HashSet<String>,
     /// Swaps sent while held, with their output sets: not yet processed.
     queued: Vec<(u64, String, u64, Done)>,
@@ -454,11 +460,26 @@ struct Ledger {
 }
 
 impl Ledger {
+    /// Whether the mint at `url` is down: every mint, or that one alone.
+    fn mint_down(&self, url: &str) -> bool {
+        self.down || self.down_at.contains(url)
+    }
+
+    /// Whether the mint of `token` is down (any of its mints, for a token naming several).
+    fn token_down(&self, token: &str) -> bool {
+        self.down
+            || self
+                .tokens
+                .get(token)
+                .is_some_and(|i| i.mints.iter().any(|m| self.down_at.contains(m)))
+    }
+
     /// The keyset listing of the mint at `url` as it answers now: which keysets it names
     /// ([`Listed::names`]), and the `final_expiry` of its active keyset: the one it alone
     /// started last, if any ([`Harness::start_keyset_at`]), else the one every mint shares.
     fn listing_at(&self, url: &str) -> Listed {
         Listed {
+            down: self.down_at.contains(url),
             active: self.active_keyset,
             own_upto: OWN_KEYSETS + self.own_keysets.len() as u64,
             final_expiry: self
@@ -679,11 +700,22 @@ enum Held {
     Listing(String),
 }
 
+/// A mint's answer to a request for keys ([`MockNetwork::fetch_keys`]).
+#[derive(Clone)]
+enum KeysAnswer {
+    /// The keys it served.
+    Served(MintKeys),
+    /// A keyset it does not know (CDK 12001), or any while it refuses its keys.
+    Unknown,
+    /// None: it cannot be reached ([`Harness::mint_outage_at`]).
+    Unreachable,
+}
+
 /// What came back for a [`Call`].
 #[derive(Clone)]
 enum Called {
-    /// A key request's: the keys, or `None` for a keyset the mint does not know (12001).
-    Keys(Option<MintKeys>),
+    /// A key request's ([`KeysAnswer`]).
+    Keys(KeysAnswer),
     /// A keyset listing's.
     Listing(Listed),
 }
@@ -1146,6 +1178,22 @@ impl MockNetwork {
         .await;
     }
 
+    /// The mint `token` is of (its first, for a token naming several): `""` for one the
+    /// mints never issued.
+    fn mint_of(&self, token: &str) -> String {
+        self.ledger()
+            .tokens
+            .get(token)
+            .and_then(|i| i.mints.first().cloned())
+            .unwrap_or_default()
+    }
+
+    /// Whether the mint at `url` is down: the mint's own state, which only a planted flaw
+    /// consults.
+    fn mint_down(&self, url: &str) -> bool {
+        self.ledger().mint_down(url)
+    }
+
     /// Whether the mint at `url` refuses its keys now ([`Harness::refuse_keys`]).
     fn refuses_keys(&self, url: &str) -> bool {
         self.ledger().keys_refused.contains(url)
@@ -1158,10 +1206,11 @@ impl MockNetwork {
 
     /// Fetch the keys of `keysets` from the mint at `url` (`ask`: the request is sent now,
     /// not one sent before and held): `None` while key requests are held, and then `waker`
-    /// is woken at their release. Else the keys it served: that mint's, of those keysets; or
-    /// `Some(None)`, a keyset it does not know (CDK 12001). When every call is answered from
-    /// another thread ([`Answers::Woken`]), the answer comes back by a wake: `None` until
-    /// then, the request under way as `call` (0: none yet), and `waker` woken as it does.
+    /// is woken at their release. Else its answer ([`KeysAnswer`]): the keys it served, that
+    /// mint's, of those keysets; a keyset it does not know (CDK 12001); or none, the mint
+    /// down. When every call is answered from another thread ([`Answers::Woken`]), the
+    /// answer comes back by a wake: `None` until then, the request under way as `call` (0:
+    /// none yet), and `waker` woken as it does.
     fn fetch_keys(
         &self,
         url: &str,
@@ -1169,7 +1218,7 @@ impl MockNetwork {
         ask: bool,
         call: &mut u64,
         waker: &Waker,
-    ) -> Option<Option<MintKeys>> {
+    ) -> Option<KeysAnswer> {
         let mut l = self.ledger();
         if *call != 0 {
             let id = std::mem::take(call);
@@ -1212,20 +1261,28 @@ impl MockNetwork {
     }
 
     /// The mint at `url`'s answer to a request for the keys of `keysets`, now: that mint's,
-    /// of those keysets; or `None`, a keyset it does not know (CDK 12001), or any keyset
-    /// while it refuses its keys ([`Harness::refuse_keys`]).
-    fn keys_of(l: &mut Ledger, url: &str, keysets: &HashSet<u64>) -> Option<MintKeys> {
+    /// of those keysets; a keyset it does not know (CDK 12001), or any keyset while it
+    /// refuses its keys ([`Harness::refuse_keys`]); or none while it is down alone
+    /// ([`Harness::mint_outage_at`]).
+    fn keys_of(l: &mut Ledger, url: &str, keysets: &HashSet<u64>) -> KeysAnswer {
         l.dialled.insert(url.to_owned());
+        if l.down_at.contains(url) {
+            return KeysAnswer::Unreachable;
+        }
         let listing = l.listing_at(url);
         let known = !l.keys_refused.contains(url)
             && keysets.iter().all(|k| {
                 let owner = l.own_keysets.get(k).map(String::as_str);
                 listing.names(url, *k, owner)
             });
-        known.then(|| MintKeys {
-            mint: url.to_owned(),
-            keysets: keysets.clone(),
-        })
+        if known {
+            KeysAnswer::Served(MintKeys {
+                mint: url.to_owned(),
+                keysets: keysets.clone(),
+            })
+        } else {
+            KeysAnswer::Unknown
+        }
     }
 
     /// Answer, from another thread, the key requests and keyset listings held at the mint
@@ -1340,7 +1397,7 @@ impl MockNetwork {
         for m in &info.mints {
             l.dialled.insert(m.clone());
         }
-        if l.down {
+        if l.token_down(token) {
             return Swap::Unreachable;
         }
         // CDK checks the inputs first, then the outputs: an expired keyset is 12003 either
@@ -1542,17 +1599,25 @@ impl MockNetwork {
         read
     }
 
-    /// NUT-09 restore of the output set `outputs` (`size` outputs): whether the mint signed
-    /// it, that is processed that swap, or `None` without an answer.
-    fn restore_swap(&self, outputs: u64, size: usize) -> Option<bool> {
-        self.restore_swaps(&[outputs], &[size]).ok().map(|s| s[0])
+    /// NUT-09 restore of the output set `outputs` (`size` outputs) of a swap of `token`:
+    /// whether the mint signed it, that is processed that swap, or `None` without an answer.
+    fn restore_swap(&self, token: &str, outputs: u64, size: usize) -> Option<bool> {
+        self.restore_swaps(&[token.to_owned()], &[outputs], &[size])
+            .ok()
+            .map(|s| s[0])
     }
 
-    /// NUT-09 restore of several output sets in one request.
-    fn restore_swaps(&self, outputs: &[u64], sizes: &[usize]) -> Result<Vec<bool>, ReadErr> {
+    /// NUT-09 restore of several output sets, of swaps of `tokens`, in one request: down if
+    /// any of their mints is.
+    fn restore_swaps(
+        &self,
+        tokens: &[String],
+        outputs: &[u64],
+        sizes: &[usize],
+    ) -> Result<Vec<bool>, ReadErr> {
         self.serve_read(
             sizes.iter().sum(),
-            |l| l.down || l.restore_down,
+            |l| l.down || l.restore_down || tokens.iter().any(|t| l.token_down(t)),
             |l| {
                 outputs
                     .iter()
@@ -1601,7 +1666,7 @@ impl MockNetwork {
     /// send again.
     fn reclaim_unexpired(&self, token: &str) -> Reclaim {
         let mut l = self.ledger();
-        if l.down {
+        if l.token_down(token) {
             return Reclaim::Blocked;
         }
         let Some(info) = l.tokens.get(token).cloned() else {
@@ -1668,7 +1733,7 @@ impl MockNetwork {
     fn restore_by_tokens(&self, tokens: &[String], sizes: &[usize]) -> Result<Vec<bool>, ReadErr> {
         self.serve_read(
             sizes.iter().sum(),
-            |l| l.down || l.restore_down,
+            |l| l.down || l.restore_down || tokens.iter().any(|t| l.token_down(t)),
             |l| {
                 tokens
                     .iter()
@@ -1679,12 +1744,12 @@ impl MockNetwork {
     }
 
     /// NUT-07 check of several tokens' proofs in one request: spent if any proof is,
-    /// else pending if any proof is reserved, else unspent.
+    /// else pending if any proof is reserved, else unspent. Down if any of their mints is.
     fn input_states(&self, tokens: &[String]) -> Result<Vec<InputState>, ReadErr> {
         let size = tokens.iter().map(|t| self.proofs_in(t)).sum();
         self.serve_read(
             size,
-            |l| l.down || l.state_down,
+            |l| l.down || l.state_down || tokens.iter().any(|t| l.token_down(t)),
             |l| {
                 tokens
                     .iter()
@@ -1820,7 +1885,7 @@ impl MockNetwork {
     /// the mint cannot be reached.
     fn restore_reclaim(&self, token: &str, any: bool) -> Option<bool> {
         let l = self.ledger();
-        if l.down || l.restore_down {
+        if l.token_down(token) || l.restore_down {
             return None;
         }
         // Its outputs, unless their keyset has expired: a restore no longer shows them then.
@@ -1839,7 +1904,7 @@ impl MockNetwork {
     /// or `None` while the mint cannot be reached.
     fn restore_spent_own(&self, token: &str) -> Option<bool> {
         let l = self.ledger();
-        if l.down || l.restore_down {
+        if l.token_down(token) || l.restore_down {
             return None;
         }
         let mine = |p: &u64| l.reclaimed.get(p).is_some_and(|o| !l.outputs_expired(*o));
@@ -2016,7 +2081,7 @@ impl MockNetwork {
     /// as every input unspent.
     fn reclaim_as(&self, token: &str, check_down_unspent: bool) -> (Reclaim, bool) {
         let mut l = self.ledger();
-        if l.down {
+        if l.token_down(token) {
             return (Reclaim::Blocked, false);
         }
         // Its NUT-07 check unanswered: nothing is decided, and nothing is sent.
@@ -4926,6 +4991,17 @@ pub enum SeederFlaw {
     /// An invalid outcome that lands late is dropped, and its swap kept as one of unknown
     /// outcome: the account's next payment is answered `mint-unavailable`.
     LateInvalidStaysUnknown,
+    /// Reads every mint's swaps in one request, which one mint down leaves unanswered whole:
+    /// that mint's outage is taken for an outage at all of them.
+    OneMintsOutageTakenForAll,
+    /// A sweep takes the swaps of a mint that is down, whose read goes unanswered, for
+    /// decided: nothing, and no longer unknown.
+    SweepReadsDownMintAsDecided,
+    /// Answers a payment `mint-unavailable`, unswapped, while another quoted mint is down.
+    UpMintStoppedByOtherOutage,
+    /// Takes a mint that cannot be reached for its keys for one that does not know the
+    /// keyset: `bad-token`.
+    UnreachableKeysBadToken,
 }
 
 /// How a payment came to its account's turn: the paths of the suite's matrix of payments,
@@ -7874,6 +7950,9 @@ struct State {
     listings: HashMap<String, Listing>,
     /// Keyset listings asked for so far, of every mint.
     listings_asked: u64,
+    /// The second in which each mint's listing was last asked for and could not be had, the
+    /// mint down: that second's ask, made (NFX-07 §3 step 3).
+    listing_down: HashMap<String, u64>,
     /// The keyset rule's own listings ([`SeederFlaw::KeysetListingOwnCache`] only).
     keyset_listings: HashMap<String, Listing>,
     /// The keysets each mint's last listing was asked for
@@ -8452,6 +8531,9 @@ impl Wake for EarlyWake {
     }
 }
 
+/// What a seeder answers a payment whose mint it cannot reach for keys or a keyset listing.
+const MINT_UNREACHABLE: &str = "the mint cannot be reached";
+
 fn unavailable(detail: &str) -> Rej {
     rej(RejCode::MintUnavailable, detail)
 }
@@ -8546,7 +8628,7 @@ impl Inner {
                 st.listings_asked
             };
             let (released, call, answer) = self.net.list_keysets(mint, Waker::noop());
-            if self.has(SeederFlaw::StartListingDiscarded) {
+            if self.has(SeederFlaw::StartListingDiscarded) || answer.is_some_and(|a| a.down) {
                 continue;
             }
             self.state().listings.insert(
@@ -8619,6 +8701,9 @@ impl Inner {
             st.listings_asked
         };
         let (released, call, answer) = self.net.list_keysets(mint, Waker::noop());
+        if answer.is_some_and(|a| a.down) {
+            return;
+        }
         self.state().listings.insert(
             mint.clone(),
             Listing {
@@ -8722,15 +8807,17 @@ impl Inner {
     /// mint's answers (completions included). `None`: nothing to read.
     fn learn_read(&self, scope: Option<Key>, until: Option<u64>) -> Option<Learnt> {
         let (lost, flight) = self.to_learn(scope);
-        self.learn_read_of(lost, flight, until)
+        self.learn_read_of(lost, flight, until, scope.is_none())
     }
 
-    /// [`Inner::learn_read`] of the swaps given: exactly those are sent.
+    /// [`Inner::learn_read`] of the swaps given: exactly those are sent. `sweep`: they are
+    /// every account's, as a sweep reads them.
     fn learn_read_of(
         &self,
         lost: Vec<Unknown>,
         flight: Vec<InFlight>,
         until: Option<u64>,
+        sweep: bool,
     ) -> Option<Learnt> {
         // Asked of the read as a whole, which may cover swaps at several mints: whether
         // and how a read is sent is no judging of one mint's answer. (`NeverRestores` is
@@ -8759,7 +8846,7 @@ impl Inner {
                 .flat_map(|i| self.read_states(std::slice::from_ref(i), until))
                 .collect()
         } else {
-            self.read_states(&items, until)
+            self.read_per_mint(&items, until, sweep)
         };
         // Undecided with every input unspent `account_ttl` after it became unknown: its
         // payer has had the inputs back all that time and never spent them. The seeder
@@ -9325,7 +9412,7 @@ impl Inner {
                     self.net.deliver_as_read().await;
                     // Sent now, exactly the swaps its place covers: its requests reach the
                     // mint.
-                    let Some(learnt) = self.learn_read_of(lost, flight, until) else {
+                    let Some(learnt) = self.learn_read_of(lost, flight, until, false) else {
                         return;
                     };
                     if self.has(SeederFlaw::CoversSetAfterSend) {
@@ -9594,6 +9681,40 @@ impl Inner {
         }
     }
 
+    /// Read the state of swaps `(token, outputs)`, each mint's in requests of its own, the
+    /// mints in the order of their first swap: a request reads one mint's swaps, so one left
+    /// unanswered proves nothing for that mint's swaps, and nothing more (NFX-07 §3). The
+    /// reads in `items`' order. The flaws: one request for every mint, which one mint down
+    /// leaves unanswered whole; or, in a sweep, a mint's swaps taken for decided while that
+    /// mint is down.
+    fn read_per_mint(&self, items: &[(String, u64)], until: Option<u64>, sweep: bool) -> Vec<Read> {
+        if self.has(SeederFlaw::OneMintsOutageTakenForAll) {
+            return self.read_states(items, until);
+        }
+        let of: Vec<String> = items.iter().map(|i| self.net.mint_of(&i.0)).collect();
+        let mut mints: Vec<&String> = Vec::new();
+        for m in &of {
+            if !mints.contains(&m) {
+                mints.push(m);
+            }
+        }
+        let mut reads = vec![Read::Unknown; items.len()];
+        for m in mints {
+            let at: Vec<usize> = (0..items.len()).filter(|i| of[*i] == *m).collect();
+            let group: Vec<(String, u64)> = at.iter().map(|i| items[*i].clone()).collect();
+            let decided =
+                sweep && self.has(SeederFlaw::SweepReadsDownMintAsDecided) && self.net.mint_down(m);
+            for (read, i) in self.read_states(&group, until).into_iter().zip(&at) {
+                reads[*i] = if decided && read == Read::Unknown {
+                    Read::Nothing
+                } else {
+                    read
+                };
+            }
+        }
+        reads
+    }
+
     /// Read the state of swaps `(token, outputs)`: their inputs first (NUT-07), then
     /// their own outputs (NUT-09 restore). In that order, a swap processed between the
     /// two reads shows as signed. Signed outputs are a claim, whatever the first read
@@ -9614,7 +9735,8 @@ impl Inner {
                     if self.has(SeederFlaw::RestoreByToken) {
                         self.net.restore_by_tokens(&tokens[r.clone()], &sizes[r])
                     } else {
-                        self.net.restore_swaps(&outputs[r.clone()], &sizes[r])
+                        self.net
+                            .restore_swaps(&tokens[r.clone()], &outputs[r.clone()], &sizes[r])
                     }
                 },
                 until,
@@ -9731,7 +9853,8 @@ impl Inner {
         let signed = if self.has(SeederFlaw::RestoreByToken) {
             self.net.restore_by_token(token)
         } else {
-            self.net.restore_swap(outputs, self.net.proofs_in(token))
+            self.net
+                .restore_swap(token, outputs, self.net.proofs_in(token))
         };
         if signed.is_none() {
             self.wait_unanswered(until);
@@ -10735,7 +10858,16 @@ impl Inner {
                         .fetch_keys(mint, &missing, ask, &mut call, &keys_waker(cx))
                     {
                         None => None,
-                        Some(None) => {
+                        // The mint cannot be reached: `mint-unavailable`, and nothing kept
+                        // (the flaw takes it for a keyset the mint does not know).
+                        Some(KeysAnswer::Unreachable) => {
+                            Some(Err(if self.has(SeederFlaw::UnreachableKeysBadToken) {
+                                rej(RejCode::BadToken, "a keyset the mint does not know")
+                            } else {
+                                unavailable(MINT_UNREACHABLE)
+                            }))
+                        }
+                        Some(KeysAnswer::Unknown) => {
                             // A keyset the mint lists, and answers a request for its keys
                             // 12001: nothing is kept of the answer (the flaw keeps it).
                             if self.has(SeederFlaw::KeysRefusalCached) {
@@ -10764,7 +10896,7 @@ impl Inner {
                                 "a keyset the mint does not know",
                             )))
                         }
-                        Some(Some(served)) => {
+                        Some(KeysAnswer::Served(served)) => {
                             keys_seen.store(true, Ordering::SeqCst);
                             let mut st = self.state();
                             let held = st.keys.entry(mint.to_owned()).or_insert_with(|| MintKeys {
@@ -10840,6 +10972,9 @@ impl Inner {
                     else {
                         break None;
                     };
+                    if answer.down {
+                        break Some(Err(self.listing_unreachable(key, l.at)));
+                    }
                     listing_seen.store(true, Ordering::SeqCst);
                     held_waited = true;
                     if let Some(l) = self.state().listings.get_mut(key) {
@@ -10875,6 +11010,10 @@ impl Inner {
                 if no_listing && !after_held {
                     break None; // at its deadline: not asked for
                 }
+                // This second's ask made, the mint down: none again before the next.
+                if st.listing_down.get(key) == Some(&now) {
+                    break Some(Err(unavailable(MINT_UNREACHABLE)));
+                }
                 st.listings_asked += 1;
                 if self.has(SeederFlaw::ListingRateLimitedPerKeyset) {
                     st.listed_for.insert(mint.to_owned(), missing.clone());
@@ -10887,6 +11026,9 @@ impl Inner {
                 drop(st);
                 let (released, call, answer) =
                     self.net.list_keysets(mint, &listing_waker(cx, false));
+                if answer.is_some_and(|a| a.down) {
+                    break Some(Err(self.listing_unreachable(key, now)));
+                }
                 self.state().listings.insert(
                     key.to_owned(),
                     Listing {
@@ -11045,6 +11187,10 @@ impl Inner {
                     else {
                         break None;
                     };
+                    if answer.down {
+                        let r = self.listing_unreachable(key, l.at);
+                        return Poll::Ready(Err(r));
+                    }
                     seen.store(true, Ordering::SeqCst);
                     if self.has(SeederFlaw::HeldListingExpiryDropped) {
                         answer.final_expiry = None;
@@ -11069,6 +11215,10 @@ impl Inner {
                 if no_listing {
                     break None; // at its deadline: not asked for
                 }
+                // This second's ask made, the mint down: none again before the next.
+                if st.listing_down.get(key) == Some(&now) {
+                    return Poll::Ready(Err(unavailable(MINT_UNREACHABLE)));
+                }
                 asked = true;
                 if !self.has(SeederFlaw::KeysetListingUncounted) {
                     st.listings_asked += 1;
@@ -11076,6 +11226,9 @@ impl Inner {
                 let seq = st.listings_asked;
                 drop(st);
                 let (released, call, answer) = self.net.list_keysets(mint, &waker());
+                if answer.is_some_and(|a| a.down) {
+                    return Poll::Ready(Err(self.listing_unreachable(key, now)));
+                }
                 let listed = Listing {
                     at: now,
                     seq,
@@ -11129,6 +11282,21 @@ impl Inner {
             Poll::Pending
         })
         .await
+    }
+
+    /// A keyset listing asked for in the second `at` that the mint, down, did not answer: no
+    /// listing is kept of it, the cache keeps what it held before, and that second's ask is
+    /// made (NFX-07 §3 step 3). The payment that needed it is answered `mint-unavailable`.
+    fn listing_unreachable(&self, key: &str, at: u64) -> Rej {
+        let mut st = self.state();
+        let st = &mut *st;
+        for cache in [&mut st.listings, &mut st.keyset_listings] {
+            if cache.get(key).is_some_and(|l| l.answer.is_none()) {
+                cache.remove(key);
+            }
+        }
+        st.listing_down.insert(key.to_owned(), at);
+        unavailable(MINT_UNREACHABLE)
     }
 
     /// The key a mint's keyset listing is cached under: the mint's own
@@ -13125,6 +13293,15 @@ impl MockSession {
                     st.debt.retain(|(debt, _)| debt.0 != key);
                 }
                 return Err(unavailable("an earlier payment's outcome is not known yet"));
+            }
+            // The flaw: another quoted mint down stops this payment too.
+            if e.has(SeederFlaw::UpMintStoppedByOtherOutage)
+                && e.config
+                    .mints
+                    .iter()
+                    .any(|m| *m != mint && e.net.mint_down(m))
+            {
+                return Err(unavailable(MINT_UNREACHABLE));
             }
             let acked_now = st.accounts.get(&self.key).map_or(0, |a| a.acked);
             let recheck_first = e.has(SeederFlaw::RecheckPastDeadline);
@@ -16844,7 +17021,20 @@ impl Harness for MockHarness {
     }
 
     fn mint_outage(&self, down: bool) {
-        self.net.ledger().down = down;
+        let mut l = self.net.ledger();
+        l.down = down;
+        if !down {
+            l.down_at.clear();
+        }
+    }
+
+    fn mint_outage_at(&self, url: &str, down: bool) {
+        let mut l = self.net.ledger();
+        if down {
+            l.down_at.insert(url.to_owned());
+        } else {
+            l.down_at.remove(url);
+        }
     }
 
     fn lose_next_swap_response(&self) {

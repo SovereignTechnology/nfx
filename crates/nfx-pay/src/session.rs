@@ -620,8 +620,9 @@ pub struct EngineParams {
 /// names ([`EngineParams`]), and the suite pays at each ([`Harness::token_at`]): the cases
 /// in which it pays a seeder itself it runs at the second of two quoted mints as at the
 /// one. (A watcher of the harness's pays at the harness's own mint: [`Harness::viewer`]
-/// names none.) So a harness backs every mint its seeders quote, and a fault or an event
-/// that a method here brings about with no mint named, it brings about at each of them: an
+/// names none.) So a harness backs every mint its seeders quote, as sovtech accepted on
+/// 2026-10-25, the thirty-first round having written it; and a fault or an event that a
+/// method here brings about with no mint named, it brings about at each of them: an
 /// outage, a request held, lost or given up, a read left unanswered or limited, a
 /// [`MintEvent`], a keyset rotated, expired or listed to expire. (One mint is apart for the
 /// last: a mint that has started a keyset of its own, [`Harness::start_keyset_at`], issues
@@ -631,8 +632,10 @@ pub struct EngineParams {
 /// method that names it.) What such a method counts
 /// or reports ([`Harness::key_requests`], [`Harness::listing_requests`],
 /// [`Harness::state_reads`], [`Harness::reads_out`], [`Harness::answers_under_way`]) is
-/// over all of them. No scenario has one mint down while another answers: that takes
-/// faults that name a mint, which a harness does not have.
+/// over all of them. One fault names a mint, as sovtech decided on 2026-10-25: an outage of
+/// one mint alone ([`Harness::mint_outage_at`]), so that a scenario has one quoted mint down
+/// while another answers. The keys a mint refuses ([`Harness::refuse_keys`]) and the keyset
+/// it starts ([`Harness::start_keyset_at`]) name theirs too; nothing else does.
 ///
 /// **The panic hook.** The runner notes the first panic raised on a scenario's thread with
 /// a panic hook of its own, set over the hook that stood and handing every panic on to it
@@ -833,8 +836,19 @@ pub trait Harness {
     fn spawn_thread(&self, side: Box<dyn FnOnce() + Send>) {
         std::thread::spawn(side);
     }
-    /// Make the mint unreachable (`true`) or reachable again.
+    /// Make the mint unreachable (`true`), every mint the harness backs; or reachable again,
+    /// every one of them, those [`Harness::mint_outage_at`] took down included.
     fn mint_outage(&self, down: bool);
+    /// Make the mint at `url` alone unreachable (`true`), or reachable again, while every
+    /// other mint answers as before. The seeder's swaps there and its requests for that
+    /// mint's keys and keyset listing (NUT-01, NUT-02) are refused as unreachable, and its
+    /// reads of swap state there (NUT-07, NUT-09) go unanswered; a watcher's reclaims and
+    /// restores there are not served. A read is of one mint's swaps, so a seeder that reads
+    /// swaps at several mints reads each mint's apart, and the down one's prove nothing
+    /// (NFX-07 §3). A swap or a key request held before ([`Harness::hold_swaps`] and the
+    /// like) meets the mint as it is when it is let go. [`Harness::mint_outage`] brings it
+    /// back with the rest.
+    fn mint_outage_at(&self, url: &str, down: bool);
     /// The mint processes the next swap that reaches it (held or not), and its response
     /// is lost on the way back: the seeder sees no answer, though the proofs are now its
     /// own. A retry is answered by the mint as usual, and the swap's outputs can be
