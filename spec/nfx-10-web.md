@@ -209,9 +209,13 @@ says of a page holds for a worker it pays or earns from. Whether a page pays an 
   the partition pays that seeder nothing more, as it pays an origin nothing more that
   kept a closed page's payment (§3.1). A stated concession, the cost of the one-payment
   bound.
-  Credit is the ledger's too: a seeder that refuses everything takes at most half a
-  page's window ceiling for each video (NFX-07 §3a) from each page, a new page's identity
-  holding none of an earlier one's.
+  Credit is the ledger's too, and so are its rules: a page keeps one request unanswered
+  at a time for a seeder and a video, across its sessions with that seeder for that
+  video, and makes the decision a refusal licenses before its next request there (NFX-07
+  §3a). So a seeder that refuses everything takes at most half a page's window ceiling
+  for each video from each page, a new page's identity holding none of an earlier one's.
+  Its loaders fetch from several seeders at once, and from each one file of a video at a
+  time (§3.2).
 
 ### 3.1 HTTPS
 
@@ -274,7 +278,10 @@ mesh, and it is NFX-07's:
   `rej`, `refuse`), byte-identical JSON, travel on the WebRTC data channel
   p2p-media-loader already holds open between two peers. A peer opens a pay session per
   remote peer and video it watches, as on iroh, and NFX-07 §3 allows several open at once
-  on one account, up to the per-peer cap. The channel meets NFX-07 §2's delivery rule:
+  on one account, up to the per-peer cap. However many are open, a paying peer keeps one
+  request unanswered at a time to a remote peer for a video, across them all (NFX-07
+  §3a): its loader fetches a video's files from several peers at once, and from each one
+  at a time. The channel meets NFX-07 §2's delivery rule:
   a message unacknowledged for 60 s closes it. A browser↔bridge link is the same (§2).
 - **Unit and window.** The mesh accounts in **chunks, where one chunk is one NFX-05
   file**. That is a whole segment or init, never a WebRTC message fragment. `quote.window`
@@ -425,3 +432,10 @@ NFX-05 byte formats.
   - §3: credit a page holds with a seeder is its ledger's, so its identity's: a seeder
     that refuses everything takes at most half a page's window ceiling for each video from
     each page (NFX-07 §3a, which now states that bound per identity).
+- Draft 2026-10-25 (M2.0 round 32: sovtech's decisions of 2026-10-25, `docs/nfx/m2-plan.md`).
+  - §3 and §3.2: a page keeps one request unanswered at a time for a seeder (a mesh peer
+    included) and a video, across its sessions with it for that video, and makes the
+    decision a refusal licenses before its next request there, as NFX-07 §3a now says; its
+    loaders fetch from several seeders at once, and from each one file of a video at a time
+    (was: nothing said, and the half-window bound that §3's sentence on a page's credit rests
+    on did not hold for a page with two requests unanswered at once).

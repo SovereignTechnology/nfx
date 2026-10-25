@@ -239,9 +239,11 @@ payment-enforced after release, so no mechanism pretends otherwise.
 
 **Admission.** Every request the seeder serves for a file of the session's video
 counts as one chunk of the account **when it is admitted**: whole, ranged or aborted
-alike. It is counted atomically, so concurrent requests cannot share a slot. A request
-for a file of another video is not admitted under this session. A request that is not
-admitted is answered with `refuse` naming its file, and not one byte of it is served.
+alike. It is counted atomically, so concurrent requests cannot share a slot: a watcher
+keeps one request unanswered at a time for a video (§3a), and a peer that does not is
+bounded by this count all the same. A request for a file of another video is not
+admitted under this session. A request that is not admitted is answered with `refuse`
+naming its file, and not one byte of it is served.
 
 **Service limit.** A chunk is **covered** while its own account's `served` is below
 that account's `accepted_upto`, that is, pre-paid. Credit on one video never covers
@@ -549,6 +551,19 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   request is always un-owed; if it was already paid for, that payment becomes credit. A
   request the watcher abandons stays owed; if the seeder never saw it, the payment
   becomes pre-payment.
+- **Keep one request unanswered at a time** for a seeder and a video: under one identity
+  toward the seeder (the ledger's, above), across every session the watcher holds with it
+  for that video, open at once or one after another. A request is answered once its file
+  has arrived whole and passed its sha256 (NFX-05 §4), once the seeder refuses it, or once
+  the watcher abandons it, which leaves it owed (above) whatever comes for it later: a
+  `refuse` of it then answers nothing. Nothing else answers a request: not part of its
+  file, its first byte included, nor bytes that fail the sha256 (the watcher waits on, or
+  abandons it), a payment or its answer, a timeout, nor the session's end, after which
+  its file may still arrive, and no request goes on a later session until it is answered.
+  Requests to several seeders, or to one seeder for several videos, go at once. This is
+  the watcher's duty, as one payment in flight is (below): a seeder has no rule of it,
+  still counts concurrent requests atomically (§3), and bounds a peer that ignores it by
+  its window and its global cap.
 - **Pay exactly the quoted price** for every chunk a payment covers, requested or paid
   ahead (below): the price of the open session's quote (§2), whatever an earlier session's
   or another video's was, and never the watcher's own cap. Pay with a token that passes
@@ -584,11 +599,14 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     nothing else stops a payment, pay ahead half of `window`, rounded down, less any
     credit that video's ledger already holds (what another video's ledger holds or owes
     counts for nothing): that much, not merely at most, so too on whichever ledger and
-    whatever came before, which the seeder serves whatever its cap. Nothing that comes
+    whatever came before, which the seeder serves whatever its cap. The watcher makes that
+    decision before it sends that seeder its next request for that video, whether or not
+    the decision pays, as it makes one payment at a time (below): so every request it pays
+    for then is answered, and none of them can be refused once paid for. Nothing that comes
     between the refusal and that decision is such a decision, or ends the licence, but the
-    session's end: not a request sent, the answer to a payment in flight, a second quote, a
-    refused `hello`, a timeout before a payment's 180 s or with no payment on the session,
-    nor anything on another video's ledger. The licence ends there, whether or not that decision
+    session's end: not the answer to a payment in flight, a second quote, a refused
+    `hello`, a timeout before a payment's 180 s or with no payment on the session, nor
+    anything on another video's ledger. The licence ends there, whether or not that decision
     paid: one that paid nothing because a payment was in flight toward the seeder or left
     unsettled, a reclaim was incomplete, a payment awaited a quote, the tries were used,
     the wallet held no proof the mint takes, the ledger already held half a window of
@@ -599,13 +617,15 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     watcher pays at a session's end is
     not such a decision: it covers what is owed and nothing ahead, and, whether or not
     anything is paid then, it neither uses the licence nor ends it, so the licence stays
-    for the decision that follows on that session, if one does. Credit on a video never
-    grows beyond half its window, so a seeder that refuses everything takes at most half
-    the watcher's ceiling for each video the watcher asks it for, under each identity the
-    watcher takes toward it: the ledger, and its credit, are that identity's (above).
+    for the decision that follows on that session, if one does. With one request
+    unanswered at a time (above) and that decision made before the next, credit on a video
+    never grows beyond half its window, rounded down, so a seeder that refuses everything
+    takes at most half the watcher's ceiling for each video the watcher asks it for, under
+    each identity the watcher takes toward it: the ledger, and its credit, are that
+    identity's (above).
   - Keep one payment in flight toward a seeder at a time, across its videos. One sent on a
     live session holds that place until it is answered or its 180 s are up (below): a
-    second quote, a request refused or new, a timeout before then, a ledger made for
+    second quote, a request new or answered, a timeout before then, a ledger made for
     another video, or a quote on one, taken or refused, frees nothing.
   - After three `mint-unavailable` answers to its payments in a row, pay that seeder
     nothing more until a new session's accepted quote. Each answer costs the watcher a
@@ -753,7 +773,7 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   new one, or one held since before the payment was sent), stopped or not, and whenever it
   catches up: as it decides a payment, or at a session's end.
   - On a live connection, for the payment sent on it, the seeder was unresponsive: 180 s
-    after sending it, whatever came since (a second quote, a request refused or new, a
+    after sending it, whatever came since (a second quote, a request new or answered, a
     timeout before then, or anything on another video), the watcher reclaims and stops. A
     reclaim the mint cannot serve yet is incomplete, and finished once it can, though the
     watcher has stopped.
@@ -773,7 +793,7 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     that session's quote.
 - **Pay nothing after stopping,** at the end of a session included, nor ahead after a
   refusal. Nothing undoes a stop: not a later `ack` that matches its payment (it settles
-  that payment into the ledger, and nothing more), a request sent or refused, a refused
+  that payment into the ledger, and nothing more), a request sent or answered, a refused
   `hello`, a timeout before a payment's 180 s or with no payment on the session, a
   `mint-unavailable` answer with every proof taken back, the
   session's end, a second quote on an open session, a new session's quote on any of the
@@ -1593,3 +1613,31 @@ paths on one host are two origins.
     forgotten", as on a video it serves, which let a seeder keep such accounts for good; a
     seeder that drops videos one after another would keep whatever free identities left on
     each). A tightening, and one a peer can see: a `hello` that was answered is refused.
+- Draft 2026-10-25 (M2.0 round 32: sovtech's decisions of 2026-10-25, `docs/nfx/m2-plan.md`,
+  on the thirtieth audit's row 12).
+  - §3a: a watcher keeps one request unanswered at a time for a seeder and a video, under
+    one identity toward the seeder, across every session it holds with it for that video.
+    A request is answered once its file has arrived whole and passed its sha256, once the
+    seeder refuses it, or once the watcher abandons it, which leaves it owed whatever comes
+    for it later; part of its file, its first byte included, a payment, its answer, a
+    timeout and the session's end answer nothing. Requests to several seeders, or to one
+    seeder for several videos, go at once. It is the watcher's duty: a seeder has no rule
+    of it, and §3's atomic count of concurrent requests stays, bounding a peer that ignores
+    it (was: nothing limited the requests unanswered at once, and with k of them a refusing
+    seeder took credit to half the window, rounded down, plus k − 1).
+  - §3a: after a refusal the watcher makes the decision it licenses before it sends that
+    seeder its next request for that video, whether or not the decision pays, as it makes
+    one payment at a time (was: a request sent between the refusal and that decision kept
+    the licence, and, paid for at that decision and then refused, took credit to half the
+    window, rounded down, plus one). So no request comes between a refusal and its
+    decision, and the list of what does not end the licence no longer names one.
+  - §3a: with both, the bound holds as it was written, and now says how: credit on a video
+    never grows beyond half its window, rounded down. What rests on it holds again as it
+    stands: §3's concession for a dropped video, the restatement per identity (2026-09-29),
+    and NFX-10 §3's for a page, which now says that a page keeps both rules too.
+  - §3a: the lists of what frees no place of a payment in flight, of what a live payment's
+    180 s are counted through, and of what undoes no stop name a request answered beside
+    one sent. §3's admission says that a watcher keeps one request unanswered at a time for
+    a video, and that the seeder's count bounds a peer that does not.
+  - Unchanged, as sovtech decided: reading A of a dropped video's `hello` (2026-10-11), and
+    "that much, not merely at most" of the pay-ahead after a refusal.
