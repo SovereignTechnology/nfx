@@ -14,7 +14,44 @@ This repository is public, and since `c07be45` (2026-09-28) its CI runs on GitHu
 two jobs for GitLab and is a dormant twin: it runs nothing. What the sections below say of the private
 GitLab project, of GitLab CI and of its shared runner is as it stood before that.
 
-Updated 2026-10-12 · `main` = `c07be45` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
+Updated 2026-10-25 · `main` = `85b3782` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
+
+## Since 2026-10-19
+
+**M2's code has not moved since the thirty-first audit** (merged as `0b69f8a`). sovtech took
+the decisions it left on 2026-10-25 ([`m2-plan.md`](m2-plan.md), "Decided"); making them is the
+thirty-second round's work ([Next](#next)). What changed meanwhile is the interop with the
+desktop app and the dependency tree.
+
+- **nutflix-pear ⇄ nfx on one network** ([ADR 0101](../decisions/0101-nutflix-pear-interop.md),
+  Phase 0 done):
+  - **NFX-12 is rewritten** as files over Protomux on HyperDHT, with its vectors (#2,
+    [`spec/nfx-12-hyperdht.md`](../../spec/nfx-12-hyperdht.md)). The Hypercore profile it replaces is gone.
+  - **[ADR 0102](../decisions/0102-creator-share.md)** proposes a creator share on open videos,
+    the creator's receipt before `ack` (#3); it waits for NFX-07's freeze, and would go in a new
+    Draft, NFX-14, beside the frozen texts.
+  - **Spike S5′ failed** (#4, [`spikes/s5-hyperdht.md`](spikes/s5-hyperdht.md)): peeroxide 1.7.3,
+    the one Rust HyperDHT, does not serve Node peers, fails behind NATs, and has its own security
+    findings. Its workflow now runs only by hand (#6).
+  - **sovtech chose the course on 2026-10-25** (ADR 0101 §4, the spike record's third):
+    nutflix-pear speaks iroh as well, beside HyperDHT, and stays a Pear app (the Pear runtime,
+    its `pear://` address); nfx meets it over iroh and does not speak HyperDHT. How the desktop
+    app runs iroh is the next decision record's. nutflix-pear's NFX codec, NFX-12 transport,
+    CMAF packager and NFX file store are on its `main`.
+- **Dependencies:** every RustSec advisory published since is fixed or recorded.
+  - #5: rustls-webpki 0.103.16 and webpki-roots/webpki-root-certs 1.0.10
+    (RUSTSEC-2026-0381/0382/0383).
+  - #6 (`d53b682`): tokio 1.53.3, ctutils 0.4.5 and crypto-bigint 0.7.6
+    (RUSTSEC-2026-0386/0385/0387), with the lock re-pinned for tokio, a money dependency.
+  - #7 (`85b3782`): str0m 0.24.1; the desktop workspace's lock file brought up to the main workspace's fixes;
+    the lock re-pinned (the money closure is back to the thirty-first round's pins, but for
+    tokio). RUSTSEC-2026-0387 is ignored for crypto-bigint **0.5.5** only, with a revisit date
+    (2026-12-31): no release of str0m or dimpl leaves elliptic-curve 0.13 yet, and the path is
+    WebRTC's DTLS, not a money crate.
+- **The publish gate** (`prepublish.sh`, not published) fails on sixteen commits already
+  published on 2026-10-21 and 2026-10-22: their dates carry `-0600`, and the three merge commits
+  GitHub made for #2 to #4 are authored with another address. Published history is not
+  rewritten, so the gate needs a baseline after them.
 
 ## Where things stand
 
@@ -575,8 +612,11 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        its 180 on the audited one, is in the audit's
        [record](reviews/2026-09-24-m2.0-thirty-first-audit.md) once it has run, with the
        runs and what stays open;
-     - sovtech's decisions: on the half-window credit bound, on the five new requirements,
-       and on a fault that names a mint;
+     - sovtech's decisions, taken on 2026-10-25 ([`m2-plan.md`](m2-plan.md), "Decided"):
+       one unanswered request at a time for a seeder and a video; the five requirements
+       accepted; a fault that names one mint added now, to the locked `Harness` trait; reading
+       A and "that much, not merely at most" kept. Making them is the thirty-second round's
+       work;
      - then a thirty-second independent audit, until one reports nothing;
      - sovtech's OK to push M2.0 (given, once the audits are clean);
      - the testnet mint: sovtech approved its deployment once its runbook's checks
@@ -606,9 +646,10 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
   the intended single implementation for browsers.
 - **iroh tickets in `beacon.json` are placeholders.** Ticket encodings pin at the M1
   freeze (S1).
-- **NFX-12's Hypercore stack pin** (hypercore 11, hyperdrive 13, hyperswarm 4,
-  protomux 3) comes from the demo seeder's `package.json`, plus hyperdrive 13 inferred
-  as the matching series. It is unverified until spike S5.
+- **No Rust implementation of NFX-12 exists.** The profile was rewritten as files over
+  Protomux on HyperDHT (ADR 0101), and spike S5′ found that peeroxide 1.7.3, the one Rust
+  HyperDHT, does not interoperate with the reference stack (`spikes/s5-hyperdht.md`). Only
+  nutflix-pear speaks it, over the reference JavaScript stack.
 - **p2p-media-loader v4 fork points** (NFX-10 §3.2) are mapped from the 4.0.0 source
   (S3) but not yet built.
 - **k256's deterministic signing** (`PrehashSigner`, zero `aux_rand`) is used for

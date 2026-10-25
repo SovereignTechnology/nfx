@@ -554,6 +554,31 @@ Its outputs:
   on private infrastructure. Tests still use an in-process mint.
 - The locked paths and the order (iroh, HTTPS, then the mesh) stand as proposed.
 
+## Decided (sovtech, 2026-10-25)
+
+What the thirtieth and thirty-first audits left to sovtech, decided:
+
+- **The half-window credit bound (the thirtieth round's row 12): one unanswered request at a
+  time.** A paying watcher keeps at most one request unanswered for a seeder and a video. It
+  costs parallel fetching from one seeder, not from several. On its own it does not restore
+  NFX-07 §3a's bound as written: §3a lets a request sent between a refusal and the decision it
+  licenses keep the licence, and that request, paid at the licensed `due` and then refused, takes
+  credit to half the window plus one. The thirty-second round's plan settles that order, and how
+  a watcher learns a request was answered (the locked `Viewer` trait has no such input). The
+  suite's case runs with a second request attempted, and the cells that pinned what the mock
+  pays ahead with two or more chunks unpaid go with it.
+- **The five requirements the thirty-first round wrote are accepted**, as written: the window
+  is the open session's quote's; a harness backs every mint its seeders quote; a never-paid
+  account on a video no longer served MUST be forgotten at `account_ttl`; no thread keeps the
+  runtime's tasks ready without pause; a runner's `start` keeps the suite's task.
+- **A fault that names one mint is added now, in M2.0:** a new required method of the locked
+  `Harness` trait, and scenarios with one quoted mint down while another answers (the
+  thirty-first round's row 2). The lock is re-pinned for it, and sovtech reads that diff.
+- **Reading A stays**, and so does "that much, not merely at most" (after a refusal the
+  watcher pays ahead half the window, rounded down, less the credit held, and not less).
+
+These are the thirty-second round's work, before its audit.
+
 ## The testnet mint
 
 A persistent testnet mint (CDK `cdk-mintd` with its fake Lightning backend and SQLite)
