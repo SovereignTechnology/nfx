@@ -23968,13 +23968,13 @@ const COMES_AFTER_SENDING: [u64; 5] = [1, 60, 100, 178, 179];
 /// The table is run in two parts, by the ledger the cell is about (`LEDGERS`): this one is
 /// the first the watcher made.
 pub async fn nothing_undoes_a_stop_on_its_first_ledger_whatever_comes<H: Harness>(h: &H) {
-    nothing_undoes_a_stop(h, true, (37_755, 101_925)).await;
+    nothing_undoes_a_stop(h, true, (44_135, 102_322)).await;
 }
 
 /// [`nothing_undoes_a_stop_on_its_first_ledger_whatever_comes`], on a ledger the watcher
 /// made for another video.
 pub async fn nothing_undoes_a_stop_on_another_videos_ledger_whatever_comes<H: Harness>(h: &H) {
-    nothing_undoes_a_stop(h, false, (38_060, 102_730)).await;
+    nothing_undoes_a_stop(h, false, (44_490, 103_131)).await;
 }
 
 async fn nothing_undoes_a_stop<H: Harness>(h: &H, first: bool, cells: (usize, usize)) {
@@ -24064,7 +24064,7 @@ pub async fn a_payment_waits_180_s_and_holds_its_place_whatever_comes<H: Harness
     };
     let endings = [Ending::Unanswered];
     table!(h, tally, rule, (takes, base, 0), endings, a_payment_waits);
-    tally.ends(rule, (17_105, 42_691));
+    tally.ends(rule, (19_745, 42_931));
     tally.told(rule, 15_628);
 }
 
@@ -24275,7 +24275,7 @@ pub async fn a_refusals_licence_lasts_to_its_due_whatever_comes<H: Harness>(h: &
     };
     let endings = [Ending::Acked, Ending::Unavailable];
     table!(h, tally, rule, (takes, base, 0), endings, a_licence_lasts);
-    tally.ends(rule, (5_050, 12_615));
+    tally.ends(rule, (5_810, 12_710));
 }
 
 /// One cell of [`a_refusals_licence_lasts_to_its_due_whatever_comes`].
@@ -24344,7 +24344,7 @@ async fn a_licence_lasts<H: Harness>(
 pub async fn the_tries_on_its_first_ledger_are_used_and_restored_by_nothing_else<H: Harness>(
     h: &H,
 ) {
-    the_tries_are_used_and_restored_by_nothing_else(h, true, (12_901, 33_441)).await;
+    the_tries_are_used_and_restored_by_nothing_else(h, true, (14_989, 33_603)).await;
 }
 
 /// [`the_tries_on_its_first_ledger_are_used_and_restored_by_nothing_else`], on a ledger the
@@ -24354,7 +24354,7 @@ pub async fn the_tries_on_another_videos_ledger_are_used_and_restored_by_nothing
 >(
     h: &H,
 ) {
-    the_tries_are_used_and_restored_by_nothing_else(h, false, (12_967, 33_560)).await;
+    the_tries_are_used_and_restored_by_nothing_else(h, false, (15_063, 33_723)).await;
 }
 
 async fn the_tries_are_used_and_restored_by_nothing_else<H: Harness>(
