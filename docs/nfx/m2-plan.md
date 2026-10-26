@@ -104,7 +104,8 @@ is zero findings, confirmed after the sixth:
     and sweeps settled on tasks of the engine's own; more polls at every step; entries,
     their answers and their wakes through tasks of the seeder's runtime; a closed
     connection or the clock taken on such a task; keys and listings held from the start.
-- **Suite:** `nfx_pay::adversary` has 149 scenarios (101 until the thirty-first audit, three of those threaded), each on its own thread under a
+- **Suite** (figures as of round 33, `m2/r33`; until round 33 this section stood at the
+  thirty-first audit's figures, a round behind status.md): `nfx_pay::adversary` has 152 scenarios (149 until the thirty-second round, 101 until the thirty-first audit, three of those threaded), each on its own thread under a
   real-time limit (300 s, which ends a hang, and is sized for a machine under load and a
   mint that answers within about ten milliseconds, as the `Harness` contract now requires
   of a harness's mint).
@@ -116,8 +117,9 @@ is zero findings, confirmed after the sixth:
   has settled after 100 turns of the runtime with no answer under way, and an entry on a
   thread of its own waits once it has stood idle through 100 such turns or been polled 100
   times more. An entry on a task of its own is a task of the scenario's runtime, polled
-  only when it is woken. The suite never blocks its runtime's thread. **1,495 planted
-  defects (942 of the seeder, 553 of the watcher) are registered in 3,599 entries, each
+  only when it is woken. The suite never blocks its runtime's thread. **1,520 planted
+  defects (950 of the seeder, 570 of the watcher) are registered in 3,665 entries** (1,506
+  in 3,634 after the thirty-second round, 1,495 in 3,599 after the thirty-first audit), **each
   entry one defect on one harness against one scenario, and each to fail a named check in
   its scenario** (a hang, a panic raised outside the suite, a runtime panic of Rust's own,
   a failure of a table's set-up, or a bare unwrap, is not a catch); 239 of the entries are
@@ -130,7 +132,12 @@ is zero findings, confirmed after the sixth:
   mock, honest behaviour, a freedom of the mint or the harness, or a slip of the harness
   that no honest run shows) are in its record. The thirtieth's hunts registered every
   survivor of theirs; the 40 planted defects of those hunts that the suite caught are not
-  registered. The thirty-first's auditors' survivors are registered. On `c60f864`, the thirty-first audit's tree
+  registered. The thirty-first's auditors' survivors are registered, and so are the
+  thirty-second's, but four: two of the harness (C6, C7), which has no registry and which new
+  cells catch, and two that sovtech's decision of 2026-10-26 removed the input of (A5, B5).
+  On `102d579`, round 33's code tree, each of the 3,665 entries fails a check of the suite,
+  and the honest mock passes all 152 scenarios on the four harnesses and all 3,345 tests of
+  the timings (runs 40356537863 and 40356532696). On `c60f864`, the thirty-first audit's tree
   before its last five commits, each of the 3,599 entries fails a check of the suite, and
   the honest mock passes all 149 scenarios on the four harnesses and all 3,279 tests of
   the timings; what ran on the final code tree is in that audit's record, with what had
@@ -204,7 +211,7 @@ is zero findings, confirmed after the sixth:
     checks corrected;
   - **not fixed:** NFX-07 §3a's half-window credit bound, which does not hold once a
     watcher has two requests unanswered at a time. It is sovtech's decision, between three
-    courses, and none is taken yet;
+    courses, and none was taken then (sovtech decided it on 2026-10-25, below);
   - no scenario was added: 2,906 planted entries became 3,122 (1,343 planted defects
     became 1,415), and `honest_timings` holds 2,223 tests where it held 2,222. A review
     before the push found nothing private and no check weakened; its findings, none above
@@ -571,7 +578,8 @@ What the thirtieth and thirty-first audits left to sovtech, decided:
     §3a's one payment in flight at a time; the bound then holds as written;
   - **answered** means the whole file arrived and passed its sha256, or the seeder refused it,
     or the watcher abandoned it (which stays owed, §3a); the locked `Viewer` trait gains the
-    input that says a request was served.
+    input that says a request was served. (The abandonment half was reversed on 2026-10-26,
+    below: abandoning answers nothing.)
 
   The suite's case runs with a second request attempted, and the cells that pinned what the mock
   pays ahead with two or more chunks unpaid go with it.
@@ -601,10 +609,37 @@ What the thirtieth and thirty-first audits left to sovtech, decided:
 
 The thirty-second round made them, on `m2/r32` at `6c56690`; the five requirements and reading A
 were record only, being in the text already. Its record, with what each decision changed, every run, and eight points of the
-round's own making that await sovtech's reading, is
+round's own making that awaited sovtech's reading (decided 2026-10-26, below), is
 [`reviews/2026-09-24-m2.0-thirty-second-round.md`](reviews/2026-09-24-m2.0-thirty-second-round.md).
-The thirty-second independent audit comes next, repeated until one reports nothing, and then
-sovtech's OK to push M2.0.
+The thirty-second independent audit came next (below, "Decided (sovtech, 2026-10-26)"); audits
+repeat until one reports nothing, and then sovtech's OK to merge M2.0's branch to `main`.
+
+## Decided (sovtech, 2026-10-26)
+
+What the thirty-second audit left to sovtech
+([record](reviews/2026-09-24-m2.0-thirty-second-audit.md)), decided:
+
+- **An abandoned request keeps its place (S1, course a).** Abandoning answers nothing: a
+  request is answered only by its whole file, passed by its sha256, or by a `refuse` naming it
+  on the session it was sent on. So a seeder that serves nothing of a request it admitted, or
+  bytes that fail the sha256, is owed that one and gets no other for that video under that
+  identity, and the watcher fetches the video elsewhere (was: abandoning answered the request
+  and freed its place while it stayed owed, and 400 abandoned requests paid 402 chunks for
+  none served). It reverses the abandonment half of 2026-10-25's "answered"; `Viewer::abandoned`
+  is removed (14 methods). A stated concession: an honest seeder whose transfer is cut short
+  gets no other request for that video either.
+- **The whole outage's keys and listings (S2, course a):** the `Harness` doc follows the mock,
+  whose whole outage serves keys and listings (25 scenarios a file would change otherwise).
+- **D1's and D3's remaining calls are accepted as written (S3):** inputs with nothing
+  unanswered change nothing; `Served::Part` stays a test input; keys and a listing at a down
+  mint fail at once, and a failed listing ask is that second's; no per-mint restore,
+  state-check or `MintEvent`; `mint_outage(false)` ends every mint's outage.
+- **NFX-12's per-session seeder close is dropped (S4):** §5 points at NFX-07 §3a.
+- **The lock job may take 120 minutes (S5).**
+
+  **Done** in round 33 on `m2/r33`: `9f389dd` (spec), `e87a8ac` (the money crate),
+  `f7ffb6f` (the lock), `332cea3` (the pre-push review's fixes). The lock is re-pinned after
+  sovtech has read the code diff; the thirty-third independent audit follows.
 
 ## The testnet mint
 
