@@ -77,6 +77,13 @@ fi
 # Anything else fails:
 #   - an edited, added, removed, renamed or symlinked file (listed from git), before the
 #     build and again after the tests;
+#   - a file the lock reads from git's listing (every pinned file, the pins file, every
+#     tracked Cargo.toml and Cargo.lock) whose checkout is not its blob in git's index byte
+#     for byte, as `git hash-object --no-filters` reads it: an attribute that rewrites a
+#     file on checkout (`ident`, `eol`, `text`, `working-tree-encoding` or a filter, from a
+#     tracked .gitattributes, .git/info/attributes or git's own config), which no diff of
+#     the commit shows, would otherwise have the pins, the build and the tests read bytes
+#     nobody reviewed. In CI the index is the commit's (lock-job.sh);
 #   - crates/ci/locked.sha256 not a tracked regular file of mode 100644 (a link, an
 #     untracked file, another mode); the workspace's manifest, its lock file or a member's
 #     manifest not tracked at its path; any tracked Cargo.toml or Cargo.lock that is a link
@@ -234,6 +241,15 @@ if [ "$mode" = --pin ] && [ "${LOCKED_DIRS_UNLOCKED:-0}" != 1 ]; then
   fail "--pin needs LOCKED_DIRS_UNLOCKED=1 (the security stage, after sovtech's review)"
 fi
 
+# The checkout of `path` is its blob in git's index, byte for byte (`entry` is its
+# `git ls-files -s` line): no attribute rewrote it on checkout (the header).
+committed() {
+  local blob=${1#* }
+  blob=${blob%% *}
+  [ "$(git hash-object --no-filters -- "$2")" = "$blob" ] \
+    || fail "the checkout of $2 is not its committed blob: an attribute rewrote it, or it is edited"
+}
+
 # Every file under the paths, from git (NUL-separated, so no name can split a line).
 manifest() {
   local untracked
@@ -249,6 +265,7 @@ manifest() {
       fail "symlink in a guarded path: $path"
     fi
     [ -f "$path" ] && [ ! -L "$path" ] || fail "missing or not a regular file: $path"
+    committed "$entry" "$path"
     printf '%s %s %s\n' "$mode" "$(sha256sum < "$path" | cut -d' ' -f1)" "$path"
   done
   $py crates/ci/locked.py manifest
@@ -267,6 +284,7 @@ entry=$(git ls-files -s -- "$pins")
 [[ $entry =~ ^100644\ [0-9a-f]+\ 0$'\t'crates/ci/locked\.sha256$ ]] \
   || fail "$pins must be a tracked regular file of mode 100644, not ${entry:-untracked or missing}"
 [ -f "$pins" ] && [ ! -L "$pins" ] || fail "$pins must be a regular file, not a link"
+committed "$entry" "$pins"
 # Each of the next two listings is piped into its loop, never read from a process
 # substitution, whose exit status bash drops: there a git or an env that fails, or lists
 # nothing, leaves its loop nothing to check, and the check passes. Piped, the failure is
@@ -277,6 +295,7 @@ git ls-files -s -z -- '*Cargo.toml' '*Cargo.lock' | {
     path=${entry#*$'\t'}
     [[ $entry =~ ^100644\ [0-9a-f]+\ 0$'\t' ]] && [ -f "$path" ] && [ ! -L "$path" ] \
       || fail "a Cargo manifest or lock file must be a tracked regular file of mode 100644: ${entry@Q}"
+    committed "$entry" "$path"
     case $path in crates/Cargo.toml | crates/Cargo.lock) seen=$((seen + 1)) ;; esac
   done
   [ "$seen" = 2 ] || fail "git listed $seen of crates/Cargo.toml and crates/Cargo.lock"
