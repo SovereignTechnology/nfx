@@ -5002,6 +5002,18 @@ pub enum SeederFlaw {
     /// Takes a mint that cannot be reached for its keys for one that does not know the
     /// keyset: `bad-token`.
     UnreachableKeysBadToken,
+    /// Keeps nothing of a listing it asked a mint for at its start that the mint, down, did
+    /// not answer: a payment there in that second asks again.
+    StartListingDownAskedAgain,
+    /// Keeps nothing of a listing a payment asked a mint for that the mint, down, did not
+    /// answer: a payment there in that second asks again.
+    ListingDownAskedAgain,
+    /// Keeps a mint's failure to give its keys for the second: a payment there in that
+    /// second is answered `mint-unavailable` unasked, the mint back or not.
+    KeysDownKeptForSecond,
+    /// Sends no read of an account's own swaps at a mint that is up while another quoted
+    /// mint is down: they stay unknown.
+    UpMintOwnReadStoppedByOtherOutage,
 }
 
 /// How a payment came to its account's turn: the paths of the suite's matrix of payments,
@@ -7417,10 +7429,6 @@ pub enum ViewerFlaw {
     RequestBeforeLicensedDue,
     /// Takes part of a file, its first byte included, for its request's answer.
     PartAnswers,
-    /// Takes a request it abandoned for un-owed, as a refused one.
-    AbandonedUnowed,
-    /// Takes no abandonment for an answer: once it abandons a request, it sends no other.
-    AbandonedKeepsSlot,
     /// Takes a session's end for the answer to its unanswered request: the next session
     /// sends one while that one's file may still arrive.
     EndAnswers,
@@ -7429,6 +7437,34 @@ pub enum ViewerFlaw {
     RequestHeldByOtherVideo,
     /// Takes a `due` for the answer to its unanswered request.
     DueAnswers,
+    /// Takes a `refuse` on a later session for the answer to a request an earlier session
+    /// left unanswered, or one that comes with no session open: a `refuse` answers only a
+    /// request of its own session.
+    RefusedAcrossSessions,
+    /// Takes a second quote on the open session for the decision a refusal licenses: the
+    /// next request goes before that `due`.
+    SecondQuoteClearsDueFirst,
+    /// Takes a `hello` refused with a code but `banned` for that decision.
+    HelloRefusedNonBannedClearsDueFirst,
+    /// Takes a whole file, none of its requests unanswered, for that decision.
+    WholeClearsDueFirst,
+    /// Takes part of a file for that decision.
+    PartClearsDueFirst,
+    /// Takes `mint-unavailable` to the payment in flight, the watcher not stopped, for that
+    /// decision.
+    UnavailableLiveClearsDueFirst,
+    /// Part of a file undoes a stop.
+    PartClearsStop,
+    /// Part of a file starts the 180 s of the payment in flight on its session again.
+    PartRestartsLiveWait,
+    /// Part of a file ends a refusal's licence to pay ahead.
+    PartEndsLicence,
+    /// Part of a file restores the `mint-unavailable` tries.
+    PartRestoresTries,
+    /// Pays at half the window, rounded down, while a request is unanswered.
+    DueRoundsDownWhileUnanswered,
+    /// Pays at the full window, an odd one, while a request is unanswered.
+    DueFullOnOddWhileUnanswered,
 }
 
 /// What a stopped standing keeps, for the defects that undo a stop on one input only while
@@ -7953,6 +7989,9 @@ struct State {
     /// The second in which each mint's listing was last asked for and could not be had, the
     /// mint down: that second's ask, made (NFX-07 §3 step 3).
     listing_down: HashMap<String, u64>,
+    /// The second in which each mint could not be reached for keys
+    /// ([`SeederFlaw::KeysDownKeptForSecond`] only: nothing is kept of it).
+    keys_down: HashMap<String, u64>,
     /// The keyset rule's own listings ([`SeederFlaw::KeysetListingOwnCache`] only).
     keyset_listings: HashMap<String, Listing>,
     /// The keysets each mint's last listing was asked for
@@ -8628,7 +8667,16 @@ impl Inner {
                 st.listings_asked
             };
             let (released, call, answer) = self.net.list_keysets(mint, Waker::noop());
-            if self.has(SeederFlaw::StartListingDiscarded) || answer.is_some_and(|a| a.down) {
+            // A mint down at the start: that second's ask is made (NFX-07 §3 step 3), and no
+            // listing is kept of it (the flaw keeps nothing at all).
+            if answer.is_some_and(|a| a.down) {
+                if !self.has(SeederFlaw::StartListingDownAskedAgain) {
+                    let key = self.listing_key(mint).to_owned();
+                    self.state().listing_down.insert(key, now);
+                }
+                continue;
+            }
+            if self.has(SeederFlaw::StartListingDiscarded) {
                 continue;
             }
             self.state().listings.insert(
@@ -9700,6 +9748,17 @@ impl Inner {
         }
         let mut reads = vec![Read::Unknown; items.len()];
         for m in mints {
+            // The flaw: an account's own read sent at no mint while another quoted one is down.
+            if !sweep
+                && self.has(SeederFlaw::UpMintOwnReadStoppedByOtherOutage)
+                && self
+                    .config
+                    .mints
+                    .iter()
+                    .any(|x| x != m && self.net.mint_down(x))
+            {
+                continue;
+            }
             let at: Vec<usize> = (0..items.len()).filter(|i| of[*i] == *m).collect();
             let group: Vec<(String, u64)> = at.iter().map(|i| items[*i].clone()).collect();
             let decided =
@@ -10851,6 +10910,10 @@ impl Inner {
                     if !asked && no_keys && !others {
                         break None; // at its deadline: not asked for
                     }
+                    // The flaw: keys a mint could not give are not asked for again that second.
+                    if !asked && st.keys_down.get(mint) == Some(&self.clock.now()) {
+                        break Some(Err(unavailable(MINT_UNREACHABLE)));
+                    }
                     let ask = !std::mem::replace(&mut asked, true);
                     drop(st);
                     break match self
@@ -10859,8 +10922,13 @@ impl Inner {
                     {
                         None => None,
                         // The mint cannot be reached: `mint-unavailable`, and nothing kept
-                        // (the flaw takes it for a keyset the mint does not know).
+                        // (the flaws take it for a keyset the mint does not know, or keep it
+                        // for the second).
                         Some(KeysAnswer::Unreachable) => {
+                            if self.has(SeederFlaw::KeysDownKeptForSecond) {
+                                let now = self.clock.now();
+                                self.state().keys_down.insert(mint.to_owned(), now);
+                            }
                             Some(Err(if self.has(SeederFlaw::UnreachableKeysBadToken) {
                                 rej(RejCode::BadToken, "a keyset the mint does not know")
                             } else {
@@ -11295,7 +11363,9 @@ impl Inner {
                 cache.remove(key);
             }
         }
-        st.listing_down.insert(key.to_owned(), at);
+        if !self.has(SeederFlaw::ListingDownAskedAgain) {
+            st.listing_down.insert(key.to_owned(), at);
+        }
         unavailable(MINT_UNREACHABLE)
     }
 
@@ -13831,9 +13901,11 @@ pub struct MockViewer {
     pending: Option<Pending>,
     /// A refusal since the last payment: the next one may pay ahead.
     pay_ahead: bool,
-    /// This ledger's requests unanswered, one at most (NFX-07 §3a); and a refusal's `due`
-    /// not yet made, which comes before the next request.
+    /// This ledger's requests unanswered, one at most (NFX-07 §3a), and whether it was sent
+    /// on the open session, so that a `refuse` there answers it; and a refusal's `due` not
+    /// yet made, which comes before the next request.
     unanswered: u64,
+    sent_here: bool,
     due_first: bool,
     /// `mint-unavailable` answers counted here ([`ViewerFlaw::UnavailablePerLedger`] only).
     unavailable_here: u32,
@@ -13929,6 +14001,7 @@ impl MockViewer {
             pending: None,
             pay_ahead: false,
             unanswered: 0,
+            sent_here: false,
             due_first: false,
             unavailable_here: 0,
             quoted_at: 0,
@@ -14021,13 +14094,14 @@ impl MockViewer {
         self.flaw == Some(f)
     }
 
-    /// The unanswered request is answered, if there is one: served whole, refused or
-    /// abandoned. Whether there was one.
+    /// The unanswered request is answered, if there is one: served whole, or refused on its
+    /// session. Whether there was one.
     fn answer(&mut self) -> bool {
         if self.unanswered == 0 {
             return false;
         }
         self.unanswered -= 1;
+        self.sent_here = false;
         let mut st = self.standing();
         st.unanswered_all = st.unanswered_all.saturating_sub(1);
         true
@@ -15386,6 +15460,9 @@ impl Viewer for MockViewer {
             self.standing().unavailable = 0;
         }
         let read_first = self.has(ViewerFlaw::SecondQuoteReadFirst);
+        if self.quote.is_some() && self.has(ViewerFlaw::SecondQuoteClearsDueFirst) {
+            self.due_first = false;
+        }
         if self.quote.is_some() && !self.has(ViewerFlaw::AcceptsSecondQuote) && !read_first {
             if self.has(ViewerFlaw::SecondQuoteRestartsLiveWait) {
                 self.restart_live_wait();
@@ -15699,6 +15776,10 @@ impl Viewer for MockViewer {
     }
 
     fn hello_refused(&mut self, rej: &Rej) {
+        if rej.code != RejCode::Banned && self.has(ViewerFlaw::HelloRefusedNonBannedClearsDueFirst)
+        {
+            self.due_first = false;
+        }
         if rej.code != RejCode::Banned && self.has(ViewerFlaw::OtherHelloRefusedReclaimsLiveNow) {
             self.reclaims_other_live();
         }
@@ -15799,6 +15880,7 @@ impl Viewer for MockViewer {
             return Err(Unsent::DueFirst);
         }
         self.unanswered += 1;
+        self.sent_here = true;
         self.standing().unanswered_all += 1;
         if self.has(ViewerFlaw::OtherRequestRestartsLiveWait) {
             self.restarts_other_live();
@@ -15840,28 +15922,38 @@ impl Viewer for MockViewer {
     }
 
     fn served(&mut self, served: Served) {
-        // Only the whole file answers the request (flaw: part of it does).
-        if served == Served::Whole || self.has(ViewerFlaw::PartAnswers) {
-            self.answer();
+        // Only the whole file answers the request (flaw: part of it does). It is no decision
+        // of what to pay, and changes nothing else (flaws: it does).
+        let whole = served == Served::Whole;
+        let answered = (whole || self.has(ViewerFlaw::PartAnswers)) && self.answer();
+        if (whole && !answered && self.has(ViewerFlaw::WholeClearsDueFirst))
+            || (!whole && self.has(ViewerFlaw::PartClearsDueFirst))
+        {
+            self.due_first = false;
         }
-    }
-
-    fn abandoned(&mut self) {
-        // It answers the request, which stays owed (flaws: it is un-owed, or no answer).
-        if self.has(ViewerFlaw::AbandonedKeepsSlot) || !self.answer() {
+        if whole {
             return;
         }
-        if self.has(ViewerFlaw::AbandonedUnowed) {
-            self.requested = self.requested.saturating_sub(1);
-            self.request_times.pop();
-            let mut st = self.standing();
-            st.requested_all = st.requested_all.saturating_sub(1);
+        if self.has(ViewerFlaw::PartClearsStop) {
+            self.standing().stopped = false;
+        }
+        if self.has(ViewerFlaw::PartRestartsLiveWait) {
+            self.restart_live_wait();
+        }
+        if self.has(ViewerFlaw::PartEndsLicence) {
+            self.pay_ahead = false;
+        }
+        if self.has(ViewerFlaw::PartRestoresTries) {
+            self.standing().unavailable = 0;
         }
     }
 
     fn refused(&mut self) {
-        // It answers the unanswered request; with none, it is no answer.
-        if !self.answer() {
+        // It answers the request unanswered on the open session; with none, or with that
+        // request sent on an earlier session, or with no session open, it is no answer
+        // (flaw: it answers a request carried over all the same).
+        let of_its_session = self.quote.is_some() && self.sent_here;
+        if !(of_its_session || self.has(ViewerFlaw::RefusedAcrossSessions)) || !self.answer() {
             return;
         }
         if self.has(ViewerFlaw::OtherRefusedRequestReclaimsLiveNow) {
@@ -15949,9 +16041,13 @@ impl Viewer for MockViewer {
             window + 1
         } else if self.has(ViewerFlaw::PaysAtFullWindow)
             || (window % 2 == 1 && self.has(ViewerFlaw::DueFullOnOdd))
+            || (window % 2 == 1
+                && self.unanswered > 0
+                && self.has(ViewerFlaw::DueFullOnOddWhileUnanswered))
         {
             window
         } else if self.has(ViewerFlaw::DueRoundsDown)
+            || (self.unanswered > 0 && self.has(ViewerFlaw::DueRoundsDownWhileUnanswered))
             || (self.resumed && self.has(ViewerFlaw::DueRoundsDownOnResume))
             || (self.id != 0 && self.has(ViewerFlaw::DueRoundsDownOnSibling))
             || (self.held_credit && self.has(ViewerFlaw::DueRoundsDownWithCredit))
@@ -16162,6 +16258,12 @@ impl Viewer for MockViewer {
     async fn rej(&mut self, rej: &Rej) {
         self.taken_by_another();
         let was_halted = self.halted();
+        if rej.code == RejCode::MintUnavailable
+            && !was_halted
+            && self.has(ViewerFlaw::UnavailableLiveClearsDueFirst)
+        {
+            self.due_first = false;
+        }
         if was_halted && self.has(ViewerFlaw::RejSkipsWhenStopped) {
             return;
         }
@@ -16373,8 +16475,10 @@ impl Viewer for MockViewer {
         self.taken_by_another();
         self.clears_stop_beside_live(ViewerFlaw::OtherEndWhileLiveClearsStop);
         self.quote = None;
-        // A request unanswered stays so, its file still to come (flaw: the end answers it);
-        // a refusal's `due` is no more owed first, its licence ending.
+        // A request unanswered stays so, its file still to come (flaw: the end answers it),
+        // and no `refuse` of a later session answers it; a refusal's `due` is no more owed
+        // first, its licence ending.
+        self.sent_here = false;
         self.due_first = false;
         if self.has(ViewerFlaw::EndAnswers) {
             while self.answer() {}

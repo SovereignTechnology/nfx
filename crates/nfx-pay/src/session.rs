@@ -175,9 +175,13 @@ pub trait SeederSession {
 /// as long as the watcher's own identity toward it, which the watcher keeps while a payment
 /// of the ledger is not yet settled, and the standing as long as the wallet the watcher pays
 /// from, so a lying seeder takes one payment per seeder identity the watcher pays. A ledger
-/// keeps one request unanswered at a time, and after a refusal decides what to pay before
-/// its next ([`Viewer::requested`]), so a seeder that refuses everything takes at most half
-/// a window of credit, rounded down, for each video (NFX-07 §3a).
+/// keeps one request unanswered at a time, abandoned or not, and after a refusal decides
+/// what to pay before its next ([`Viewer::requested`]), so a seeder that refuses or
+/// withholds everything takes at most half the largest window it quoted, rounded down, or
+/// one chunk where that is more, for each video (NFX-07 §3a). A ledger holds one session at
+/// a time: a quote on an open session is a second quote, refused unread ([`Viewer::quote`]).
+/// So the sessions NFX-07 §3a lets a watcher hold with a seeder for one video at once are a
+/// real watcher's to keep one request across; this trait does not hold them.
 /// Implementations: the real wallet-backed viewer (locked until the M2 security stage) and
 /// [`crate::mock::MockViewer`]. It keeps time on the harness's clock.
 #[allow(async_fn_in_trait)]
@@ -228,10 +232,12 @@ pub trait Viewer {
     /// while NFX-07 §3a holds it back, on whichever session, stopped or not:
     /// - [`Unsent::Unanswered`]: a request of this ledger's, sent on this session or an
     ///   earlier one, is unanswered: one at a time. Only its whole file
-    ///   ([`Viewer::served`]), its refusal ([`Viewer::refused`]) or its abandonment
-    ///   ([`Viewer::abandoned`]) answers it: no part of its file, payment, answer to a
-    ///   payment, timeout or session's end does. Each ledger keeps its own, so requests for
-    ///   the seeder's other videos, as to other seeders, go at once;
+    ///   ([`Viewer::served`]) or, on the session it was sent on, its refusal
+    ///   ([`Viewer::refused`]) answers it: no part of its file, payment, answer to a
+    ///   payment, timeout or session's end does, nor the watcher's abandoning it, which
+    ///   leaves it owed and holds its place (nothing tells the viewer of it). Each ledger
+    ///   keeps its own, so requests for the seeder's other videos, as to other seeders, go
+    ///   at once;
     /// - [`Unsent::DueFirst`]: a refusal licenses a [`Viewer::due`] not yet made
     ///   ([`Viewer::refused`]), which comes first, whether or not it pays.
     ///
@@ -246,15 +252,11 @@ pub trait Viewer {
     /// refusal's licence as they were.
     fn served(&mut self, served: Served);
 
-    /// The watcher abandoned the unanswered request: that answers it, and it stays owed
-    /// (NFX-07 §3a), whatever comes for it later: a `refuse` of its file is then no answer.
-    /// With no request unanswered, it changes nothing. It is no decision of what to pay: it
-    /// leaves the payment in flight, a stop, the tries and a refusal's licence as they were.
-    fn abandoned(&mut self);
-
-    /// The seeder answered the unanswered request with `refuse`. It is not owed, and if it
-    /// was already paid for, that payment becomes credit. With no request unanswered (none
-    /// was sent, or it was served or abandoned) it is no answer, and changes nothing. It
+    /// The seeder answered the unanswered request with `refuse` naming its file. It is not
+    /// owed, and if it was already paid for, that payment becomes credit. With no request
+    /// unanswered that was sent on the open session (none was sent, it was served, or it was
+    /// sent on an earlier session, whose `refuse` cannot come on this one), or with no
+    /// session open, it is no answer, and changes nothing, and licenses nothing. It
     /// licenses the next [`Viewer::due`] on this ledger, and no other call, to pay ahead half
     /// a window, rounded down, less the credit already held, that much and not merely at
     /// most: that `due` uses the licence and ends it, whether or not it pays, and so does
@@ -382,7 +384,7 @@ pub trait Viewer {
 
     /// The session ended (its connection closed). A refusal's licence to pay ahead ends
     /// with it. A request unanswered stays so ([`Viewer::requested`]): its file may still
-    /// arrive. The ledger stays, and a payment in flight stays unsettled, still the
+    /// arrive, which answers it, and nothing on a later session but that does. The ledger stays, and a payment in flight stays unsettled, still the
     /// standing's one payment in flight. This ledger's quote settles it if both its fields
     /// match. Failing that, any ledger of the standing reclaims it once it is 180 s old, and
     /// proofs found spent leave it awaiting a quote.
@@ -837,10 +839,16 @@ pub trait Harness {
         std::thread::spawn(side);
     }
     /// Make the mint unreachable (`true`), every mint the harness backs; or reachable again,
-    /// every one of them, those [`Harness::mint_outage_at`] took down included.
+    /// every one of them, those [`Harness::mint_outage_at`] took down included. While it is
+    /// down, the seeder's swaps are refused as unreachable and its reads of swap state
+    /// (NUT-07, NUT-09) go unanswered, and a watcher's reclaims and restores are not served;
+    /// its keys and keyset listing (NUT-01, NUT-02) are still served, as by a front that
+    /// answers them while the mint behind it is down. An outage that refuses those too is
+    /// [`Harness::mint_outage_at`]'s, of one mint. ([`MintEvent::Down`] is this outage.)
     fn mint_outage(&self, down: bool);
-    /// Make the mint at `url` alone unreachable (`true`), or reachable again, while every
-    /// other mint answers as before. The seeder's swaps there and its requests for that
+    /// Make the mint at `url` alone unreachable (`true`), or reachable again, unless an
+    /// outage of every mint holds it ([`Harness::mint_outage`]), while every other mint
+    /// answers as before. The seeder's swaps there and its requests for that
     /// mint's keys and keyset listing (NUT-01, NUT-02) are refused as unreachable, and its
     /// reads of swap state there (NUT-07, NUT-09) go unanswered; a watcher's reclaims and
     /// restores there are not served. A read is of one mint's swaps, so a seeder that reads
