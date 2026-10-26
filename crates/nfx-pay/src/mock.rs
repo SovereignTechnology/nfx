@@ -14101,7 +14101,7 @@ impl MockViewer {
             return false;
         }
         self.unanswered -= 1;
-        self.sent_here = false;
+        self.sent_here &= self.unanswered > 0;
         let mut st = self.standing();
         st.unanswered_all = st.unanswered_all.saturating_sub(1);
         true

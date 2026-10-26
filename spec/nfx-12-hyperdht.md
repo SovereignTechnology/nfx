@@ -159,8 +159,8 @@ closes the channel.
 **Limits** (per connection; a peer that exceeds one is closed):
 
 - at most 16 videos, so 32 channels;
-- in free mode at most 8 open requests per channel; in paid mode NFX-07 §3's admission bounds
-  them (§5);
+- at most 8 open requests per channel, in free mode and in paid mode alike: a paid watcher keeps
+  one (§5), and a seeder's state for requests a large pre-payment covers stays bounded;
 - the 60 s inactivity rule of §3.
 
 ## 5. `nfx/pay/1`
@@ -258,4 +258,6 @@ An implementation is conformant when it passes those fixtures and the cross-impl
   a refusal's decision before the next request (was: provisional, one request outstanding per
   session, and a seeder closing the channel of a watcher that sent a second; that close is
   dropped). §4 says why a `refuse` names at most one request in paid mode, and that an
-  abandoned request stays unanswered; the open issue of paid concurrency is closed.
+  abandoned request stays unanswered; its limit of 8 open requests per channel holds in paid
+  mode too (was: §5's), so covered requests still cannot pile up on a seeder; the open issue
+  of paid concurrency is closed.

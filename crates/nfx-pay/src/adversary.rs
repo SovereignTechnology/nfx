@@ -14718,9 +14718,11 @@ pub async fn a_viewer_sends_one_request_at_a_time<H: Harness>(h: &H) {
     v.timeout().await;
     close(h, s).await;
     v.end();
+    v.refused();
     let mut s = open(h, &e, 1).await;
     v.quote(s.quote())
         .expect("the third session's honest quote is accepted");
+    held(&mut v, Unsent::Unanswered, "a refuse with no session open");
     v.refused();
     held(
         &mut v,
