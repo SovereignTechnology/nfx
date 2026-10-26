@@ -96,7 +96,7 @@ them.
 | `stale` | `pay.upto_chunk` ≤ last acked watermark | NFX-07 §2 |
 | `bad-token` | token unreadable, not unit `sat`, of more than one mint, with more than 64 proofs, with locked proofs (in open mode: a licensed video's are P2PK-locked, and `bad-lock` if not), with a missing or invalid DLEQ, or with proofs the mint refuses as invalid (the last is also a ban) | NFX-07 §3 |
 | `banned` | the peer is banned by this seeder (a spent or invalid proof), until `ban_ttl` | NFX-07 §3 |
-| `mint-unavailable` | the seeder could not complete the swap: the mint could not be reached, the seeder's own swap failed or was refused as pending, or no answer came within 60 s of the `pay`'s arrival; or it did not swap, because an earlier payment's outcome on the account is still unknown. Not a ban, and nothing credited by then (a late claim is credited later) | NFX-07 §3 |
+| `mint-unavailable` | the seeder could not complete the swap: the mint could not be reached, the seeder's own swap failed or was refused as pending, or no answer came within 60 s of the `pay`'s arrival; or it did not swap, because an earlier payment's outcome on the account is still unknown, or the quoted mint could not be reached for keys or for its keyset listing. Not a ban, and nothing credited by then (a late claim is credited later) | NFX-07 §3 |
 | `bad-session` | the session id names a session that is open, or the peer holds too many open or waiting sessions | NFX-07 §3 |
 | `payment-required` | license requested without payment/voucher | NFX-09 §2 |
 | `bad-voucher` | voucher signature, presenter (NIP-98 ≠ `seeder`), whitelist or expiry failed | NFX-08 §5, NFX-09 §2 |
@@ -236,3 +236,6 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   deprecated; the per-video topic is MAY and is the 32-byte digest (the row used to leave hex or
   bytes open). The Hypercore stack pin becomes a HyperDHT wire pin. L2 and L3 accept NFX-12. New
   vectors `beacon-hyperdht.json` and `files1.json`.
+- 2026-10-26 (M2.0 round 33) — `mint-unavailable` names a quoted mint that cannot be reached
+  for keys or for its keyset listing among the cases it answers (NFX-07 §3 step 3, which said
+  so since 2026-10-25; was: covered only by "the mint could not be reached").

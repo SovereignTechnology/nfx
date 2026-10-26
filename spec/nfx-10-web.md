@@ -211,10 +211,11 @@ says of a page holds for a worker it pays or earns from. Whether a page pays an 
   bound.
   Credit is the ledger's too, and so are its rules: a page keeps one request unanswered
   at a time for a seeder and a video, across its sessions with that seeder for that
-  video, and makes the decision a refusal licenses before its next request there (NFX-07
-  §3a). So a seeder that refuses everything takes at most half a page's window ceiling
-  for each video from each page, a new page's identity holding none of an earlier one's.
-  Its loaders fetch from several seeders at once, and from each one file of a video at a
+  video, abandoned or not, and makes the decision a refusal licenses before its next
+  request there (NFX-07 §3a). So a seeder that refuses or withholds everything takes at
+  most half a page's window ceiling, rounded down, or one chunk where that is more, for
+  each video from each page, a new page's identity holding none of an earlier one's. Its
+  loaders fetch from several seeders at once, and from each one file of a video at a
   time (§3.2).
 
 ### 3.1 HTTPS
@@ -281,7 +282,10 @@ mesh, and it is NFX-07's:
   on one account, up to the per-peer cap. However many are open, a paying peer keeps one
   request unanswered at a time to a remote peer for a video, across them all (NFX-07
   §3a): its loader fetches a video's files from several peers at once, and from each one
-  at a time. The channel meets NFX-07 §2's delivery rule:
+  at a time. A transfer it stops, or one cut short, leaves its request unanswered, so it
+  sends that peer no other request for the video. Only the requested file answers it: the
+  loader matches what arrives to the request by its sha256, and bytes of another file
+  answer nothing. The channel meets NFX-07 §2's delivery rule:
   a message unacknowledged for 60 s closes it. A browser↔bridge link is the same (§2).
 - **Unit and window.** The mesh accounts in **chunks, where one chunk is one NFX-05
   file**. That is a whole segment or init, never a WebRTC message fragment. `quote.window`
@@ -439,3 +443,10 @@ NFX-05 byte formats.
     loaders fetch from several seeders at once, and from each one file of a video at a time
     (was: nothing said, and the half-window bound that §3's sentence on a page's credit rests
     on did not hold for a page with two requests unanswered at once).
+- Draft 2026-10-26 (M2.0 round 33: sovtech's decisions of 2026-10-26, NFX-07 §3a).
+  - §3 and §3.2: a request a page abandons, a transfer it stops or one cut short, stays
+    unanswered, so the page sends that seeder no other request for the video; only the
+    requested file, matched by its sha256, or a `refuse` naming it answers it (was: an
+    abandoned request answered, and stayed owed, so a seeder that served nothing was owed
+    one chunk per abandoned request without bound). The bound on a page's credit says it
+    covers a seeder that withholds, and is rounded down, or one chunk where that is more.

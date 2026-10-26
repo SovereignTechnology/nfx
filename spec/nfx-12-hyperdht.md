@@ -111,8 +111,9 @@ closes the channel.
 **Requests.**
 
 - A watcher asks for one file by its sha256 with `get`. It picks `req`, unique among its open
-  requests on the channel, and never has two open requests for the same `sha` there, so a pay/1
-  `refuse`, which names the file and not the request, is never ambiguous.
+  requests on the channel, and never has two open requests for the same `sha` there. In paid
+  mode it keeps one request unanswered at a time for the video, abandoned or not (NFX-07 §3a),
+  so a pay/1 `refuse`, which names the file and not the request, answers that one or none.
 - The seeder answers with the file's bytes in order, in `data` frames tagged with `req`, then
   `end`. Frames of different requests may interleave.
 - A seeder serves only files listed in the hash list of **the channel's video** that it holds and
@@ -120,7 +121,8 @@ closes the channel.
   is refused (below), even one it holds for another video, so a channel is never an oracle for
   the rest of a seeder's store.
 - There is no cancel. A watcher that abandons a transfer closes the channel. In paid mode the
-  abandoned request stays owed (NFX-07 §3a).
+  abandoned request stays owed and unanswered (NFX-07 §3a): the watcher sends that seeder no
+  other request for the video.
 
 **Refusal.**
 
@@ -157,7 +159,8 @@ closes the channel.
 **Limits** (per connection; a peer that exceeds one is closed):
 
 - at most 16 videos, so 32 channels;
-- in free mode at most 8 open requests per channel; in paid mode see §5;
+- in free mode at most 8 open requests per channel; in paid mode NFX-07 §3's admission bounds
+  them (§5);
 - the 60 s inactivity rule of §3.
 
 ## 5. `nfx/pay/1`
@@ -182,10 +185,11 @@ Message types, by index:
   origin surface of NFX-07 §4: one admitted `get` is one chunk (`window`, `pay.upto_chunk`),
   whole or aborted, as in the web mesh (NFX-10 §3). `get` for the hash list (`sha` = `root`)
   counts as a chunk, as the meta collection's members do on iroh (NFX-06 §2).
-- **Concurrency (provisional).** In paid mode a watcher keeps at most **one** request outstanding
-  per session, and a seeder closes the channel of a watcher that sends a second. NFX-07 §3a's
-  half-window credit bound holds with one request outstanding and not with two (sovtech's open
-  decision, `docs/nfx/status.md`). This rule is relaxed only by that decision.
+- **Concurrency.** In paid mode a watcher keeps one request unanswered at a time for a seeder
+  and a video, across every session it holds with the seeder for that video, and makes the
+  decision a refusal licenses before its next request there: NFX-07 §3a, unchanged. A seeder
+  has no rule of it: it counts each admitted `get` atomically (NFX-07 §3), which bounds a peer
+  that sends more.
 - **The account's peer** is the watcher's Noise public key (§1). Licensed videos add the proof
   lock of NFX-08 §4, as on every transport.
 
@@ -234,8 +238,6 @@ An implementation is conformant when it passes those fixtures and the cross-impl
 
 ## 10. Open issues (before any freeze)
 
-- **Paid concurrency** (§5): one outstanding request per session until sovtech decides the
-  half-window credit bound.
 - **Partial seeders.** A seeder whose NFX-03 `chunks` is not `"all"` answers requests for files it
   lacks with `missing` or `refuse`. Whether it should also say which files it holds is open.
 - **Verification while streaming.** A later `nfx/files/2` could carry incremental proofs, so a lie
@@ -251,3 +253,9 @@ An implementation is conformant when it passes those fixtures and the cross-impl
   request. The `hyperdht` endpoint and its `bind` replace `hyper`, which is deprecated. The
   Hyperdrive storage is gone, and the per-video topic becomes MAY. The open issues of the first
   draft (upload gating, the sidecar's runtime, partial drives) are void with it.
+- Draft 2026-10-26 (M2.0 round 33: sovtech's decision of 2026-10-26). §5's paid concurrency
+  is NFX-07 §3a's: one request unanswered at a time per seeder and video, across sessions, and
+  a refusal's decision before the next request (was: provisional, one request outstanding per
+  session, and a seeder closing the channel of a watcher that sent a second; that close is
+  dropped). §4 says why a `refuse` names at most one request in paid mode, and that an
+  abandoned request stays unanswered; the open issue of paid concurrency is closed.

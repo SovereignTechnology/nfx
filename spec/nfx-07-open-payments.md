@@ -3,9 +3,9 @@
 **Status: Draft (target freeze: M2)** · depends on NFX-01/02/03/05/06
 
 Open mode: segments unencrypted; the manifest's `license` is `open`. Watchers pay
-**seeders** per delivered chunk in Cashu ecash; creators earn from **zaps** (NIP-57)
-on the manifest — the design's honest position is that open bytes can't be
-payment-enforced after release, so no mechanism pretends otherwise.
+**seeders** per chunk requested and not refused (§3a) in Cashu ecash; creators earn
+from **zaps** (NIP-57) on the manifest — the design's honest position is that open
+bytes can't be payment-enforced after release, so no mechanism pretends otherwise.
 
 ## 1. Where payments flow
 
@@ -97,7 +97,8 @@ payment-enforced after release, so no mechanism pretends otherwise.
   watermark, and `spent_total` is the face value accepted so far on the account.
 - **`rej` `mint-unavailable`**: the seeder could not complete the swap in time, and its
   outcome may be unknown; or it did not swap at all, because an earlier payment's
-  outcome on the account is still unknown, or the mint has no keyset it may swap to.
+  outcome on the account is still unknown, the mint has no keyset it may swap to, or the
+  quoted mint could not be reached for keys or for its keyset listing (§3 step 3).
   It is not a ban, and nothing was credited by then; a swap that lands later is
   credited if it claimed the proofs and the seeder learns so before its outputs' keyset
   expires (§3).
@@ -314,8 +315,9 @@ whatever it offers. The checks run in this order:
    - A quoted mint that cannot be reached for keys or for its listing is
      `mint-unavailable`, as an unreachable swap is (step 5): no ban, and nothing of it is
      kept but that the second's ask of the listing was made, so a payment that needs that
-     mint's listing in the same second is answered so without asking again. No payment at
-     another quoted mint waits for it.
+     mint's listing in the same second is answered so without asking again, even one
+     naming a keyset the listing it holds does not name, which would otherwise wait for
+     the next second's listing. No payment at another quoted mint waits for it.
 4. **The face value** exactly covers the new chunks. Short is `underpaid`, over is
    `overpaid`. A product above 2^53−1 is `underpaid`. An exact payment that would take
    the account's `spent_total` above 2^53−1 is `overpaid`: no `ack` or quote could carry
@@ -555,21 +557,27 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   session, refused (§2) whatever it claims: its price and `window` change nothing.
 - **Owe every request sent,** except one the seeder answers with `refuse`. A refused
   request is always un-owed; if it was already paid for, that payment becomes credit. A
-  request the watcher abandons stays owed; if the seeder never saw it, the payment
-  becomes pre-payment.
+  request the watcher abandons (it stops waiting for the file, or closes the transfer)
+  stays owed, and unanswered (below); if the seeder never saw it, the payment becomes
+  pre-payment.
 - **Keep one request unanswered at a time** for a seeder and a video: under one identity
   toward the seeder (the ledger's, above), across every session the watcher holds with it
   for that video, open at once or one after another. A request is answered once its file
-  has arrived whole and passed its sha256 (NFX-05 §4), once the seeder refuses it, or once
-  the watcher abandons it, which leaves it owed (above) whatever comes for it later: a
-  `refuse` of it then answers nothing. Nothing else answers a request: not part of its
-  file, its first byte included, nor bytes that fail the sha256 (the watcher waits on, or
-  abandons it), a payment or its answer, a timeout, nor the session's end, after which
+  has arrived whole and passed its sha256 (NFX-05 §4), or once the seeder refuses it with
+  a `refuse` naming its file on the session it was sent on, and by nothing else: not part
+  of its file, its first byte included, nor bytes that fail the sha256, the watcher
+  abandoning it, a payment or its answer, a timeout, nor the session's end, after which
   its file may still arrive, and no request goes on a later session until it is answered.
-  Requests to several seeders, or to one seeder for several videos, go at once. This is
-  the watcher's duty, as one payment in flight is (below): a seeder has no rule of it,
-  still counts concurrent requests atomically (§3), and bounds a peer that ignores it by
-  its window and its global cap.
+  So a request the watcher abandons keeps its place, whatever came of it: a seeder that
+  serves nothing of a request it admitted, or bytes that fail the sha256, is owed that one
+  request and gets no other request for that video under that identity, and the watcher
+  fetches the video elsewhere. A stated concession: so does an honest seeder whose
+  transfer is cut short (its connection lost), since no `refuse` comes for it and its
+  file does not arrive; a loader that drops a load leaves the transfer running (NFX-10
+  §3.1). Requests to several seeders, or to one seeder for several videos, go at once.
+  This is the watcher's duty, as one payment in flight is (below): a seeder has no rule of
+  it, still counts concurrent requests atomically (§3), and bounds a peer that ignores it
+  by its window and its global cap.
 - **Pay exactly the quoted price** for every chunk a payment covers, requested or paid
   ahead (below): the price of the open session's quote (§2), whatever an earlier session's
   or another video's was, and never the watcher's own cap. Pay with a token that passes
@@ -606,13 +614,15 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     credit that video's ledger already holds (what another video's ledger holds or owes
     counts for nothing): that much, not merely at most, so too on whichever ledger and
     whatever came before, which the seeder serves whatever its cap. The watcher makes that
-    decision before it sends that seeder its next request for that video, whether or not
-    the decision pays, as it makes one payment at a time (below): so every request it pays
-    for then is answered, and none of them can be refused once paid for. Nothing that comes
-    between the refusal and that decision is such a decision, or ends the licence, but the
-    session's end: not the answer to a payment in flight, a second quote, a refused
-    `hello`, a timeout before a payment's 180 s or with no payment on the session, nor
-    anything on another video's ledger. The licence ends there, whether or not that decision
+    decision before it sends that seeder its next request for that video on that session,
+    whether or not the decision pays, as it makes one payment at a time (below): so every
+    request it pays for then is answered, and none of them can be refused once paid for.
+    The session's end, which ends the licence (below), ends this order too. Nothing that
+    comes between the refusal and that decision is such a decision, or ends the licence,
+    but the session's end: not the answer to a payment in flight, a second quote, a refused
+    `hello`, a timeout before a payment's 180 s or with no payment on the session, bytes
+    of a file, whole or in part, or a `refuse`, that answer no request, nor anything on
+    another video's ledger. The licence ends there, whether or not that decision
     paid: one that paid nothing because a payment was in flight toward the seeder or left
     unsettled, a reclaim was incomplete, a payment awaited a quote, the tries were used,
     the wallet held no proof the mint takes, the ledger already held half a window of
@@ -624,11 +634,13 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     not such a decision: it covers what is owed and nothing ahead, and, whether or not
     anything is paid then, it neither uses the licence nor ends it, so the licence stays
     for the decision that follows on that session, if one does. With one request
-    unanswered at a time (above) and that decision made before the next, credit on a video
-    never grows beyond half its window, rounded down, so a seeder that refuses everything
-    takes at most half the watcher's ceiling for each video the watcher asks it for, under
-    each identity the watcher takes toward it: the ledger, and its credit, are that
-    identity's (above).
+    unanswered at a time (above), abandoned or not, and that decision made before the
+    next, credit on a video never grows beyond half the largest window it was quoted,
+    rounded down, and a request the seeder admits and does not serve is the last it gets
+    for that video: so a seeder that refuses or withholds everything takes at most half
+    the watcher's ceiling, rounded down, or one chunk where that is more, for each video
+    the watcher asks it for, under each identity the watcher takes toward it: the ledger,
+    and its credit, are that identity's (above).
   - Keep one payment in flight toward a seeder at a time, across its videos. One sent on a
     live session holds that place until it is answered or its 180 s are up (below): a
     second quote, a request new or answered, a timeout before then, a ledger made for
@@ -662,8 +674,11 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   restores (NUT-09) find its own requests' outputs, after a restart too.
 - **Answers belong to their session.** A `rej` answers the payment sent on its session.
   One that answers no payment is unsolicited, and stops the watcher paying that seeder,
-  as an unsolicited `ack` does. A refused `hello` opens no session and answers no
-  payment: `banned` stops the watcher, and any other code, known or not,
+  as an unsolicited `ack` does. A `refuse` answers the request unanswered on its session
+  for the file it names: one that answers none (no request sent on that session, or none
+  unanswered there, or another file named) is no answer, changes nothing and licenses
+  nothing, and does not stop the watcher. A refused `hello` opens no session and answers
+  no payment: `banned` stops the watcher, and any other code, known or not,
   `mint-unavailable` included, changes nothing. A payment an earlier session left
   unsettled is settled only by a quote or by the 180 s reclaim below. A quote the watcher
   refuses (for its price, its `window` or its mints, or a second quote on an open
@@ -1659,3 +1674,33 @@ paths on one host are two origins.
     (was: "in as few requests as the mint's limits allow", as of one mint). What "a read
     refused or unanswered proves nothing for the swaps it covered, and nothing more" said
     of a seeder of several mints, now said.
+- Draft 2026-10-26 (M2.0 round 33: the thirty-second audit,
+  `docs/nfx/reviews/2026-09-24-m2.0-thirty-second-audit.md`, and sovtech's decisions of
+  2026-10-26).
+  - §3a: a request the watcher abandons stays owed and unanswered: only its whole file,
+    passed by its sha256, or a `refuse` naming its file on the session it was sent on
+    answers it. So a seeder that admits a request and serves nothing of it, or bytes that
+    fail the sha256, is owed that one request and gets no other for that video under that
+    identity (was: abandoning answered the request and freed its place while it stayed
+    owed, so a seeder that served nothing was owed one chunk per abandoned request, without
+    bound: 400 abandoned requests paid 402 chunks for none served, and the watcher never
+    stopped). A stated concession: an honest seeder whose transfer is cut short gets no
+    other request for that video either. A refused request is always un-owed again, an
+    abandoned one included, and a late `refuse` is an ordinary one.
+  - §3a: the bound says what it counts: credit never grows beyond half the largest window
+    the video was quoted, rounded down, and a seeder that refuses or withholds everything
+    takes at most half the watcher's ceiling, rounded down, or one chunk where that is
+    more (was: "a seeder that refuses everything", and "half its window").
+  - §3a: the decision a refusal licenses comes before the next request on that session,
+    and the session's end ends that order with the licence (was: no session named). Bytes
+    of a file, whole or in part, and a `refuse` that answer no request are named among
+    what is no such decision.
+  - §3a, answers: a `refuse` that answers no request unanswered on its session for the
+    file it names is no answer, changes nothing and does not stop the watcher (was: said
+    of a refused abandoned request only).
+  - §3 step 3: a payment that needs a mint's listing in a second whose ask of it failed is
+    answered `mint-unavailable` without asking again, even one that the listing held would
+    send to wait for the next second's (was: two sentences that each claimed that case).
+    §2's `mint-unavailable` names an unreachable mint's keys or listing among its causes.
+  - The summary says watchers pay per chunk requested and not refused (was: "per
+    delivered chunk", which an owed abandoned request already contradicted).
