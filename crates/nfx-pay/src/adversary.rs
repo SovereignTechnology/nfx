@@ -24145,7 +24145,7 @@ pub async fn a_payment_waits_180_s_and_holds_its_place_whatever_comes<H: Harness
     let endings = [Ending::Unanswered];
     table!(h, tally, rule, (takes, base, 0), endings, a_payment_waits);
     tally.ends(rule, (22_945, 45_491));
-    tally.told(rule, 18_286);
+    tally.told(rule, 21_469);
 }
 
 /// One cell of [`a_payment_waits_180_s_and_holds_its_place_whatever_comes`].
