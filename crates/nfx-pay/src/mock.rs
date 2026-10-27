@@ -35,7 +35,7 @@ use nfx_pay_wire::pay::{
 
 use crate::session::{
     BadToken, EngineParams, Harness, MintEvent, PeerId, SeederEngine, SeederSession, Served,
-    Unsent, Viewer,
+    Sha256, Unsent, Viewer,
 };
 
 /// Sessions one peer may hold open at once, across all videos.
@@ -7429,6 +7429,17 @@ pub enum ViewerFlaw {
     RequestBeforeLicensedDue,
     /// Takes part of a file, its first byte included, for its request's answer.
     PartAnswers,
+    /// Takes the whole of any file for the answer to its unanswered request, whatever file
+    /// that request asks for.
+    ServedAnyFile,
+    /// Takes the whole of any file its ledger has asked for, an earlier request's (served
+    /// or refused) included, for the answer to its unanswered request.
+    AnyRequestedFileAnswers,
+    /// Takes a `refuse` naming any file for the refusal of its unanswered request.
+    RefusedAnyFile,
+    /// Takes a `refuse` naming any file its ledger has asked for, an earlier request's
+    /// included, for the refusal of its unanswered request.
+    RefusedEarlierFile,
     /// Takes a session's end for the answer to its unanswered request: the next session
     /// sends one while that one's file may still arrive.
     EndAnswers,
@@ -13901,12 +13912,16 @@ pub struct MockViewer {
     pending: Option<Pending>,
     /// A refusal since the last payment: the next one may pay ahead.
     pay_ahead: bool,
-    /// This ledger's requests unanswered, one at most (NFX-07 §3a), and whether it was sent
-    /// on the open session, so that a `refuse` there answers it; and a refusal's `due` not
-    /// yet made, which comes before the next request.
-    unanswered: u64,
+    /// This ledger's requests unanswered, by the file each asks for, one at most (NFX-07
+    /// §3a), and whether it was sent on the open session, so that a `refuse` there naming
+    /// its file answers it; and a refusal's `due` not yet made, which comes before the next
+    /// request.
+    unanswered: Vec<Sha256>,
     sent_here: bool,
     due_first: bool,
+    /// Every file this ledger has requested ([`ViewerFlaw::AnyRequestedFileAnswers`] and
+    /// [`ViewerFlaw::RefusedEarlierFile`] only).
+    asked: Vec<Sha256>,
     /// `mint-unavailable` answers counted here ([`ViewerFlaw::UnavailablePerLedger`] only).
     unavailable_here: u32,
     /// When this session's quote was taken, and when the seeder last answered on it (the
@@ -14000,7 +14015,8 @@ impl MockViewer {
             spent: 0,
             pending: None,
             pay_ahead: false,
-            unanswered: 0,
+            unanswered: Vec::new(),
+            asked: Vec::new(),
             sent_here: false,
             due_first: false,
             unavailable_here: 0,
@@ -14094,14 +14110,19 @@ impl MockViewer {
         self.flaw == Some(f)
     }
 
-    /// The unanswered request is answered, if there is one: served whole, or refused on its
-    /// session. Whether there was one.
-    fn answer(&mut self) -> bool {
-        if self.unanswered == 0 {
+    /// The unanswered request for `file` is answered, if there is one: served whole, or
+    /// refused on its session. `None`: whichever is unanswered, whatever file it asks for
+    /// (the flaws that take something else for its answer). Whether there was one.
+    fn answer(&mut self, file: Option<Sha256>) -> bool {
+        let Some(at) = self
+            .unanswered
+            .iter()
+            .position(|f| file.is_none_or(|file| *f == file))
+        else {
             return false;
-        }
-        self.unanswered -= 1;
-        self.sent_here &= self.unanswered > 0;
+        };
+        self.unanswered.remove(at);
+        self.sent_here &= !self.unanswered.is_empty();
         let mut st = self.standing();
         st.unanswered_all = st.unanswered_all.saturating_sub(1);
         true
@@ -15861,7 +15882,7 @@ impl Viewer for MockViewer {
         }
     }
 
-    fn requested(&mut self) -> Result<(), Unsent> {
+    fn requested(&mut self, file: Sha256) -> Result<(), Unsent> {
         if self.has(ViewerFlaw::RequestEndsLicence) {
             (self.pay_ahead, self.due_first) = (false, false);
         }
@@ -15870,8 +15891,8 @@ impl Viewer for MockViewer {
         let others = self
             .standing()
             .unanswered_all
-            .saturating_sub(self.unanswered);
-        if (self.unanswered > 0 && !self.has(ViewerFlaw::SecondRequestWhileUnanswered))
+            .saturating_sub(self.unanswered.len() as u64);
+        if (!self.unanswered.is_empty() && !self.has(ViewerFlaw::SecondRequestWhileUnanswered))
             || (others > 0 && self.has(ViewerFlaw::RequestHeldByOtherVideo))
         {
             return Err(Unsent::Unanswered);
@@ -15879,7 +15900,11 @@ impl Viewer for MockViewer {
         if self.due_first && !self.has(ViewerFlaw::RequestBeforeLicensedDue) {
             return Err(Unsent::DueFirst);
         }
-        self.unanswered += 1;
+        self.unanswered.push(file);
+        if self.has(ViewerFlaw::AnyRequestedFileAnswers) || self.has(ViewerFlaw::RefusedEarlierFile)
+        {
+            self.asked.push(file);
+        }
         self.sent_here = true;
         self.standing().unanswered_all += 1;
         if self.has(ViewerFlaw::OtherRequestRestartsLiveWait) {
@@ -15921,11 +15946,15 @@ impl Viewer for MockViewer {
         Ok(())
     }
 
-    fn served(&mut self, served: Served) {
-        // Only the whole file answers the request (flaw: part of it does). It is no decision
-        // of what to pay, and changes nothing else (flaws: it does).
+    fn served(&mut self, file: Sha256, served: Served) {
+        // Only the whole of its own file answers the request (flaws: part of it does; any
+        // file does; any file the ledger asked for does). It is no decision of what to pay,
+        // and changes nothing else (flaws: it does).
         let whole = served == Served::Whole;
-        let answered = (whole || self.has(ViewerFlaw::PartAnswers)) && self.answer();
+        let any = self.has(ViewerFlaw::ServedAnyFile)
+            || (self.has(ViewerFlaw::AnyRequestedFileAnswers) && self.asked.contains(&file));
+        let answered =
+            (whole || self.has(ViewerFlaw::PartAnswers)) && self.answer((!any).then_some(file));
         if (whole && !answered && self.has(ViewerFlaw::WholeClearsDueFirst))
             || (!whole && self.has(ViewerFlaw::PartClearsDueFirst))
         {
@@ -15948,12 +15977,18 @@ impl Viewer for MockViewer {
         }
     }
 
-    fn refused(&mut self) {
-        // It answers the request unanswered on the open session; with none, or with that
-        // request sent on an earlier session, or with no session open, it is no answer
-        // (flaw: it answers a request carried over all the same).
+    fn refused(&mut self, file: Sha256) {
+        // It answers the request unanswered on the open session for the file it names; with
+        // none, or with that request sent on an earlier session or asking for another file,
+        // or with no session open, it is no answer (flaws: it answers a request carried over
+        // all the same; it answers whatever file it names; it answers for a file the ledger
+        // asked for before).
         let of_its_session = self.quote.is_some() && self.sent_here;
-        if !(of_its_session || self.has(ViewerFlaw::RefusedAcrossSessions)) || !self.answer() {
+        let any = self.has(ViewerFlaw::RefusedAnyFile)
+            || (self.has(ViewerFlaw::RefusedEarlierFile) && self.asked.contains(&file));
+        if !(of_its_session || self.has(ViewerFlaw::RefusedAcrossSessions))
+            || !self.answer((!any).then_some(file))
+        {
             return;
         }
         if self.has(ViewerFlaw::OtherRefusedRequestReclaimsLiveNow) {
@@ -16016,7 +16051,7 @@ impl Viewer for MockViewer {
         // unanswered request is taken for answered).
         self.due_first = false;
         if self.has(ViewerFlaw::DueAnswers) {
-            self.answer();
+            self.answer(None);
         }
         // Pay at half the window, rounded up, so the seeder never has to stall.
         let window = match (self.quote.as_ref(), self.first_window) {
@@ -16042,12 +16077,12 @@ impl Viewer for MockViewer {
         } else if self.has(ViewerFlaw::PaysAtFullWindow)
             || (window % 2 == 1 && self.has(ViewerFlaw::DueFullOnOdd))
             || (window % 2 == 1
-                && self.unanswered > 0
+                && !self.unanswered.is_empty()
                 && self.has(ViewerFlaw::DueFullOnOddWhileUnanswered))
         {
             window
         } else if self.has(ViewerFlaw::DueRoundsDown)
-            || (self.unanswered > 0 && self.has(ViewerFlaw::DueRoundsDownWhileUnanswered))
+            || (!self.unanswered.is_empty() && self.has(ViewerFlaw::DueRoundsDownWhileUnanswered))
             || (self.resumed && self.has(ViewerFlaw::DueRoundsDownOnResume))
             || (self.id != 0 && self.has(ViewerFlaw::DueRoundsDownOnSibling))
             || (self.held_credit && self.has(ViewerFlaw::DueRoundsDownWithCredit))
@@ -16481,7 +16516,7 @@ impl Viewer for MockViewer {
         self.sent_here = false;
         self.due_first = false;
         if self.has(ViewerFlaw::EndAnswers) {
-            while self.answer() {}
+            while self.answer(None) {}
         }
         // The session's end ends a refusal's licence to pay ahead (the flaws that take a
         // quote they refuse for a refused request keep theirs for the next session).

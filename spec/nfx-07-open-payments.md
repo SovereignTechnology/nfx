@@ -565,9 +565,11 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   for that video, open at once or one after another. A request is answered once its file
   has arrived whole and passed its sha256 (NFX-05 §4), or once the seeder refuses it with
   a `refuse` naming its file on the session it was sent on, and by nothing else: not part
-  of its file, its first byte included, nor bytes that fail the sha256, the watcher
-  abandoning it, a payment or its answer, a timeout, nor the session's end, after which
-  its file may still arrive, and no request goes on a later session until it is answered.
+  of its file, its first byte included, nor bytes that fail the sha256, nor another file
+  whole (an earlier request's, served or refused, or one never asked for) or a `refuse`
+  naming one, the watcher abandoning it, a payment or its answer, a timeout, nor the
+  session's end, after which its file may still arrive, and no request goes on a later
+  session until it is answered.
   So a request the watcher abandons keeps its place, whatever came of it: a seeder that
   serves nothing of a request it admitted, or bytes that fail the sha256, is owed that one
   request and gets no other request for that video under that identity, and the watcher
@@ -1704,3 +1706,10 @@ paths on one host are two origins.
     §2's `mint-unavailable` names an unreachable mint's keys or listing among its causes.
   - The summary says watchers pay per chunk requested and not refused (was: "per
     delivered chunk", which an owed abandoned request already contradicted).
+- Draft 2026-10-27 (M2.0 round 33: sovtech's decision of 2026-10-27 on the round's
+  pre-push review, SE1).
+  - §3a: another file whole, an earlier request's (served or refused) or one never asked
+    for, and a `refuse` naming one, are named among what answers no request (was: implied
+    by "its file" only). The M2 viewer contract now names the file in every request and
+    every answer, so a watcher cannot free its one request's place with a file it did not
+    ask for.

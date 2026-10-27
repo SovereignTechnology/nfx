@@ -23,6 +23,12 @@ use nfx_pay_wire::pay::{Ack, Hello, Pay, Quote, Rej};
 /// A payer's identity as the transport gives it (the iroh endpoint id).
 pub type PeerId = [u8; 32];
 
+/// A file's sha256 (NFX-05 §4): the file a request asks for, and the one an answer names
+/// ([`Viewer::requested`], [`Viewer::served`], [`Viewer::refused`]). Its own type, so that
+/// no other 32 bytes pass for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Sha256(pub [u8; 32]);
+
 /// A seeder's payment engine. Implementations: the real engine (locked until the M2
 /// security stage) and [`crate::mock::MockEngine`].
 ///
@@ -227,36 +233,39 @@ pub trait Viewer {
     /// ledger's live session keeps its place and its 180 s from sending, `banned` or not.
     fn hello_refused(&mut self, rej: &Rej);
 
-    /// The watcher would send a request for a file of this ledger's video. `Ok`: it is sent,
-    /// and owed unless the seeder refuses it. `Err`, and it is not sent and nothing changes,
-    /// while NFX-07 §3a holds it back, on whichever session, stopped or not:
+    /// The watcher would send a request for `file`, a file of this ledger's video. `Ok`: it
+    /// is sent, and owed unless the seeder refuses it. `Err`, and it is not sent and nothing
+    /// changes, while NFX-07 §3a holds it back, on whichever session, stopped or not:
     /// - [`Unsent::Unanswered`]: a request of this ledger's, sent on this session or an
-    ///   earlier one, is unanswered: one at a time. Only its whole file
-    ///   ([`Viewer::served`]) or, on the session it was sent on, its refusal
-    ///   ([`Viewer::refused`]) answers it: no part of its file, payment, answer to a
-    ///   payment, timeout or session's end does, nor the watcher's abandoning it, which
-    ///   leaves it owed and holds its place (nothing tells the viewer of it). Each ledger
-    ///   keeps its own, so requests for the seeder's other videos, as to other seeders, go
-    ///   at once;
+    ///   earlier one, is unanswered: one at a time. Only its own file, whole
+    ///   ([`Viewer::served`]), or, on the session it was sent on, a `refuse` naming that file
+    ///   ([`Viewer::refused`]) answers it: no other file, an earlier request's included,
+    ///   no part of its own, payment, answer to a payment, timeout or session's end does,
+    ///   nor the watcher's abandoning it, which leaves it owed and holds its place (nothing
+    ///   tells the viewer of it). Each ledger keeps its own, so requests for the seeder's
+    ///   other videos, as to other seeders, go at once;
     /// - [`Unsent::DueFirst`]: a refusal licenses a [`Viewer::due`] not yet made
     ///   ([`Viewer::refused`]), which comes first, whether or not it pays.
     ///
     /// A request sent leaves the payment in flight as it was, its place and its 180 s from
     /// sending included, and a stop as it was: it is no decision of what to pay.
-    fn requested(&mut self) -> Result<(), Unsent>;
+    fn requested(&mut self, file: Sha256) -> Result<(), Unsent>;
 
-    /// What has arrived of the file the unanswered request asks for ([`Served`]). The whole
-    /// of it answers the request, which is served, and owed. Part of it answers nothing,
-    /// and changes nothing. With no request unanswered, it changes nothing. It is no
-    /// decision of what to pay: it leaves the payment in flight, a stop, the tries and a
-    /// refusal's licence as they were.
-    fn served(&mut self, served: Served);
+    /// What has arrived of `file` ([`Served`]). The whole of it answers the unanswered request
+    /// for `file`, which is served, and owed. Part of it answers nothing, and changes nothing.
+    /// With no request unanswered for `file` (none is, or the one unanswered asks for another
+    /// file: `file` is an earlier request's, served or refused, or one never asked for), the
+    /// whole of it is no answer either, and changes nothing. It is no decision of what to
+    /// pay: it leaves the payment in flight, a stop, the tries and a refusal's licence as they
+    /// were.
+    fn served(&mut self, file: Sha256, served: Served);
 
-    /// The seeder answered the unanswered request with `refuse` naming its file. It is not
-    /// owed, and if it was already paid for, that payment becomes credit. With no request
-    /// unanswered that was sent on the open session (none was sent, it was served, or it was
-    /// sent on an earlier session, whose `refuse` cannot come on this one), or with no
-    /// session open, it is no answer, and changes nothing, and licenses nothing. It
+    /// The seeder answered with `refuse` naming `file`: the unanswered request for `file` is
+    /// refused. It is not owed, and if it was already paid for, that payment becomes credit.
+    /// With no request unanswered for `file` that was sent on the open session (none was
+    /// sent, it was served, it asks for another file, or it was sent on an earlier session,
+    /// whose `refuse` cannot come on this one), or with no session open, it is no answer, and
+    /// changes nothing, and licenses nothing. It
     /// licenses the next [`Viewer::due`] on this ledger, and no other call, to pay ahead half
     /// a window, rounded down, less the credit already held, that much and not merely at
     /// most: that `due` uses the licence and ends it, whether or not it pays, and so does
@@ -268,7 +277,7 @@ pub trait Viewer {
     /// ([`Viewer::requested`]), so credit never grows beyond half a window, rounded down. It
     /// settles nothing: the payment in flight, a payment awaiting a quote, an incomplete
     /// reclaim and a stop stay as they were.
-    fn refused(&mut self);
+    fn refused(&mut self, file: Sha256);
 
     /// The payment due now, if any. It covers requested chunks at the quoted price (the open
     /// session's quote's, whatever an earlier session's or another video's was and whatever
@@ -414,13 +423,14 @@ pub enum Unsent {
     DueFirst,
 }
 
-/// What has arrived of a requested file ([`Viewer::served`]).
+/// What has arrived of a file ([`Viewer::served`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Served {
-    /// Part of it, its first byte included, or all its bytes with a sha256 other than the
-    /// one requested: the request is still unanswered.
+    /// Part of it, its first byte included, or all its bytes with a sha256 other than its
+    /// own: its request is still unanswered.
     Part,
-    /// The whole file, its sha256 the one requested (NFX-05 §4): the request is served.
+    /// The whole file, its sha256 checked (NFX-05 §4): its request, if it is the one
+    /// unanswered, is served.
     Whole,
 }
 
