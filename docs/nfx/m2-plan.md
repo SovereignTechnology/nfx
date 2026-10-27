@@ -117,9 +117,10 @@ is zero findings, confirmed after the sixth:
   has settled after 100 turns of the runtime with no answer under way, and an entry on a
   thread of its own waits once it has stood idle through 100 such turns or been polled 100
   times more. An entry on a task of its own is a task of the scenario's runtime, polled
-  only when it is woken. The suite never blocks its runtime's thread. **1,520 planted
-  defects (950 of the seeder, 570 of the watcher) are registered in 3,665 entries** (1,506
-  in 3,634 after the thirty-second round, 1,495 in 3,599 after the thirty-first audit), **each
+  only when it is woken. The suite never blocks its runtime's thread. **1,524 planted
+  defects (950 of the seeder, 574 of the watcher) are registered in 3,673 entries** (1,520
+  in 3,665 before SE1, below; 1,506 in 3,634 after the thirty-second round, 1,495 in 3,599
+  after the thirty-first audit), **each
   entry one defect on one harness against one scenario, and each to fail a named check in
   its scenario** (a hang, a panic raised outside the suite, a runtime panic of Rust's own,
   a failure of a table's set-up, or a bare unwrap, is not a catch); 239 of the entries are
@@ -135,9 +136,10 @@ is zero findings, confirmed after the sixth:
   registered. The thirty-first's auditors' survivors are registered, and so are the
   thirty-second's, but four: two of the harness (C6, C7), which has no registry and which new
   cells catch, and two that sovtech's decision of 2026-10-26 removed the input of (A5, B5).
-  On `102d579`, round 33's code tree, each of the 3,665 entries fails a check of the suite,
-  and the honest mock passes all 152 scenarios on the four harnesses and all 3,345 tests of
-  the timings (runs 40356537863 and 40356532696). On `c60f864`, the thirty-first audit's tree
+  On `c4123b4`, round 33's code tree with SE1, each of the 3,673 entries fails a check of
+  the suite, and the honest mock passes all 152 scenarios on the four harnesses and all
+  3,345 tests of the timings (runs 40557709360 and 40557704778); so they did on `102d579`,
+  before SE1, with 3,665 entries (runs 40356537863 and 40356532696). On `c60f864`, the thirty-first audit's tree
   before its last five commits, each of the 3,599 entries fails a check of the suite, and
   the honest mock passes all 149 scenarios on the four harnesses and all 3,279 tests of
   the timings; what ran on the final code tree is in that audit's record, with what had
@@ -640,6 +642,21 @@ What the thirty-second audit left to sovtech
   **Done** in round 33 on `m2/r33`: `9f389dd` (spec), `e87a8ac` (the money crate),
   `f7ffb6f` (the lock), `332cea3` (the pre-push review's fixes). The lock is re-pinned after
   sovtech has read the code diff; the thirty-third independent audit follows.
+
+## Decided (sovtech, 2026-10-27)
+
+- **Answers name their file (SE1, the round's pre-push review).** The `Viewer` takes the
+  file's sha256 in `requested`, `served` and `refused`: only the request's own file, whole, or
+  a `refuse` naming it answers it, and the whole of another file (an earlier request's, served
+  or refused, or one never asked for) or a `refuse` naming one changes nothing. Before, the
+  answers named no file, so a real watcher that fed any file that landed to `served` would
+  free its one request's place with a file it never asked for. NFX-07 §3a names another file
+  among what answers no request. Done on `m2/r33` in `696351d` (with the tables' counts in
+  `26cc92f` and `c4123b4`): four planted defects, eight entries, and two table inputs, the
+  whole of another file and a `refuse` naming one.
+- **The re-pin follows sovtech's reading of the code diff, every round**, as the lock's header
+  says; round 32's pushes without the two review passes are covered by the thirty-second
+  audit, whose briefs carried both.
 
 ## The testnet mint
 

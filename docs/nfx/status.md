@@ -29,10 +29,13 @@ serves nothing of a request it admitted is owed that one and gets no other for t
 under that identity (was: 400 abandoned requests paid 402 chunks for none served).
 `Viewer::abandoned` is removed (14 methods). The suite now checks every ledger after every
 table input for a request held back, runs the whole of a file and part of one as inputs,
-and has 1,520 planted defects (950 of the seeder, 570 of the watcher) in 3,665 entries; it
+and has 1,524 planted defects (950 of the seeder, 574 of the watcher) in 3,673 entries; it
 still has 152 scenarios and 3,345 tests across its 22 honest timings. The lock now reads
 every file as committed (an attribute that rewrites a checkout fails it), and its job may
-take 120 minutes. The re-pin waits for sovtech's reading of the code diff; then the
+take 120 minutes. On 2026-10-27 sovtech took the round's pre-push sharp edge SE1: the
+`Viewer`'s requests and answers name their file by its sha256, so only a request's own file,
+or a `refuse` naming it, answers it ([`m2-plan.md`](m2-plan.md), "Decided (sovtech,
+2026-10-27)"). The re-pin waits for sovtech's reading of the code diff; then the
 thirty-third audit.
 
 - **CI and the lock** (round 33, from the audit's E2, E8 and E9):
@@ -540,15 +543,16 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        the answers an engine awaits and by its settling, never by one poll or one turn:
        an engine has settled after 100 turns of the runtime with no answer under way,
        and an entry on a thread of its own waits once it has stood idle through 100 such
-       turns or been polled 100 times more. It never blocks its runtime's thread. 1,520
-       planted defects (950 of the seeder, 570 of the watcher) are registered in 3,665
+       turns or been polled 100 times more. It never blocks its runtime's thread. 1,524
+       planted defects (950 of the seeder, 574 of the watcher) are registered in 3,673
        entries, each entry one defect on one harness against one scenario, and each to
        fail an assertion of the suite (a hang, a panic raised elsewhere, or a runtime
        panic of Rust's own, is not a catch); 239 of the entries are of a defect that acts
        only at a seeder's quoted mints other than the first. The timings' file holds 3,345
-       tests. On `102d579`, round 33's code tree, each of the 3,665 entries fails a check of
-       the suite, and the honest mock passes all 152 scenarios on the four harnesses and all
-       3,345 tests under the timings (runs 40356537863 and 40356532696). After the
+       tests. On `c4123b4`, round 33's code tree with SE1, each of the 3,673 entries fails a
+       check of the suite, and the honest mock passes all 152 scenarios on the four harnesses
+       and all 3,345 tests under the timings (runs 40557709360 and 40557704778); on
+       `102d579`, before SE1, so did each of 3,665 (runs 40356537863 and 40356532696). After the
        thirty-second round the figures were 1,506 defects (946 and 560) in 3,634 entries:
        on `6c56690`, the thirty-second round's tree, each of the 3,634 entries fails a
        check of the suite, and the honest mock passes all 152 scenarios on the four
