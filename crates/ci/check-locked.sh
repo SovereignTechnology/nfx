@@ -33,8 +33,10 @@ fi
 #   LOCKED_DIRS_UNLOCKED=1 check-locked.sh --pin
 #                                the security stage, after sovtech has read the diff:
 #                                re-pin both, the compiled facts first (their file is one
-#                                of the pinned files). Refused wherever CI, GITLAB_CI or
-#                                CI_JOB_ID is set, so no CI job can make it: the pin is
+#                                of the pinned files, read as just written, not as
+#                                committed: the re-pin commits it with the pins).
+#                                Refused wherever CI, GITLAB_CI or CI_JOB_ID is set,
+#                                so no CI job can make it: the pin is
 #                                made by hand, on a machine or in a manually dispatched
 #                                probe run whose command unsets those for this script.
 #
@@ -250,9 +252,13 @@ committed() {
     || fail "the checkout of $2 is not its committed blob: an attribute rewrote it, or it is edited"
 }
 
-# Every file under the paths, from git (NUL-separated, so no name can split a line).
+# Every file under the paths, from git (NUL-separated, so no name can split a line), each
+# read as committed, but for the compiled facts in a re-pin: --pin has just written them
+# (locked.py compiled --pin), so their checkout is the new pin, committed with the pins
+# file, and not yet their blob. Every later check reads them as committed again.
 manifest() {
-  local untracked
+  local untracked fresh=
+  [ "$mode" != --pin ] || fresh=crates/ci/locked-compiled.txt
   untracked=$(git ls-files -o -z -- "${paths[@]}" | tr '\0' '\n')
   [ -z "$untracked" ] || fail "untracked files in guarded paths: $untracked"
   git ls-files -s -z -- "${paths[@]}" | while IFS= builtin read -r -d '' entry; do
@@ -265,7 +271,7 @@ manifest() {
       fail "symlink in a guarded path: $path"
     fi
     [ -f "$path" ] && [ ! -L "$path" ] || fail "missing or not a regular file: $path"
-    committed "$entry" "$path"
+    [ "$path" = "$fresh" ] || committed "$entry" "$path"
     printf '%s %s %s\n' "$mode" "$(sha256sum < "$path" | cut -d' ' -f1)" "$path"
   done
   $py crates/ci/locked.py manifest
