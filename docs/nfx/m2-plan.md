@@ -658,6 +658,20 @@ What the thirty-second audit left to sovtech
   says; round 32's pushes without the two review passes are covered by the thirty-second
   audit, whose briefs carried both.
 
+## Decided (sovtech, 2026-10-28)
+
+- **sovtech has read the round's code diff** (`a45c3eb..102d579`, SE1's `2da2b10..c4123b4`,
+  and `49ae389`, which lets the re-pin read the compiled facts it has just written). The lock
+  is re-pinned to it in `cbcf6bd`, from probe `r33-pin2` (run 40705674410) on `49ae389`; the
+  thirty-third independent audit follows.
+- **S1's concession stays.** An honest seeder whose transfer is cut short is owed that
+  request and gets no other for that video under that identity: the watcher fetches the
+  video elsewhere, or under a new identity, giving up the credit it holds there. Not taken:
+  an allowance of k cut-short requests, which would raise the bound to half a window plus k
+  and bring an abandonment input back into the locked trait. If cut-short transfers prove
+  common in M2.1, a seeder could send the rest of a paid file again once (a free resume),
+  which changes nothing about what answers a request.
+
 ## The testnet mint
 
 A persistent testnet mint (CDK `cdk-mintd` with its fake Lightning backend and SQLite)

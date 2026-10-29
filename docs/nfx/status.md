@@ -35,8 +35,10 @@ every file as committed (an attribute that rewrites a checkout fails it), and it
 take 120 minutes. On 2026-10-27 sovtech took the round's pre-push sharp edge SE1: the
 `Viewer`'s requests and answers name their file by its sha256, so only a request's own file,
 or a `refuse` naming it, answers it ([`m2-plan.md`](m2-plan.md), "Decided (sovtech,
-2026-10-27)"). The re-pin waits for sovtech's reading of the code diff; then the
-thirty-third audit.
+2026-10-27)"). On 2026-10-28 sovtech read the code diff and kept S1's concession for a
+transfer cut short (same, "Decided (sovtech, 2026-10-28)"); the lock is re-pinned to it
+(`cbcf6bd`, run 40705674410, after `49ae389` mended the re-pin itself), and the
+thirty-third audit follows.
 
 - **CI and the lock** (round 33, from the audit's E2, E8 and E9):
   - The money suite runs twice per push: once in the `check` job (`cargo test
@@ -687,8 +689,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        decided on 2026-10-26;
      - the thirty-second independent audit (of `57a1c85`): 50 points standing, resolved in
        round 33 on `m2/r33` with sovtech's decisions of 2026-10-26
-       ([record](reviews/2026-09-24-m2.0-thirty-second-audit.md)); the re-pin after sovtech's
-       reading of the code diff;
+       ([record](reviews/2026-09-24-m2.0-thirty-second-audit.md)), with SE1 (2026-10-27);
+       the lock re-pinned in `cbcf6bd` after sovtech's reading of the code diff (2026-10-28);
      - next, the thirty-third independent audit, repeated until one reports nothing;
      - sovtech's OK to merge M2.0's branch to `main` (given, once the audits are clean; the
        thirty-first audit's tree is on `main` already, as `0b69f8a`);
