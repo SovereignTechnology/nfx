@@ -17,6 +17,10 @@ on:
 permissions:
   contents: read
 
+# No job restores or saves a cache: the job's token gets no cache access (GitHub's
+# `cache-mode`; omitted, a trusted trigger gets `write`).
+cache-mode: none
+
 # The tip of every push (but a probe's) runs in a group of its own, named by its commit, so
 # no later push cancels its lock verdict; only a pull request's superseded runs are
 # cancelled. A commit pushed below a tip gets no run of its own: check-locked.sh lists every

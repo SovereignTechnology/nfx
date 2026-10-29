@@ -29,10 +29,18 @@ run-name: probe ${{ inputs.tag }}
 permissions:
   contents: read
 
+# The job's token can neither restore nor save a cache, on any ref it is dispatched on
+# (`cache-mode`; omitted, a dispatch, a trusted trigger, gets `write`): a probe's command,
+# root in a container a token-holding step runs in after it, can then seed no entry a later
+# run would restore.
+cache-mode: none
+
 jobs:
   probe:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # As ci.yml's lock job: a re-pin, run as a probe, does that job's `--compiled`
+    # (crates/ci/check-locked.sh --pin).
+    timeout-minutes: 120
     container:
       image: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
     env:

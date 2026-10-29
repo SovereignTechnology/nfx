@@ -35,10 +35,16 @@ fi
 #                                re-pin both, the compiled facts first (their file is one
 #                                of the pinned files, read as just written, not as
 #                                committed: the re-pin commits it with the pins).
-#                                Refused wherever CI, GITLAB_CI or CI_JOB_ID is set,
-#                                so no CI job can make it: the pin is
-#                                made by hand, on a machine or in a manually dispatched
-#                                probe run whose command unsets those for this script.
+#                                Refused wherever CI, GITLAB_CI or CI_JOB_ID is
+#                                non-empty, as in every CI job, so no job makes it unless
+#                                its command unsets them, as the re-pin's manually
+#                                dispatched probe does: a guard against a re-pin by
+#                                accident, not a control. The control is sovtech's review
+#                                of every change to the pins (below). A re-pin takes as
+#                                long as the lock job's --compiled (65 min on 49ae389,
+#                                run 40705674410): dispatch it with `timeout` at least
+#                                the lock job's last time plus a third, under probe.yml's
+#                                limit, which is the lock job's.
 #
 # crates/ci/locked.sha256 pins, by git mode and content:
 #   - the locked paths (stubs until the security stage);
@@ -85,7 +91,8 @@ fi
 #     file on checkout (`ident`, `eol`, `text`, `working-tree-encoding` or a filter, from a
 #     tracked .gitattributes, .git/info/attributes or git's own config), which no diff of
 #     the commit shows, would otherwise have the pins, the build and the tests read bytes
-#     nobody reviewed. In CI the index is the commit's (lock-job.sh);
+#     nobody reviewed. In CI the index is the commit's (lock-job.sh); outside it the
+#     index is whatever is staged, so a file edited and staged passes as its blob there;
 #   - crates/ci/locked.sha256 not a tracked regular file of mode 100644 (a link, an
 #     untracked file, another mode); the workspace's manifest, its lock file or a member's
 #     manifest not tracked at its path; any tracked Cargo.toml or Cargo.lock that is a link
@@ -244,18 +251,19 @@ if [ "$mode" = --pin ] && [ "${LOCKED_DIRS_UNLOCKED:-0}" != 1 ]; then
 fi
 
 # The checkout of `path` is its blob in git's index, byte for byte (`entry` is its
-# `git ls-files -s` line): no attribute rewrote it on checkout (the header).
-committed() {
+# `git ls-files -s` line): no attribute rewrote it on checkout (the header). The index is
+# the commit's only in CI (lock-job.sh).
+as_indexed() {
   local blob=${1#* }
   blob=${blob%% *}
   [ "$(git hash-object --no-filters -- "$2")" = "$blob" ] \
-    || fail "the checkout of $2 is not its committed blob: an attribute rewrote it, or it is edited"
+    || fail "the checkout of $2 is not its blob in git's index: an attribute rewrote it, or it is edited"
 }
 
 # Every file under the paths, from git (NUL-separated, so no name can split a line), each
-# read as committed, but for the compiled facts in a re-pin: --pin has just written them
+# read as indexed, but for the compiled facts in a re-pin: --pin has just written them
 # (locked.py compiled --pin), so their checkout is the new pin, committed with the pins
-# file, and not yet their blob. Every later check reads them as committed again.
+# file, and not yet their blob. Every later check reads them as indexed again.
 manifest() {
   local untracked fresh=
   [ "$mode" != --pin ] || fresh=crates/ci/locked-compiled.txt
@@ -271,7 +279,7 @@ manifest() {
       fail "symlink in a guarded path: $path"
     fi
     [ -f "$path" ] && [ ! -L "$path" ] || fail "missing or not a regular file: $path"
-    [ "$path" = "$fresh" ] || committed "$entry" "$path"
+    [ "$path" = "$fresh" ] || as_indexed "$entry" "$path"
     printf '%s %s %s\n' "$mode" "$(sha256sum < "$path" | cut -d' ' -f1)" "$path"
   done
   $py crates/ci/locked.py manifest
@@ -290,7 +298,7 @@ entry=$(git ls-files -s -- "$pins")
 [[ $entry =~ ^100644\ [0-9a-f]+\ 0$'\t'crates/ci/locked\.sha256$ ]] \
   || fail "$pins must be a tracked regular file of mode 100644, not ${entry:-untracked or missing}"
 [ -f "$pins" ] && [ ! -L "$pins" ] || fail "$pins must be a regular file, not a link"
-committed "$entry" "$pins"
+as_indexed "$entry" "$pins"
 # Each of the next two listings is piped into its loop, never read from a process
 # substitution, whose exit status bash drops: there a git or an env that fails, or lists
 # nothing, leaves its loop nothing to check, and the check passes. Piped, the failure is
@@ -301,7 +309,7 @@ git ls-files -s -z -- '*Cargo.toml' '*Cargo.lock' | {
     path=${entry#*$'\t'}
     [[ $entry =~ ^100644\ [0-9a-f]+\ 0$'\t' ]] && [ -f "$path" ] && [ ! -L "$path" ] \
       || fail "a Cargo manifest or lock file must be a tracked regular file of mode 100644: ${entry@Q}"
-    committed "$entry" "$path"
+    as_indexed "$entry" "$path"
     case $path in crates/Cargo.toml | crates/Cargo.lock) seen=$((seen + 1)) ;; esac
   done
   [ "$seen" = 2 ] || fail "git listed $seen of crates/Cargo.toml and crates/Cargo.lock"
