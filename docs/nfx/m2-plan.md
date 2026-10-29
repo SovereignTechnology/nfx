@@ -631,7 +631,8 @@ What the thirty-second audit left to sovtech
   is removed (14 methods). A stated concession: an honest seeder whose transfer is cut short
   gets no other request for that video either.
 - **The whole outage's keys and listings (S2, course a):** the `Harness` doc follows the mock,
-  whose whole outage serves keys and listings (25 scenarios a file would change otherwise).
+  whose whole outage serves keys and listings (23 to 25 scenarios a file, of 152, would
+  change otherwise).
 - **D1's and D3's remaining calls are accepted as written (S3):** inputs with nothing
   unanswered change nothing; `Served::Part` stays a test input; keys and a listing at a down
   mint fail at once, and a failed listing ask is that second's; no per-mint restore,
@@ -640,8 +641,9 @@ What the thirty-second audit left to sovtech
 - **The lock job may take 120 minutes (S5).**
 
   **Done** in round 33 on `m2/r33`: `9f389dd` (spec), `e87a8ac` (the money crate),
-  `f7ffb6f` (the lock), `332cea3` (the pre-push review's fixes). The lock is re-pinned after
-  sovtech has read the code diff; the thirty-third independent audit follows.
+  `f7ffb6f` (the lock), `332cea3` (the pre-push review's fixes). The lock was re-pinned in
+  `cbcf6bd` once sovtech had read the code diff (2026-10-28, below), and the thirty-third
+  independent audit followed (`docs/nfx/reviews/2026-09-24-m2.0-thirty-third-audit.md`).
 
 ## Decided (sovtech, 2026-10-27)
 
@@ -671,6 +673,31 @@ What the thirty-second audit left to sovtech
   and bring an abandonment input back into the locked trait. If cut-short transfers prove
   common in M2.1, a seeder could send the rest of a paid file again once (a free resume),
   which changes nothing about what answers a request.
+
+## Decided (sovtech, 2026-10-29)
+
+On the thirty-third independent audit (`f087126`; record
+`docs/nfx/reviews/2026-09-24-m2.0-thirty-third-audit.md`):
+
+- **Severity.** A plausible planted defect that breaks a money bound without limit and passes
+  every scenario is High, as the thirty-second audit rated A1 to A4, though the honest mock
+  holds the bound: B-1 (a whole file answering a request a session's end carried over), C-1 (a
+  timeout 180 s after the request freeing it) and C-2 (a new session's honest quote showing
+  fewer chunks served than requested freeing it) are High. The thirty-fourth audit's scale
+  says so.
+- **A request goes only on an open session (NS, course a).** `Viewer::requested` with no
+  session open is `Err(Unsent::NoSession)`, and changes nothing; NFX-07 §3a says a watcher
+  sends a request only once its quote is taken, as NFX-12 §5 admits no `get` before it. Not
+  taken: a request sent between sessions that belongs to no session, answered only by its
+  file, which would strand a watcher that asked too early.
+- **Answers belong to their session, still (A-2).** On iroh a blob request is under the
+  seeder's session for its video that is open as it arrives, the watcher holding one such
+  session at a time; a request that reaches the seeder only after its session has closed is a
+  stated concession: its `refuse` on a later session answers nothing. Not taken: letting such
+  a `refuse` answer it while licensing nothing, which would reverse D9.
+- **The cut-short concession's text (E-1).** It names a stopped mesh or HyperDHT transfer, a
+  lost `refuse` and a request the seeder never saw, and the credit given up; NFX-10 §3.1, an
+  HTTPS rule, is cited as such. The decision of 2026-10-28 stands.
 
 ## The testnet mint
 

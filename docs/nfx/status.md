@@ -14,9 +14,25 @@ This repository is public, and since `c07be45` (2026-09-28) its CI runs on GitHu
 two jobs for GitLab and is a dormant twin: it runs nothing. What the sections below say of the private
 GitLab project, of GitLab CI and of its shared runner is as it stood before that.
 
-Updated 2026-10-26 · `main` = `cf9788a` · `m2/r33` = round 33, from `m2/r32` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
+Updated 2026-10-29 · `main` = `29019d2` · `m2/r34` = round 34, from `m2/r33` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
 
 ## Since 2026-10-19
+
+**Round 34 resolves the thirty-third independent audit** (branch `m2/r34`, from `m2/r33` at
+`f087126`; the audit and its resolution in one
+[record](reviews/2026-09-24-m2.0-thirty-third-audit.md)). The audit, of `f087126`, found 35
+points, none refuted outright, and its refuters 4 more: 3 High, 5 Medium, 8 Low and 23 Info.
+The honest mock holds every money bound; the Highs are plausible watchers that break one
+without limit and pass the suite, which sovtech rated High on 2026-10-29 as the thirty-second
+audit did ([`m2-plan.md`](m2-plan.md), "Decided (sovtech, 2026-10-29)"). **A request goes
+only on an open session** (`Unsent::NoSession`), a request is answered by its own file
+arriving on the transfer that request started, and answers still belong to their session, a
+request that reaches the seeder after its session has closed being a stated concession. The
+suite checks every ledger's hold after every input and every timeout, carries a request over
+a session's end in its tables, and has 1,542 planted defects (951 of the seeder, 591 of the
+watcher) in 3,699 entries, every plant of the audit's that passed now registered; it still
+has 152 scenarios. `probe.yml` and `ci.yml` give no job's token cache access, and the probe
+job may take 120 minutes. The lock's re-pin waits for sovtech's reading of the code diff.
 
 **Round 33 resolves the thirty-second independent audit** (branch `m2/r33`, from `m2/r32`
 at `a45c3eb`; the audit and its resolution in one
@@ -38,35 +54,38 @@ or a `refuse` naming it, answers it ([`m2-plan.md`](m2-plan.md), "Decided (sovte
 2026-10-27)"). On 2026-10-28 sovtech read the code diff and kept S1's concession for a
 transfer cut short (same, "Decided (sovtech, 2026-10-28)"); the lock is re-pinned to it
 (`cbcf6bd`, run 40705674410, after `49ae389` mended the re-pin itself), and the
-thirty-third audit follows.
+thirty-third audit followed (above).
 
 - **CI and the lock** (round 33, from the audit's E2, E8 and E9):
-  - The money suite runs twice per push: once in the `check` job (`cargo test
-    --workspace`) and once in the `lock` job (`check-locked.sh --compiled`). On `a45c3eb`
-    the lock job took 71 min (limit 90 until round 33, 120 since) and the check job 106 min
-    of 180.
+  - The money suite runs three times per push: twice in the `check` job (`cargo test
+    --workspace`, then its last step, `check-locked.sh --compiled`) and once in the `lock`
+    job (`check-locked.sh --compiled`). On `a45c3eb` the lock job took 71 min (limit 90
+    until round 33, 120 since) and the check job 106 min of 180; on `f087126`, 56 min 51 s
+    and 110 min 33 s (run 40811478196).
   - GitHub's side enforces nothing: `main` has no branch protection and no ruleset, and
     every action is allowed. That is by design, not an oversight: the lock makes a money
     change loud and the control is sovtech's review of every re-pin (the header of
     `crates/ci/check-locked.sh`), and the default workflow token is read-only.
   - `probe.yml`'s job container gets the runner's docker socket (the runner mounts it), so a
-    probe's command can reach the runner VM's docker daemon. No workflow restores a cache
-    today, so nothing a probe does reaches another run; no cache may be added to any
-    workflow without scoping it per ref and never saving it from a dispatched run.
+    probe's command can reach the runner VM's docker daemon. `probe.yml` and `ci.yml` set
+    `cache-mode: none` (round 34), so no job's token can restore or save a cache, on any
+    ref a probe is dispatched on; a workflow that adds a cache sets `cache-mode` per job,
+    scopes the cache per ref, and never saves it from a dispatched run.
 
-**M2's code moved in the thirty-second round alone** (branch `m2/r32`, `6c56690`; its
+**M2's code moved in the thirty-second round** (branch `m2/r32`, `6c56690`; its
 [record](reviews/2026-09-24-m2.0-thirty-second-round.md)), which makes the decisions sovtech
 took on 2026-10-25 on what the thirtieth and thirty-first audits left ([`m2-plan.md`](m2-plan.md),
 "Decided"). NFX-07 §3a: a watcher keeps one request unanswered at a time for a seeder and a
 video, and after a refusal makes the `due` it licenses before its next request, so credit on a
-video never grows beyond half its window, rounded down. The `Viewer` trait has 15 methods:
-`requested` returns `Result<(), Unsent>`, holding a request back, and `served` and `abandoned`
-are new. A fault names one mint: the `Harness` trait's new `mint_outage_at`, the mock's mints
-going down one at a time, and a seeder that reads each mint's swaps apart. The suite has 152
-scenarios, 1,506 planted defects in 3,634 entries and 3,345 tests across its 22 honest
-timings, and every target passes on `6c56690`. Eight points of the round's own making awaited sovtech's reading, decided on 2026-10-26. Before
-the round, M2's code had not moved since the thirty-first audit (merged as `0b69f8a`). What
-else changed is the interop with the desktop app and the dependency tree.
+video never grows beyond half its window, rounded down. The `Viewer` trait then had 15
+methods: `requested` returned `Result<(), Unsent>`, holding a request back, and `served` and
+`abandoned` were new. A fault names one mint: the `Harness` trait's new `mint_outage_at`, the
+mock's mints going down one at a time, and a seeder that reads each mint's swaps apart. The
+suite then had 152 scenarios, 1,506 planted defects in 3,634 entries and 3,345 tests across
+its 22 honest timings, and every target passed on `6c56690`. Eight points of the round's own
+making awaited sovtech's reading, decided on 2026-10-26. Before the round, M2's code had not
+moved since the thirty-first audit (merged as `0b69f8a`). What else changed is the interop
+with the desktop app and the dependency tree.
 
 - **nutflix-pear ⇄ nfx on one network** ([ADR 0101](../decisions/0101-nutflix-pear-interop.md),
   Phase 0 done):
@@ -679,7 +698,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        runs and what stays open;
      - sovtech's decisions, taken on 2026-10-25 ([`m2-plan.md`](m2-plan.md), "Decided"):
        one unanswered request at a time for a seeder and a video, the licensed `due` before the
-       next request after a refusal, and "answered" as served whole, refused or abandoned; the five requirements
+       next request after a refusal, and "answered" as served whole, refused or abandoned
+       (its abandonment half reversed on 2026-10-26); the five requirements
        accepted; a fault that names one mint added now, to the locked `Harness` trait; reading
        A and "that much, not merely at most" kept. **Made in the thirty-second round**, on
        `m2/r32` ([record](reviews/2026-09-24-m2.0-thirty-second-round.md)): the `Viewer`
