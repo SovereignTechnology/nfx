@@ -212,9 +212,10 @@ says of a page holds for a worker it pays or earns from. Whether a page pays an 
   Credit is the ledger's too, and so are its rules: a page keeps one request unanswered
   at a time for a seeder and a video, across its sessions with that seeder for that
   video, abandoned or not, and makes the decision a refusal licenses before its next
-  request there (NFX-07 §3a). So a seeder that refuses or withholds everything takes at
-  most half a page's window ceiling, rounded down, or one chunk where that is more, for
-  each video from each page, a new page's identity holding none of an earlier one's. Its
+  request there on that session (NFX-07 §3a). So a seeder that refuses or withholds
+  everything takes at most half a page's window ceiling, rounded down, for each video
+  from each page, a new page's identity holding none of an earlier one's: a `window` is at
+  least 2, so that is at least the one chunk a withholding seeder is owed. Its
   loaders fetch from several seeders at once, and from each one file of a video at a
   time (§3.2).
 
@@ -279,13 +280,18 @@ mesh, and it is NFX-07's:
   `rej`, `refuse`), byte-identical JSON, travel on the WebRTC data channel
   p2p-media-loader already holds open between two peers. A peer opens a pay session per
   remote peer and video it watches, as on iroh, and NFX-07 §3 allows several open at once
-  on one account, up to the per-peer cap. However many are open, a paying peer keeps one
+  on one account, up to the per-peer cap. A data channel carries one session per video at
+  a time: a second `hello` for a video whose session is open on it is refused
+  `bad-session`, and a segment request is under the session for its video on the channel
+  it travels on (NFX-07 §3, Admission). However many are open, a paying peer keeps one
   request unanswered at a time to a remote peer for a video, across them all (NFX-07
   §3a): its loader fetches a video's files from several peers at once, and from each one
   at a time. A transfer it stops, or one cut short, leaves its request unanswered, so it
-  sends that peer no other request for the video. Only the requested file answers it: the
-  loader matches what arrives to the request by its sha256, and bytes of another file
-  answer nothing. The channel meets NFX-07 §2's delivery rule:
+  sends that peer no other request for the video. Only the requested file, arriving whole
+  from that peer as the data channel's response to the request, or a `refuse` naming it on
+  that session, answers it: the loader matches what arrives from that peer to the request
+  by its sha256, and bytes of another file, or of that file from another peer, answer
+  nothing. The channel meets NFX-07 §2's delivery rule:
   a message unacknowledged for 60 s closes it. A browser↔bridge link is the same (§2).
 - **Unit and window.** The mesh accounts in **chunks, where one chunk is one NFX-05
   file**. That is a whole segment or init, never a WebRTC message fragment. `quote.window`
@@ -450,3 +456,14 @@ NFX-05 byte formats.
     abandoned request answered, and stayed owed, so a seeder that served nothing was owed
     one chunk per abandoned request without bound). The bound on a page's credit says it
     covers a seeder that withholds, and is rounded down, or one chunk where that is more.
+- Draft 2026-10-29 (M2.0 round 34: the thirty-third audit, NFX-07 §3a).
+  - §3.2: only the requested file arriving whole from that peer, as the data channel's
+    response to the request, or a `refuse` naming it on that session answers a request;
+    that file from another peer answers nothing (was: "only the requested file", which
+    named no source, and left the `refuse` out). A data channel carries one session per
+    video at a time, and a segment request is under the session of the channel it travels
+    on (was: nothing said, so which session a `refuse` belonged to was undefined with two
+    open).
+  - §3: the decision a refusal licenses comes before the next request on that session, as
+    NFX-07 §3a says; the bound on a page's credit drops "or one chunk where that is more",
+    which a `window` of at least 2 never reaches.

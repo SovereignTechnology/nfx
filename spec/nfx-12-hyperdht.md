@@ -180,14 +180,18 @@ Message types, by index:
 - **Admission.** In paid mode a `get` is admitted only while the pay/1 channel of the same id, on
   the same connection, has an open session whose `quote` has been sent. A `get` on a channel with
   no such session, from a seeder that does not serve for free, is a protocol error and closes the
-  `nfx/files/1` channel; nothing was served, so nothing is owed.
+  `nfx/files/1` channel; the seeder admitted nothing, so its account counts nothing for it. The
+  watcher sends a `get` only once the quote has come (NFX-07 §3a), and cannot tell that close
+  from a transfer cut short: a `get` it did send stays owed and unanswered (NFX-07 §3a), and what
+  it pays for it is pre-payment.
 - **The unit is one file.** Paid delivery maps to NFX-06 §2, one member per request, not to the
   origin surface of NFX-07 §4: one admitted `get` is one chunk (`window`, `pay.upto_chunk`),
   whole or aborted, as in the web mesh (NFX-10 §3). `get` for the hash list (`sha` = `root`)
   counts as a chunk, as the meta collection's members do on iroh (NFX-06 §2).
 - **Concurrency.** In paid mode a watcher keeps one request unanswered at a time for a seeder
   and a video, across every session it holds with the seeder for that video, and makes the
-  decision a refusal licenses before its next request there: NFX-07 §3a, unchanged. A seeder
+  decision a refusal licenses before its next request there on that session: NFX-07 §3a,
+  unchanged. A seeder
   has no rule of it: it counts each admitted `get` atomically (NFX-07 §3), which bounds a peer
   that sends more.
 - **The account's peer** is the watcher's Noise public key (§1). Licensed videos add the proof
@@ -261,3 +265,8 @@ An implementation is conformant when it passes those fixtures and the cross-impl
   abandoned request stays unanswered; its limit of 8 open requests per channel holds in paid
   mode too (was: §5's), so covered requests still cannot pile up on a seeder; the open issue
   of paid concurrency is closed.
+- Draft 2026-10-29 (M2.0 round 34: the thirty-third audit). §5: a `get` with no session open is
+  one the seeder admitted nothing for, and counts nothing on its account; the watcher, which
+  sends one only once the quote has come, keeps one it did send owed and unanswered, as NFX-07
+  §3a says (was: "nothing is owed", against NFX-07 §3a's rule that a request sent is owed unless
+  refused). The decision a refusal licenses comes before the next request on that session.
