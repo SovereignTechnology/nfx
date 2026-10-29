@@ -355,8 +355,10 @@ const A_WATCHERS_LEDGER: &str = "a watcher's ledger: its payments are the watche
 /// Its watcher pays, at the mint the harness gives every watcher: a harness has none of
 /// another mint ([`Harness::viewer`]).
 const ITS_WATCHER_PAYS: &str = "its watcher pays at the harness's own mint";
-/// Its seeders ask no mint for anything: nothing is paid.
-const ASKS_NO_MINT: &str = "no mint is asked for anything";
+/// Its seeders take no payment: they ask no mint for anything but, on a harness that has a
+/// seeder ask at its start (`tests/listings_at_start.rs`), its listing then.
+const ASKS_NO_MINT: &str = "no payment is taken: no mint is asked for anything but a listing \
+                            at a seeder's start";
 /// It names its mints itself: its cases are of one seeder's two mints at once, or of a
 /// mint's keys and listings, run at each quoted mint by name ([`QUOTED`]).
 const NAMES_ITS_MINTS: &str = "it names its mints itself";
@@ -8133,22 +8135,23 @@ pub async fn a_mint_outage_at_one_mint_is_not_a_ban<H: Harness>(h: &H) {
     }
 
     // A mint down at the seeder's start: what it asked of it then is that second's ask.
-    for back in [false, true] {
+    for (down, back) in QUOTED.into_iter().flat_map(|d| [(d, false), (d, true)]) {
+        let mint = down.mint(h);
         let cell =
-            format!("the second mint down at the seeder's start, back in that second: {back}");
+            format!("the mint down at the seeder's start: {down:?}; back in that second: {back}");
         advance(h, SECOND).await;
-        h.mint_outage_at(SECOND_MINT, true);
+        h.mint_outage_at(&mint, true);
         let before = h.listing_requests();
         let e = Quoted::Second.engine(h);
         let at_start = h.listing_requests() - before;
         let mut s = open(h, &e, 1).await;
         assert_eq!(serve(h, &mut s, 0, 2), 2, "within the window ({cell})");
         if back {
-            h.mint_outage_at(SECOND_MINT, false);
+            h.mint_outage_at(&mint, false);
         }
         let there = Pay {
             upto_chunk: 2,
-            token: h.token_at(SECOND_MINT, 2).await,
+            token: h.token_at(&mint, 2).await,
         };
         let listings = h.listing_requests();
         let r = s.pay(&there).await;
@@ -8165,7 +8168,7 @@ pub async fn a_mint_outage_at_one_mint_is_not_a_ban<H: Harness>(h: &H) {
              asking again, the mint back or not; one that did not asks once ({cell}; asked at \
              its start {at_start}, then {asked}): {r:?}"
         );
-        h.mint_outage_at(SECOND_MINT, false);
+        h.mint_outage_at(&mint, false);
         if unavailable {
             let listings = h.listing_requests();
             let r = s.pay(&there).await;
@@ -14615,8 +14618,17 @@ pub async fn a_viewer_owes_nothing_for_refused_requests<H: Harness>(h: &H) {
     );
     v.ack(&s.pay(&ahead).await.expect("accepted"))
         .expect("the honest ack of the pay-ahead is taken");
-    v.fetch();
+    // The retry asks for the refused request's own file again (NFX-07 §3a: the watcher asks
+    // again): its whole file answers it, and the next request goes.
+    let retry = v.requested(asked);
+    assert!(
+        retry.is_ok(),
+        "the refused request's file, asked again, is sent: {retry:?}"
+    );
     assert!(s.admit(&h.chunk(3)), "the retry is served from the credit");
+    v.served(asked, Served::Whole);
+    assert!(s.admit(&h.chunk(4)), "within the credit");
+    v.fetch();
     assert!(
         v.last_pay()
             .await
@@ -14645,7 +14657,15 @@ fn held<V: Viewer>(v: &mut V, why: Unsent, what: &str) {
 /// request, whether or not it pays: one that pays nothing, a payment in flight, lets the
 /// next request go as one that pays ahead does, and a `last_pay` between is not that `due`.
 /// The ledger then agrees with the seeder: its next session's quote, for every chunk
-/// admitted and the one served two sessions late among them, is taken.
+/// admitted and the one served two sessions late among them, is taken. A request's own
+/// `refuse` on its session answers it whatever came between, and the same file asked for
+/// again is answered again; a file whose sha256 differs from its own in any one byte answers
+/// nothing. A request a session's end carried over is answered by its own file whole, with
+/// no session open too, and by nothing else: not another file whole, with no session open or
+/// on the next session before any request there; not time and a timeout, at any span; nor a
+/// new session's quote showing fewer chunks served than requested. And a request goes only
+/// on an open session: before the first quote, after a refused `hello` or quote (one with a
+/// window under 2 among them) and between two sessions it is held back, and nothing changes.
 pub async fn a_viewer_sends_one_request_at_a_time<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
@@ -14690,6 +14710,19 @@ pub async fn a_viewer_sends_one_request_at_a_time<H: Harness>(h: &H) {
         Unsent::Unanswered,
         "a refuse naming a file it never asked for",
     );
+    // Nor does a file whose sha256 differs from its own in one byte, whichever, whole, or a
+    // `refuse` naming it.
+    for at in 0..32 {
+        let mut near = asked;
+        near.0[at] ^= 1;
+        v.served(near, Served::Whole);
+        v.refused(near);
+        held(
+            &mut v,
+            Unsent::Unanswered,
+            &format!("a file whose sha256 differs from its own in byte {at}, or its refuse"),
+        );
+    }
     assert!(
         v.due()
             .await
@@ -14765,6 +14798,11 @@ pub async fn a_viewer_sends_one_request_at_a_time<H: Harness>(h: &H) {
     close(h, s).await;
     v.end();
     v.refused(asked);
+    held(
+        &mut v,
+        Unsent::Unanswered,
+        "a refuse with no session open, before the next session's quote",
+    );
     let mut s = open(h, &e, 1).await;
     v.quote(s.quote())
         .expect("the third session's honest quote is accepted");
@@ -14849,7 +14887,195 @@ pub async fn a_viewer_sends_one_request_at_a_time<H: Harness>(h: &H) {
         q.served
     );
     close(h, s).await;
+    // A request's own `refuse`, on the session it was sent on, answers it whatever came
+    // between: it is refused, and the `due` it licenses comes before the next request.
+    for (peer, between) in (10u8..).zip(BETWEEN_A_REQUEST_AND_ITS_REFUSE) {
+        let mut s = open(h, &e, peer).await;
+        let mut v = h.viewer(1);
+        v.quote(s.quote()).expect("an honest quote is accepted");
+        if between == "mint-unavailable to the payment in flight" {
+            for i in 0..2 {
+                assert!(s.admit(&h.chunk(i)), "within the window");
+                v.fetch();
+            }
+            let in_flight = v.due().await.expect("due answers");
+            assert!(in_flight.is_some(), "half the window is due");
+        }
+        let asked = v.request();
+        match between {
+            "a timeout" => v.timeout().await,
+            "a second quote" => assert!(v.quote(s.quote()).is_err(), "one quote per session"),
+            "mint-unavailable to the payment in flight" => {
+                v.rej(&Rej {
+                    code: RejCode::MintUnavailable,
+                    detail: None,
+                })
+                .await;
+            }
+            "180 s" => advance(h, Duration::from_secs(180)).await,
+            "a hello refused with each code but banned" => {
+                for code in hello_refusal_codes() {
+                    v.hello_refused(&Rej { code, detail: None });
+                }
+            }
+            "part of its file" => v.served(asked, Served::Part),
+            "another file whole" => v.served(NEVER_ASKED, Served::Whole),
+            _ => {}
+        }
+        v.refused(asked);
+        held(
+            &mut v,
+            Unsent::DueFirst,
+            &format!("a request, {between}, then its refuse on its session: refused"),
+        );
+        close(h, s).await;
+    }
+    // A request a session's end carried over: its own file whole answers it, with no session
+    // open too, and nothing else does: not another file whole, with no session open or on
+    // the next session before any request there (NFX-07 §3a; Viewer::end, Viewer::served).
+    let e = h.engine(1, 4, 1000);
+    let mut s = open(h, &e, 1).await;
+    let mut v = h.viewer(1);
+    v.quote(s.quote()).expect("an honest quote is accepted");
+    assert!(s.admit(&h.chunk(0)), "within the window");
+    let first = v.request();
+    v.served(first, Served::Whole);
+    assert!(s.admit(&h.chunk(1)), "within the window");
+    let asked = v.request();
+    close(h, s).await;
+    v.end();
+    held(
+        &mut v,
+        Unsent::Unanswered,
+        "a request the session's end carried over, no session open",
+    );
+    v.served(first, Served::Whole);
+    v.served(NEVER_ASKED, Served::Whole);
+    held(
+        &mut v,
+        Unsent::Unanswered,
+        "another file whole, no session open, a request carried over",
+    );
+    let s = open(h, &e, 1).await;
+    v.quote(s.quote())
+        .expect("the next session's honest quote is accepted");
+    v.served(first, Served::Whole);
+    v.served(NEVER_ASKED, Served::Whole);
+    held(
+        &mut v,
+        Unsent::Unanswered,
+        "another file whole on the next session, a request carried over",
+    );
+    close(h, s).await;
+    v.end();
+    v.served(asked, Served::Whole);
+    held(
+        &mut v,
+        Unsent::NoSession,
+        "its own file whole, no session open: answered",
+    );
+    let mut s = open(h, &e, 1).await;
+    v.quote(s.quote())
+        .expect("the third session's honest quote is accepted");
+    assert!(s.admit(&h.chunk(2)), "within the window");
+    v.fetch();
+    close(h, s).await;
+    // Nor does time, then a timeout, at any span, no payment on the session; nor a new
+    // session's quote showing fewer chunks served than were requested, which is honest (at
+    // most the chunks requested and not refused: the seeder may not have seen the last
+    // request, NFX-07 §3a). Its own file, whole, then answers it.
+    for span in clock_spans(h) {
+        let mut v = h.viewer(1);
+        let quote = Quote {
+            price_per_chunk: 1,
+            mints: vec![h.mint()],
+            window: 4,
+            served: 0,
+            accepted_upto: 0,
+            spent_total: 0,
+        };
+        v.quote(&quote).expect("an honest quote is accepted");
+        let asked = v.request();
+        advance(h, Duration::from_secs(span)).await;
+        v.timeout().await;
+        held(
+            &mut v,
+            Unsent::Unanswered,
+            &format!("{span} s, then a timeout with no payment on the session"),
+        );
+        v.end();
+        v.quote(&quote)
+            .expect("a new session's quote showing fewer chunks served than requested is taken");
+        held(
+            &mut v,
+            Unsent::Unanswered,
+            "a new session's quote showing fewer chunks served than requested",
+        );
+        v.served(asked, Served::Whole);
+        v.fetch();
+    }
+    // A request goes only on an open session: with none it is held back, and nothing
+    // changes. So before the first quote, after a `hello` refused or a quote refused (a
+    // window under 2, which NFX-07 §2 forbids, among them), and between two sessions, its
+    // request answered (NFX-07 §3a; NFX-12 §5 admits no `get` before the quote).
+    let e = h.engine(1, 4, 1000);
+    let mut v = h.viewer(1);
+    held(&mut v, Unsent::NoSession, "no quote taken yet");
+    for code in hello_refusal_codes() {
+        v.hello_refused(&Rej { code, detail: None });
+    }
+    held(
+        &mut v,
+        Unsent::NoSession,
+        "a hello refused, with each code but banned",
+    );
+    let mut s = open(h, &e, 2).await;
+    for window in [0, 1] {
+        let under = Quote {
+            window,
+            ..s.quote().clone()
+        };
+        assert!(
+            v.quote(&under).is_err() && !v.stopped(),
+            "a quote with a window of {window}, under 2 (NFX-07 §2), is refused, and the \
+             watcher does not stop"
+        );
+        held(
+            &mut v,
+            Unsent::NoSession,
+            &format!("a quote with a window of {window}, refused"),
+        );
+    }
+    v.quote(s.quote()).expect("an honest quote is accepted");
+    assert!(s.admit(&h.chunk(0)), "within the window");
+    let asked = v.request();
+    v.served(asked, Served::Whole);
+    close(h, s).await;
+    v.end();
+    held(
+        &mut v,
+        Unsent::NoSession,
+        "between two sessions, its request answered",
+    );
+    let mut s = open(h, &e, 2).await;
+    v.quote(s.quote())
+        .expect("the next session's honest quote is accepted: nothing changed");
+    assert!(s.admit(&h.chunk(1)), "within the window");
+    v.fetch();
+    close(h, s).await;
 }
+
+/// What comes between a request and its `refuse` on its session in
+/// [`a_viewer_sends_one_request_at_a_time`]: none of them answers it, so the `refuse` does.
+const BETWEEN_A_REQUEST_AND_ITS_REFUSE: [&str; 7] = [
+    "a timeout",
+    "a second quote",
+    "mint-unavailable to the payment in flight",
+    "180 s",
+    "a hello refused with each code but banned",
+    "part of its file",
+    "another file whole",
+];
 
 /// A viewer pays ahead only right after a refusal. It checks the seeder's ack of that
 /// payment like any other, takes the honest one, and holding the credit it answers `due`
@@ -17955,6 +18181,11 @@ pub async fn a_viewer_settles_only_on_an_exact_match<H: Harness>(h: &H) {
         };
         assert!(refused, "{lie}: not a settlement");
         h.mint_outage(false);
+        // A new session on video 0, its quote honest: the watcher has stopped, so a request
+        // there, and the payment due for it, pay nothing.
+        let s0 = open_on(h, &e, 1, 0).await;
+        v0.quote(s0.quote())
+            .expect("an honest quote is taken, stopped or not");
         v0.fetch();
         assert!(
             v0.due()
@@ -17963,6 +18194,7 @@ pub async fn a_viewer_settles_only_on_an_exact_match<H: Harness>(h: &H) {
                 .is_none(),
             "{lie}: nothing more is paid"
         );
+        close(h, s0).await;
     }
 
     a_settling_quote_matches_both_fields(h).await;
@@ -18642,12 +18874,13 @@ async fn nothing_else_settles_what_it_waits_on<H: Harness>(h: &H, events: &[&str
 /// What comes between a refusal and the `due` it licenses in
 /// [`a_refusing_seeder_takes_at_most_half_a_window`], a round each in turn: none of them is a
 /// decision of what to pay, and none lets a request go before that `due` (NFX-07 §3a).
-const NO_DECISION: [&str; 5] = [
+const NO_DECISION: [&str; 6] = [
     "nothing",
     "a second quote",
     "a hello refused with each code but banned",
     "the whole of a file, none unanswered",
     "part of a file, none unanswered",
+    "a refuse, none unanswered",
 ];
 
 /// A seeder that refuses every request, while acknowledging every payment, gets at most
@@ -18688,6 +18921,7 @@ pub async fn a_refusing_seeder_takes_at_most_half_a_window<H: Harness>(h: &H) {
             }
             "the whole of a file, none unanswered" => v.served(one, Served::Whole),
             "part of a file, none unanswered" => v.served(one, Served::Part),
+            "a refuse, none unanswered" => v.refused(one),
             _ => {}
         }
         let third = v.requested(three).is_ok();
@@ -20778,6 +21012,13 @@ async fn a_request_undoes_no_stop_while_a_payment_waits<H: Harness>(h: &H) {
                     s = open(h, &e, 1).await;
                     v.quote(s.quote())
                         .expect("the quote shows the payment: settled into the ledger");
+                    if request == REQUESTS_BETWEEN[0] {
+                        held(
+                            &mut v,
+                            Unsent::Unanswered,
+                            "a new session's quote showing fewer chunks served than requested",
+                        );
+                    }
                 }
                 "is being reclaimed" => h.mint_outage(false),
                 _ => advance(h, Duration::from_secs(180)).await,
@@ -22011,15 +22252,16 @@ enum Does {
     SecondQuote,
     /// `hello_refused`, with each code but `banned` in turn.
     HelloRefused,
-    /// `requested`.
+    /// `requested`: on a ledger that holds no session it is held back
+    /// ([`Unsent::NoSession`]).
     Request,
     /// `requested`, then `refused`.
     RefusedRequest,
     /// `requested`, then `served`, the whole file.
     ServedRequest,
-    /// `served` with no request sent for it: the whole of a file, which answers the request
-    /// unanswered on the ledger if there is one, its own file, and nothing if not (a file
-    /// never asked for); or part of one, which answers nothing either way.
+    /// `served` with no request sent as the input comes: the whole of the file of the
+    /// request unanswered on the ledger, which answers it, or of a file never asked for where
+    /// none is, which answers nothing; or part of either, which answers nothing.
     Bytes(Served),
     /// `served`: the whole of another file than the one the ledger's request unanswered asks
     /// for, its last request's answered or one never asked for, which answers nothing.
@@ -22067,8 +22309,7 @@ impl Does {
     /// (`Some(false)`), or on either.
     fn needs(self) -> Option<bool> {
         match self {
-            Self::Request
-            | Self::RefusedRequest
+            Self::RefusedRequest
             | Self::ServedRequest
             | Self::SecondQuote
             | Self::Ack
@@ -22077,8 +22318,10 @@ impl Does {
             | Self::End => Some(true),
             Self::QuoteTaken | Self::QuoteRefused(_) => Some(false),
             // A file may still arrive once its session has ended, or on a ledger that never
-            // asked for it, and so may a `refuse` that names another file.
-            Self::Sibling
+            // asked for it, and so may a `refuse` that names another file. A request may be
+            // asked for with no session open: it is held back ([`Unsent::NoSession`]).
+            Self::Request
+            | Self::Sibling
             | Self::HelloRefused
             | Self::Bytes(_)
             | Self::OtherFile
@@ -22148,8 +22391,14 @@ impl std::fmt::Display for Input {
             Does::Request => "a new request",
             Does::RefusedRequest => "a refused request",
             Does::ServedRequest => "a request served whole",
-            Does::Bytes(Served::Whole) => "the whole of a file, no request sent for it,",
-            Does::Bytes(Served::Part) => "part of a file, no request sent for it,",
+            Does::Bytes(Served::Whole) => {
+                "the whole of the unanswered request's file, or of one never asked for where \
+                 none is unanswered,"
+            }
+            Does::Bytes(Served::Part) => {
+                "part of the unanswered request's file, or of one never asked for where none \
+                 is unanswered,"
+            }
             Does::OtherFile => "the whole of another file than the one requested",
             Does::OtherRefused => "a refuse naming another file than the one requested",
             Does::Due => "a due",
@@ -22835,14 +23084,17 @@ impl<'a, H: Harness> World<'a, H> {
     }
 
     /// A request on ledger `l`, if the watcher sends it: it holds one back while a request
-    /// of the ledger's is unanswered, or a refusal licenses a `due` not yet made, and sends it
-    /// otherwise (NFX-07 §3a). Whether it was sent; it is then owed, and unanswered.
+    /// of the ledger's is unanswered, or a refusal licenses a `due` not yet made, or, with
+    /// neither, while the ledger holds no session, and sends it otherwise (NFX-07 §3a).
+    /// Whether it was sent; it is then owed, and unanswered.
     fn send(&mut self, l: usize) -> Result<bool, String> {
         let led = &mut self.led[l];
         let held = if led.unanswered.is_some() {
             Some(Unsent::Unanswered)
         } else if led.licence {
             Some(Unsent::DueFirst)
+        } else if !led.open {
+            Some(Unsent::NoSession)
         } else {
             None
         };
@@ -22850,8 +23102,9 @@ impl<'a, H: Harness> World<'a, H> {
         let sent = led.v.requested(file);
         ensure!(
             sent == held.map_or(Ok(()), Err),
-            "one request unanswered at a time, and a refusal's due before the next request: \
-             held back for {held:?}, the watcher answered {sent:?}"
+            "one request unanswered at a time, a refusal's due before the next request, and a \
+             request only on an open session: held back for {held:?}, the watcher answered \
+             {sent:?}"
         );
         if sent.is_ok() {
             led.requested += 1;
@@ -23267,6 +23520,7 @@ impl<'a, H: Harness> World<'a, H> {
     /// payment and stops, whatever its reclaim finds.
     async fn timeout(&mut self, l: usize, what: &str) -> Result<(), String> {
         self.led[l].v.timeout().await;
+        self.holds_back(what)?;
         let comes = self.held.as_ref().is_some_and(|hold| {
             hold.by == l && hold.kind == Kind::Live && self.now >= hold.sent + 180
         });
@@ -23459,29 +23713,39 @@ impl<'a, H: Harness> World<'a, H> {
             Does::End => self.end(l),
             Does::Clock(secs) => self.tick(secs),
         }
-        // Nothing but its answer answers a request, and nothing but the `due` a refusal
-        // licenses is that `due`: on every ledger, one unanswered is still so, and a licence
-        // still holds the next request back, whatever came (NFX-07 §3a).
+        self.holds_back(what)?;
+        self.intact(what).await?;
+        Ok(Ok(()))
+    }
+
+    /// Nothing but its answer answers a request, and nothing but the `due` a refusal
+    /// licenses is that `due`: on every ledger, one unanswered is still so, and a licence
+    /// still holds the next request back, whatever came (NFX-07 §3a). And on a ledger that
+    /// holds no session, with neither, the request is held back for that, so one answered
+    /// there is answered: asking sends nothing, and changes nothing.
+    fn holds_back(&mut self, what: &str) -> Result<(), String> {
         for l in 0..self.led.len() {
             let led = &mut self.led[l];
             let held = if led.unanswered.is_some() {
                 Unsent::Unanswered
             } else if led.licence {
                 Unsent::DueFirst
+            } else if !led.open {
+                Unsent::NoSession
             } else {
                 continue;
             };
             let sent = led.v.requested(fresh_file());
             ensure!(
                 sent == Err(held),
-                "{what}: nothing but its whole file or its refusal answers a request, and \
-                 nothing but the due a refusal licenses comes before the next request: {} \
-                 holds it back for {held:?}, and the watcher answered {sent:?}",
+                "{what}: nothing but its whole file or its refusal answers a request, nothing \
+                 but the due a refusal licenses comes before the next request, and a request \
+                 goes only on an open session: {} holds it back for {held:?}, and the watcher \
+                 answered {sent:?}",
                 ledger(l)
             );
         }
-        self.intact(what).await?;
-        Ok(Ok(()))
+        Ok(())
     }
 
     /// Bring what the standing holds to its end, so that what the watcher does after it
@@ -23745,6 +24009,14 @@ impl<'a, H: Harness> World<'a, H> {
         if state.open && !w.led[OWN].open {
             w.open(OWN)?;
         } else if !state.open && w.led[OWN].open {
+            // A request the session's end carries over goes on it, the last thing it does.
+            if need.unanswered {
+                ensure!(
+                    w.send(OWN)?,
+                    "{what}: with none unanswered and no refusal's due to make first, a request \
+                     goes"
+                );
+            }
             w.end(OWN);
         }
         for _ in 0..state.licence {
@@ -23759,7 +24031,7 @@ impl<'a, H: Harness> World<'a, H> {
             w.used,
             w.stopped
         );
-        if need.unanswered {
+        if need.unanswered && state.open {
             ensure!(
                 w.send(OWN)?,
                 "{what}: with none unanswered and no refusal's due to make first, a request goes"
@@ -23925,8 +24197,10 @@ fn rows(
 /// What a cell needs for `input` in `state` ([`Need`]): the other video's session as the
 /// input has it; the third video's where the state's stop comes on one or `third`; in half
 /// the cells where it can, by the cell's number `turn`, a stop on another video's ledger
-/// coming on the very one the input comes on; and in half the cells whose own ledger holds a
-/// session and no refusal's licence, a request of that ledger's sent and unanswered.
+/// coming on the very one the input comes on; and in half the cells whose own ledger holds
+/// no refusal's licence, a request of that ledger's sent and unanswered: on its open
+/// session, or, where the state's session ends as it is brought about, sent on it before
+/// its end and carried over ([`World::build`]).
 fn need_for(state: State, input: Input, third: bool, turn: usize) -> Need {
     let other = if input.on == OTHER && input.does.method().is_some() {
         input.sess
@@ -23946,7 +24220,7 @@ fn need_for(state: State, input: Input, third: bool, turn: usize) -> Need {
         third: third || (on_third && !stop_other),
         older: input.does == Does::Unavailable(Back::PartExpired),
         stop_other,
-        unanswered: state.open && state.licence == 0 && spread(turn / 3 + 1, 2) == 1,
+        unanswered: state.licence == 0 && spread(turn / 3 + 1, 2) == 1,
     }
 }
 
@@ -24048,13 +24322,13 @@ const COMES_AFTER_SENDING: [u64; 5] = [1, 60, 100, 178, 179];
 /// The table is run in two parts, by the ledger the cell is about (`LEDGERS`): this one is
 /// the first the watcher made.
 pub async fn nothing_undoes_a_stop_on_its_first_ledger_whatever_comes<H: Harness>(h: &H) {
-    nothing_undoes_a_stop(h, true, (51_665, 108_346)).await;
+    nothing_undoes_a_stop(h, true, (54_280, 105_731)).await;
 }
 
 /// [`nothing_undoes_a_stop_on_its_first_ledger_whatever_comes`], on a ledger the watcher
 /// made for another video.
 pub async fn nothing_undoes_a_stop_on_another_videos_ledger_whatever_comes<H: Harness>(h: &H) {
-    nothing_undoes_a_stop(h, false, (52_080, 109_203)).await;
+    nothing_undoes_a_stop(h, false, (54_715, 106_568)).await;
 }
 
 async fn nothing_undoes_a_stop<H: Harness>(h: &H, first: bool, cells: (usize, usize)) {
@@ -24144,8 +24418,8 @@ pub async fn a_payment_waits_180_s_and_holds_its_place_whatever_comes<H: Harness
     };
     let endings = [Ending::Unanswered];
     table!(h, tally, rule, (takes, base, 0), endings, a_payment_waits);
-    tally.ends(rule, (22_945, 45_491));
-    tally.told(rule, 21_469);
+    tally.ends(rule, (23_985, 44_451));
+    tally.told(rule, 22_506);
 }
 
 /// One cell of [`a_payment_waits_180_s_and_holds_its_place_whatever_comes`].
@@ -24355,7 +24629,7 @@ pub async fn a_refusals_licence_lasts_to_its_due_whatever_comes<H: Harness>(h: &
     };
     let endings = [Ending::Acked, Ending::Unavailable];
     table!(h, tally, rule, (takes, base, 0), endings, a_licence_lasts);
-    tally.ends(rule, (6_760, 13_470));
+    tally.ends(rule, (7_045, 13_185));
 }
 
 /// One cell of [`a_refusals_licence_lasts_to_its_due_whatever_comes`].
@@ -24424,7 +24698,7 @@ async fn a_licence_lasts<H: Harness>(
 pub async fn the_tries_on_its_first_ledger_are_used_and_restored_by_nothing_else<H: Harness>(
     h: &H,
 ) {
-    the_tries_are_used_and_restored_by_nothing_else(h, true, (17_489, 35_603)).await;
+    the_tries_are_used_and_restored_by_nothing_else(h, true, (18_327, 34_765)).await;
 }
 
 /// [`the_tries_on_its_first_ledger_are_used_and_restored_by_nothing_else`], on a ledger the
@@ -24434,7 +24708,7 @@ pub async fn the_tries_on_another_videos_ledger_are_used_and_restored_by_nothing
 >(
     h: &H,
 ) {
-    the_tries_are_used_and_restored_by_nothing_else(h, false, (17_573, 35_731)).await;
+    the_tries_are_used_and_restored_by_nothing_else(h, false, (18_414, 34_890)).await;
 }
 
 async fn the_tries_are_used_and_restored_by_nothing_else<H: Harness>(
@@ -24779,15 +25053,16 @@ async fn a_payment_made<H: Harness>(
 /// inputs that leaves it paying is here: a quote taken (a new session, a resumed one, one
 /// that settles a payment, one that restores the tries) or refused, a refused `hello`, an
 /// ack, `mint-unavailable` and each way its reclaim ends, a closed session's payment and
-/// each way and place its reclaim ends, a refusal (credit), a timeout with no payment, and
-/// part of a file before the whole of it; a ledger is made for another video in every row. Behind an answer, half the window was
+/// each way and place its reclaim ends, a refusal (credit), a timeout with no payment, part
+/// of a file before the whole of it, and a `refuse` that answered no request; a ledger is
+/// made for another video in every row. Behind an answer, half the window was
 /// requested while the payment before
 /// was in flight; after a reclaim, the payment before was a pay-ahead; after a quote that
 /// settled it, a payment due at half the window. Credit held is one chunk, left of a
 /// pay-ahead. A closed session's payment is reclaimed 180 s after it was sent: by its own
 /// ledger in its next session, or with none, or by the other video's ledger, in a session
 /// it holds or with none; late, where the mint is down at the first try.
-const FROM: [&str; 30] = [
+const FROM: [&str; 31] = [
     "on a new session",
     "after an ack",
     "behind an ack, half the window requested meanwhile",
@@ -24819,6 +25094,7 @@ const FROM: [&str; 30] = [
     "after a refused hello",
     "after a timeout with no payment on the session",
     "after part of a file, then the whole of it",
+    "after a refuse that answered no request",
 ];
 
 /// What the standing's other ledger does while the paying ledger comes to pay, for the same
@@ -24939,6 +25215,17 @@ async fn a_payer<H: Harness>(
             let asked = v.request();
             v.served(asked, Served::Part);
             v.served(asked, Served::Whole);
+            next += 1;
+            requested = 1;
+        }
+        "after a refuse that answered no request" => {
+            // One naming a file never asked for, and one naming a request's file after that
+            // file came whole: neither answers anything, nor licenses anything.
+            v.refused(NEVER_ASKED);
+            assert!(s.admit(&h.chunk_of(video, next)), "within the window");
+            let asked = v.request();
+            v.served(asked, Served::Whole);
+            v.refused(asked);
             next += 1;
             requested = 1;
         }

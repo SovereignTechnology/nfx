@@ -5005,6 +5005,8 @@ pub enum SeederFlaw {
     /// Keeps nothing of a listing it asked a mint for at its start that the mint, down, did
     /// not answer: a payment there in that second asks again.
     StartListingDownAskedAgain,
+    /// The same, at its first quoted mint alone.
+    StartListingDownAskedAgainAtFirstMint,
     /// Keeps nothing of a listing a payment asked a mint for that the mint, down, did not
     /// answer: a payment there in that second asks again.
     ListingDownAskedAgain,
@@ -7476,6 +7478,48 @@ pub enum ViewerFlaw {
     DueRoundsDownWhileUnanswered,
     /// Pays at the full window, an odd one, while a request is unanswered.
     DueFullOnOddWhileUnanswered,
+    /// Sends a request with no session open, which the next session's `refuse` then answers
+    /// as one of its own: a request goes only on an open session.
+    RequestWithNoSession,
+    /// Takes a quote whose `window` is under 2 (NFX-07 §2).
+    TakesWindowUnderTwo,
+    /// Takes the whole of a file whose sha256 shares its first 8 bytes with the unanswered
+    /// request's for that request's answer, and so for a `refuse`.
+    AnswersOnPrefix,
+    /// Never answers a request for a file the ledger has had answered before: the same file
+    /// asked for again stays unanswered, its file whole or its `refuse` come.
+    SameFileTwiceUnanswered,
+    /// Takes a timeout for the end of the request's session: its `refuse` on that session
+    /// answers nothing.
+    TimeoutUnmarksSession,
+    /// The same, upon a second quote on the open session.
+    SecondQuoteUnmarksSession,
+    /// The same, upon a `rej` of the payment in flight.
+    RejUnmarksSession,
+    /// The same, upon a refused `hello`.
+    HelloRefusedUnmarksSession,
+    /// The same, upon a file, whole or in part, that answers nothing.
+    StrayBytesUnmarksSession,
+    /// Takes a request's `refuse` that comes 180 s or more after the request for no answer.
+    LateRefuseNoAnswer,
+    /// Rounds the pay-ahead up once a `refuse` that answered nothing has come on the ledger.
+    StrayRefusePayAheadRoundsUp,
+    /// Takes the whole of a request's own file, come with no session open, for no answer.
+    WholeWithNoSessionNoAnswer,
+    /// Takes the whole of any file, come with no session open, for the answer to its
+    /// unanswered request.
+    AnyWholeAnswersWithNoSession,
+    /// Takes the whole of any file for the answer to a request a session's end carried
+    /// over, with no session open or on the next before any request there.
+    AnyWholeAnswersCarriedOver,
+    /// Takes a new session's quote showing fewer chunks served than requested, which is
+    /// honest (the seeder may not have seen the last), for the answer to its unanswered
+    /// request.
+    LowQuoteAnswers,
+    /// Takes a timeout 180 s or more after the request for its answer: it gives up waiting.
+    LateTimeoutAnswers,
+    /// The same, 600 s or more after the request.
+    LongTimeoutAnswers,
 }
 
 /// What a stopped standing keeps, for the defects that undo a stop on one input only while
@@ -8681,7 +8725,10 @@ impl Inner {
             // A mint down at the start: that second's ask is made (NFX-07 §3 step 3), and no
             // listing is kept of it (the flaw keeps nothing at all).
             if answer.is_some_and(|a| a.down) {
-                if !self.has(SeederFlaw::StartListingDownAskedAgain) {
+                if !self.has(SeederFlaw::StartListingDownAskedAgain)
+                    && !(self.has(SeederFlaw::StartListingDownAskedAgainAtFirstMint)
+                        && !self.other_mint(mint))
+                {
                     let key = self.listing_key(mint).to_owned();
                     self.state().listing_down.insert(key, now);
                 }
@@ -13924,6 +13971,9 @@ pub struct MockViewer {
     asked: Vec<Sha256>,
     /// `mint-unavailable` answers counted here ([`ViewerFlaw::UnavailablePerLedger`] only).
     unavailable_here: u32,
+    /// A `refuse` that answered nothing came on this ledger
+    /// ([`ViewerFlaw::StrayRefusePayAheadRoundsUp`] only).
+    stray_refuse: bool,
     /// When this session's quote was taken, and when the seeder last answered on it (the
     /// quote, or the last ack taken) ([`ViewerFlaw::LiveWaitFromQuote`] and the like only:
     /// the 180 s run from sending).
@@ -14020,6 +14070,7 @@ impl MockViewer {
             sent_here: false,
             due_first: false,
             unavailable_here: 0,
+            stray_refuse: false,
             quoted_at: 0,
             answered_at: 0,
             last_request_at: 0,
@@ -14114,13 +14165,19 @@ impl MockViewer {
     /// refused on its session. `None`: whichever is unanswered, whatever file it asks for
     /// (the flaws that take something else for its answer). Whether there was one.
     fn answer(&mut self, file: Option<Sha256>) -> bool {
-        let Some(at) = self
-            .unanswered
-            .iter()
-            .position(|f| file.is_none_or(|file| *f == file))
-        else {
+        let prefix = self.has(ViewerFlaw::AnswersOnPrefix);
+        let Some(at) = self.unanswered.iter().position(|f| {
+            file.is_none_or(|file| *f == file || (prefix && f.0[..8] == file.0[..8]))
+        }) else {
             return false;
         };
+        if self.has(ViewerFlaw::SameFileTwiceUnanswered) {
+            let f = self.unanswered[at];
+            if self.asked.contains(&f) {
+                return false;
+            }
+            self.asked.push(f);
+        }
         self.unanswered.remove(at);
         self.sent_here &= !self.unanswered.is_empty();
         let mut st = self.standing();
@@ -15205,6 +15262,7 @@ impl MockViewer {
         {
             q.window / 2
         } else if self.has(ViewerFlaw::PayAheadRoundsUp)
+            || (self.stray_refuse && self.has(ViewerFlaw::StrayRefusePayAheadRoundsUp))
             || (unavailable && self.has(ViewerFlaw::PayAheadRoundsUpAfterUnavailable))
             || (self.id != 0 && self.has(ViewerFlaw::PayAheadRoundsUpOnSibling))
             || self.slips(PaySlip::AheadRoundsUp)
@@ -15484,6 +15542,9 @@ impl Viewer for MockViewer {
         if self.quote.is_some() && self.has(ViewerFlaw::SecondQuoteClearsDueFirst) {
             self.due_first = false;
         }
+        if self.quote.is_some() && self.has(ViewerFlaw::SecondQuoteUnmarksSession) {
+            self.sent_here = false;
+        }
         if self.quote.is_some() && !self.has(ViewerFlaw::AcceptsSecondQuote) && !read_first {
             if self.has(ViewerFlaw::SecondQuoteRestartsLiveWait) {
                 self.restart_live_wait();
@@ -15521,6 +15582,10 @@ impl Viewer for MockViewer {
             self.clears_stop_beside_live(ViewerFlaw::OtherPriceRefusalWhileLiveClearsStop);
             self.on_refused_quote(Refusal::Price, quote);
             return Err("price above this viewer's cap".into());
+        }
+        if quote.window < 2 && !self.has(ViewerFlaw::TakesWindowUnderTwo) {
+            self.on_refused_quote(Refusal::Window, quote);
+            return Err("window under 2 (NFX-07 §2)".into());
         }
         let skip_ceiling = resumed && self.has(ViewerFlaw::SkipsCeilingOnResume);
         if quote.window > WINDOW_CEILING && !self.has(ViewerFlaw::NoWindowCeiling) && !skip_ceiling
@@ -15790,6 +15855,9 @@ impl Viewer for MockViewer {
         self.standing().last_price = Some(quote.price_per_chunk);
         self.unavailable_here = 0;
         self.tries_here = 0;
+        if self.has(ViewerFlaw::LowQuoteAnswers) && quote.served < self.requested {
+            self.answer(None);
+        }
         self.quote = Some(quote.clone());
         (self.quoted_at, self.answered_at) = (self.clock.now(), self.clock.now());
         self.note_position();
@@ -15797,6 +15865,9 @@ impl Viewer for MockViewer {
     }
 
     fn hello_refused(&mut self, rej: &Rej) {
+        if self.has(ViewerFlaw::HelloRefusedUnmarksSession) {
+            self.sent_here = false;
+        }
         if rej.code != RejCode::Banned && self.has(ViewerFlaw::HelloRefusedNonBannedClearsDueFirst)
         {
             self.due_first = false;
@@ -15900,6 +15971,11 @@ impl Viewer for MockViewer {
         if self.due_first && !self.has(ViewerFlaw::RequestBeforeLicensedDue) {
             return Err(Unsent::DueFirst);
         }
+        // A request goes only on an open session, so every request has the one it was sent
+        // on (flaw: it goes with none, and counts as the next session's).
+        if self.quote.is_none() && !self.has(ViewerFlaw::RequestWithNoSession) {
+            return Err(Unsent::NoSession);
+        }
         self.unanswered.push(file);
         if self.has(ViewerFlaw::AnyRequestedFileAnswers) || self.has(ViewerFlaw::RefusedEarlierFile)
         {
@@ -15937,7 +16013,9 @@ impl Viewer for MockViewer {
         }
         let now = self.clock.now();
         self.last_request_at = now;
-        self.request_times.push(now);
+        if self.has(ViewerFlaw::WaitFromDueRequest) {
+            self.request_times.push(now);
+        }
         self.sent_requests += 1;
         if self.first_request_window.is_none() {
             self.first_request_window = self.quote.as_ref().map(|q| q.window);
@@ -15952,9 +16030,15 @@ impl Viewer for MockViewer {
         // and changes nothing else (flaws: it does).
         let whole = served == Served::Whole;
         let any = self.has(ViewerFlaw::ServedAnyFile)
-            || (self.has(ViewerFlaw::AnyRequestedFileAnswers) && self.asked.contains(&file));
-        let answered =
-            (whole || self.has(ViewerFlaw::PartAnswers)) && self.answer((!any).then_some(file));
+            || (self.has(ViewerFlaw::AnyRequestedFileAnswers) && self.asked.contains(&file))
+            || (self.has(ViewerFlaw::AnyWholeAnswersWithNoSession) && self.quote.is_none())
+            || (self.has(ViewerFlaw::AnyWholeAnswersCarriedOver) && !self.sent_here);
+        let answered = (whole || self.has(ViewerFlaw::PartAnswers))
+            && !(self.has(ViewerFlaw::WholeWithNoSessionNoAnswer) && self.quote.is_none())
+            && self.answer((!any).then_some(file));
+        if !answered && self.has(ViewerFlaw::StrayBytesUnmarksSession) {
+            self.sent_here = false;
+        }
         if (whole && !answered && self.has(ViewerFlaw::WholeClearsDueFirst))
             || (!whole && self.has(ViewerFlaw::PartClearsDueFirst))
         {
@@ -15983,12 +16067,16 @@ impl Viewer for MockViewer {
         // or with no session open, it is no answer (flaws: it answers a request carried over
         // all the same; it answers whatever file it names; it answers for a file the ledger
         // asked for before).
-        let of_its_session = self.quote.is_some() && self.sent_here;
+        let of_its_session = self.quote.is_some()
+            && self.sent_here
+            && !(self.has(ViewerFlaw::LateRefuseNoAnswer)
+                && self.clock.now() >= self.last_request_at + ANSWER_WAIT.as_secs());
         let any = self.has(ViewerFlaw::RefusedAnyFile)
             || (self.has(ViewerFlaw::RefusedEarlierFile) && self.asked.contains(&file));
         if !(of_its_session || self.has(ViewerFlaw::RefusedAcrossSessions))
             || !self.answer((!any).then_some(file))
         {
+            self.stray_refuse |= self.has(ViewerFlaw::StrayRefusePayAheadRoundsUp);
             return;
         }
         if self.has(ViewerFlaw::OtherRefusedRequestReclaimsLiveNow) {
@@ -16013,7 +16101,9 @@ impl Viewer for MockViewer {
         } else {
             self.requested = self.requested.saturating_sub(1);
         }
-        self.request_times.pop();
+        if self.has(ViewerFlaw::WaitFromDueRequest) {
+            self.request_times.pop();
+        }
         {
             let mut st = self.standing();
             st.requested_all = st.requested_all.saturating_sub(1);
@@ -16291,6 +16381,9 @@ impl Viewer for MockViewer {
     }
 
     async fn rej(&mut self, rej: &Rej) {
+        if self.has(ViewerFlaw::RejUnmarksSession) {
+            self.sent_here = false;
+        }
         self.taken_by_another();
         let was_halted = self.halted();
         if rej.code == RejCode::MintUnavailable
@@ -16398,6 +16491,15 @@ impl Viewer for MockViewer {
     }
 
     async fn timeout(&mut self) {
+        if self.has(ViewerFlaw::TimeoutUnmarksSession) {
+            self.sent_here = false;
+        }
+        let waited = self.clock.now().saturating_sub(self.last_request_at);
+        if (self.has(ViewerFlaw::LateTimeoutAnswers) && waited >= ANSWER_WAIT.as_secs())
+            || (self.has(ViewerFlaw::LongTimeoutAnswers) && waited >= MIN_DEBT_TTL.as_secs())
+        {
+            self.answer(None);
+        }
         self.taken_by_another();
         let was_halted = self.halted();
         if was_halted && self.has(ViewerFlaw::TimeoutSkipsWhenStopped) {
