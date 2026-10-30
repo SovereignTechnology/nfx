@@ -14,7 +14,7 @@ This repository is public, and since `c07be45` (2026-09-28) its CI runs on GitHu
 two jobs for GitLab and is a dormant twin: it runs nothing. What the sections below say of the private
 GitLab project, of GitLab CI and of its shared runner is as it stood before that.
 
-Updated 2026-10-29 · `main` = `29019d2` · `m2/r34` = round 34, from `m2/r33` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
+Updated 2026-10-30 · `main` = `29019d2` · `m2/r34` = round 34, from `m2/r33` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
 
 ## Since 2026-10-19
 
@@ -32,7 +32,8 @@ suite checks every ledger's hold after every input and every timeout, carries a 
 a session's end in its tables, and has 1,542 planted defects (951 of the seeder, 591 of the
 watcher) in 3,699 entries, every plant of the audit's that passed now registered; it still
 has 152 scenarios. `probe.yml` and `ci.yml` give no job's token cache access, and the probe
-job may take 120 minutes. The lock's re-pin waits for sovtech's reading of the code diff.
+job may take 120 minutes. On 2026-10-30 sovtech read the code diff; the lock is re-pinned
+to it (`da6e121`, run 40962165836), and the thirty-fourth audit follows.
 
 **Round 33 resolves the thirty-second independent audit** (branch `m2/r33`, from `m2/r32`
 at `a45c3eb`; the audit and its resolution in one
@@ -711,7 +712,11 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
        round 33 on `m2/r33` with sovtech's decisions of 2026-10-26
        ([record](reviews/2026-09-24-m2.0-thirty-second-audit.md)), with SE1 (2026-10-27);
        the lock re-pinned in `cbcf6bd` after sovtech's reading of the code diff (2026-10-28);
-     - next, the thirty-third independent audit, repeated until one reports nothing;
+     - the thirty-third independent audit (of `f087126`): 39 points standing after
+       refutation, 3 of them High, resolved in round 34 on `m2/r34` with sovtech's decisions
+       of 2026-10-29 ([record](reviews/2026-09-24-m2.0-thirty-third-audit.md)); the lock
+       re-pinned in `da6e121` after sovtech's reading of the code diff (2026-10-30);
+     - next, the thirty-fourth independent audit, repeated until one reports nothing;
      - sovtech's OK to merge M2.0's branch to `main` (given, once the audits are clean; the
        thirty-first audit's tree is on `main` already, as `0b69f8a`);
      - the testnet mint: sovtech approved its deployment once its runbook's checks

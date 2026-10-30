@@ -699,6 +699,12 @@ On the thirty-third independent audit (`f087126`; record
   lost `refuse` and a request the seeder never saw, and the credit given up; NFX-10 §3.1, an
   HTTPS rule, is cited as such. The decision of 2026-10-28 stands.
 
+## Decided (sovtech, 2026-10-30)
+
+- **sovtech has read the round's code diff** (`58958b0`, the money crate, and `d14e2de`, the
+  lock and CI). The lock is re-pinned to it in `da6e121`, from probe `r34-pin` (run
+  40962165836) on `a5532bc`; the thirty-fourth independent audit follows.
+
 ## The testnet mint
 
 A persistent testnet mint (CDK `cdk-mintd` with its fake Lightning backend and SQLite)
