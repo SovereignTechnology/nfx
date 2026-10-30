@@ -114,7 +114,7 @@ money-test nfx-pay lib nfx_pay 19
 money-test nfx-pay test adversary 152
 money-test nfx-pay test honest_timings 3345
 money-test nfx-pay test listings_at_start 152
-money-test nfx-pay test mutants 3712
+money-test nfx-pay test mutants 3738
 money-test nfx-pay test round_trip 152
 money-test nfx-pay test runner 14
 money-test nfx-pay test woken_answers 152
