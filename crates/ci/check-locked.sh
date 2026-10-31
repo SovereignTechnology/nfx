@@ -40,10 +40,13 @@ fi
 #                                its command unsets them, as the re-pin's manually
 #                                dispatched probe does: a guard against a re-pin by
 #                                accident, not a control. The control is sovtech's review
-#                                of every change to the pins (below). A re-pin takes as
-#                                long as the lock job's --compiled (65 min on 49ae389,
-#                                run 40705674410): dispatch it with `timeout` at least
-#                                the lock job's last time plus a third, under probe.yml's
+#                                of every change to the pins (below). A re-pin does the
+#                                build and money tests of the lock job's --compiled, and
+#                                its time varies as much from runner to runner (65 min for
+#                                the re-pin on 49ae389, run 40705674410, against 56 min
+#                                for the lock job's --compiled on the same code, run
+#                                40811478196): dispatch it with `timeout` at least the
+#                                lock job's last time plus a third, under probe.yml's
 #                                limit, which is the lock job's.
 #
 # crates/ci/locked.sha256 pins, by git mode and content:

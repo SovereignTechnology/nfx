@@ -18,6 +18,10 @@ on:
 permissions:
   contents: read
 
+# The job's token can neither restore nor save a cache (`cache-mode`; omitted, a dispatch,
+# a trusted trigger, gets `write`), as ci.yml and probe.yml.
+cache-mode: none
+
 env:
   RUST_VERSION: "1.98.0"
   NODE_VERSION: "v24.21.0"

@@ -39,8 +39,9 @@ jobs:
   probe:
     runs-on: ubuntu-24.04
     # As ci.yml's lock job: a re-pin, run as a probe, does that job's `--compiled`
-    # (crates/ci/check-locked.sh --pin).
-    timeout-minutes: 120
+    # (crates/ci/check-locked.sh --pin), whose time has varied from 56 to 76 min on the
+    # runners (runs 40811478196, 41143765468).
+    timeout-minutes: 180
     container:
       image: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
     env:
