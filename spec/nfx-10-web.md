@@ -214,8 +214,11 @@ says of a page holds for a worker it pays or earns from. Whether a page pays an 
   video, abandoned or not, and makes the decision a refusal licenses before its next
   request there on that session (NFX-07 §3a). So a seeder that refuses or withholds
   everything takes at most half a page's window ceiling, rounded down, for each video
-  from each page, a new page's identity holding none of an earlier one's: a `window` is at
-  least 2, so that is at least the one chunk a withholding seeder is owed. Its
+  from each page, a new page's identity holding none of an earlier one's, and one that
+  withholds a request takes that once for the video from each partition: the partition's
+  standing records the video, and no page of it asks that seeder for it while the request
+  is unanswered (NFX-07 §3a). A `window` is at least 2, so that is at least the one chunk
+  a withholding seeder is owed. Its
   loaders fetch from several seeders at once, and from each one file of a video at a
   time (§3.2).
 
@@ -276,25 +279,27 @@ the page cannot see.
 Browser peers earn sats for serving other browsers. There is one rule set for the
 mesh, and it is NFX-07's:
 
-- **Messages.** The pay/1 messages of NFX-07 §2 (`hello`, `quote`, `pay`, `ack`,
-  `rej`, `refuse`), byte-identical JSON, travel on the WebRTC data channel
-  p2p-media-loader already holds open between two peers. A peer opens a pay session per
-  remote peer and video it watches, as on iroh, and NFX-07 §3 allows several open at once
-  on one account, up to the per-peer cap. A data channel carries one session per video at
-  a time: a second `hello` for a video whose session is open on it is refused
-  `bad-session`, and a segment request is under the session for its video on the channel
-  it travels on (NFX-07 §3, Admission). However many are open, a paying peer keeps one
-  request unanswered at a time to a remote peer for a video, across them all (NFX-07
-  §3a): its loader fetches a video's files from several peers at once, and from each one
-  at a time. A transfer it stops, or one cut short, leaves its request unanswered, so it
-  sends that peer no other request for the video. Only the requested file, arriving whole
-  from that peer as the data channel's response to the request, or a `refuse` naming it on
-  that session, answers it: the loader matches what arrives from that peer to the request
-  by its sha256, and bytes of another file, or of that file from another peer, answer
-  nothing. The channel meets NFX-07 §2's delivery rule:
-  a message unacknowledged for 60 s closes it. A browser↔bridge link is the same (§2).
+- **Messages.** The pay/1 messages of NFX-07 §2 (`hello`, `quote`, `pay`, `ack`, `rej`,
+  `refuse`), byte-identical JSON, travel on the WebRTC data channel p2p-media-loader
+  already holds open between two peers. A peer opens a pay session per remote peer and
+  video it watches, as on iroh, and NFX-07 §3 allows several open at once on one account,
+  up to the per-peer cap. A data channel carries one session at a time, for its swarm's
+  video (§2): a `hello` naming another video is refused `unknown-video`, and a second
+  `hello` on it is refused `bad-session`; a segment request is under the session of the
+  channel it travels on (NFX-07 §3, Admission). However many are open, a paying peer
+  keeps one request unanswered at a time to a remote peer for a video, across them all
+  (NFX-07 §3a): its loader fetches a video's files from several peers at once, and from
+  each one at a time. A transfer it stops, or one cut short, leaves its request
+  unanswered, so it sends that peer no other request for the video. Only the requested
+  file, arriving whole from that peer as the data channel's response to the request, or a
+  `refuse` naming it on that session, answers it: the loader matches what arrives from
+  that peer to the request by its sha256, on the response to that request, and bytes of
+  another file, or of that file from another peer, answer nothing. The channel meets
+  NFX-07 §2's delivery rule: a message unacknowledged for 60 s closes it. A
+  browser↔bridge link is the same (§2).
 - **Unit and window.** The mesh accounts in **chunks, where one chunk is one NFX-05
-  file**. That is a whole segment or init, never a WebRTC message fragment. `quote.window`
+  file**. That is a whole segment (init segments never travel over the mesh, §1), never
+  a WebRTC message fragment. `quote.window`
   is the number of chunks a peer will upload unpaid, default 8 (about 16 s of video at
   2 s segments). As on iroh (NFX-07 §3), every upload request counts as one chunk when
   it is admitted, whole or aborted, and the payer pays for every chunk it requested
@@ -302,7 +307,10 @@ mesh, and it is NFX-07's:
   transfer at 99% and never owe anything. An uploader serves under NFX-07 §3's service
   limit: `window` per account, and a global cap per `debt_ttl`. A refused upload request
   is answered with pay/1 `refuse` on the data channel, so the requester can tell it from
-  an aborted transfer.
+  an aborted transfer. In paid mode a segment request asks for its whole file: the
+  paid-mesh fork sends none from a later byte (p2p-media-loader's `byteFrom`, its `b`) and
+  drops what a load holds in part before asking another peer, as §3.1 does over HTTPS; a
+  ranged request is a chunk, owed, whose file never arrives whole on it (NFX-07 §3a).
 - **Identity.** A mesh peer's id is self-chosen, so a ban on the mesh holds only until
   the peer takes a new id. The global cap is what bounds an uploader's loss here, as on
   every transport (NFX-07 §3).
@@ -314,8 +322,11 @@ mesh, and it is NFX-07's:
   framing on the existing data channel. The fork changes no segment bytes and no
   tracker protocol, so it interoperates with upstream peers as a free peer.
 - **Free peers coexist.** A peer without the fork, or one that is not charging,
-  serves and fetches for free (the M1 mesh). A paid peer MUST NOT upload beyond
-  `window` to a peer that does not speak pay/1, unless it has chosen to serve free.
+  serves and fetches for free (the M1 mesh). A paid peer that charges serves a peer that
+  does not speak pay/1 as NFX-07 §3 serves an account that never pays: each upload is an
+  unpaid chunk of that peer id's account for the swarm's video, counted toward `window`
+  and toward the global cap, and none goes once either is full. A peer that has chosen to
+  serve free counts nothing.
 - **Earnings.** Ecash a browser earns is written through to the user's NIP-60 wallet
   (encrypted to the user's key, on the user's relays) as soon as the swap that claims it
   is done (an ack follows that swap, NFX-07 §3), and in licensed mode after `redeem`
@@ -461,9 +472,26 @@ NFX-05 byte formats.
     response to the request, or a `refuse` naming it on that session answers a request;
     that file from another peer answers nothing (was: "only the requested file", which
     named no source, and left the `refuse` out). A data channel carries one session per
-    video at a time, and a segment request is under the session of the channel it travels
+    video at a time, a second `hello` for a video whose session is open on it refused
+    `bad-session`, and a segment request is under the session of the channel it travels
     on (was: nothing said, so which session a `refuse` belonged to was undefined with two
     open).
   - §3: the decision a refusal licenses comes before the next request on that session, as
     NFX-07 §3a says; the bound on a page's credit drops "or one chunk where that is more",
     which a `window` of at least 2 never reaches.
+- Draft 2026-10-31 (M2.0 round 35: the thirty-fourth audit, and sovtech's decisions of
+  2026-10-31).
+  - §3.2: a paid peer that charges serves a peer that does not speak pay/1 as an account
+    that never pays, each upload counted toward `window` and the global cap (was: "MUST
+    NOT upload beyond `window`", which with NFX-07's "counts nowhere" left each free peer
+    id a window outside the cap; sovtech, 2026-10-31).
+  - §3: a seeder that withholds a request takes its half window once for the video from
+    each partition, whose standing records the video (was: from each page; NFX-07 §3a
+    drops "or under a new identity", sovtech, 2026-10-31).
+  - §3.2: a data channel carries one session at a time, for its swarm's video: a `hello`
+    naming another video is refused `unknown-video` (was: "one session per video", which
+    left that `hello` unsaid). In paid mode a segment request asks for its whole file, and
+    the paid-mesh fork resumes no load from a later byte (was: nothing said; the pinned
+    p2p-media-loader resumes a stalled load with `byteFrom`, a ranged request never
+    answered). A chunk is a whole segment, init segments never travelling over the mesh
+    (was: "segment or init").

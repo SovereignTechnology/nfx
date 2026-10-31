@@ -37,9 +37,11 @@ bytes can't be payment-enforced after release, so no mechanism pretends otherwis
 - **`session`** is exactly 32 lowercase hex characters (128 bits).
 - **`video`** is an NFX video address (NFX-01).
 - **`price_per_chunk`** (in **sat**) is at least 1, and **`window`** is 2 to 64: at
-  least 2, so a watcher paying once half the window is unpaid, rounded up (§3a), never
-  stalls the seeder, and at most 64, so one refusal makes a watcher pay ahead at most 32
-  chunks (§3a). A seeder that serves for free does not quote; it serves without pay/1.
+  least 2, so a watcher paying once half the window is unpaid, rounded up (§3a), leaves
+  the seeder half the window, rounded down (at least one chunk), that it may admit while
+  that payment is in flight, and at most 64, so one refusal makes a watcher pay ahead at
+  most 32 chunks (§3a). A seeder that serves for free does not quote; it serves without
+  pay/1.
 - **`mints`** holds 1 to 16 URLs. A mint URL is:
   - printable ASCII without space, `\` or `@`;
   - `https://`, then a host, then optionally `:` and a port of 1 to 5 digits (1 to 65535);
@@ -106,8 +108,8 @@ bytes can't be payment-enforced after release, so no mechanism pretends otherwis
   under this session: an honest seeder sends it in place of the file, and serves not one
   byte of it (§3, Admission). That is how a refusal is told apart from a transfer the
   watcher aborted, which gets no `refuse`. One `refuse` answers at most one request: the
-  one unanswered for `file` on this session, whatever part of its file came before it
-  (§3a).
+  one sent on this session for `file` and still unanswered, whatever part of its file came
+  before it (§3a).
 
 ## 3. Seeder duties
 
@@ -152,8 +154,9 @@ bytes can't be payment-enforced after release, so no mechanism pretends otherwis
   videos. The window belongs to the account.
 - A `session` id names one **open** session. A `hello` naming a session id that is open
   is refused (`bad-session`). A seeder caps the sessions one peer may hold open at once,
-  across all videos (recommended 8, also `bad-session`). A session closes with its
-  connection.
+  across all videos (recommended 8, also `bad-session`). On the mesh a data channel
+  carries one session at a time, so a second `hello` on a channel whose session is open is
+  refused `bad-session` too (NFX-10 §3.2). A session closes with its connection.
 
 **Configuration.** A seeder refuses to start outside these:
 - `price_per_chunk` 1 to 2^53−1, and 1 to 16 mints, each a valid mint URL (§2): its quote
@@ -250,10 +253,17 @@ naming its file, and not one byte of it is served. A request is under the sessio
 reaches the seeder on: on HyperDHT the session of its channel's id (NFX-12 §5), on the
 mesh the session of the data channel it travels on, which carries one at a time (NFX-10
 §3.2), and on iroh, whose blob requests travel on a connection of their own (NFX-06 §2,
-§3), the peer's session for the file's video that is open as the request arrives; its
-`refuse` goes on that session. A request that arrives with no such session open is
-admitted under none (on iroh, refused with iroh-blobs' permission error), and counts
-nowhere.
+§3), the peer's session whose video lists the file, open as the request arrives (the
+latest opened, if several for that video are); its `refuse` goes on that session. A
+request that arrives with no such session open, or with sessions open for more than one
+video that lists the file (a file two of the seeder's videos share), is admitted under
+none (on iroh, refused with iroh-blobs' permission error), and counts nowhere, with one
+exception: on the mesh, an uploader that charges serves a peer that does not speak pay/1,
+if at all, as it serves an account that never pays, each upload an unpaid chunk of that
+peer's account, counted toward its `window` and toward the global cap (NFX-10 §3.2). A
+seeder may also serve a peer it serves free (a free seeder, NFX-08 §5, or one exempt by
+its local policy, NFX-06 §2) with no session: that service is its own choice, outside
+every account, and counts nowhere.
 
 **Service limit.** A chunk is **covered** while its own account's `served` is below
 that account's `accepted_upto`, that is, pre-paid. Credit on one video never covers
@@ -539,7 +549,9 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   - payments awaiting a quote (below);
   - the one payment in flight toward it, a payment a closed session left unsettled
     included;
-  - how many `mint-unavailable` answers came in a row.
+  - how many `mint-unavailable` answers came in a row;
+  - the videos for which a request of its, under any identity it has taken toward the
+    seeder, is unanswered there (below).
 
   Every rule below that says "pays that seeder nothing" holds for all its videos, and any
   of its videos' ledgers does the standing's catching up (the 180 s reclaim below).
@@ -560,28 +572,35 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     included, and so is one naming no mint it holds tokens from, by the mint's exact URL
     (§2): a lookalike names none;
   - so is a quote whose `window` is above the watcher's own ceiling, at most 64 (§2):
-    `window` bounds what one refusal makes it pay ahead.
+    `window` bounds what one refusal makes it pay ahead;
+  - so is a quote whose `window` is under 2 (§2).
 
   A quote dishonest about the account stops the watcher paying that seeder; one refused
-  for its price, its `window` or its mints does not, nor a second quote on an open
-  session, refused (§2) whatever it claims: its price and `window` change nothing.
-- **Send a request only on an open session,** once its quote is taken (§2), so every
-  request has the session it was sent on: NFX-12 §5 admits no `get` before the quote. With
-  none open the watcher holds a request back. On iroh, where blob requests travel on a
-  connection of their own (NFX-06 §3), a request is under the seeder's session for its
-  video that is open as it arrives (§3, Admission): the watcher holds at most one session
-  for a seeder and a video at a time there, and in paid mode requests each member whole,
-  never a range (NFX-06 §2), since a ranged request is a chunk, owed, whose file never
-  arrives whole on it.
+  for its price, its `window` or its mints does not, whatever else it claims: it is
+  refused before it is read for the account. Nor does a second quote on an open session,
+  refused (§2) whatever it claims: its price and `window` change nothing.
+- **In paid mode, send a request only on an open session,** once its quote is taken (§2),
+  so every request has the session it was sent on: NFX-12 §5 admits no `get` before the
+  quote. With none open the watcher holds a request back. On iroh, where blob requests
+  travel on a connection of their own (NFX-06 §3), a request is under the seeder's session
+  whose video lists its file, open as it arrives (§3, Admission): the watcher holds at most
+  one session for a seeder and a video at a time there, sends its iroh-blobs requests to a
+  seeder from the endpoint its pay/1 sessions with that seeder are on, sends that seeder
+  no request for a file that another video it holds a session open for there also lists
+  (a file two videos share) until that session has closed, and requests each member
+  whole, one per request (NFX-06 §2) and never a range, since a ranged request is a
+  chunk, owed, whose file never arrives whole on it.
 - **Owe every request sent,** except one the seeder answers with `refuse`. A refused
   request is always un-owed; if it was already paid for, that payment becomes credit. A
   request the watcher abandons (it stops waiting for the file, or closes the transfer)
-  stays owed, and unanswered (below); if the seeder never saw it, the payment becomes
-  pre-payment.
+  stays owed, and unanswered (below); if the seeder never admitted it (it never saw it, or
+  admitted it under no session, §3, Admission), the payment becomes pre-payment.
 - **Keep one request unanswered at a time** for a seeder and a video: under one identity
   toward the seeder (the ledger's, above), across every session the watcher holds with it
-  for that video, open at once or one after another. A request is answered once its file
-  has arrived whole in answer to it, on the transfer that request started (on iroh its
+  for that video, open at once or one after another, and none under another identity
+  while it is unanswered (the standing records the video, above). A request is answered
+  once its file has arrived whole in answer to it, on the transfer that request started
+  (on iroh its
   iroh-blobs request, on HyperDHT its `get`'s `req`, on the mesh its data channel's
   response), and passed its sha256 (NFX-05 §4), or once the seeder refuses it with a
   `refuse` naming its file on the session it was sent on, whatever part of its file came
@@ -591,15 +610,20 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
   served or refused, or one never asked for) or a `refuse` naming one, the watcher
   abandoning it, a payment or its answer, a timeout, nor the session's end, after which
   its file may still arrive, and no request goes on a later session until it is
-  answered.
+  answered. A retry is a request: the same file asked for again while its request is
+  unanswered is held back as any other is. A request has no deadline either: unlike a
+  payment, whose 180 s free its place (below), no time passing answers it or frees its
+  place, whatever else comes meanwhile.
   So a request the watcher abandons keeps its place, whatever came of it: a seeder that
   serves nothing of a request it admitted, or bytes that fail the sha256, is owed that one
-  request and gets no other request for that video under that identity, and the watcher
-  fetches the video elsewhere. A stated concession: so does an honest seeder whose
-  transfer is cut short (its connection lost, or a mesh or HyperDHT transfer stopped:
-  NFX-10 §3.2, NFX-12 §4), whose `refuse` is lost, or that never saw the request, since
-  no `refuse` reaches the watcher and the file does not arrive; the watcher fetches the
-  video elsewhere, or under a new identity, giving up the credit it holds there. Over
+  request and gets no other request for that video from the watcher, under any identity
+  it takes toward the seeder while it keeps the standing (above), and the watcher fetches
+  the video elsewhere. A stated concession: so does an honest seeder whose transfer is cut
+  short (its connection lost, or a mesh or HyperDHT transfer stopped: NFX-10 §3.2, NFX-12
+  §4), whose `refuse` is lost, or that never admitted the request, since no `refuse`
+  reaches the watcher and the file does not arrive; the watcher fetches the video
+  elsewhere, giving up the credit it holds there, and asks that seeder for it under no
+  other identity while it keeps the standing, which records the video (above). Over
   HTTPS a loader that drops a load leaves the transfer running (NFX-10 §3.1). So too, a
   stated concession, does a request that reaches the seeder only after the session it was
   sent on has closed (on iroh, as a session ends): its `refuse`, on a later session, is
@@ -670,8 +694,10 @@ Bans are local policy, never global claims: no "bad payer list" events exist.
     for that video: so a seeder that refuses or withholds everything takes at most half
     the watcher's ceiling, rounded down, for each video the watcher asks it for, under
     each identity the watcher takes toward it: the ledger, and its credit, are that
-    identity's (above). A `window` is at least 2 (§2), so that is at least the one chunk a
-    withholding seeder is owed.
+    identity's (above). A seeder that withholds a request takes that once for the video
+    from each standing: the watcher asks it for that video under no other identity while
+    the request is unanswered (above). A `window` is at least 2 (§2), so that is at least
+    the one chunk a withholding seeder is owed.
   - Keep one payment in flight toward a seeder at a time, across its videos. One sent on a
     live session holds that place until it is answered or its 180 s are up (below): a
     second quote, a request new or answered, a timeout before then, a ledger made for
@@ -1751,7 +1777,8 @@ paths on one host are two origins.
     at most one such session at a time, and paid members are requested whole (was: no
     session named for an iroh-blobs request, and a ranged request was owed with no answer
     that could come). §3, Admission, says which session a request is under on each
-    transport, and that one arriving with none open is admitted under none.
+    transport, and that one arriving with none open is admitted under none, and counts
+    nowhere (was: nothing said).
   - §3a: a request is answered by its own file arriving whole on the transfer that request
     started, not by the file fetched elsewhere or for another video (was: "its file has
     arrived whole", which named no source), and by its `refuse` whatever part of its file
@@ -1760,7 +1787,8 @@ paths on one host are two origins.
     refuses.
   - §3a: the cut-short concession names a stopped mesh or HyperDHT transfer, a lost
     `refuse` and a request the seeder never saw, and the credit the watcher gives up (was:
-    a lost connection only, resting on NFX-10 §3.1, a rule of HTTPS). A request that
+    a lost connection only, resting on NFX-10 §3.1, a rule of HTTPS), and lets the watcher
+    fetch the video elsewhere or under a new identity (was: elsewhere). A request that
     reaches the seeder only after its session has closed is a stated concession too: its
     `refuse` on a later session answers nothing (sovtech, 2026-10-29: the rule that
     answers belong to their session stays).
@@ -1768,3 +1796,33 @@ paths on one host are two origins.
     the listed contents alone freed the place at a restart).
   - §3a: the bound drops "or one chunk where that is more", which a `window` of at least 2
     never reaches.
+- Draft 2026-10-31 (M2.0 round 35: the thirty-fourth audit, and sovtech's decisions of
+  2026-10-31).
+  - §3a: the standing records each video for which a request of the watcher's, under any
+    identity, is unanswered, and the watcher asks that seeder for that video under no
+    other identity meanwhile; the cut-short concession drops "or under a new identity"
+    (was: a new identity reset the place, so a seeder that withheld on purpose took half
+    a window per new identity, without end; sovtech, 2026-10-31).
+  - §3, Admission: on the mesh, an uploader that charges serves a peer that does not speak
+    pay/1 as an account that never pays, counted toward its `window` and the global cap
+    (was: such service counted nowhere, outside the cap; sovtech, 2026-10-31). A seeder may
+    serve a peer it serves free with no session, outside every account.
+  - §3, Admission: on iroh a request is under the peer's session whose video lists its
+    file, the latest opened if several for that video are, and under none if sessions for
+    more than one video that lists it are open (was: "the session for the file's video",
+    which a file two videos share does not name). §3a: the watcher sends no request for
+    such a file while it holds sessions open for both, and sends its iroh-blobs requests
+    from the endpoint of its pay/1 sessions.
+  - §3a: a retry of a file whose request is unanswered is a request, held back as any
+    other; a request has no deadline, and no time passing frees its place (was: implied).
+  - §3a: a quote whose `window` is under 2 is among those refused without a stop, and a
+    quote is refused for its price, `window` or mints before it is read for the account
+    (was: not listed, and the order unstated).
+  - §2: `window`'s floor leaves the seeder half the window, rounded down, to admit while a
+    payment is in flight (was: "never stalls the seeder", false under a slow mint). §2's
+    `refuse` answers the request sent on its session (was: "unanswered … on this
+    session"). §3: on the mesh, a second `hello` on a channel whose session is open is
+    refused `bad-session`. §3a: a payment becomes pre-payment when the seeder never
+    admitted its request (was: "never saw"), members are requested one per request
+    (NFX-06 §2) and never a range, and the rule to send only on an open session is paid
+    mode's.
