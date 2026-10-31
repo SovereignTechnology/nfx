@@ -107,7 +107,9 @@ pub trait SeederSession {
     fn quote(&self) -> &Quote;
 
     /// Admit one request for the file `sha256`, counting it at once, whole, ranged or
-    /// aborted alike. `false` means answer it with `refuse` and serve not one byte.
+    /// aborted alike. `sha256` is the file's sha256 as NFX-05 §4 lists it and a `refuse`
+    /// names it, 64 lowercase hex characters; any other string names no file of the video,
+    /// and is refused. `false` means answer it with `refuse` and serve not one byte.
     /// That happens when:
     /// - the peer is banned;
     /// - the file is not this video's, or the seeder no longer serves this video, pre-paid
@@ -192,7 +194,10 @@ pub trait SeederSession {
 /// session is a second quote, refused unread ([`Viewer::quote`]). A request goes only on an
 /// open session ([`Viewer::requested`]).
 /// So the sessions NFX-07 §3a lets a watcher hold with a seeder for one video at once are a
-/// real watcher's to keep one request across; this trait does not hold them.
+/// real watcher's to keep one request across; this trait does not hold them. Nor does it
+/// take another identity toward the seeder: the standing's record of a video left with a
+/// request unanswered, under which no other identity asks that seeder for it (NFX-07 §3a),
+/// is a real watcher's to keep.
 /// Implementations: the real wallet-backed viewer (locked until the M2 security stage) and
 /// [`crate::mock::MockViewer`]. It keeps time on the harness's clock.
 #[allow(async_fn_in_trait)]
@@ -215,11 +220,14 @@ pub trait Viewer {
     ///   ledger for another of the seeder's videos holds counts;
     /// - its `accepted_upto` or `spent_total` is anything else, below the ledger included.
     ///
-    /// Also `Err`, without stopping: a price over this viewer's cap, a `window` under 2
+    /// Also `Err`, without stopping, whatever it claims of the account, which is not read:
+    /// a price over this viewer's cap, a `window` under 2
     /// (NFX-07 §2) or over its ceiling or no mint it holds tokens from, by the mint's exact
     /// URL (on every session, a resumed one included), or a session already open: a second
     /// quote on it is refused unread, whatever it claims, its price and `window` included. A
-    /// quote refused so is not taken, and settles nothing: the payment in flight, a payment
+    /// quote refused so is not taken: refused with no session open, it opens none, and the
+    /// next quote is taken as a session's first; refused as a second quote, it leaves the
+    /// open session as it was. It settles nothing: the payment in flight, a payment
     /// awaiting a quote and an incomplete reclaim stay as they were, and so do the
     /// `mint-unavailable` tries, none used and none restored. Taken, refused or dishonest, a
     /// quote settles nothing of the seeder's other videos, even one showing their payment in
@@ -246,10 +254,12 @@ pub trait Viewer {
     ///   earlier one, is unanswered: one at a time. Only its own file, whole
     ///   ([`Viewer::served`]), or, on the session it was sent on, a `refuse` naming that file
     ///   ([`Viewer::refused`]) answers it: no other file, an earlier request's included,
-    ///   no part of its own, payment, answer to a payment, timeout or session's end does,
-    ///   nor the watcher's abandoning it, which leaves it owed and holds its place (nothing
-    ///   tells the viewer of it). Each ledger keeps its own, so requests for the seeder's
-    ///   other videos, as to other seeders, go at once;
+    ///   no part of its own, payment, answer to a payment, timeout, time passing, however
+    ///   long, or session's end does, nor the watcher's abandoning it, which leaves it owed
+    ///   and holds its place (nothing tells the viewer of it). Whatever file is asked for,
+    ///   its own included: a retry is another request, and is held back as any other. Each
+    ///   ledger keeps its own, so requests for the seeder's other videos, as to other
+    ///   seeders, go at once;
     /// - [`Unsent::DueFirst`]: a refusal licenses a [`Viewer::due`] not yet made
     ///   ([`Viewer::refused`]), which comes first, whether or not it pays;
     /// - [`Unsent::NoSession`]: with neither, no session is open: no quote is taken since the
@@ -261,8 +271,10 @@ pub trait Viewer {
     /// sending included, and a stop as it was: it is no decision of what to pay.
     fn requested(&mut self, file: Sha256) -> Result<(), Unsent>;
 
-    /// What has arrived of `file` for this ledger ([`Served`]): what came on the transfer its
-    /// request for `file` started, on whichever transport (NFX-07 §3a). The same file come
+    /// What has arrived of `file` for this ledger ([`Served`]): what came on the transfer the
+    /// request for `file` now unanswered started, on whichever transport (NFX-07 §3a); what
+    /// comes later on an earlier request's transfer, even of the same file, is not this
+    /// call's. The same file come
     /// from another seeder, or for another of the seeder's videos, is not this ledger's to
     /// hear. The whole of it answers the unanswered request for `file`, which is served, and
     /// owed. Part of it answers nothing, and changes nothing. With no request unanswered for
@@ -276,8 +288,9 @@ pub trait Viewer {
     /// The seeder answered with `refuse` naming `file`: the unanswered request for `file` is
     /// refused. It is not owed, and if it was already paid for, that payment becomes credit.
     /// With no request unanswered for `file` that was sent on the open session (none was
-    /// sent, it was served, it asks for another file, or it was sent on an earlier session,
-    /// whose `refuse` cannot come on this one), or with no session open, it is no answer, and
+    /// sent, it was served, it asks for another file, or it was sent on an earlier session:
+    /// a `refuse` for it that comes on this one, as NFX-07 §3a says one may, answers
+    /// nothing), or with no session open, it is no answer, and
     /// changes nothing, and licenses nothing. It licenses the next [`Viewer::due`] on this
     /// ledger, and no other call, to pay ahead half the open session's window, rounded down,
     /// less the credit already held, that much and not merely at most: that `due` uses the
@@ -298,8 +311,8 @@ pub trait Viewer {
     /// the viewer's own cap: so for every payment, ahead after a refusal and at a session's
     /// end included, on whichever ledger and whatever came before), made
     /// once the unpaid count reaches half the open session's quoted window (whatever an
-    /// earlier session's or another video's was), rounded up, so a
-    /// payment in flight never stalls the seeder, or pays ahead after a refusal half the
+    /// earlier session's or another video's was), rounded up, so the seeder need not stall
+    /// while a payment is in flight, or pays ahead after a refusal half the
     /// window, rounded down, less the credit the ledger holds: what another video's ledger
     /// owes or holds counts for nothing. It pays ahead only as the first `due` after a
     /// refusal on this ledger's open session ([`Viewer::refused`]): if this call pays

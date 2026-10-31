@@ -88,8 +88,10 @@ pub struct Ack {
     pub spent_total: u64,
 }
 
-/// Seeder → watcher: the request for `file` under this session was refused, and not one
-/// byte of it was served (NFX-07 §2). An aborted transfer gets no `refuse`.
+/// Seeder → watcher: the watcher's request for `file` under this session was refused
+/// (NFX-07 §2). An honest seeder sends it in place of the file and serves not one byte of
+/// it; it answers the one request sent on this session for `file` and still unanswered,
+/// whatever part of the file came before it. An aborted transfer gets no `refuse`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refuse {
     /// The file's sha256, 64 lowercase hex characters.

@@ -14662,10 +14662,16 @@ fn held<V: Viewer>(v: &mut V, why: Unsent, what: &str) {
 /// again is answered again; a file whose sha256 differs from its own in any one byte answers
 /// nothing. A request a session's end carried over is answered by its own file whole, with
 /// no session open too, and by nothing else: not another file whole, with no session open or
-/// on the next session before any request there; not time and a timeout, at any span; nor a
-/// new session's quote showing fewer chunks served than requested. And a request goes only
-/// on an open session: before the first quote, after a refused `hello` or quote (one with a
-/// window under 2 among them) and between two sessions it is held back, and nothing changes.
+/// on the next session before any request there. Nor is any request answered by anything
+/// else whatever comes and whenever (`nothing_else_answers_a_request`): at each span from
+/// its sending, on its session or a later one, unpaid, paid for or beside its payment left
+/// unsettled, by part of its file, another file whole or a `refuse` naming it, a refused
+/// `hello`, a second quote, its own file asked for again (a retry, held back as any other
+/// request), timeouts in a row, a `due` or a `last_pay` and their answers, the session's end,
+/// a new session's quote (showing fewer chunks served than requested, which is honest,
+/// among them), or anything on another video's ledger. And a request goes only on an open
+/// session: before the first quote, after a refused `hello` or quote (one with a window
+/// under 2 among them) and between two sessions it is held back, and nothing changes.
 pub async fn a_viewer_sends_one_request_at_a_time<H: Harness>(h: &H) {
     let e = h.engine(1, 4, 1000);
     let mut s = open(h, &e, 1).await;
@@ -14980,40 +14986,9 @@ pub async fn a_viewer_sends_one_request_at_a_time<H: Harness>(h: &H) {
     assert!(s.admit(&h.chunk(2)), "within the window");
     v.fetch();
     close(h, s).await;
-    // Nor does time, then a timeout, at any span, no payment on the session; nor a new
-    // session's quote showing fewer chunks served than were requested, which is honest (at
-    // most the chunks requested and not refused: the seeder may not have seen the last
-    // request, NFX-07 §3a). Its own file, whole, then answers it.
-    for span in clock_spans(h) {
-        let mut v = h.viewer(1);
-        let quote = Quote {
-            price_per_chunk: 1,
-            mints: vec![h.mint()],
-            window: 4,
-            served: 0,
-            accepted_upto: 0,
-            spent_total: 0,
-        };
-        v.quote(&quote).expect("an honest quote is accepted");
-        let asked = v.request();
-        advance(h, Duration::from_secs(span)).await;
-        v.timeout().await;
-        held(
-            &mut v,
-            Unsent::Unanswered,
-            &format!("{span} s, then a timeout with no payment on the session"),
-        );
-        v.end();
-        v.quote(&quote)
-            .expect("a new session's quote showing fewer chunks served than requested is taken");
-        held(
-            &mut v,
-            Unsent::Unanswered,
-            "a new session's quote showing fewer chunks served than requested",
-        );
-        v.served(asked, Served::Whole);
-        v.fetch();
-    }
+    // Nor does anything else, whatever comes and whenever: at any span from its sending, on
+    // its session or a later one, unpaid or paid for, nor on another video's ledger.
+    nothing_else_answers_a_request(h).await;
     // A request goes only on an open session: with none it is held back, and nothing
     // changes. So before the first quote, after a `hello` refused or a quote refused (a
     // window under 2, which NFX-07 §2 forbids, among them), and between two sessions, its
@@ -15076,6 +15051,684 @@ const BETWEEN_A_REQUEST_AND_ITS_REFUSE: [&str; 7] = [
     "part of its file",
     "another file whole",
 ];
+
+/// What comes to a request in [`nothing_else_answers_a_request`]'s walks ([`WALKS`]): none
+/// of it answers the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Comes {
+    /// The clock moves on by the walk's span, one of [`clock_spans`].
+    Span,
+    /// Part of its own file.
+    Part,
+    /// The whole of another file, then a `refuse` naming it: one never asked for, then the
+    /// earlier request's.
+    OtherFiles,
+    /// A `hello` refused, with each code but `banned`.
+    HelloRefused,
+    /// A second quote on the open session.
+    SecondQuote,
+    /// Its own file asked for again: a retry is a request, held back as any other.
+    Retry,
+    /// [`IDLE_TIMEOUTS`] timeouts in a row, no payment on the session.
+    Timeouts,
+    /// A `due`, or (`LastPay`) a `last_pay`: with `Some`, it pays for every chunk
+    /// requested, and the payment is answered so; with `None`, it pays nothing (nothing owed
+    /// or held, or no session open).
+    Due(Option<Answer>),
+    LastPay(Option<Answer>),
+    /// The session's end.
+    End,
+    /// A new session's honest quote, taken ([`Shows`]).
+    Quote(Shows),
+    /// Everything that can come on another video's ledger of the same standing, made now
+    /// ([`on_another_video`]).
+    AnotherVideo,
+}
+
+/// How a payment in a walk ([`Comes`]) is answered: by the seeder's honest ack; by
+/// `mint-unavailable`, every proof coming back; or not before the session's end, which
+/// leaves it unsettled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Ack,
+    Unavailable,
+    Unsettled,
+}
+
+/// What a new session's honest quote in a walk ([`Comes::Quote`]) shows: the account as it
+/// stands; the request unseen, one chunk fewer served than requested (the seeder may not
+/// have seen it, NFX-07 §3a); or the payment the last session left unsettled, which it
+/// settles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shows {
+    Ledger,
+    Unseen,
+    Settled,
+}
+
+/// Timeouts in a row with no payment on the session ([`Comes::Timeouts`]): far more than
+/// any table brings in one state, so a watcher that counts them toward giving a request up
+/// is tried. One that counts to more is not.
+const IDLE_TIMEOUTS: u32 = 60;
+
+/// The walks of [`nothing_else_answers_a_request`]: what comes to a request, in turn. Its
+/// own session first, then the sessions after its end: paid for on its session, by a
+/// `due` its seeder answers `mint-unavailable` and then by one acked, or by a `last_pay`
+/// acked; carried over a session's end unpaid, then paid for on the next by a `last_pay`,
+/// answered so; carried over beside its own `last_pay` left unsettled, which the next
+/// session's quote settles; and carried over three sessions, unpaid.
+const WALKS: [(&str, &[Comes]); 5] = [
+    (
+        "paid for on its session by a due, then carried over",
+        &[
+            Comes::Span,
+            Comes::Part,
+            Comes::OtherFiles,
+            Comes::HelloRefused,
+            Comes::SecondQuote,
+            Comes::Retry,
+            Comes::Timeouts,
+            Comes::Due(Some(Answer::Unavailable)),
+            Comes::Due(Some(Answer::Ack)),
+            Comes::Timeouts,
+            Comes::Span,
+            Comes::Timeouts,
+            Comes::Due(None),
+            Comes::LastPay(None),
+            Comes::Part,
+            Comes::OtherFiles,
+            Comes::HelloRefused,
+            Comes::SecondQuote,
+            Comes::Retry,
+            Comes::AnotherVideo,
+            Comes::End,
+            Comes::Due(None),
+            Comes::LastPay(None),
+            Comes::Span,
+            Comes::Due(None),
+            Comes::LastPay(None),
+            Comes::Quote(Shows::Unseen),
+            Comes::Part,
+            Comes::OtherFiles,
+            Comes::HelloRefused,
+            Comes::SecondQuote,
+            Comes::Retry,
+            Comes::Timeouts,
+            Comes::Due(None),
+            Comes::LastPay(None),
+            Comes::AnotherVideo,
+            Comes::End,
+            Comes::Due(None),
+            Comes::LastPay(None),
+            Comes::Quote(Shows::Ledger),
+            Comes::End,
+            Comes::Quote(Shows::Ledger),
+            Comes::End,
+            Comes::Quote(Shows::Unseen),
+            Comes::End,
+        ],
+    ),
+    (
+        "paid for on its session by a last_pay, then carried over",
+        &[
+            Comes::LastPay(Some(Answer::Ack)),
+            Comes::Timeouts,
+            Comes::Span,
+            Comes::Timeouts,
+            Comes::Due(None),
+            Comes::HelloRefused,
+            Comes::SecondQuote,
+            Comes::Part,
+            Comes::End,
+            Comes::Due(None),
+            Comes::Span,
+            Comes::Due(None),
+            Comes::Quote(Shows::Unseen),
+            Comes::End,
+            Comes::Quote(Shows::Ledger),
+            Comes::End,
+        ],
+    ),
+    (
+        "carried over unpaid, then paid for on the next session",
+        &[
+            Comes::End,
+            Comes::Due(None),
+            Comes::LastPay(None),
+            Comes::Span,
+            Comes::Due(None),
+            Comes::Quote(Shows::Ledger),
+            Comes::Timeouts,
+            Comes::Span,
+            Comes::Timeouts,
+            Comes::Part,
+            Comes::OtherFiles,
+            Comes::HelloRefused,
+            Comes::SecondQuote,
+            Comes::Retry,
+            Comes::LastPay(Some(Answer::Unavailable)),
+            Comes::LastPay(Some(Answer::Ack)),
+            Comes::Timeouts,
+            Comes::Span,
+            Comes::Timeouts,
+            Comes::Due(None),
+            Comes::HelloRefused,
+            Comes::SecondQuote,
+            Comes::Part,
+            Comes::OtherFiles,
+            Comes::Retry,
+            Comes::AnotherVideo,
+            Comes::End,
+            Comes::Due(None),
+            Comes::Span,
+            Comes::Due(None),
+            Comes::Quote(Shows::Ledger),
+            Comes::End,
+            Comes::Quote(Shows::Unseen),
+        ],
+    ),
+    (
+        "carried over beside its payment, left unsettled",
+        &[
+            Comes::Span,
+            Comes::LastPay(Some(Answer::Unsettled)),
+            Comes::End,
+            Comes::Due(None),
+            Comes::LastPay(None),
+            Comes::Quote(Shows::Settled),
+            Comes::Timeouts,
+            Comes::Part,
+            Comes::OtherFiles,
+            Comes::End,
+            Comes::Quote(Shows::Ledger),
+        ],
+    ),
+    (
+        "carried over three sessions, unpaid",
+        &[
+            Comes::Span,
+            Comes::End,
+            Comes::Quote(Shows::Ledger),
+            Comes::End,
+            Comes::Quote(Shows::Ledger),
+            Comes::End,
+            Comes::Quote(Shows::Unseen),
+            Comes::Timeouts,
+            Comes::End,
+        ],
+    ),
+];
+
+/// A ledger in [`nothing_else_answers_a_request`] as an honest seeder's account shows it, at
+/// price 1 and window 2: the chunks requested and not refused, those acked and the sats
+/// spent, and a payment a closed session left unsettled.
+#[derive(Default)]
+struct Account {
+    requested: u64,
+    acked: u64,
+    spent: u64,
+    unsettled: Option<Pay>,
+}
+
+impl Account {
+    /// A new session's honest quote, showing what `shows` says.
+    fn quote<H: Harness>(&self, h: &H, shows: Shows) -> Quote {
+        let mut quote = Quote {
+            price_per_chunk: 1,
+            mints: vec![h.mint()],
+            window: 2,
+            served: self.requested,
+            accepted_upto: self.acked,
+            spent_total: self.spent,
+        };
+        match shows {
+            Shows::Ledger => {}
+            Shows::Unseen => quote.served = self.requested.saturating_sub(1),
+            Shows::Settled => {
+                if let Some(pay) = &self.unsettled {
+                    quote.accepted_upto = pay.upto_chunk;
+                    quote.spent_total = self.spent + (pay.upto_chunk - self.acked);
+                }
+            }
+        }
+        quote
+    }
+
+    /// The seeder's honest ack of `pay`, which the account then holds.
+    fn ack(&mut self, pay: &Pay) -> Ack {
+        self.spent += pay.upto_chunk - self.acked;
+        self.acked = pay.upto_chunk;
+        Ack {
+            accepted_upto: self.acked,
+            spent_total: self.spent,
+        }
+    }
+}
+
+/// A request is answered only by its own file whole, or by its own `refuse` on its session,
+/// whatever comes and whenever (NFX-07 §3a; `Viewer::requested`): a watcher that took
+/// anything else for its answer, or gave it up after a time or a count of its own, would
+/// send the next request, and a seeder that serves nothing would take a chunk each time,
+/// where it gets no other request for the video. For each span of [`clock_spans`], each walk
+/// of [`WALKS`] takes a fresh watcher (window 2, price 1, its quotes those an honest
+/// seeder's account would show, built by hand) that has one request served, sends another,
+/// and brings it what the walk says: on its session, then on the sessions after its end;
+/// unpaid, paid for or left unsettled beside it; at every span from its sending, the clock
+/// moving on by the span between its inputs; and every input of another video's ledger of
+/// the same standing ([`on_another_video`]). The hold is checked after each input, and
+/// between a payment and its answer. Its own file whole then answers it. At each span too, a
+/// request at a window of 4, its one chunk owed below the due point, is brought a `due` that
+/// pays nothing, a timeout, its session's end and a new session's quote showing it unseen,
+/// then that `due` and timeout again.
+async fn nothing_else_answers_a_request<H: Harness>(h: &H) {
+    let unavailable = Rej {
+        code: RejCode::MintUnavailable,
+        detail: None,
+    };
+    for span in clock_spans(h) {
+        for (walk, comes) in WALKS {
+            let mut v = h.viewer(1);
+            let mut account = Account::default();
+            v.quote(&account.quote(h, Shows::Ledger))
+                .expect("an honest quote is accepted");
+            let earlier = v.request();
+            v.served(earlier, Served::Whole);
+            let asked = v.request();
+            account.requested = 2;
+            let (mut age, mut ends, mut open) = (0, 0, true);
+            for &step in comes {
+                let prefix = format!(
+                    "a request {walk} (spans of {span} s): {age} s after it was sent, {}, {}",
+                    if account.acked >= account.requested {
+                        "paid for"
+                    } else {
+                        "unpaid"
+                    },
+                    match (ends, open) {
+                        (0, _) => "on its session".to_owned(),
+                        (1, true) => "carried over a session's end".to_owned(),
+                        (1, false) => "carried over a session's end, no session open".to_owned(),
+                        (n, true) => format!("carried over {n} sessions' ends"),
+                        (n, false) => format!("carried over {n} sessions' ends, no session open"),
+                    }
+                );
+                let what = |input: &str| format!("{prefix}, then {input}");
+                match step {
+                    Comes::Span => {
+                        advance(h, Duration::from_secs(span)).await;
+                        age += span;
+                        held(&mut v, Unsent::Unanswered, &what(&format!("{span} s more")));
+                    }
+                    Comes::Part => {
+                        v.served(asked, Served::Part);
+                        held(&mut v, Unsent::Unanswered, &what("part of its file"));
+                    }
+                    Comes::OtherFiles => {
+                        for (other, which) in [
+                            (NEVER_ASKED, "one never asked for"),
+                            (earlier, "the earlier request's"),
+                        ] {
+                            v.served(other, Served::Whole);
+                            held(
+                                &mut v,
+                                Unsent::Unanswered,
+                                &what(&format!("another file whole, {which}")),
+                            );
+                            v.refused(other);
+                            held(
+                                &mut v,
+                                Unsent::Unanswered,
+                                &what(&format!("a refuse naming another file, {which}")),
+                            );
+                        }
+                    }
+                    Comes::HelloRefused => {
+                        for code in hello_refusal_codes() {
+                            let name = code.as_str().to_owned();
+                            v.hello_refused(&Rej { code, detail: None });
+                            held(
+                                &mut v,
+                                Unsent::Unanswered,
+                                &what(&format!("a hello refused {name}")),
+                            );
+                        }
+                    }
+                    Comes::SecondQuote => {
+                        assert!(
+                            v.quote(&account.quote(h, Shows::Ledger)).is_err(),
+                            "{prefix}: one quote per session, a second is refused"
+                        );
+                        held(&mut v, Unsent::Unanswered, &what("a second quote"));
+                    }
+                    Comes::Retry => assert_eq!(
+                        v.requested(asked),
+                        Err(Unsent::Unanswered),
+                        "{}: a retry is a request, held back while its own is unanswered",
+                        what("its own file asked for again")
+                    ),
+                    Comes::Timeouts => {
+                        for i in 1..=IDLE_TIMEOUTS {
+                            v.timeout().await;
+                            held(
+                                &mut v,
+                                Unsent::Unanswered,
+                                &what(&format!(
+                                    "a timeout with no payment on the session, {i} of \
+                                     {IDLE_TIMEOUTS} in a row"
+                                )),
+                            );
+                        }
+                    }
+                    Comes::Due(answer) | Comes::LastPay(answer) => {
+                        let (pay, name) = if matches!(step, Comes::Due(_)) {
+                            (v.due().await.expect("due answers"), "a due")
+                        } else {
+                            (v.last_pay().await.expect("last_pay answers"), "a last_pay")
+                        };
+                        let Some(pay) = pay else {
+                            held(
+                                &mut v,
+                                Unsent::Unanswered,
+                                &what(&format!("{name} that pays nothing")),
+                            );
+                            assert!(
+                                answer.is_none(),
+                                "{prefix}: {name} pays for the chunks owed on an open session"
+                            );
+                            continue;
+                        };
+                        held(
+                            &mut v,
+                            Unsent::Unanswered,
+                            &what(&format!("{name} that pays, its payment in flight")),
+                        );
+                        assert!(
+                            answer.is_some() && pay.upto_chunk == account.requested,
+                            "{prefix}: {name} pays for every chunk requested and nothing ahead, \
+                             and only with chunks owed on an open session: {}",
+                            pay.upto_chunk
+                        );
+                        match answer {
+                            Some(Answer::Ack) => {
+                                v.ack(&account.ack(&pay))
+                                    .expect("the seeder's honest ack is taken");
+                                held(
+                                    &mut v,
+                                    Unsent::Unanswered,
+                                    &what(&format!("the ack of {name}'s payment")),
+                                );
+                            }
+                            Some(Answer::Unavailable) => {
+                                v.rej(&unavailable).await;
+                                held(
+                                    &mut v,
+                                    Unsent::Unanswered,
+                                    &what(&format!("mint-unavailable to {name}'s payment")),
+                                );
+                            }
+                            _ => account.unsettled = Some(pay),
+                        }
+                    }
+                    Comes::End => {
+                        v.end();
+                        (ends, open) = (ends + 1, false);
+                        held(&mut v, Unsent::Unanswered, &what("the session's end"));
+                    }
+                    Comes::Quote(shows) => {
+                        v.quote(&account.quote(h, shows))
+                            .expect("a new session's honest quote is taken");
+                        if shows == Shows::Settled {
+                            let pay = account
+                                .unsettled
+                                .take()
+                                .expect("the last session left a payment unsettled");
+                            account.ack(&pay);
+                        }
+                        open = true;
+                        held(
+                            &mut v,
+                            Unsent::Unanswered,
+                            &what(match shows {
+                                Shows::Ledger => "a new session's quote",
+                                Shows::Unseen => "a new session's quote showing it unseen",
+                                Shows::Settled => "a new session's quote that settles its payment",
+                            }),
+                        );
+                    }
+                    Comes::AnotherVideo => on_another_video(h, &mut v, &prefix).await,
+                }
+            }
+            v.served(asked, Served::Whole);
+            if open {
+                v.fetch();
+            } else {
+                held(
+                    &mut v,
+                    Unsent::NoSession,
+                    &format!(
+                        "a request {walk} (spans of {span} s): its own file whole, no \
+                         session open: answered"
+                    ),
+                );
+            }
+        }
+        // At a window of 4, one chunk owed is below the due point: a `due` then pays nothing
+        // with a chunk owed, and that answers nothing either; nor does a timeout with no
+        // payment on the session, the session's end, or a new session's quote showing the
+        // request unseen.
+        let quote = Quote {
+            price_per_chunk: 1,
+            mints: vec![h.mint()],
+            window: 4,
+            served: 0,
+            accepted_upto: 0,
+            spent_total: 0,
+        };
+        let mut v = h.viewer(1);
+        v.quote(&quote).expect("an honest quote is accepted");
+        let asked = v.request();
+        advance(h, Duration::from_secs(span)).await;
+        let prefix =
+            format!("a request at a window of 4, one chunk owed, {span} s after it was sent");
+        for (session, name) in [(1, "on its session"), (2, "carried over a session's end")] {
+            assert!(
+                v.due().await.expect("due answers").is_none(),
+                "{prefix}, {name}: below the due point, a due pays nothing"
+            );
+            held(
+                &mut v,
+                Unsent::Unanswered,
+                &format!("{prefix}, {name}, then a due that pays nothing"),
+            );
+            v.timeout().await;
+            held(
+                &mut v,
+                Unsent::Unanswered,
+                &format!("{prefix}, {name}, then a timeout with no payment on the session"),
+            );
+            if session == 1 {
+                v.end();
+                held(
+                    &mut v,
+                    Unsent::Unanswered,
+                    &format!("{prefix}, {name}, then the session's end"),
+                );
+                v.quote(&quote).expect(
+                    "a new session's quote showing fewer chunks served than requested is taken",
+                );
+                held(
+                    &mut v,
+                    Unsent::Unanswered,
+                    &format!("{prefix}, then a new session's quote showing it unseen"),
+                );
+            }
+        }
+        v.served(asked, Served::Whole);
+        v.fetch();
+    }
+}
+
+/// Everything that can come on another video's ledger of `v`'s standing, made now, `v`'s
+/// request held back after each, in [`nothing_else_answers_a_request`]: making it; a
+/// `hello` refused, with each code but `banned`; a quote refused for its price, a `window`
+/// over the ceiling or under 2, or its mints; its honest quote, and a second; a request,
+/// part of its file, another file whole and a `refuse` naming it, its own file whole; a
+/// request refused, and the `due` that pays ahead after it, acked; timeouts with no payment;
+/// two requests served, a `due` its seeder answers `mint-unavailable`, then one acked; a
+/// `last_pay`, acked; a `due` and a `last_pay` paying nothing; its session's end, a `due`
+/// and a `last_pay` with no session open; and a new session's honest quote. Nothing on
+/// another video's ledger answers a request (NFX-07 §3a; `Viewer::requested`): its
+/// payments, `refuse`s and files are its own.
+async fn on_another_video<H: Harness>(h: &H, v: &mut H::Viewer, prefix: &str) {
+    let what = |input: &str| format!("{prefix}, then on another video's ledger {input}");
+    let mut o = v.sibling();
+    held(v, Unsent::Unanswered, &what("made now"));
+    for code in hello_refusal_codes() {
+        let name = code.as_str().to_owned();
+        o.hello_refused(&Rej { code, detail: None });
+        held(
+            v,
+            Unsent::Unanswered,
+            &what(&format!("a hello refused {name}")),
+        );
+    }
+    let mut account = Account::default();
+    for why in [
+        "its price",
+        "a window over the ceiling",
+        "a window under 2",
+        "its mints",
+    ] {
+        let mut quote = account.quote(h, Shows::Ledger);
+        match why {
+            "its price" => quote.price_per_chunk = 2,
+            "a window over the ceiling" => quote.window = h.window_ceiling() + 1,
+            "a window under 2" => quote.window = 1,
+            _ => quote.mints = vec![format!("{}/", h.mint())],
+        }
+        assert!(
+            o.quote(&quote).is_err(),
+            "{prefix}: another video's quote refused for {why}"
+        );
+        held(
+            v,
+            Unsent::Unanswered,
+            &what(&format!("a quote refused for {why}")),
+        );
+    }
+    o.quote(&account.quote(h, Shows::Ledger))
+        .expect("another video's honest quote is accepted");
+    held(v, Unsent::Unanswered, &what("its honest quote"));
+    assert!(
+        o.quote(&account.quote(h, Shows::Ledger)).is_err(),
+        "{prefix}: one quote per session on another video's ledger too"
+    );
+    held(v, Unsent::Unanswered, &what("a second quote"));
+    let file = o.request();
+    held(v, Unsent::Unanswered, &what("a request, sent"));
+    o.served(file, Served::Part);
+    held(v, Unsent::Unanswered, &what("part of its file"));
+    o.served(NEVER_ASKED, Served::Whole);
+    held(v, Unsent::Unanswered, &what("another file whole"));
+    o.refused(NEVER_ASKED);
+    held(v, Unsent::Unanswered, &what("a refuse naming another file"));
+    o.served(file, Served::Whole);
+    account.requested += 1;
+    held(v, Unsent::Unanswered, &what("its request's file whole"));
+    o.refused_request();
+    held(v, Unsent::Unanswered, &what("a request refused"));
+    let ahead = o
+        .due()
+        .await
+        .expect("due answers on another video's ledger")
+        .expect("refused, it pays ahead");
+    held(
+        v,
+        Unsent::Unanswered,
+        &what("a due paying ahead after the refusal"),
+    );
+    o.ack(&account.ack(&ahead))
+        .expect("the seeder's honest ack is taken on another video's ledger");
+    held(v, Unsent::Unanswered, &what("the ack of its payment ahead"));
+    for i in 1..=IDLE_TIMEOUTS {
+        o.timeout().await;
+        held(
+            v,
+            Unsent::Unanswered,
+            &what(&format!(
+                "a timeout with no payment on its session, {i} of {IDLE_TIMEOUTS} in a row"
+            )),
+        );
+    }
+    for _ in 0..2 {
+        o.fetch();
+        account.requested += 1;
+        held(v, Unsent::Unanswered, &what("a request served whole"));
+    }
+    let unavailable = Rej {
+        code: RejCode::MintUnavailable,
+        detail: None,
+    };
+    for answer in [Answer::Unavailable, Answer::Ack] {
+        let pay = o
+            .due()
+            .await
+            .expect("due answers on another video's ledger")
+            .expect("a chunk owed, it pays");
+        held(v, Unsent::Unanswered, &what("a due that pays"));
+        if answer == Answer::Ack {
+            o.ack(&account.ack(&pay))
+                .expect("the seeder's honest ack is taken on another video's ledger");
+            held(v, Unsent::Unanswered, &what("the ack of its payment"));
+        } else {
+            o.rej(&unavailable).await;
+            held(
+                v,
+                Unsent::Unanswered,
+                &what("mint-unavailable to its payment"),
+            );
+        }
+    }
+    o.fetch();
+    account.requested += 1;
+    let tail = o
+        .last_pay()
+        .await
+        .expect("last_pay answers on another video's ledger")
+        .expect("a chunk owed, it pays");
+    held(v, Unsent::Unanswered, &what("a last_pay that pays"));
+    o.ack(&account.ack(&tail))
+        .expect("the seeder's honest ack is taken on another video's ledger");
+    held(v, Unsent::Unanswered, &what("the ack of its last_pay"));
+    for open in [true, false] {
+        let when = if open { "" } else { ", no session open" };
+        assert!(
+            o.due().await.expect("due answers").is_none(),
+            "{prefix}: nothing owed on another video's ledger, nothing is due"
+        );
+        held(
+            v,
+            Unsent::Unanswered,
+            &what(&format!("a due that pays nothing{when}")),
+        );
+        assert!(
+            o.last_pay().await.expect("last_pay answers").is_none(),
+            "{prefix}: nothing owed on another video's ledger, nothing is paid"
+        );
+        held(
+            v,
+            Unsent::Unanswered,
+            &what(&format!("a last_pay that pays nothing{when}")),
+        );
+        if open {
+            o.end();
+            held(v, Unsent::Unanswered, &what("its session's end"));
+        }
+    }
+    o.quote(&account.quote(h, Shows::Ledger))
+        .expect("another video's new session's honest quote is taken");
+    held(v, Unsent::Unanswered, &what("a new session's quote"));
+}
 
 /// A viewer pays ahead only right after a refusal. It checks the seeder's ack of that
 /// payment like any other, takes the honest one, and holding the credit it answers `due`
@@ -15143,8 +15796,11 @@ pub async fn a_viewer_pays_ahead_only_after_a_refusal<H: Harness>(h: &H) {
 
 /// Only a refused request lets the watcher pay ahead: after anything else between its
 /// payments ([`BETWEEN_ROUNDS`], a refused request aside), it pays for the chunks it
-/// requested, and nothing ahead. Nor does a ledger made for another video start out paying
-/// ahead, even when a request of the video it was made from was refused.
+/// requested, and nothing ahead. Nor does a quote it refuses (for its price, a `window` over
+/// its ceiling or under 2, or its mints) before the seeder's honest quote on the same
+/// connection, which opens the session: its first `due` pays for the chunks requested. Nor
+/// does a ledger made for another video start out paying ahead, even when a request of the
+/// video it was made from was refused.
 async fn nothing_but_a_refused_request_lets_it_pay_ahead<H: Harness>(h: &H) {
     for event in BETWEEN_ROUNDS {
         if matches!(
@@ -15169,6 +15825,40 @@ async fn nothing_but_a_refused_request_lets_it_pay_ahead<H: Harness>(h: &H) {
             pay.upto_chunk, 2,
             "{event} is no refused request: it pays for the chunks it requested, and nothing \
              ahead"
+        );
+        close(h, s).await;
+    }
+    for why in [
+        "its price",
+        "a window over its ceiling",
+        "a window under 2",
+        "its mints",
+    ] {
+        let e = h.engine(1, 4, 1000);
+        let s = open(h, &e, 1).await;
+        let mut v = h.viewer(1);
+        let mut q = s.quote().clone();
+        match why {
+            "its price" => q.price_per_chunk = 2,
+            "a window over its ceiling" => q.window = h.window_ceiling() + 1,
+            "a window under 2" => q.window = 1,
+            _ => q.mints = vec![format!("{}/", h.mint())],
+        }
+        assert!(v.quote(&q).is_err(), "a quote refused for {why}");
+        v.quote(s.quote())
+            .expect("the seeder's honest quote, on the same connection, is accepted");
+        v.fetch();
+        v.fetch();
+        let pay = v
+            .due()
+            .await
+            .expect("due answers with two chunks requested")
+            .expect("due");
+        assert_eq!(
+            pay.upto_chunk, 2,
+            "a quote refused for {why}, then the honest one on the same connection: the refused \
+             quote is no refused request, so the first due pays for the chunks requested, and \
+             nothing ahead"
         );
         close(h, s).await;
     }
@@ -18216,6 +18906,7 @@ async fn a_refused_quote_settles_nothing<H: Harness>(h: &H) {
         for why in [
             "for its price",
             "for its window",
+            "for its window under 2",
             "for its mints",
             "as a second quote",
         ] {
@@ -18246,6 +18937,7 @@ async fn a_refused_quote_settles_nothing<H: Harness>(h: &H) {
             match why {
                 "for its price" => claims.price_per_chunk = 2,
                 "for its window" => claims.window = h.window_ceiling() + 1,
+                "for its window under 2" => claims.window = 1,
                 "for its mints" => claims.mints = vec![format!("{}/", h.mint())],
                 _ => v
                     .quote(s.quote())
@@ -18556,10 +19248,11 @@ async fn a_seeder_that_kept_a_payment_takes_no_more_with_time<H: Harness>(h: &H)
 
 /// What can come between a seeder's rounds, for [`nothing_else_settles_what_it_waits_on`]:
 /// none of it settles anything.
-const BETWEEN_ROUNDS: [&str; 9] = [
+const BETWEEN_ROUNDS: [&str; 10] = [
     "the session's end",
     "a quote over its price cap",
     "a quote with a window over its ceiling",
+    "a quote with a window under 2",
     "a quote naming no mint it holds",
     "a second quote on the open session",
     "a refused request",
@@ -18589,9 +19282,10 @@ fn two_more_after<V: Viewer>(v: &mut V, event: &str) {
 /// What can come between a seeder's rounds on a ledger made that round for video 1, while
 /// the payment waits on video 0's: a quote refused or taken there settles nothing of video
 /// 0's.
-const ON_ANOTHER_VIDEO: [&str; 5] = [
+const ON_ANOTHER_VIDEO: [&str; 6] = [
     "another video's quote over its price cap",
     "another video's quote with a window over its ceiling",
+    "another video's quote with a window under 2",
     "another video's quote naming no mint it holds",
     "another video's honest quote",
     "another video's second quote",
@@ -18646,6 +19340,7 @@ async fn bring_about<H: Harness>(
                 "another video's quote with a window over its ceiling" => {
                     q.window = h.window_ceiling() + 1;
                 }
+                "another video's quote with a window under 2" => q.window = 1,
                 "another video's quote naming no mint it holds" => {
                     q.mints = vec![format!("{}/", h.mint())];
                 }
@@ -18715,6 +19410,7 @@ async fn bring_about<H: Harness>(
             match event {
                 "a quote over its price cap" => q.price_per_chunk = 2,
                 "a quote with a window over its ceiling" => q.window = h.window_ceiling() + 1,
+                "a quote with a window under 2" => q.window = 1,
                 _ => q.mints = vec![format!("{}/", h.mint())],
             }
             assert!(v.quote(&q).is_err(), "{event}: refused");
@@ -19270,7 +19966,7 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
 
     // Nor does a quote refused for its price, its window or its mints: it is no new
     // session's accepted quote, on another video either.
-    for why in ["its price", "its window", "its mints"] {
+    for why in ["its price", "its window", "its window under 2", "its mints"] {
         let e = h.engine(1, 4, 1000);
         let s0 = open_on(h, &e, 1, 0).await;
         let mut v0 = h.viewer(1);
@@ -19291,6 +19987,7 @@ pub async fn an_unavailable_seeder_gets_three_tries_a_session<H: Harness>(h: &H)
         match why {
             "its price" => q.price_per_chunk = 2,
             "its window" => q.window = h.window_ceiling() + 1,
+            "its window under 2" => q.window = 1,
             _ => q.mints = vec![format!("{}/", h.mint())],
         }
         assert!(v1.quote(&q).is_err(), "video 1's quote refused for {why}");
@@ -22066,8 +22763,9 @@ async fn a_new_session_leaves_the_standing_stopped<H: Harness>(h: &H) {
         (2, 2),
         "the seeder's quote shows the ledger"
     );
-    // Taken or refused, the quote undoes nothing.
-    let _ = v.quote(s.quote());
+    // Taken, the quote undoes nothing.
+    v.quote(s.quote())
+        .expect("an honest quote is taken, stopped or not");
     assert!(
         v.stopped(),
         "a new session's honest quote leaves the standing stopped"
@@ -22105,7 +22803,9 @@ async fn a_new_session_leaves_the_standing_stopped<H: Harness>(h: &H) {
         other.end();
     }
     let mut s1 = open_on(h, &e, 1, 1).await;
-    let _ = other.quote(s1.quote());
+    other
+        .quote(s1.quote())
+        .expect("an honest quote is taken, stopped or not");
     for i in 0..2 {
         assert!(s1.admit(&h.chunk_of(1, i)));
         other.fetch();
@@ -22559,6 +23259,7 @@ fn input_named(event: &str) -> Input {
             (Does::QuoteRefused(Why::Price), OTHER, Sess::Never)
         }
         "another video's quote with a window over its ceiling"
+        | "another video's quote with a window under 2"
         | "video 1's quote with a window over its ceiling" => {
             (Does::QuoteRefused(Why::Window), OTHER, Sess::Never)
         }

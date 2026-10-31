@@ -58,9 +58,12 @@ pub const WINDOW_CEILING: u64 = MAX_WINDOW;
 pub const UNAVAILABLE_BUDGET: u32 = 3;
 /// The seeder answers every `pay` within this (NFX-07 §3).
 pub const SEEDER_DEADLINE: Duration = Duration::from_secs(60);
-/// How long a watcher waits for an answer before reclaiming (NFX-07 §3a): the `pay`'s
-/// delivery, the seeder's deadline and the answer's delivery, 60 s each.
-pub const ANSWER_WAIT: Duration = Duration::from_secs(180);
+/// How long a watcher waits for the answer to a payment before reclaiming it (NFX-07 §3a):
+/// the `pay`'s delivery, the seeder's deadline and the answer's delivery, 60 s each. It is a
+/// payment's wait only: a request has none. Its file whole, or its `refuse` on its session,
+/// answers it however long that takes, and nothing else does, time included
+/// ([`Viewer::requested`]).
+pub const PAY_ANSWER_WAIT: Duration = Duration::from_secs(180);
 /// The longest `debt_ttl` a seeder accepts (NFX-07 §3).
 pub const MAX_DEBT_TTL: Duration = Duration::from_secs(24 * 3600);
 /// The longest `account_ttl` and `ban_ttl` a seeder accepts (NFX-07 §3).
@@ -7520,6 +7523,129 @@ pub enum ViewerFlaw {
     LateTimeoutAnswers,
     /// The same, 600 s or more after the request.
     LongTimeoutAnswers,
+    /// Gives up a request 180 s or more without its file as any ack comes, taken or not.
+    LateAckGivesUp,
+    /// Takes a `due` for the answer to a request already paid for (`accepted_upto` at or
+    /// past the chunks requested).
+    DueAnswersPaidFor,
+    /// Takes a session's end, once the session is let go, for the answer to a request
+    /// already paid for: it is over with its session.
+    SessionOverAnswersPaidFor,
+    /// Gives up a request 180 s or more without its file as a `hello` is refused.
+    LateHelloRefusedGivesUp,
+    /// Takes a new session's quote showing fewer chunks served than requested for the answer
+    /// to a request already paid for: the seeder never saw it, so it is over.
+    LowQuoteAnswersPaidFor,
+    /// Gives up a request 180 s or more without its file as another file comes whole.
+    LateOtherFileGivesUp,
+    /// Gives up a transfer still trickling 180 s after its request: part of its own file
+    /// then answers it.
+    LatePartGivesUp,
+    /// Gives up a request 180 s or more without its file as a `refuse` naming another
+    /// file comes.
+    LateOtherRefuseGivesUp,
+    /// Gives up a request 180 s or more without its file as a `rej` comes.
+    LateRejGivesUp,
+    /// Sends a retry: the unanswered request's own file, asked for again, goes and is owed
+    /// again, where it is a request held back as any other.
+    RetryOfUnansweredSent,
+    /// Gives up a request 180 s or more without its file as a second quote comes on the
+    /// open session.
+    LateSecondQuoteGivesUp,
+    /// Takes a timeout 180 s or more after the request for the answer to a request already
+    /// paid for.
+    LateTimeoutAnswersPaidFor,
+    /// Forgives a payment found spent, awaiting a quote, on a quote it refuses for its
+    /// `window` under 2 alone (as [`ViewerFlaw::WindowRefusalForgivesLost`] on that
+    /// refusal only).
+    UnderTwoRefusalForgivesLost,
+    /// Undoes a stop on a quote it refuses for its `window` under 2 alone.
+    UnderTwoRefusalClearsStop,
+    /// Takes an ack it takes, on the next session, for the answer to a request a session's
+    /// end carried over.
+    AckAnswersCarriedOver,
+    /// Takes an ack it takes 180 s or more after the request for the request's answer.
+    LateAckTakenAnswers,
+    /// Takes a `due` on the next session for the answer to a request a session's end
+    /// carried over.
+    DueAnswersCarriedOver,
+    /// Takes a `due` on an open session 180 s or more after the request, the standing
+    /// holding no payment (none in flight, unsettled, being reclaimed or awaiting a quote)
+    /// and not stopped, for the request's answer.
+    LateDueAnswersNothingHeld,
+    /// Takes the next session's end for the answer to a request a session's end carried
+    /// over.
+    EndAnswersCarriedOver,
+    /// Takes a session's end for the answer to a request already paid for.
+    EndAnswersPaidFor,
+    /// Takes a `hello` refused on the next session for the answer to a request a session's
+    /// end carried over.
+    HelloRefusedAnswersCarriedOver,
+    /// Takes a `last_pay` on the next session for the answer to a request a session's end
+    /// carried over.
+    LastPayAnswersCarriedOver,
+    /// Takes a `last_pay` on an open session 180 s or more after the request, the standing
+    /// holding no payment and not stopped, for the request's answer.
+    LateLastPayAnswersNothingHeld,
+    /// Takes a `due` with no session open, 180 s or more after the request and no payment
+    /// unsettled, for the request's answer.
+    LateDueWithNoSessionAnswers,
+    /// Takes part of its own file, come on the next session, for the answer to a request a
+    /// session's end carried over.
+    PartAnswersCarriedOver,
+    /// Takes part of its own file, come 180 s or more after the request, for its answer.
+    LatePartAnswers,
+    /// Takes a new session's quote for the answer to a request already paid for.
+    QuoteAnswersPaidFor,
+    /// Takes a new session's quote for the answer to a request sent two sessions or more
+    /// before.
+    QuoteAnswersTwoEndsOn,
+    /// Takes a `rej` on the next session for the answer to a request a session's end carried
+    /// over.
+    RejAnswersCarriedOver,
+    /// Takes the second timeout with no payment since the request for its answer.
+    SecondIdleTimeoutAnswers,
+    /// Takes a second quote on the next session for the answer to a request a session's end
+    /// carried over.
+    SecondQuoteAnswersCarriedOver,
+    /// Takes a timeout on the next session for the answer to a request a session's end
+    /// carried over.
+    TimeoutAnswersCarriedOver,
+    /// Takes a timeout for the answer to a request already paid for.
+    TimeoutAnswersPaidFor,
+    /// Gives up a request 180 s or more without its file as any message of the seeder's on
+    /// the session comes that is not its answer: part of a file or another whole, a `refuse`
+    /// naming another file, an ack, a `rej`, a second quote.
+    SeederMessageGivesUp,
+    /// Gives up a request 180 s or more without its file as a `due` comes while the
+    /// standing's one place for a payment in flight is free.
+    LateDueGivesUpSlotFree,
+    /// Gives up a request 180 s or more without its file as a `due` on an open session pays
+    /// nothing with chunks owed and no payment of the ledger's pending: below the due point,
+    /// at a window of 4 or more.
+    LateDueBelowDuePointGivesUp,
+    /// Drops an incomplete reclaim on a quote it refuses for its `window` under 2 alone (as
+    /// [`ViewerFlaw::WindowRefusalDropsReclaim`] on that refusal only).
+    UnderTwoRefusalDropsReclaim,
+    /// Frees the payment slot on that refusal alone (as
+    /// [`ViewerFlaw::WindowRefusalFreesSlot`]).
+    UnderTwoRefusalFreesSlot,
+    /// Settles what the quote shows on that refusal alone (as
+    /// [`ViewerFlaw::WindowRefusalSettles`]).
+    UnderTwoRefusalSettles,
+    /// Restores the `mint-unavailable` tries on that refusal alone (as
+    /// [`ViewerFlaw::WindowRefusalRestoresTries`]).
+    UnderTwoRefusalRestoresTries,
+    /// Takes that refusal alone for a refused request (as
+    /// [`ViewerFlaw::WindowRefusalPaysAhead`] on it): the session the connection then opens
+    /// pays ahead, the licence ending with a session's end as a refusal's does.
+    UnderTwoRefusalPaysAhead,
+    /// Keeps every ledger's unanswered request, with when it was sent, in the standing its
+    /// ledgers share, and sweeps those unanswered 180 s or more as a control message of the
+    /// seeder's comes on another video's ledger (a `refuse`, an ack, a `rej`, a refused
+    /// `hello`, a second quote; not a file's bytes), each then taken for answered on its own
+    /// ledger.
+    OtherVideoSweepsLateRequest,
 }
 
 /// What a stopped standing keeps, for the defects that undo a stop on one input only while
@@ -7640,6 +7766,20 @@ enum Waits {
 }
 
 impl ViewerFlaw {
+    /// The registered window refusal's defect a defect plants on the refusal of a `window`
+    /// under 2 alone: it acts as that one while the viewer refuses such a quote, and is
+    /// honest at a window over the ceiling.
+    fn on_under_two_alone(self) -> Option<Self> {
+        Some(match self {
+            Self::UnderTwoRefusalDropsReclaim => Self::WindowRefusalDropsReclaim,
+            Self::UnderTwoRefusalFreesSlot => Self::WindowRefusalFreesSlot,
+            Self::UnderTwoRefusalSettles => Self::WindowRefusalSettles,
+            Self::UnderTwoRefusalRestoresTries => Self::WindowRefusalRestoresTries,
+            Self::UnderTwoRefusalPaysAhead => Self::WindowRefusalPaysAhead,
+            _ => return None,
+        })
+    }
+
     /// The history a defect is planted on, and what it does wrong with the next payment.
     fn past_slip(self) -> Option<(Whose, Past, PaySlip)> {
         Some(match self {
@@ -13933,6 +14073,11 @@ struct Standing {
     /// Requests unanswered on every ledger ([`ViewerFlaw::RequestHeldByOtherVideo`] only:
     /// each ledger keeps one of its own).
     unanswered_all: u64,
+    /// Each ledger's unanswered request, by when it was sent, and the ledgers whose request
+    /// another's input swept ([`ViewerFlaw::OtherVideoSweepsLateRequest`] only: nothing on
+    /// another video's ledger answers a request).
+    request_sent_at: Vec<(u64, u64)>,
+    swept: Vec<u64>,
 }
 
 /// An honest viewer's ledger with one seeder for one video, holding tokens from one mint
@@ -14019,6 +14164,12 @@ pub struct MockViewer {
     /// The price the payment was made at that this session's quote settled
     /// ([`ViewerFlaw::PriceOfSettledPayment`] only: the price is the session's quote's).
     settled_price: Option<u64>,
+    /// Sessions ended since the last request was sent ([`ViewerFlaw::QuoteAnswersTwoEndsOn`]
+    /// only: a request carried over any number of ends is still unanswered).
+    ends_since_request: u32,
+    /// Timeouts with no payment on the session since the last request
+    /// ([`ViewerFlaw::SecondIdleTimeoutAnswers`] only: no count of them answers it).
+    idle_timeouts: u32,
 }
 
 impl MockViewer {
@@ -14091,6 +14242,8 @@ impl MockViewer {
             banned_in_flight: false,
             licence_mark: 0,
             settled_price: None,
+            ends_since_request: 0,
+            idle_timeouts: 0,
         }
     }
 
@@ -14161,6 +14314,55 @@ impl MockViewer {
         self.flaw == Some(f)
     }
 
+    /// A request 180 s or more without its file is given up on ([`ViewerFlaw::LateAckGivesUp`]
+    /// and the like only: nothing but its file whole, or its `refuse` on its session,
+    /// answers it, however long it takes).
+    fn gives_up(&mut self) {
+        if !self.unanswered.is_empty()
+            && self.clock.now().saturating_sub(self.last_request_at) >= PAY_ANSWER_WAIT.as_secs()
+        {
+            self.answer(None);
+        }
+    }
+
+    /// As a control message of the seeder's comes on this ledger, the requests of the
+    /// standing's other ledgers unanswered 180 s or more are swept
+    /// ([`ViewerFlaw::OtherVideoSweepsLateRequest`] only: nothing on another video's ledger
+    /// answers a request).
+    fn sweeps_others(&self) {
+        if !self.has(ViewerFlaw::OtherVideoSweepsLateRequest) {
+            return;
+        }
+        let (id, now) = (self.id, self.clock.now());
+        let mut st = self.standing();
+        let late: Vec<u64> = st
+            .request_sent_at
+            .iter()
+            .filter(|(l, at)| *l != id && now.saturating_sub(*at) >= PAY_ANSWER_WAIT.as_secs())
+            .map(|(l, _)| *l)
+            .collect();
+        st.request_sent_at.retain(|(l, _)| !late.contains(l));
+        st.swept.extend(late);
+    }
+
+    /// The request another ledger's input swept is taken for answered here (the same flaw
+    /// only).
+    fn takes_sweep(&mut self) {
+        if !self.has(ViewerFlaw::OtherVideoSweepsLateRequest) {
+            return;
+        }
+        let id = self.id;
+        let swept = {
+            let mut st = self.standing();
+            let swept = st.swept.contains(&id);
+            st.swept.retain(|l| *l != id);
+            swept
+        };
+        if swept {
+            self.answer(None);
+        }
+    }
+
     /// The unanswered request for `file` is answered, if there is one: served whole, or
     /// refused on its session. `None`: whichever is unanswered, whatever file it asks for
     /// (the flaws that take something else for its answer). Whether there was one.
@@ -14180,8 +14382,12 @@ impl MockViewer {
         }
         self.unanswered.remove(at);
         self.sent_here &= !self.unanswered.is_empty();
+        let id = self.id;
         let mut st = self.standing();
         st.unanswered_all = st.unanswered_all.saturating_sub(1);
+        if self.has(ViewerFlaw::OtherVideoSweepsLateRequest) {
+            st.request_sent_at.retain(|(l, _)| *l != id);
+        }
         true
     }
 
@@ -14921,9 +15127,9 @@ impl MockViewer {
 
     fn waited(&self, p: &Pending) -> bool {
         let wait = if self.has(ViewerFlaw::TimeoutAt179) {
-            ANSWER_WAIT.as_secs() - 1
+            PAY_ANSWER_WAIT.as_secs() - 1
         } else {
-            ANSWER_WAIT.as_secs()
+            PAY_ANSWER_WAIT.as_secs()
         };
         self.clock.now() >= p.sent_at + wait
     }
@@ -14996,22 +15202,22 @@ impl MockViewer {
         let early_own = (self.has(ViewerFlaw::StoppedIgnoresOwnWait) && self.halted())
             || (self.has(ViewerFlaw::StoppedCatchUpFromQuote)
                 && self.halted()
-                && self.clock.now() >= self.quoted_at + ANSWER_WAIT.as_secs())
+                && self.clock.now() >= self.quoted_at + PAY_ANSWER_WAIT.as_secs())
             || (self.has(ViewerFlaw::StoppedCatchUpFromLastRequest)
                 && self.halted()
-                && self.clock.now() >= self.last_request_at + ANSWER_WAIT.as_secs())
+                && self.clock.now() >= self.last_request_at + PAY_ANSWER_WAIT.as_secs())
             || (self.quote.is_none()
                 && !self.halted()
                 && ((self.has(ViewerFlaw::NoSessionCatchUpFromLastRequest)
-                    && self.clock.now() >= self.last_request_at + ANSWER_WAIT.as_secs())
+                    && self.clock.now() >= self.last_request_at + PAY_ANSWER_WAIT.as_secs())
                     || (self.has(ViewerFlaw::NoSessionCatchUpFromQuote)
-                        && self.clock.now() >= self.quoted_at + ANSWER_WAIT.as_secs())));
+                        && self.clock.now() >= self.quoted_at + PAY_ANSWER_WAIT.as_secs())));
         let early_own = early_own
             || (self.has(ViewerFlaw::OwnSessionCatchUpFromRefusal)
                 && self.quote.is_some()
                 && !self.halted()
                 && self.refused_at > 0
-                && self.clock.now() >= self.refused_at + ANSWER_WAIT.as_secs());
+                && self.clock.now() >= self.refused_at + PAY_ANSWER_WAIT.as_secs());
         let own_from_request = self.has(ViewerFlaw::OwnSessionCatchUpFromLastRequest)
             && self.quote.is_some()
             && !self.halted();
@@ -15025,7 +15231,7 @@ impl MockViewer {
         let early_others = (self.has(ViewerFlaw::NoSessionIgnoresOthersWait)
             && self.quote.is_none())
             || (self.quoted_at > 0
-                && self.clock.now() >= self.quoted_at + ANSWER_WAIT.as_secs()
+                && self.clock.now() >= self.quoted_at + PAY_ANSWER_WAIT.as_secs()
                 && match (self.halted(), self.quote.is_some()) {
                     (true, true) => self.has(ViewerFlaw::StoppedOtherCatchUpFromQuote),
                     (true, false) => self.has(ViewerFlaw::StoppedOtherNoSessionCatchUpFromQuote),
@@ -15040,15 +15246,17 @@ impl MockViewer {
                     let early = early
                         || (p.last
                             && self.has(ViewerFlaw::LastPayCatchUpFromRequest)
-                            && self.clock.now() >= p.requested_at + ANSWER_WAIT.as_secs())
+                            && self.clock.now() >= p.requested_at + PAY_ANSWER_WAIT.as_secs())
                         || if *l == self.id {
                             early_own
                                 || (own_from_request
-                                    && self.clock.now() >= p.requested_at + ANSWER_WAIT.as_secs())
+                                    && self.clock.now()
+                                        >= p.requested_at + PAY_ANSWER_WAIT.as_secs())
                         } else {
                             early_others
                                 || (others_from_request
-                                    && self.clock.now() >= p.requested_at + ANSWER_WAIT.as_secs())
+                                    && self.clock.now()
+                                        >= p.requested_at + PAY_ANSWER_WAIT.as_secs())
                         };
                     (!own || *l == self.id) && (early || self.waited(p))
                 });
@@ -15542,6 +15750,23 @@ impl Viewer for MockViewer {
         if self.quote.is_some() && self.has(ViewerFlaw::SecondQuoteClearsDueFirst) {
             self.due_first = false;
         }
+        // A second quote gives up a request a session's end carried over (flaw).
+        if self.has(ViewerFlaw::SecondQuoteAnswersCarriedOver)
+            && self.quote.is_some()
+            && !self.sent_here
+            && !self.unanswered.is_empty()
+        {
+            self.answer(None);
+        }
+        if self.quote.is_some()
+            && (self.has(ViewerFlaw::LateSecondQuoteGivesUp)
+                || self.has(ViewerFlaw::SeederMessageGivesUp))
+        {
+            self.gives_up();
+        }
+        if self.quote.is_some() {
+            self.sweeps_others();
+        }
         if self.quote.is_some() && self.has(ViewerFlaw::SecondQuoteUnmarksSession) {
             self.sent_here = false;
         }
@@ -15584,7 +15809,23 @@ impl Viewer for MockViewer {
             return Err("price above this viewer's cap".into());
         }
         if quote.window < 2 && !self.has(ViewerFlaw::TakesWindowUnderTwo) {
+            // Refused for its window: what waits on the seeder is let go, or the seeder is
+            // given another chance (flaws).
+            if self.has(ViewerFlaw::UnderTwoRefusalForgivesLost) {
+                let id = self.id;
+                self.standing().lost.retain(|(l, _)| *l != id);
+            }
+            if self.has(ViewerFlaw::UnderTwoRefusalClearsStop) {
+                self.standing().stopped = false;
+                self.halted = false;
+            }
+            // A registered window refusal's defect, on this refusal alone (flaws).
+            let flaw = self.flaw;
+            if let Some(mirror) = flaw.and_then(ViewerFlaw::on_under_two_alone) {
+                self.flaw = Some(mirror);
+            }
             self.on_refused_quote(Refusal::Window, quote);
+            self.flaw = flaw;
             return Err("window under 2 (NFX-07 §2)".into());
         }
         let skip_ceiling = resumed && self.has(ViewerFlaw::SkipsCeilingOnResume);
@@ -15858,6 +16099,24 @@ impl Viewer for MockViewer {
         if self.has(ViewerFlaw::LowQuoteAnswers) && quote.served < self.requested {
             self.answer(None);
         }
+        // Paid for, and not served: the seeder never saw it; the request is over (flaw).
+        if self.has(ViewerFlaw::LowQuoteAnswersPaidFor)
+            && quote.served < self.requested
+            && self.acked >= self.requested
+        {
+            self.answer(None);
+        }
+        // A new session's quote gives up a request already paid for (flaw).
+        if self.has(ViewerFlaw::QuoteAnswersPaidFor)
+            && !self.unanswered.is_empty()
+            && self.acked >= self.requested
+        {
+            self.answer(None);
+        }
+        // A new session's quote gives up a request sent two sessions or more ago (flaw).
+        if self.has(ViewerFlaw::QuoteAnswersTwoEndsOn) && self.ends_since_request >= 2 {
+            self.answer(None);
+        }
         self.quote = Some(quote.clone());
         (self.quoted_at, self.answered_at) = (self.clock.now(), self.clock.now());
         self.note_position();
@@ -15865,6 +16124,18 @@ impl Viewer for MockViewer {
     }
 
     fn hello_refused(&mut self, rej: &Rej) {
+        self.sweeps_others();
+        if self.has(ViewerFlaw::LateHelloRefusedGivesUp) {
+            self.gives_up();
+        }
+        // A refused `hello` gives up a request a session's end carried over (flaw).
+        if self.has(ViewerFlaw::HelloRefusedAnswersCarriedOver)
+            && self.quote.is_some()
+            && !self.sent_here
+            && !self.unanswered.is_empty()
+        {
+            self.answer(None);
+        }
         if self.has(ViewerFlaw::HelloRefusedUnmarksSession) {
             self.sent_here = false;
         }
@@ -15954,6 +16225,7 @@ impl Viewer for MockViewer {
     }
 
     fn requested(&mut self, file: Sha256) -> Result<(), Unsent> {
+        self.takes_sweep();
         if self.has(ViewerFlaw::RequestEndsLicence) {
             (self.pay_ahead, self.due_first) = (false, false);
         }
@@ -15963,7 +16235,11 @@ impl Viewer for MockViewer {
             .standing()
             .unanswered_all
             .saturating_sub(self.unanswered.len() as u64);
-        if (!self.unanswered.is_empty() && !self.has(ViewerFlaw::SecondRequestWhileUnanswered))
+        // A retry: the unanswered request's own file asked for again is sent again (flaw).
+        let again = self.has(ViewerFlaw::RetryOfUnansweredSent) && self.unanswered.contains(&file);
+        if (!self.unanswered.is_empty()
+            && !again
+            && !self.has(ViewerFlaw::SecondRequestWhileUnanswered))
             || (others > 0 && self.has(ViewerFlaw::RequestHeldByOtherVideo))
         {
             return Err(Unsent::Unanswered);
@@ -15976,13 +16252,29 @@ impl Viewer for MockViewer {
         if self.quote.is_none() && !self.has(ViewerFlaw::RequestWithNoSession) {
             return Err(Unsent::NoSession);
         }
-        self.unanswered.push(file);
+        if self.has(ViewerFlaw::QuoteAnswersTwoEndsOn) {
+            self.ends_since_request = 0;
+        }
+        if self.has(ViewerFlaw::SecondIdleTimeoutAnswers) {
+            self.idle_timeouts = 0;
+        }
+        if self.has(ViewerFlaw::OtherVideoSweepsLateRequest) {
+            let (id, now) = (self.id, self.clock.now());
+            let mut st = self.standing();
+            st.request_sent_at.retain(|(l, _)| *l != id);
+            st.request_sent_at.push((id, now));
+        }
+        if !again {
+            self.unanswered.push(file);
+        }
         if self.has(ViewerFlaw::AnyRequestedFileAnswers) || self.has(ViewerFlaw::RefusedEarlierFile)
         {
             self.asked.push(file);
         }
         self.sent_here = true;
-        self.standing().unanswered_all += 1;
+        if !again {
+            self.standing().unanswered_all += 1;
+        }
         if self.has(ViewerFlaw::OtherRequestRestartsLiveWait) {
             self.restarts_other_live();
         }
@@ -16025,15 +16317,42 @@ impl Viewer for MockViewer {
     }
 
     fn served(&mut self, file: Sha256, served: Served) {
+        // Part of its own file, come on a later session, answers a request a session's end
+        // carried over (flaw).
+        if self.has(ViewerFlaw::PartAnswersCarriedOver)
+            && served == Served::Part
+            && self.quote.is_some()
+            && !self.sent_here
+            && !self.unanswered.is_empty()
+        {
+            self.answer(Some(file));
+        }
+        // Part of its own file, come 180 s or more after the request, answers it (flaw).
+        if self.has(ViewerFlaw::LatePartAnswers)
+            && served == Served::Part
+            && self.clock.now() >= self.last_request_at + PAY_ANSWER_WAIT.as_secs()
+        {
+            self.answer(Some(file));
+        }
         // Only the whole of its own file answers the request (flaws: part of it does; any
         // file does; any file the ledger asked for does). It is no decision of what to pay,
         // and changes nothing else (flaws: it does).
         let whole = served == Served::Whole;
+        if (self.has(ViewerFlaw::LateOtherFileGivesUp) && whole && !self.unanswered.contains(&file))
+            || (self.has(ViewerFlaw::SeederMessageGivesUp)
+                && !(whole && self.unanswered.contains(&file)))
+        {
+            self.gives_up();
+        }
         let any = self.has(ViewerFlaw::ServedAnyFile)
             || (self.has(ViewerFlaw::AnyRequestedFileAnswers) && self.asked.contains(&file))
             || (self.has(ViewerFlaw::AnyWholeAnswersWithNoSession) && self.quote.is_none())
             || (self.has(ViewerFlaw::AnyWholeAnswersCarriedOver) && !self.sent_here);
-        let answered = (whole || self.has(ViewerFlaw::PartAnswers))
+        // A transfer still trickling 180 s after its request is given up (flaw).
+        let gave_up = self.has(ViewerFlaw::LatePartGivesUp)
+            && !whole
+            && self.clock.now().saturating_sub(self.last_request_at) >= PAY_ANSWER_WAIT.as_secs();
+        let answered = (whole || gave_up || self.has(ViewerFlaw::PartAnswers))
             && !(self.has(ViewerFlaw::WholeWithNoSessionNoAnswer) && self.quote.is_none())
             && self.answer((!any).then_some(file));
         if !answered && self.has(ViewerFlaw::StrayBytesUnmarksSession) {
@@ -16062,6 +16381,13 @@ impl Viewer for MockViewer {
     }
 
     fn refused(&mut self, file: Sha256) {
+        self.sweeps_others();
+        if (self.has(ViewerFlaw::LateOtherRefuseGivesUp)
+            || self.has(ViewerFlaw::SeederMessageGivesUp))
+            && !self.unanswered.contains(&file)
+        {
+            self.gives_up();
+        }
         // It answers the request unanswered on the open session for the file it names; with
         // none, or with that request sent on an earlier session or asking for another file,
         // or with no session open, it is no answer (flaws: it answers a request carried over
@@ -16070,7 +16396,7 @@ impl Viewer for MockViewer {
         let of_its_session = self.quote.is_some()
             && self.sent_here
             && !(self.has(ViewerFlaw::LateRefuseNoAnswer)
-                && self.clock.now() >= self.last_request_at + ANSWER_WAIT.as_secs());
+                && self.clock.now() >= self.last_request_at + PAY_ANSWER_WAIT.as_secs());
         let any = self.has(ViewerFlaw::RefusedAnyFile)
             || (self.has(ViewerFlaw::RefusedEarlierFile) && self.asked.contains(&file));
         if !(of_its_session || self.has(ViewerFlaw::RefusedAcrossSessions))
@@ -16137,13 +16463,63 @@ impl Viewer for MockViewer {
     }
 
     async fn due(&mut self) -> Result<Option<Pay>, String> {
+        // A `due` gives up a request unanswered 180 s while the standing's one place for a
+        // payment in flight is free (flaw).
+        if self.has(ViewerFlaw::LateDueGivesUpSlotFree) && self.standing().in_flight.is_none() {
+            self.gives_up();
+        }
         // The decision a refusal licensed is made: the next request may go (flaw: and the
         // unanswered request is taken for answered).
         self.due_first = false;
+        // A due gives up a request a session's end carried over (flaw).
+        if self.has(ViewerFlaw::DueAnswersCarriedOver)
+            && self.quote.is_some()
+            && !self.sent_here
+            && !self.unanswered.is_empty()
+        {
+            self.answer(None);
+        }
+        // A due on an open session gives up a request unanswered 180 s or more, the standing
+        // holding no payment and not stopped (flaw).
+        if self.has(ViewerFlaw::LateDueAnswersNothingHeld) {
+            let free = {
+                let st = self.standing();
+                st.in_flight.is_none()
+                    && st.unsettled.is_empty()
+                    && st.reclaiming.is_empty()
+                    && st.lost.is_empty()
+            };
+            if self.quote.is_some()
+                && free
+                && self.pending.is_none()
+                && !self.halted()
+                && self.clock.now() >= self.last_request_at + PAY_ANSWER_WAIT.as_secs()
+            {
+                self.answer(None);
+            }
+        }
+        // A due with no session open, 180 s or more after the request and no payment
+        // unsettled, gives it up (flaw).
+        if self.has(ViewerFlaw::LateDueWithNoSessionAnswers)
+            && self.quote.is_none()
+            && self.clock.now() >= self.last_request_at + PAY_ANSWER_WAIT.as_secs()
+            && self.standing().unsettled.is_empty()
+        {
+            self.answer(None);
+        }
         if self.has(ViewerFlaw::DueAnswers) {
             self.answer(None);
         }
-        // Pay at half the window, rounded up, so the seeder never has to stall.
+        // A request already paid for is done with when the watcher decides what to pay
+        // (flaw).
+        if self.has(ViewerFlaw::DueAnswersPaidFor)
+            && !self.unanswered.is_empty()
+            && self.acked >= self.requested
+        {
+            self.answer(None);
+        }
+        // Pay at half the window, rounded up, so the seeder need not stall while a payment
+        // is in flight.
         let window = match (self.quote.as_ref(), self.first_window) {
             (Some(_), Some(first)) if self.has(ViewerFlaw::DueWindowOfFirstQuote) => first,
             (q, _) => q.map_or(2, |q| q.window),
@@ -16212,16 +16588,58 @@ impl Viewer for MockViewer {
             }
             _ => when,
         };
-        self.pay_when(when.max(1), false, licensed)
+        let pay = self.pay_when(when.max(1), false, licensed);
+        // A due on an open session that pays nothing with chunks owed gives up a request
+        // unanswered 180 s or more (flaw).
+        if self.has(ViewerFlaw::LateDueBelowDuePointGivesUp)
+            && self.quote.is_some()
+            && matches!(pay, Ok(None))
+            && self.pending.is_none()
+            && self.requested > self.acked
+        {
+            self.gives_up();
+        }
+        pay
     }
 
     async fn last_pay(&mut self) -> Result<Option<Pay>, String> {
         // It pays nothing ahead, and leaves a refusal's licence to the `due` that follows.
         self.ends_other_licences(ViewerFlaw::OtherLastPayEndsLicence);
+        // A last_pay gives up a request a session's end carried over (flaw).
+        if self.has(ViewerFlaw::LastPayAnswersCarriedOver)
+            && self.quote.is_some()
+            && !self.sent_here
+            && !self.unanswered.is_empty()
+        {
+            self.answer(None);
+        }
+        // A last_pay gives up a request unanswered 180 s or more, the standing holding no
+        // payment and not stopped (flaw).
+        if self.has(ViewerFlaw::LateLastPayAnswersNothingHeld) {
+            let free = {
+                let st = self.standing();
+                st.in_flight.is_none()
+                    && st.unsettled.is_empty()
+                    && st.reclaiming.is_empty()
+                    && st.lost.is_empty()
+            };
+            if self.quote.is_some()
+                && free
+                && self.pending.is_none()
+                && !self.halted()
+                && self.clock.now() >= self.last_request_at + PAY_ANSWER_WAIT.as_secs()
+            {
+                self.answer(None);
+            }
+        }
         self.pay_when(1, true, false)
     }
 
     fn ack(&mut self, ack: &Ack) -> Result<(), String> {
+        self.sweeps_others();
+        if self.has(ViewerFlaw::LateAckGivesUp) || self.has(ViewerFlaw::SeederMessageGivesUp) {
+            self.gives_up();
+        }
         self.taken_by_another();
         if self.has(ViewerFlaw::AckEndsLicence) {
             self.pay_ahead = false;
@@ -16352,6 +16770,20 @@ impl Viewer for MockViewer {
             if ok {
                 self.answered_at = self.clock.now();
                 self.note(self.id, Past::Acked);
+                // An ack gives up a request a session's end carried over, or one 180 s or
+                // more after it was sent (flaws).
+                if self.has(ViewerFlaw::AckAnswersCarriedOver)
+                    && self.quote.is_some()
+                    && !self.sent_here
+                    && !self.unanswered.is_empty()
+                {
+                    self.answer(None);
+                }
+                if self.has(ViewerFlaw::LateAckTakenAnswers)
+                    && self.clock.now() >= self.last_request_at + PAY_ANSWER_WAIT.as_secs()
+                {
+                    self.answer(None);
+                }
             }
             self.note_position();
             return Ok(());
@@ -16381,6 +16813,18 @@ impl Viewer for MockViewer {
     }
 
     async fn rej(&mut self, rej: &Rej) {
+        self.sweeps_others();
+        if self.has(ViewerFlaw::LateRejGivesUp) || self.has(ViewerFlaw::SeederMessageGivesUp) {
+            self.gives_up();
+        }
+        // A rej gives up a request a session's end carried over (flaw).
+        if self.has(ViewerFlaw::RejAnswersCarriedOver)
+            && self.quote.is_some()
+            && !self.sent_here
+            && !self.unanswered.is_empty()
+        {
+            self.answer(None);
+        }
         if self.has(ViewerFlaw::RejUnmarksSession) {
             self.sent_here = false;
         }
@@ -16494,8 +16938,40 @@ impl Viewer for MockViewer {
         if self.has(ViewerFlaw::TimeoutUnmarksSession) {
             self.sent_here = false;
         }
+        // A timeout gives up a request a session's end carried over, or one already paid
+        // for (flaws).
+        if self.has(ViewerFlaw::TimeoutAnswersCarriedOver)
+            && self.quote.is_some()
+            && !self.sent_here
+            && !self.unanswered.is_empty()
+        {
+            self.answer(None);
+        }
+        if self.has(ViewerFlaw::TimeoutAnswersPaidFor)
+            && !self.unanswered.is_empty()
+            && self.acked >= self.requested
+        {
+            self.answer(None);
+        }
+        // The second timeout with no payment since a request gives it up (flaw).
+        if self.has(ViewerFlaw::SecondIdleTimeoutAnswers)
+            && self.pending.is_none()
+            && !self.unanswered.is_empty()
+        {
+            self.idle_timeouts += 1;
+            if self.idle_timeouts >= 2 {
+                self.answer(None);
+            }
+        }
         let waited = self.clock.now().saturating_sub(self.last_request_at);
-        if (self.has(ViewerFlaw::LateTimeoutAnswers) && waited >= ANSWER_WAIT.as_secs())
+        // A request paid for whose file has not come in 180 s is given up (flaw).
+        if self.has(ViewerFlaw::LateTimeoutAnswersPaidFor)
+            && self.acked >= self.requested
+            && waited >= PAY_ANSWER_WAIT.as_secs()
+        {
+            self.answer(None);
+        }
+        if (self.has(ViewerFlaw::LateTimeoutAnswers) && waited >= PAY_ANSWER_WAIT.as_secs())
             || (self.has(ViewerFlaw::LongTimeoutAnswers) && waited >= MIN_DEBT_TTL.as_secs())
         {
             self.answer(None);
@@ -16561,7 +17037,7 @@ impl Viewer for MockViewer {
         };
         let waited = from.map_or_else(
             || self.waited(p),
-            |t| self.clock.now() >= t + ANSWER_WAIT.as_secs(),
+            |t| self.clock.now() >= t + PAY_ANSWER_WAIT.as_secs(),
         );
         if !waited && !early {
             // Before 180 s from sending, nothing is this call's (but for flaws).
@@ -16609,6 +17085,23 @@ impl Viewer for MockViewer {
     }
 
     fn end(&mut self) {
+        // A request a session's end carried over is given up at the next end, and one
+        // already paid for at its own (flaws).
+        if self.has(ViewerFlaw::EndAnswersCarriedOver)
+            && !self.sent_here
+            && !self.unanswered.is_empty()
+        {
+            self.answer(None);
+        }
+        if self.has(ViewerFlaw::EndAnswersPaidFor)
+            && !self.unanswered.is_empty()
+            && self.acked >= self.requested
+        {
+            self.answer(None);
+        }
+        if self.has(ViewerFlaw::QuoteAnswersTwoEndsOn) {
+            self.ends_since_request += 1;
+        }
         self.taken_by_another();
         self.clears_stop_beside_live(ViewerFlaw::OtherEndWhileLiveClearsStop);
         self.quote = None;
@@ -16617,6 +17110,10 @@ impl Viewer for MockViewer {
         // first, its licence ending.
         self.sent_here = false;
         self.due_first = false;
+        // A request already paid for is over with its session (flaw).
+        if self.has(ViewerFlaw::SessionOverAnswersPaidFor) && self.acked >= self.requested {
+            self.answer(None);
+        }
         if self.has(ViewerFlaw::EndAnswers) {
             while self.answer(None) {}
         }
