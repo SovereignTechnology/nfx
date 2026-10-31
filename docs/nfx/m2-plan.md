@@ -52,7 +52,11 @@ independent audits (the later reworks on `m2/audit-loop`)** ([first](reviews/202
 [thirtieth](reviews/2026-09-24-m2.0-thirtieth-audit.md),
 [thirty-first](reviews/2026-09-24-m2.0-thirty-first-audit.md)), and the thirty-second round
 made sovtech's decisions of 2026-10-25 on `m2/r32`
-([record](reviews/2026-09-24-m2.0-thirty-second-round.md)). sovtech's bar for the push
+([record](reviews/2026-09-24-m2.0-thirty-second-round.md)); rounds 33, 34 and 35 resolved the
+thirty-second, thirty-third and thirty-fourth audits on `m2/r33` to `m2/r35`
+([thirty-second](reviews/2026-09-24-m2.0-thirty-second-audit.md),
+[thirty-third](reviews/2026-09-24-m2.0-thirty-third-audit.md),
+[thirty-fourth](reviews/2026-09-24-m2.0-thirty-fourth-audit.md)). sovtech's bar for the push
 is zero findings, confirmed after the sixth:
 - **Spec (NFX-07, Draft):**
   - The seeder swaps before it acks.
@@ -104,8 +108,9 @@ is zero findings, confirmed after the sixth:
     and sweeps settled on tasks of the engine's own; more polls at every step; entries,
     their answers and their wakes through tasks of the seeder's runtime; a closed
     connection or the clock taken on such a task; keys and listings held from the start.
-- **Suite** (figures as of round 33, `m2/r33`; until round 33 this section stood at the
-  thirty-first audit's figures, a round behind status.md): `nfx_pay::adversary` has 152 scenarios (149 until the thirty-second round, 101 until the thirty-first audit, three of those threaded), each on its own thread under a
+- **Suite** (figures as of round 35, `m2/r35`; until round 35 this section stood at round
+  33's figures, and until round 33 at the thirty-first audit's, a round or two behind
+  status.md): `nfx_pay::adversary` has 152 scenarios (149 until the thirty-second round, 101 until the thirty-first audit, three of those threaded), each on its own thread under a
   real-time limit (300 s, which ends a hang, and is sized for a machine under load and a
   mint that answers within about ten milliseconds, as the `Harness` contract now requires
   of a harness's mint).
@@ -117,16 +122,17 @@ is zero findings, confirmed after the sixth:
   has settled after 100 turns of the runtime with no answer under way, and an entry on a
   thread of its own waits once it has stood idle through 100 such turns or been polled 100
   times more. An entry on a task of its own is a task of the scenario's runtime, polled
-  only when it is woken. The suite never blocks its runtime's thread. **1,524 planted
-  defects (950 of the seeder, 574 of the watcher) are registered in 3,673 entries** (1,520
-  in 3,665 before SE1, below; 1,506 in 3,634 after the thirty-second round, 1,495 in 3,599
-  after the thirty-first audit), **each
+  only when it is woken. The suite never blocks its runtime's thread. **1,584 planted
+  defects (951 of the seeder, 633 of the watcher) are registered in 3,741 entries** (1,542
+  in 3,699 after round 34, 1,524 in 3,673 after round 33, 1,520 in 3,665 before SE1, below;
+  1,506 in 3,634 after the thirty-second round, 1,495 in 3,599 after the thirty-first
+  audit), **each
   entry one defect on one harness against one scenario, and each to fail a named check in
   its scenario** (a hang, a panic raised outside the suite, a runtime panic of Rust's own,
   a failure of a table's set-up, or a bare unwrap, is not a catch); 239 of the entries are
   of a defect that acts only at a seeder's quoted mints other than the first. (Until the
   thirty-first audit: 1,415 defects, 915 and 500, in 3,122 entries.) Every surviving
-  mutant from all thirty-one audits
+  mutant from all thirty-four audits
   that was judged a defect of a seeder or a watcher is among the defects, but one: the
   twenty-ninth's completeness review left an engine that keeps an entry's first waker
   unplanted. The slips of its hunts that pass for another reason (equivalent to the honest
@@ -136,6 +142,10 @@ is zero findings, confirmed after the sixth:
   registered. The thirty-first's auditors' survivors are registered, and so are the
   thirty-second's, but four: two of the harness (C6, C7), which has no registry and which new
   cells catch, and two that sovtech's decision of 2026-10-26 removed the input of (A5, B5).
+  So are the thirty-third's and the thirty-fourth's (its 39 distinct plants), with three of
+  round 35's own. On round 35's code tree each of the 3,741 entries fails a check of the
+  suite, and the honest mock passes all 152 scenarios on the four harnesses and all
+  3,345 tests of the timings (the thirty-fourth audit's record, "Verified").
   On `c4123b4`, round 33's code tree with SE1, each of the 3,673 entries fails a check of
   the suite, and the honest mock passes all 152 scenarios on the four harnesses and all
   3,345 tests of the timings (runs 40557709360 and 40557704778); so they did on `102d579`,
@@ -665,14 +675,16 @@ What the thirty-second audit left to sovtech
 - **sovtech has read the round's code diff** (`a45c3eb..102d579`, SE1's `2da2b10..c4123b4`,
   and `49ae389`, which lets the re-pin read the compiled facts it has just written). The lock
   is re-pinned to it in `cbcf6bd`, from probe `r33-pin2` (run 40705674410) on `49ae389`; the
-  thirty-third independent audit follows.
+  thirty-third independent audit followed
+  (`docs/nfx/reviews/2026-09-24-m2.0-thirty-third-audit.md`).
 - **S1's concession stays.** An honest seeder whose transfer is cut short is owed that
   request and gets no other for that video under that identity: the watcher fetches the
   video elsewhere, or under a new identity, giving up the credit it holds there. Not taken:
   an allowance of k cut-short requests, which would raise the bound to half a window plus k
   and bring an abandonment input back into the locked trait. If cut-short transfers prove
   common in M2.1, a seeder could send the rest of a paid file again once (a free resume),
-  which changes nothing about what answers a request.
+  which changes nothing about what answers a request. (Its "or under a new identity" was
+  dropped on 2026-10-31, below.)
 
 ## Decided (sovtech, 2026-10-29)
 
@@ -703,7 +715,29 @@ On the thirty-third independent audit (`f087126`; record
 
 - **sovtech has read the round's code diff** (`58958b0`, the money crate, and `d14e2de`, the
   lock and CI). The lock is re-pinned to it in `da6e121`, from probe `r34-pin` (run
-  40962165836) on `a5532bc`; the thirty-fourth independent audit follows.
+  40962165836) on `a5532bc`; the thirty-fourth independent audit followed
+  (`docs/nfx/reviews/2026-09-24-m2.0-thirty-fourth-audit.md`).
+
+## Decided (sovtech, 2026-10-31)
+
+On the thirty-fourth independent audit (`37e8e1f`; record
+`docs/nfx/reviews/2026-09-24-m2.0-thirty-fourth-audit.md`):
+
+- **No new identity past an unanswered request (B-1, course a).** The standing records each
+  video for which a request of the watcher's, under any identity it has taken toward the
+  seeder, is unanswered, and the watcher asks that seeder for that video under no other
+  identity while the request is unanswered. The cut-short concession drops "or under a new
+  identity", which the decision of 2026-10-28 kept: a seeder that withheld on purpose took
+  half a window per new identity, without end, the reverse of that decision's reason for
+  refusing an allowance of k. Not taken: at most one new identity per seeder and video,
+  which bounds the loss at a whole window and keeps one retry.
+- **Free mesh peers count (B-2, course a).** An uploader that charges serves a peer that
+  does not speak pay/1 as an account that never pays: each upload is an unpaid chunk counted
+  toward that peer's `window` and the global cap. Not taken: uploading nothing to such a
+  peer, which ends M1 peers' service from charging peers.
+- **Ratings.** B-1 and E-1 are Medium: B-1 is the spec's text, its per-identity bound
+  holding, and E-1's path is out of reach of a watcher reading pay/1 with `nfx_pay_wire`.
+  Both are fixed all the same.
 
 ## The testnet mint
 
