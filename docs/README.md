@@ -46,6 +46,7 @@ to rely on. Labels and statuses are as of 2026-10-25.
 | [ADR 0101](decisions/0101-nutflix-pear-interop.md) | Record | nutflix-pear and nfx on one network: both speak NFX, NFX-12 becomes files over Protomux on HyperDHT |
 | [ADR 0102](decisions/0102-creator-share.md) | Record | A creator share on open videos: the creator's receipt before `ack`, a carve-out of the price |
 | [ADR 0103](decisions/0103-meet-over-iroh.md) | Record | nfx and nutflix-pear meet over iroh: the desktop app runs a thin iroh helper; nfx does not speak HyperDHT |
+| [ADR 0104](decisions/0104-channel-payments-and-seeder-ratings.md) | Proposed | Channel payments (Cashu Spilman) and seeder ratings, after nostr-vpn's paid exits; additive after NFX-07 freezes |
 | [NFX-01](../spec/nfx-01-networks.md) | Spec | Networks and versions |
 | [NFX-02](../spec/nfx-02-manifest.md) | Spec | Catalog manifest (kind 38504) |
 | [NFX-03](../spec/nfx-03-beacons.md) | Spec | Availability beacons (kind 20464) |
@@ -64,7 +65,7 @@ ADRs 0002, 0005 and 0007 came from the demo and stay here as records. The demo's
 and 0004, its plans, spikes, reviews, vendored copies and code left with the mirror on
 2026-10-11 (ADR 0008's amendment of that date) and are in the demo's own repository, now
 [`nutflix-pear`](https://github.com/SovereignTechnology/nutflix-pear) (`docs/decisions/`).
-ADRs 0006, 0008 and 0100 to 0102 are nfx's own.
+ADRs 0006, 0008 and 0100 to 0104 are nfx's own.
 
 ### Statements overtaken since the records were written
 
