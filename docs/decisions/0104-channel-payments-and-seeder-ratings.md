@@ -4,11 +4,11 @@ Date: 2026-11-03
 
 ## Status
 
-Proposed 2026-11-03. Nothing here is decided until sovtech accepts it; the questions sovtech owes
-are in §6.
+Accepted 2026-11-03, with sovtech's answers in §6. Those answers set the channel defaults (§1),
+drop credit by trust (§2) and settle §4 from spike S6.
 
 Touches nothing in M2. NFX-07 and its frozen readers, `nfx-pay`, `nfx-pay-wire` and the locked
-paths (`crates/ci/check-locked.sh`) stay as they are. Everything proposed is additive and comes
+paths (`crates/ci/check-locked.sh`) stay as they are. Everything here is additive and comes
 after NFX-07 freezes, like NFX-14 (ADR 0102).
 
 ## Context
@@ -100,7 +100,7 @@ Three costs NFX-07 accepts are what a channel would change:
 Neither project has a way to choose seeders by reputation. nutflix-pear's SECURITY.md names "peer
 reputation" as the control for its T10, with no code behind it.
 
-## Decision (proposed)
+## Decision
 
 ### 1. A channel rail, as a new additive Draft (NFX-15)
 
@@ -117,7 +117,7 @@ A second way to pay a seeder, beside NFX-07 and not replacing it:
   collected. The watcher's change and refund paths are nostr-vpn's.
 - **Hybrid start.** A watcher starts on NFX-07 bearer payments, and opens a channel to a seeder
   it keeps using once the channel's funding fee is worth it. One-off seeders stay on bearer
-  payments. Default thresholds are the spike's to set (§5).
+  payments. The defaults (when to open a channel, its lifetime and capacity) are in §6.2.
 - **What it changes:**
   - **The mint leaves the loop.** It sees a funding and a collection per channel, not a swap per
     payment. A mint outage stalls nothing that is already funded.
@@ -146,9 +146,8 @@ Ratings are not money, so they need not wait for NFX-15:
   trusted score, then price, as nostr-vpn does.
 - **Privacy.** A rating says "this npub used that seeder". Publishing is therefore **off by
   default**. Local measurements still steer selection when it is off.
-- **Credit by trust.** A seeder may, but need not, quote a larger `window` to a watcher that
-  proves a Nostr identity close to it in its WoT. Proving one ties the watcher's npub to what it
-  watches, toward that seeder only. So it is the watcher's choice per seeder, never required.
+- **No credit by trust** (§6.4). A seeder's credit never depends on a watcher proving who it is.
+  Ratings choose seeders; they never price watchers.
 
 ### 3. Cross-mint transfer in the watcher's wallet
 
@@ -167,8 +166,10 @@ iroh-blobs verifies BLAKE3 ranges on the wire, and channel updates cost nothing.
 bill per verified range instead of per admitted request. An honest transfer cut short would then
 be paid for what it carried, and an abort at 99 % would still pay 99 %.
 
-Whether a watcher can observe verified ranges from iroh-blobs' progress events precisely enough is
-for the spike (§5) to answer. If it cannot, NFX-15 keeps the whole-file rule.
+Spike S6 answered whether a watcher can see verified ranges: on iroh, yes. iroh-blobs 0.103 counts
+only leaves that passed BLAKE3 verification, 16 KiB at most each. So NFX-15 bills per verified
+range on iroh. A watcher that cannot observe verified ranges keeps the whole-file rule: that is
+nutflix-pear's iroh helper (an untrusted pipe, ADR 0103) and NFX-12.
 
 ### 5. Order
 
@@ -207,14 +208,16 @@ used a real CDK 0.18 mint and nostr-vpn's own channel code, with 500 files at 1 
 
 ## Consequences
 
-- **Capital is locked** for a channel's life (nostr-vpn defaults to 24 h, with collection at
-  12 h). A video session is shorter than a VPN session, so NFX-15 likely wants shorter lifetimes
-  and a smaller capacity. The spike's fee numbers decide by how much.
+- **Capital is locked** until the channel closes. nostr-vpn's channels live 24 h, with
+  collection at 12 h. NFX-15's defaults are 6 h and at most an hour of playback (§6.2). A
+  seeder that vanishes holds the watcher's funds until expiry, but cannot spend them.
 - **A seeder must be online to collect** before expiry, or the watcher reclaims the funds. That
   suits always-on seeders (desktop daemons, pull-through origins) and penalises a laptop seeder
   that sleeps. Bearer payments remain for it.
-- **Mints must support NUT-11** multisig with locktime and `SIG_ALL`. CDK does; the testnet
-  `cdk-mintd` will be checked in the spike.
+- **Mints must support NUT-11** multisig with locktime and `SIG_ALL`. CDK 0.18's mint enforced
+  both in S6. A watcher checks a mint's NUT-06 info for NUT-11 before funding a channel there, and
+  stays on bearer payments if it is missing. No deployed `cdk-mintd` has been checked yet; NFX-15's
+  adversary suite does that.
 - **One dependency question:** `nvpn-cdk-spilman` (mmalmi's maintained fork of the published
   0.17.6) against the original author's newer, unpublished line, which changes channel IDs and
   derivation. Take whichever is maintained and audited when NFX-15 is written, and pin it inside
@@ -223,13 +226,50 @@ used a real CDK 0.18 mint and nostr-vpn's own channel code, with 500 files at 1 
   sybil watchers; only the channel's price on identities does.
 - **Nothing changes for M2**, its audits, its pins or its exit run.
 
-## 6. Questions for sovtech
+## 6. sovtech's answers (2026-11-03)
 
-1. **Direction.** Accept §1–§3 as the direction, and the spike S6 as the next step?
-2. **Defaults.** Channel lifetime and capacity for video, or leave them to the spike's numbers?
-3. **Ratings.** Reuse kind 7368 (`nostr-social-memory` facts, shared with nostr-vpn) or a kind of
-   our own; and off by default, as proposed?
-4. **Credit by trust.** Allow it at all (§2), given what proving an identity reveals?
+1. **Direction: accepted, §1 to §4, in §5's order.** S6 is done. NFX-16 may start at any time.
+   NFX-15 waits for NFX-07 to freeze and M2.1 to ship.
+2. **Defaults: set now from S6's numbers.** NFX-15 writes them as defaults that a seeder's
+   quote or a watcher's policy may change; its adversary suite may revise them.
+   - **When to open a channel:** after 32 files paid to one seeder by bearer payments in a
+     session, about a minute of video at NFX-05's 2 s segments. That is past both break-evens S6
+     measured: 13 files on fees, 21 on mint calls once the seeder hands back change.
+   - **Lifetime:** 6 h, against nostr-vpn's 24 h. It covers a long film, and caps how long a
+     vanished seeder can hold the watcher's funds.
+   - **Seeder's cutoff:** it collects at ½ lifetime (3 h), or 10 minutes after the last update,
+     whichever comes first. The 3 h margin absorbs clock skew between mint, seeder and watcher
+     (S6 Finding 5). The watcher refunds only after expiry and retries while the mint's clock says
+     no.
+   - **Capacity:** at most an hour of playback at the current rendition at the quoted price, and
+     never more than the seeder's quoted maximum. Overfunding costs locked capital only, since the
+     change comes back at close.
+   - **Renewal:** the watcher funds the next channel when half the capacity or half the lifetime
+     is used, whichever comes first. The 6–8 s funding (S6 Finding 8) then runs well ahead of need,
+     and the old channel closes cooperatively.
+   - **Credit:** at most what is in flight. For whole files the watcher signs before each
+     request (§1). On iroh, where NFX-15 bills per verified range (§4), it signs as each range
+     verifies, so the seeder carries only the ranges in flight.
+   - **Change:** the seeder hands back the watcher's change at close. NUT-09 probing is the
+     fallback only (S6 Finding 4).
+   - **Persistence:** both ends persist the latest balance at least every 30 s and at close, not
+     after every update (S6 Finding 6).
+3. **Ratings: reuse kind 7368 with scope `nfx.seeder`, and keep publishing off by default.**
+   - One kind shares the WoT data and readers nostr-vpn already has. The scope keeps the two
+     apart, and a kind of our own would add a second schema for nothing.
+   - NFX-16 restates the fields it uses (subject, scope, score) with its own test vectors. A
+     change in `nostr-social-memory` then cannot change nfx's wire format silently.
+   - Off by default stands. A published rating says which seeders an npub used, while local
+     measurements steer selection without one.
+4. **Credit by trust: no.**
+   - Channels already make credit unnecessary: an update costs nothing, so the credit can be zero.
+     They also put a price on each identity, which answers sybil watchers; ratings do not (see
+     Consequences).
+   - A larger window for a proven identity would reward watchers for revealing what they watch. It
+     would also invite seeders to squeeze strangers until they identify themselves. That is a
+     privacy cost to every watcher, to solve what channels already solve.
+   - Revisit it only in a new ADR, and only with evidence: bearer-only seeders (ones that cannot
+     stay online to collect) stalling in ways a channel cannot fix.
 
 ## Sources (read 2026-11-02 and 2026-11-03)
 

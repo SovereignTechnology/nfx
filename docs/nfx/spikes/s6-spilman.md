@@ -117,7 +117,7 @@ window.
    pays fees twice per channel, not once per payment.
 8. **The funding swap is the slow part.** It took 6.0–7.9 s for the watcher, mostly wallet work
    outside the mint (the mint handled it in 28–57 ms). Checking the funding is offline and took
-   38–54 ms. The hybrid start ADR 0104 §1 proposes (bearer first, a channel for seeders the
+   38–54 ms. The hybrid start ADR 0104 §1 sets (bearer first, a channel for seeders the
    watcher keeps using) hides this latency from playback start.
 
 ## Can a getter bill per verified range on iroh? Yes
