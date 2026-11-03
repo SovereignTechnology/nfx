@@ -36,7 +36,7 @@ to rely on. Labels and statuses are as of 2026-10-25.
 | [`nfx/freeze-m1-candidate.md`](nfx/freeze-m1-candidate.md) | Superseded record | Candidate record behind the M1 freeze of NFX-02..06 |
 | [`nfx/nfx-10-m1-plan.md`](nfx/nfx-10-m1-plan.md) | Superseded record | Plan for the free browser mesh, tracker and bridge at M1 |
 | [`nfx/reviews/`](nfx/reviews/) | Record | Reviews and security audits, one file per piece of work |
-| [`nfx/spikes/`](nfx/spikes/) | Record | Spikes S1 to S4: iroh, Tauri playback, web mesh, CMAF packaging; S5′: a Rust HyperDHT for NFX-12 (FAIL) |
+| [`nfx/spikes/`](nfx/spikes/) | Record | Spikes S1 to S4: iroh, Tauri playback, web mesh, CMAF packaging; S5′: a Rust HyperDHT for NFX-12 (FAIL); S6: Cashu Spilman channels as a second pay rail (PASS) |
 | [ADR 0002](decisions/0002-stack-and-architecture.md) | Superseded record | Stack and architecture: Hypercore transport, Nostr catalog, Cashu payment, one React UI |
 | [ADR 0005](decisions/0005-open-questions.md) | Superseded record | Build-plan §9 open questions resolved for Stage 1/2 defaults |
 | [ADR 0006](decisions/0006-standardization-suite-nfx.md) | Record | Protocol standardization suite (NFX): the iroh/CMAF redesign is normative; the TypeScript implementation is v0/legacy |

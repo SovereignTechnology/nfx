@@ -1,0 +1,33 @@
+[package]
+name = "s6-spilman"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Spike S6: are Cashu Spilman payment channels a viable second NFX pay rail (NFX-15)?"
+license = "AGPL-3.0-or-later"
+
+# Its own workspace: spike dependencies stay out of the main crates/ graph, its lock and CI.
+# Nothing here may name nfx-pay or nfx-pay-wire (ADR 0101 §4, ADR 0104 §5).
+[workspace]
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+base64 = "0.22"
+cashu = { version = "=0.18.0", default-features = false, features = ["wallet"] }
+cashu-service = { package = "nvpn-cashu-service", version = "=0.4.11", features = [
+    "simulation",
+    "wallet",
+    "spilman-wallet-http",
+    "spilman-configurable-host-reqwest",
+] }
+cdk = { version = "=0.18.0", default-features = false, features = ["wallet", "mint"] }
+cdk-axum = { version = "=0.18.0", default-features = false }
+cdk-spilman = { package = "nvpn-cdk-spilman", version = "=0.17.7", features = ["wallet"] }
+cdk-sqlite = { version = "=0.18.0", default-features = false, features = ["wallet"] }
+hex = "0.4"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }

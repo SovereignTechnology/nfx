@@ -172,7 +172,24 @@ for the spike (§5) to answer. If it cannot, NFX-15 keeps the whole-file rule.
 
 ### 5. Order
 
-1. **Spike S6** (`crates/spikes/s6-spilman`): its own workspace, outside CI and the money closure.
+**Spike S6 ran on 2026-11-03: PASS** ([`spikes/s6-spilman.md`](../nfx/spikes/s6-spilman.md)). It
+used a real CDK 0.18 mint and nostr-vpn's own channel code, with 500 files at 1 sat:
+- **Mint calls while streaming: 0.** The mint accepted the 2-of-2 close, and accepted the watcher's
+  lone refund only after expiry.
+- **Fees at a 100 ppk mint:** 5 sat for the channel, 163 sat for NFX-07 bearer payments at window
+  8, which left the seeder 375 of 500 sat.
+- **Break-even:** 13 files on fees, and 21 files on mint calls once the seeder hands the watcher
+  its change.
+- **Per update:** about 162 B and about 1.5 ms to sign or verify.
+- **§4 is feasible on iroh:** iroh-blobs 0.103 counts only verified leaves (16 KiB), so a Rust
+  watcher can bill per verified range.
+- **Conditions it sets for NFX-15:**
+  - the seeder hands back the watcher's change, since probing NUT-09 cost 41 calls and 78 s;
+  - cutoffs absorb clock skew, since the mint checks the locktime on its own wall clock;
+  - the latest balance may be persisted lazily.
+
+
+1. **Spike S6** (done, above; `crates/spikes/s6-spilman`): its own workspace, outside CI and the money closure.
    - Fund a channel against an in-process CDK mint with fake Lightning (`cashu-service`'s
      `simulation` feature).
    - Stream per-file updates, collect, and refund after expiry.
