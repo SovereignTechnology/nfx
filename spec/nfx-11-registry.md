@@ -11,9 +11,11 @@ Single table of every shared constant, so no constant lives twice across NFX doc
 | 38504 | addressable | NFX-02 | video manifest |
 | 20464 | ephemeral | NFX-03 | availability beacon |
 | 30166 | addressable | NIP-66, profiled by NFX-04 §6 | scoped-relay announcement (adds `n` tag) |
+| 7368 | regular | `nostr-identity` fact op (`nostr-social-memory` `rating`), profiled by NFX-16 | seeder rating: scope `nfx.seeder`, adds `n` and `expiration` |
 
 Provisional until submitted to `nostr-protocol/registry-of-kinds`. Both 38504/20464
-chosen unclaimed as of 2026-09-16.
+chosen unclaimed as of 2026-09-16. 7368 is not ours: it is `nostr-identity`'s, also used by
+nostr-vpn (scope `vpn.exit`), and NFX-16 only profiles it.
 
 ## 2. Namespaces (NFX-01 §2)
 
@@ -124,6 +126,9 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | Derived identifiers (namespaces, topics, infohash) | `test-vectors/derived.json` |
 | `hyperdht` beacon endpoints, valid and invalid (NFX-12 §2) | `test-vectors/beacon-hyperdht.json` |
 | `nfx/files/1` messages, valid and invalid (NFX-12 §4) | `test-vectors/files1.json` |
+| Seeder ratings, valid (NFX-16 §1) | `test-vectors/ratings.json` |
+| Invalid seeder ratings (every one MUST be rejected; NFX-16 §1) | `test-vectors/ratings-invalid.json` |
+| Seeder rating scores (NFX-16 §4) | `test-vectors/ratings-scoring.json` |
 | Generator (source of truth) | `test-vectors/generate.py` |
 
 Vectors use throwaway keys whose *secret is published in the file* — never use them
@@ -151,6 +156,9 @@ of NFX-12 §8.
 - **L5 — scoped relay**: NFX-04 §§1–3 including NIP-40 and the rate-limit table.
 
 A README badge that doesn't name a level is non-claim.
+
+Seeder ratings (NFX-16) are optional and no level requires them. A claim names them beside a
+level ("L2 + NFX-16") and passes the three `ratings*.json` vector files.
 
 ## 9. Canonical JSON (`canon`)
 
@@ -236,3 +244,7 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   deprecated; the per-video topic is MAY and is the 32-byte digest (the row used to leave hex or
   bytes open). The Hypercore stack pin becomes a HyperDHT wire pin. L2 and L3 accept NFX-12. New
   vectors `beacon-hyperdht.json` and `files1.json`.
+- 2026-11-04 (ADR 0104) — NFX-16, seeder ratings: kind 7368 listed as profiled (it is
+  `nostr-identity`'s), new vectors `ratings.json`, `ratings-invalid.json` and
+  `ratings-scoring.json` (source `test-vectors/ratings.py`), and an optional claim beside a
+  conformance level.

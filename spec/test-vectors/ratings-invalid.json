@@ -1,0 +1,2022 @@
+{
+  "description": "NFX-16 §1: events every reader of namespace nfx:mainnet:1 MUST reject. Correctly signed except 'id-mismatch' and 'bad-sig'. 'reason' is informative.",
+  "secret_keys_DO_NOT_USE": {
+    "watcher": "2f3b62562c4ce7ced973f1b898bdb57be1b0800f3ae703bde94458db0f2a258e"
+  },
+  "namespace": "nfx:mainnet:1",
+  "cases": [
+    {
+      "name": "no-n",
+      "reason": "exactly one n tag is required (NFX-01 §3)",
+      "event": {
+        "id": "536c0e5397e32b799b46752b5bce47f47e835c9f558652bd5da6678e9d5ffd57",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "f99edbcd-ffef-45a4-b953-365720d96af7",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "a9d8c5e7452989cc2f655aceed0dc838824718ed837adbad848343b181dbd61727ce7143db52172271da78758605aebc73fc63ee41bee4d363fdfad663100a7e"
+      }
+    },
+    {
+      "name": "two-n",
+      "reason": "exactly one n tag is required (NFX-01 §3)",
+      "event": {
+        "id": "2caa7059face65412a0d5bc749ea48d191ab1a0512967aaaff8c2e68afa8818c",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "368c2143-eba1-446d-bc16-d983e3851016",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ],
+          [
+            "n",
+            "nfx:testnet:1"
+          ]
+        ],
+        "content": "",
+        "sig": "cbeb2248d67c602ea612e8593598881843de56936268d737dd59c98fad9cbe1fc846e2138bec22e516b9c4d17f768cf692d5f2b9a4eaf3edd54d3a388b56f9f7"
+      }
+    },
+    {
+      "name": "no-expiration",
+      "reason": "exactly one expiration tag is required",
+      "event": {
+        "id": "1d6a21836a10b5267848acf9f2d62cec9b1554f57033ab854647a4326473f9fa",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "2526dc31-70b0-4915-b54e-f060f1978ab2",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ]
+        ],
+        "content": "",
+        "sig": "048ea76c42c728d6501e8babfad2046ebe5e23d97324db5fc3d192a9c9e896f86b0dee65d9222507d12d5d7f42a612cd32867b27914370af3f4a692ea4425512"
+      }
+    },
+    {
+      "name": "scope-vpn-exit",
+      "reason": "a nostr-vpn exit rating, not a seeder rating",
+      "event": {
+        "id": "8efe01400d871bf5e705393d54570c042a7e0f1045c62a839d5a93b2a9b68c96",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "00164870-9e17-436f-b160-5c047d6525f1",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "vpn.exit"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "ee91f6861f43c0da51479f3965ee3cc330fa895a230e0f19716db4ac4b3d7a02aa1f2f81c2ac6b3e18ae59a76b80b9e84af71d767c2389d67ffee111617c6a20"
+      }
+    },
+    {
+      "name": "rater-not-signer",
+      "reason": "the rater fact must be the event's pubkey",
+      "event": {
+        "id": "29268874027689fb1f8aa16175aca60b6940324ee298838645a2cb731c564dd9",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "0f6e5c64-6b6c-4f88-b3d4-e203001224ad",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "332a316579512eb15d8c0054348351fbd15bc0c8f9d4e918e4fe59756ac42d7d2e31e6fede61740908aba88b6d44c9510b6550c309a2c60c73dc789e425bac1f"
+      }
+    },
+    {
+      "name": "self-rating",
+      "reason": "the subject must differ from the rater",
+      "event": {
+        "id": "69823051b635c92d2b85af41834098702f8069416b206c6d20300571187747b9",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "c93d4b5b-88c2-4457-a955-92a3e79bf01f",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "3b7790c9606e5c8c7c63e638bf3b756a9789655306acba9cc3f30524d085fd5304a6a2495da68eed48e226b17dc901a44ca16d370d719a414bf79f8a9b48817c"
+      }
+    },
+    {
+      "name": "subject-npub",
+      "reason": "the subject is 64 lowercase hex, not bech32",
+      "event": {
+        "id": "ff05987ab2918d934164ee13ec74f5c4035c167ab95a010223fad80f3ec8d8bd",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "eb85a954-08bb-4bfb-b0d7-9407bcbebde6",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "npub184626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b9163"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "5073d96a5fd42359caaea6497dc56f472915af7a916d78acd4b8eeef9f36d85f555c1f1b1f7278144fffacad4130015544080a3359b91b2a8c890ef03e2538ed"
+      }
+    },
+    {
+      "name": "rating-101",
+      "reason": "the rating is within -100..100",
+      "event": {
+        "id": "f516117f4067731927f82ee5ae9446c7e33cb955c14f483d8b19a53d8e090069",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "1378b394-68e9-419a-a41d-47d8bfce6ac8",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "101"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "230a7310440fb8d1395f8d67d84b002af748741a88ed98a33abc8ecdd6b05c27ab75407d9f634edc1ab6af0175e590f5b4d77ef9f6eb248c9ab2365c17fef907"
+      }
+    },
+    {
+      "name": "rating-plus-sign",
+      "reason": "the rating is a canonical decimal integer",
+      "event": {
+        "id": "c25c833d4af609d692c3b91dc3b2a07477020cb6f1b403e36ea83d7856ea2d78",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "ef0c2886-6099-4d48-b77f-cbb2878894bc",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "+80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "499c01b88bf705e06a485aac7aa3bc1310a1a0f3af07c6b9980c4c56e022f04f7c3703c4a0d0481f30622d1f115074e0b3c95752611188618851d1ce93546aaa"
+      }
+    },
+    {
+      "name": "rating-leading-zero",
+      "reason": "the rating is a canonical decimal integer",
+      "event": {
+        "id": "e3619b9a9908c96ae3a29b23befb74688111643e9c253fcc93969c3ec83b6ac7",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "6d758be8-de1a-49db-bcfa-228ee9cdf5d5",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "080"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "cd69fa89dca2e96e4d359af67707f4479631553234c74f87c2b86afe134979276eeec6cc07fab0f36f805424a06d1e5597baefafacc36e3d00081a6f52ca5cf5"
+      }
+    },
+    {
+      "name": "range-0-100",
+      "reason": "the range is exactly -100..100",
+      "event": {
+        "id": "b987e69293b1ef72815d43628b6532b7cc4489ccdd81b29528bb44596dd6e54e",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "ad2b8725-e857-43b6-9a5a-5c693874d217",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "0"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "5bbbfd80535ff54fbb02a2f182aa30cb25f06318ea944e4f37abec97f554730b289e86f997ef834b797b37860a5891170e7b81373268fdfd77fe9f6ba075950a"
+      }
+    },
+    {
+      "name": "schema-2",
+      "reason": "only schema 1 is defined",
+      "event": {
+        "id": "c877ea8cc442001f4223c4dd8dd9802f360c095dc50a030a896f2e2d64782a68",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "59faf16b-fe5e-47ef-812e-21420243357a",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "2"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "5222110189d38cb606e6033aa6ebd4152d7edfa6f9a23d9d5053ecd5633f8a61808a5efb54ba4bf2456c7ffa6b39337e36b6f69ddc720336034f8c4e70f6f5d4"
+      }
+    },
+    {
+      "name": "type-attestation",
+      "reason": "the record type is rating",
+      "event": {
+        "id": "c23aee42a58bfec26c8aa77fb19ff12d9bd8e26278ede9465ea51ee887115e1b",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "d1f1654a-615c-4658-9a41-545c4f8e2863",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "social_memory_attestation"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "4ff2ea693aa661c72e8622500eea4c1e95560d345d5b06d0f2c8c36cee32d84af2a9a387e01da0b8517e7a2775a0b1d598606268628277cdbb707bcc6d1613d1"
+      }
+    },
+    {
+      "name": "two-ratings",
+      "reason": "each required fact appears exactly once",
+      "event": {
+        "id": "028e11bfc147e725b142fa4e9aa15afc109d287453104b0310376221e3e9f1dc",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "98afe773-28eb-4665-93cc-14dd9d1fca24",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ],
+          [
+            "rating",
+            "-80"
+          ]
+        ],
+        "content": "",
+        "sig": "cec451a43cd248b2fdba3ee7e3fecfc95ffaf4f093c68c0eb8ae63cf2ce0cf3d9edc4f48ca6255fa8ffd635721d6de006b93b41acbdae52ff332ddd6c9e4d6f1"
+      }
+    },
+    {
+      "name": "rating-two-values",
+      "reason": "each required fact holds one value",
+      "event": {
+        "id": "4d8c1e21fd2faba1e89d1c5dd4a05b1527ea4967eceef3372a2e423bdcd5b41c",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "1531873f-6c37-4a9d-b87e-3dd80a505d92",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80",
+            "90"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "2e9f5f597516e13be866f2baacba816f1e70b479581a9f20f11d366a0e9c796a0ec16939df8426eb817152e6b91301eff30f8d7666c2e670f195717722ec1ce5"
+      }
+    },
+    {
+      "name": "no-created-at-fact",
+      "reason": "created_at is a required fact",
+      "event": {
+        "id": "fd21a2a385069d06c79400f1ec1dcefff35487f3f4185cfb25114e916db1d5a8",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "47a06434-5a1c-4450-9d01-04502236d646",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "22761fd23b491e1bb75507ee022557bda5dc7497bb6236dea08735fda07cc7712366854ddcd1bce673b64937b9be352f11e23e62b7060dbd8b9fe29b73a8ff1b"
+      }
+    },
+    {
+      "name": "d-tag",
+      "reason": "a fact op carries no d tag",
+      "event": {
+        "id": "babf68db632c41d498d8f1b7bc3dd0f43624301ca90c63b7b5cd79687eea388f",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "309eabe7-bd5c-4e2f-a91a-1f648cc2ba1a",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ],
+          [
+            "d",
+            "nfx-seeder"
+          ]
+        ],
+        "content": "",
+        "sig": "90b2524bdb5d51f8edf1aeea49ea8ee42d42a939998cfa4f9cdaae55f65b878f75e30ff20a1ae71f0788fbdb0e090e8ecf97a3540ff47dfe8acea909c3c0a2ec"
+      }
+    },
+    {
+      "name": "e-tag",
+      "reason": "an NFX rating links to no other event",
+      "event": {
+        "id": "7017028833b576e2aa23b3f135280ac7b2f10d3be38538f520f1d7198974e9f7",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "0d1d23d6-2588-454b-a156-d0d86ab98106",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ],
+          [
+            "e",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "",
+            "prev"
+          ]
+        ],
+        "content": "",
+        "sig": "dcf5a15005c25befdec6799808a74b6c5720cbb610c818aa02403530c0c61dd3f8bf54828a4c73bca64227b375c0782903d8b3668ccd94a3fa797c4a1ec734b2"
+      }
+    },
+    {
+      "name": "uuid-uppercase",
+      "reason": "the record UUID is canonical lowercase",
+      "event": {
+        "id": "cfd819062e8dd5a9146fefc5248f834c9ac1e25d9ca68bead0a4c4e2d43bd91b",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "DCC657C4-4308-4238-BE76-F42B37ABDEAF",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "02b4993b7d5d03e02a348a49fb0afc37450421318ba7e15d318353b5ad1ec0c515fe29beb70f25ba600127167a1700bed72f13e49dc6ec01217d41d0a07e704e"
+      }
+    },
+    {
+      "name": "two-subject-i",
+      "reason": "exactly one subject i tag",
+      "event": {
+        "id": "5d6a3e13a9362386c388693ec4dda7ff71fe7e947d7814ccbe633fa7ffebecf6",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "fafe883f-a9ce-4796-8962-1b54ea3ca255",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ],
+          [
+            "i",
+            "6fcb8ccf-cfa5-4fcf-bcec-082c5b5ccd70",
+            "subject"
+          ]
+        ],
+        "content": "",
+        "sig": "7c7755ba3cca13d050131d70687550dbbda13a6e2d669e6533656c8aac81cb89cdddb10de6b4f0efca439636bdc6c844802b29704431f1f9c70ed0a00f3f860b"
+      }
+    },
+    {
+      "name": "content",
+      "reason": "the content is empty",
+      "event": {
+        "id": "bf66a2badb7522ddb09c127dbd8b80bc9d7fad778eb38f271ccb95e482407f14",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "28ab50b4-e7df-4420-b114-fd51d144a658",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "seeder was great",
+        "sig": "50ead5a96d4bc3dafcdf882fa1f6a62933662f6b099e523edb6a1b7f51f70b6799a233d2d06d2e814081628feb872c0d19e7612ec804c44f49e2ff8d9a33690d"
+      }
+    },
+    {
+      "name": "id-mismatch",
+      "reason": "edited after signing: the id no longer matches",
+      "event": {
+        "id": "d5354f466cac58507d181db7579be4f79ba2c703fcfde0e9707a016554808c90",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "acceef0b-b543-4b7a-b01b-0eb8dd52b239",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "100"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "1c0b20582c93dedd9694b2302668d0e63151a173ef4311f515419dd24206992bb0d32f385f6ca4b409928d8fd89f457b95c84b1958b4aabbc1ce464ec37e6f71"
+      }
+    },
+    {
+      "name": "bad-sig",
+      "reason": "the signature does not verify",
+      "event": {
+        "id": "1e87f2b8a81e296c7c4a67c9f456e7792eaed83ad6760a079bbcabf85f2a1e16",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "1c438617-d489-493b-ab11-f808aa63b1e3",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "00bd4589a0514c8f6c63d3ddf2f8a099a3e17a0f8abf60f96c95484ed10b9b91f402dff41eef0b4d234c5f4491c8ad57a9e2b2d8632aeeadf025719f1fe97f2d"
+      }
+    }
+  ]
+}
