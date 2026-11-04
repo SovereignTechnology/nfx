@@ -197,7 +197,8 @@ used a real CDK 0.18 mint and nostr-vpn's own channel code, with 500 files at 1 
    - Measure update size, sign and verify time, mint calls and fees, against NFX-07 bearer
      payments at the same price and window.
    - Record the results in `docs/nfx/spikes/s6-spilman.md`.
-2. **NFX-16 ratings**, any time after acceptance.
+2. **NFX-16 ratings**, any time after acceptance. Draft written 2026-11-04:
+   [`spec/nfx-16-seeder-ratings.md`](../../spec/nfx-16-seeder-ratings.md).
 3. **NFX-15**, after NFX-07 freezes and M2.1 ships, in the same security discipline as M2: an
    adversary suite in both engines before any real mint.
 4. **nutflix-pear** follows the specs.

@@ -1,0 +1,291 @@
+{
+  "description": "NFX-16 §1 valid seeder ratings (kind 7368, a nostr-social-memory rating record, scope nfx.seeder). Tags are nostr-social-memory 0.1.1's builder output for these facts, in its order, then n and expiration. 'reads_as' is what a reader takes from each. The subject of 'measured' is the beacon vector's seeder.",
+  "secret_keys_DO_NOT_USE": {
+    "watcher": "2f3b62562c4ce7ced973f1b898bdb57be1b0800f3ae703bde94458db0f2a258e"
+  },
+  "namespace": "nfx:mainnet:1",
+  "cases": [
+    {
+      "name": "measured",
+      "reason": "the watcher's software rates the beacon vector's seeder +80",
+      "event": {
+        "id": "3078846a4d4310c4477cb55ddc335b5475a8819c1456fdfd3d7cf17f2a80a4e2",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "d207ef13-9f60-4499-bb75-cd362b57a6fc",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "9ed7d04ff81fed9311b8be41546678d11a0f64e316066bdd60c4252f60a98013d4e08e0df35f5072e5a72db85ddd1677625e9b956536e2315456008b6b0cc013"
+      },
+      "reads_as": {
+        "rater": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "subject": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "rating": 80,
+        "created_at": 1790000000,
+        "expiration": 1792592000
+      }
+    },
+    {
+      "name": "user",
+      "reason": "a person's vote: -60 for a second seeder",
+      "event": {
+        "id": "982efc6c4675ab6d251e7d6855d74694f276598ea33b75faad1bbdb2985da977",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790000000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "2b35cd6b-6d15-4859-8194-10f2bf4bc03d",
+            "subject"
+          ],
+          [
+            "i",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790000000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "-60"
+          ],
+          [
+            "reason",
+            "user"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792592000"
+          ]
+        ],
+        "content": "",
+        "sig": "9173dcce339c4f3698855aa53b92d86b41ad6102c855246f0a354b0c65939fea61e30723efd44101cd43f0d5fb01713ce7d12aa95e758d2ecb2da08ec4964f3e"
+      },
+      "reads_as": {
+        "rater": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "subject": "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2",
+        "rating": -60,
+        "created_at": 1790000000,
+        "expiration": 1792592000
+      }
+    },
+    {
+      "name": "withdrawal",
+      "reason": "a day later, 0 withdraws the first rating (§4)",
+      "event": {
+        "id": "7692318b9c714d1691e004312d08348f140f74da6cc77cd6bc44b1859426c384",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790086400,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "c11a0851-02af-40c3-a7c0-a91f5717d940",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790086400"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "0"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792678400"
+          ]
+        ],
+        "content": "",
+        "sig": "601a818507fe89cbaa9fc7e6f23b0253e87547c65a7de8235b11febb6306a53f28a5386e16fe8627132d98bb785cd5e493158fbf679c33035eb06f531c11dc13"
+      },
+      "reads_as": {
+        "rater": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "subject": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "rating": 0,
+        "created_at": 1790086400,
+        "expiration": 1792678400
+      }
+    }
+  ]
+}

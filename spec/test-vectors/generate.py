@@ -38,6 +38,7 @@ TTL = 120
 MAX_SAFE_INT = 2**53 - 1
 
 from pay1 import pay1_vectors  # noqa: E402  (pinned with the money code: crates/ci/check-locked.sh)
+from ratings import ratings_vectors  # noqa: E402  (NFX-16)
 
 
 def uvarint(n: int) -> bytes:
@@ -916,6 +917,7 @@ def main() -> int:
         },
         "derived.json": derived,
         "pay1.json": pay1_vectors(),
+        **ratings_vectors(keypair, schnorr_id_pubkey, nostr_event),
         "licensed.json": {
             "description": "NFX-08 §2 licensed-mode encryption of one file: stored = nonce || "
                            "XChaCha20-Poly1305-Encrypt(K, nonce, plaintext, aad) (IETF construction, "
