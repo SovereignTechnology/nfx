@@ -10,6 +10,7 @@
 //!          [--seed <a>]… [--fetch <a>]… [--pull <a>]… [--origin <addr:port>]
 //!          [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--tracker-url <wss url>]]] [--namespace <ns>]…
 //!          [--allow-creator <hex>]… [--gossip [--gossip-peer <id>@<ip:port|relay-url>]…]
+//!          [--rating-root <npub|hex> --general-relay <url>… [--rating-trusted <npub|hex>]…]
 //! ```
 //!
 //! `<a>` is a manifest address, `38504:<creator-hex>:<namespace>:<video-id>`, as
@@ -20,6 +21,13 @@
 //! others to use. Gossip is off by default: iroh-gossip hands the addresses swarm members
 //! advertise to the node's endpoint unfiltered, so any member can make the node contact
 //! hosts of its choosing. A `--relay-only` node never gossips.
+//!
+//! With `--rating-root` (your own key), the seeders `run` pulls from are ordered by their
+//! seeder ratings (NFX-16): those by you, the authors you follow and any
+//! `--rating-trusted`, less those you mute, read hourly from the `--general-relay`s.
+//! Scoped relays carry neither ratings nor follow lists. Off by default; ratings only
+//! ever order seeders, and never change what this node grants anyone. Reading your own
+//! lists tells those relays this node's address belongs to your key.
 //!
 //! `--embed-tracker` serves the NFX-10 browser mesh (plain `ws`), and `--bridge` joins it
 //! as a native WebRTC peer. In public, put the tracker behind a TLS proxy (browsers need
@@ -44,7 +52,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...]";
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...]";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -209,6 +217,9 @@ async fn run(args: &[String]) -> Result<()> {
             "namespace",
             "allow-creator",
             "gossip-peer",
+            "rating-root",
+            "rating-trusted",
+            "general-relay",
         ],
     )?;
     let addr = |name: &str| -> Result<Option<std::net::SocketAddr>> {
@@ -251,6 +262,14 @@ async fn run(args: &[String]) -> Result<()> {
         allow_creators: all(&f, "allow-creator"),
         gossip,
         gossip_peers: gossip_peers(&all(&f, "gossip-peer"))?,
+        rating_root: one(&f, "rating-root")?
+            .map(|v| pubkey_hex("rating-root", &v))
+            .transpose()?,
+        rating_trusted: all(&f, "rating-trusted")
+            .iter()
+            .map(|v| pubkey_hex("rating-trusted", v))
+            .collect::<Result<_>>()?,
+        general_relays: all(&f, "general-relay"),
         internal_origin: false,
         // `run` seeds only what `--seed` names, and a seeder may use the portmapper.
         seed_watched: false,
@@ -299,6 +318,13 @@ async fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// A public key given as an npub or 64 hex digits, as 64 lowercase hex.
+fn pubkey_hex(flag: &str, v: &str) -> Result<String> {
+    nostr_sdk::prelude::PublicKey::parse(v)
+        .map(|k| k.to_hex())
+        .map_err(|_| Error::Config(format!("--{flag} {v}: not an npub or a 64-hex key")))
+}
+
 /// `--gossip-peer ID@ADDR`, where `ADDR` is `ip:port` or an iroh relay URL; repeat the flag
 /// for more addresses of the same peer. `nfxd run` prints its own in this form.
 fn gossip_peers(values: &[String]) -> Result<Vec<iroh::EndpointAddr>> {
@@ -326,7 +352,21 @@ fn gossip_peers(values: &[String]) -> Result<Vec<iroh::EndpointAddr>> {
 
 #[cfg(test)]
 mod tests {
-    use super::gossip_peers;
+    use super::{gossip_peers, pubkey_hex};
+
+    #[test]
+    fn rating_keys_are_npubs_or_hex_and_come_out_as_hex() {
+        use nostr_sdk::prelude::ToBech32 as _;
+        let keys = nostr_sdk::prelude::Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let npub = keys.public_key().to_bech32().unwrap();
+        assert_eq!(pubkey_hex("rating-root", &npub).unwrap(), hex);
+        assert_eq!(pubkey_hex("rating-root", &hex).unwrap(), hex);
+        for bad in ["", "npub1nope", &hex[..63], "nsec1abc"] {
+            let err = pubkey_hex("rating-root", bad).unwrap_err().to_string();
+            assert!(err.contains("--rating-root"), "{bad}: {err}");
+        }
+    }
 
     #[test]
     fn gossip_peers_merge_by_id_and_refuse_what_they_cannot_parse() {

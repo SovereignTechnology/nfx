@@ -46,6 +46,12 @@ use crate::{Error, Result};
 
 /// How often a missing manifest or an unfetched video is retried.
 pub const RETRY: Duration = Duration::from_secs(2);
+/// How often a namespace's seeder scores are refreshed: NFX-16 §2 reads at most hourly.
+pub const RATING_REFRESH: Duration = Duration::from_secs(60 * 60);
+/// How soon a failed refresh is retried.
+pub const RATING_RETRY: Duration = Duration::from_secs(10 * 60);
+/// How often the rating task looks for a namespace it has no scores for yet.
+const RATING_TICK: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Default)]
@@ -109,6 +115,16 @@ pub struct Config {
     /// How often a seeded video is checked for its creator's deletion (NFX-02 §6).
     /// Default: every beacon republish (60 s).
     pub deletion_check_every: Option<Duration>,
+    /// The user's own Nostr key (x-only, 64 lowercase hex). When set, seeder ratings
+    /// (NFX-16) by it, the authors it follows and `rating_trusted`, less those it mutes,
+    /// order the seeders this node pulls from. Unset (the default): no rating is read, and
+    /// seeders are tried as before. Ratings never change what this node grants a watcher.
+    pub rating_root: Option<String>,
+    /// More authors whose ratings count (NFX-16 §4), 64 lowercase hex. Needs `rating_root`.
+    pub rating_trusted: Vec<String>,
+    /// General Nostr relays to read follow lists, mute lists and ratings from (NFX-16 §2);
+    /// scoped relays (NFX-04) carry neither kind. Needed with `rating_root`.
+    pub general_relays: Vec<String>,
 }
 
 /// Where each video stands, by `a` tag.
@@ -562,6 +578,25 @@ impl Daemon {
         if !cfg.pull.is_empty() && cfg.origin.is_none() && !cfg.internal_origin {
             return Err(Error::Config("--pull needs --origin".into()));
         }
+        if let Some(key) = cfg
+            .rating_root
+            .iter()
+            .chain(&cfg.rating_trusted)
+            .find(|k| !is_x_only(k))
+        {
+            return Err(Error::Config(format!(
+                "rating key {key}: not 64 lowercase hex"
+            )));
+        }
+        if cfg.rating_root.is_none() && !cfg.rating_trusted.is_empty() {
+            return Err(Error::Config("--rating-trusted needs --rating-root".into()));
+        }
+        if cfg.rating_root.is_some() && cfg.general_relays.is_empty() {
+            return Err(Error::Config("--rating-root needs --general-relay".into()));
+        }
+        if cfg.rating_root.is_none() && !cfg.general_relays.is_empty() {
+            return Err(Error::Config("--general-relay needs --rating-root".into()));
+        }
         if let Some(url) = &cfg.https_url {
             // Checked the way every reader will check it (NFX-03 §4): a bad URL would
             // otherwise make every beacon fail, every minute, forever.
@@ -702,6 +737,9 @@ impl Daemon {
 
         // Beacons for everything we fetch or pull feed the pull sources.
         let own = cfg.keys.as_ref().map(|k| k.public_key().to_hex());
+        let mut rated: std::collections::BTreeSet<String> =
+            cfg.namespaces.iter().map(ToString::to_string).collect();
+        rated.extend(by_namespace.keys().cloned());
         for (namespace, watched) in by_namespace.into_values() {
             if watched.is_empty() {
                 continue;
@@ -715,6 +753,17 @@ impl Daemon {
                     }
                 }
             }));
+        }
+
+        if let Some(root) = &cfg.rating_root {
+            let general = Relays::connect(&cfg.general_relays, CONNECT_TIMEOUT).await?;
+            tasks.push(tokio::spawn(rate_seeders(
+                general,
+                pull.clone(),
+                root.clone(),
+                cfg.rating_trusted.clone(),
+                rated,
+            )));
         }
 
         type Job = fn(
@@ -903,5 +952,67 @@ impl Daemon {
         }
         self.relays.shutdown().await;
         let _ = self.node.close().await;
+    }
+}
+
+fn is_x_only(key: &str) -> bool {
+    key.len() == 64 && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Keep the pull's seeder scores (NFX-16 §4) current: for every namespace configured or
+/// heard in a beacon, fetch the inputs from the general relays and score them, then again
+/// after [`RATING_REFRESH`], or after [`RATING_RETRY`] when the fetch failed. A failed
+/// fetch keeps the scores already held.
+async fn rate_seeders(
+    general: Relays,
+    pull: Arc<SwarmPull>,
+    root: String,
+    trusted: Vec<String>,
+    configured: std::collections::BTreeSet<String>,
+) {
+    let mut due: BTreeMap<String, tokio::time::Instant> = BTreeMap::new();
+    let mut tick = tokio::time::interval(RATING_TICK);
+    loop {
+        tick.tick().await;
+        let mut namespaces = configured.clone();
+        namespaces.extend(pull.namespaces());
+        for namespace in namespaces {
+            if due
+                .get(&namespace)
+                .is_some_and(|at| tokio::time::Instant::now() < *at)
+            {
+                continue;
+            }
+            let now = unix_now();
+            let wait = match general
+                .rating_inputs(&root, &trusted, &namespace, now, CONNECT_TIMEOUT)
+                .await
+            {
+                Ok(inputs) => {
+                    // Up to MAX_RATING_EVENTS signature checks: off the async workers.
+                    let ns = namespace.clone();
+                    let scored = tokio::task::spawn_blocking(move || {
+                        nfx_proto::rating::score(&inputs.events, &ns, now, &inputs.admitted)
+                    })
+                    .await;
+                    match scored {
+                        Ok(scored) => {
+                            pull.set_scores(
+                                &namespace,
+                                scored
+                                    .scores
+                                    .into_iter()
+                                    .map(|(seeder, s)| (seeder, s.score))
+                                    .collect(),
+                            );
+                            RATING_REFRESH
+                        }
+                        Err(_) => RATING_RETRY,
+                    }
+                }
+                Err(_) => RATING_RETRY,
+            };
+            due.insert(namespace, tokio::time::Instant::now() + wait);
+        }
     }
 }
