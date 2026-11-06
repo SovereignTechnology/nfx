@@ -19,6 +19,9 @@ iroh-blobs.workspace = true
 iroh-gossip.workspace = true
 n0-future.workspace = true
 nfx-proto.workspace = true
+# The relay CA roots (`NodeConfig::relay_cas`); already in the lock through rustls. Per crate,
+# never in [workspace.dependencies], so the workspace manifest's pinned line does not move.
+rustls-pki-types = "1.15.1"
 nostr-memory.workspace = true
 nostr-sdk = { workspace = true, features = ["local-relay"] }
 serde_json.workspace = true
@@ -30,7 +33,7 @@ tokio-tungstenite.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
-iroh-relay = { workspace = true, features = ["server"] }
+iroh-relay = { workspace = true, features = ["server", "test-utils"] }
 iroh-tickets.workspace = true
 nostr-sdk = { workspace = true, features = ["local-relay"] }
 hyper = { workspace = true, features = ["client"] }

@@ -66,6 +66,8 @@ pub struct Config {
     pub relays: Vec<String>,
     /// iroh relays this network runs (NFX-06 §1). Empty: direct connections only.
     pub iroh_relays: Vec<RelayUrl>,
+    /// Extra CA roots for those relays' TLS (`--iroh-relay-ca`), beside the compiled-in ones.
+    pub iroh_relay_cas: Vec<nfx_node::node::CertificateDer<'static>>,
     /// No direct IP transports: every iroh byte crosses a relay. For proving the relay
     /// path, and for hosts that must not expose UDP.
     pub relay_only: bool,
@@ -533,6 +535,10 @@ impl Daemon {
         if cfg.relay_only && cfg.iroh_relays.is_empty() {
             return Err(Error::Config("--relay-only needs --iroh-relay".into()));
         }
+        // CA roots for relays that are not there would trust nothing in particular.
+        if !cfg.iroh_relay_cas.is_empty() && cfg.iroh_relays.is_empty() {
+            return Err(Error::Config("--iroh-relay-ca needs --iroh-relay".into()));
+        }
         // The allow-list governs the embedded relay; without one it would govern nothing.
         if !cfg.allow_creators.is_empty() && cfg.embed_relay.is_none() {
             return Err(Error::Config("--allow-creator needs --embed-relay".into()));
@@ -674,6 +680,7 @@ impl Daemon {
             Node::spawn(NodeConfig {
                 relays: cfg.iroh_relays.clone(),
                 relay_only: cfg.relay_only,
+                relay_cas: cfg.iroh_relay_cas.clone(),
                 blobs_dir: Some(state.join("iroh-blobs")),
                 no_portmapper: cfg.no_portmapper,
                 ..NodeConfig::default()

@@ -24,7 +24,7 @@ bytes.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client"] }
 hyper-util.workspace = true
-iroh-relay = { workspace = true, features = ["server"] }
+iroh-relay = { workspace = true, features = ["server", "test-utils"] }
 
 [lints]
 workspace = true

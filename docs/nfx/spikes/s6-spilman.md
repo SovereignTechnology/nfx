@@ -44,8 +44,7 @@ window.
      `chunks × price` and fees the seeder's.
 - **Two passes:** the mint's default keyset (0 ppk), then a keyset rotated to 100 ppk input fees
   before any wallet existed, so the fees are real.
-- **Where it ran:** a Kata guest on ubuntu-server (i5-10500T), through kata-run job 17653
-  (2026-11-03). Total run time 326 s. Sum checks hold in both passes: minted = wallets + fees.
+- **Where it ran:** a Kata guest (Intel i5-10500T), 2026-11-03. Total run time 326 s. Sum checks hold in both passes: minted = wallets + fees.
 
 ## Results (500 files, 1 sat each)
 
