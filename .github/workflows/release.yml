@@ -1,0 +1,110 @@
+# NFX releases: the headless node and the packager as prebuilt binaries, beside the source.
+#
+#   push a `v<version>` tag    build in the pinned image, SHA256SUMS, then a DRAFT GitHub release
+#                              (not public: sovtech reviews it and publishes it by hand)
+#   a PR that touches this     the same build and sums, no release (a dry run)
+#
+# What ships: `nfxd` and `nfx-package` for linux-x64 (glibc, built in ci.yml's pinned
+# rust:1.98.0-bookworm image), LICENSE and README, in one tarball, and SHA256SUMS. The Tauri
+# desktop viewer and the browser player are built from source for now.
+#
+# No job holds a key or signs anything. Only `draft-release` can write (contents: write), only
+# on a tag, and it runs no project code: it attaches the files the read-only job made. The
+# workflow is pinned by the money lock with the rest of .github/workflows
+# (crates/ci/check-locked.sh): an edit here needs its pin line in crates/ci/locked.sha256.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # A tag must name exactly the version being built: the tarball's name carries it, and
+      # `nfxd` and `nfx-media` must agree.
+      - name: the version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          v=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/nfxd/Cargo.toml | head -n 1)
+          m=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/nfx-media/Cargo.toml | head -n 1)
+          [ -n "$v" ] && [ "$v" = "$m" ] || { echo "::error::nfxd $v and nfx-media $m differ"; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not name version $v"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      # Fixed timestamps from the commit; paths of the build machine kept out of the binaries.
+      - name: build (release, --locked)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --system --add safe.directory "$(pwd -P)"
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
+          export RUSTFLAGS="--remap-path-prefix=$(pwd -P)=/build --remap-path-prefix=${CARGO_HOME:-/usr/local/cargo}=/cargo"
+          cargo build --release --locked --manifest-path crates/Cargo.toml -p nfxd -p nfx-media --bins
+      - name: tarball and SHA256SUMS
+        shell: bash
+        env:
+          V: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
+          name="nfx-${V}-linux-x64"
+          mkdir -p "dist/$name"
+          install -m 0755 crates/target/release/nfxd crates/target/release/nfx-package "dist/$name/"
+          install -m 0644 LICENSE README.md "dist/$name/"
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" \
+            -C dist -cf - "$name" | gzip -9n > "dist/$name.tar.gz"
+          rm -r "dist/$name"
+          (cd dist && sha256sum "$name.tar.gz" > SHA256SUMS && cat SHA256SUMS)
+          "crates/target/release/nfxd" 2>&1 | head -n 3 || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nfx-release
+          path: dist/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'push' && 90 || 7 }}
+
+  draft-release:
+    if: github.event_name == 'push'
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nfx-release
+          path: dist/
+      # A draft is not public. A re-run fails if the draft exists already: delete it first.
+      - name: draft release with the files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --title "NFX ${GITHUB_REF_NAME#v}" \
+            --notes "Prebuilt nfxd and nfx-package for linux-x64, and SHA256SUMS. Release notes: docs/nfx/releases/${GITHUB_REF_NAME}.md in the tagged tree." \
+            dist/*.tar.gz dist/SHA256SUMS
