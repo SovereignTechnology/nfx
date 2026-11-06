@@ -318,11 +318,10 @@ async fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// A public key given as an npub or 64 hex digits, as 64 lowercase hex.
+/// A public key given as an npub or 64 hex digits, as 64 lowercase hex. The error never
+/// repeats the value: it may be a secret key given by mistake.
 fn pubkey_hex(flag: &str, v: &str) -> Result<String> {
-    nostr_sdk::prelude::PublicKey::parse(v)
-        .map(|k| k.to_hex())
-        .map_err(|_| Error::Config(format!("--{flag} {v}: not an npub or a 64-hex key")))
+    key::public_hex(v).map_err(|why| Error::Config(format!("--{flag}: {why}")))
 }
 
 /// `--gossip-peer ID@ADDR`, where `ADDR` is `ip:port` or an iroh relay URL; repeat the flag
@@ -366,6 +365,15 @@ mod tests {
             let err = pubkey_hex("rating-root", bad).unwrap_err().to_string();
             assert!(err.contains("--rating-root"), "{bad}: {err}");
         }
+        // A secret key given by mistake is named as one and never repeated.
+        let nsec = keys.secret_key().to_bech32().unwrap();
+        for secret in [nsec.clone(), format!("nostr:{nsec}")] {
+            let err = pubkey_hex("rating-root", &secret).unwrap_err().to_string();
+            assert!(err.contains("secret key"), "{err}");
+            assert!(!err.contains(&nsec[5..]), "the nsec is repeated: {err}");
+        }
+        assert_eq!(nfxd::key::npub(&hex).as_deref(), Some(npub.as_str()));
+        assert_eq!(nfxd::key::npub("nope"), None);
     }
 
     #[test]

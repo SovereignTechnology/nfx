@@ -9,7 +9,13 @@ address (`38504:<creator>:<namespace>:<video-id>`). It then:
 3. seeds the video only if sharing is on ("Share videos I watch", the `share` setting):
    it then fetches the whole video and seeds it. Sharing is off by default. Without it
    the video is only served to the window, the app announces nothing, and it never asks
-   the router to open a port.
+   the router to open a port;
+4. orders the seeders it pulls from by seeder ratings (NFX-16) only if they are set up:
+   the user's npub and at least one general relay. The node then reads the user's follow
+   and mute lists and the ratings of those they follow, and tries well-rated seeders
+   first. Ratings never block a seeder, and the app publishes none. Reading one's own
+   lists tells those relays that this computer's address goes with that key, so this is
+   off by default too.
 
 ```sh
 ./run.sh      # build (release) and start; needs web/player's npm ci for hls.js
@@ -36,7 +42,7 @@ The data directory is the app's data dir, or `NFX_DESKTOP_DATA`:
 | Path | What |
 |---|---|
 | `node.key` | This node's Nostr key, mode 0600, created on first run. Never printed; only the public key is shown. |
-| `settings.json` | `relays` (Nostr scoped relays), `iroh_relays` (the network's own iroh relays; none disables relaying, so direct connections only) and `share` (`false` unless turned on). |
+| `settings.json` | `relays` (Nostr scoped relays), `iroh_relays` (the network's own iroh relays; none disables relaying, so direct connections only), `share` (`false` unless turned on), and for seeder ratings `rating_root` (the user's key, hex; unset = off), `rating_trusted` (more keys, hex) and `general_relays`. |
 | `store/` | Content by sha256. `store/.nfxd/` holds iroh-blobs' index. |
 
 ## Security
@@ -47,5 +53,8 @@ The data directory is the app's data dir, or `NFX_DESKTOP_DATA`:
 - **The CSP allows only the app's own scripts**, with no inline script. Media and fetch
   go to `nfx:` / `http://nfx.localhost`. The page builds the DOM with `textContent`
   only.
+- **Rating keys are npubs only.** Bare hex would let a pasted secret key pass for a public
+  key and go out to relays as a filter. An nsec is refused as one, and no refusal repeats
+  the key it was given.
 - **Relays must be `ws://` or `wss://`.** Addresses and deletions are handled with
   `nfx-proto`'s parser, never a generic Nostr one (NFX-02 §2).

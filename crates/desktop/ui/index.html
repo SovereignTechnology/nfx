@@ -54,6 +54,17 @@
     <p class="note">Off by default. When on, each video you watch is fetched whole and
     seeded to other viewers. That announces it publicly, signed with this node's key and
     with this computer's network addresses.</p>
+    <label for="rating-root">Seeder ratings: your npub (optional)</label>
+    <input id="rating-root" autocomplete="off" spellcheck="false" placeholder="npub1…">
+    <label for="general">General relays for ratings (one per line, wss://…)</label>
+    <textarea id="general" spellcheck="false"></textarea>
+    <label for="trusted">Also count ratings by (one npub per line, optional)</label>
+    <textarea id="trusted" spellcheck="false"></textarea>
+    <p class="note">Off unless your npub is set. The node then reads your follow and mute
+    lists and the seeder ratings of the people you follow from these relays, and tries
+    well-rated seeders first. Ratings only change that order: they never block a seeder,
+    and nothing is published. Reading your lists tells these relays that this computer's
+    network address goes with your key. Give your npub, never your nsec.</p>
     <button id="save">Save and restart node</button>
     <label>This node's key</label>
     <code id="pubkey"></code>
