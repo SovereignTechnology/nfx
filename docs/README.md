@@ -3,7 +3,7 @@
 This directory holds the decision records, the project status log and the reference
 copies behind NFX, the Nostr-identified, peer-seeded video network specified in
 [`spec/`](../spec/README.md). Every area below carries one label, so you can tell what
-to rely on. Labels and statuses are as of 2026-10-25.
+to rely on. Labels and statuses are as of 2026-11-05.
 
 ## Where to start
 
