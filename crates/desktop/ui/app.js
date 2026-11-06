@@ -20,6 +20,9 @@ async function loadSettings() {
   $('relays').value = s.relays.join('\n');
   $('iroh').value = s.iroh_relays.join('\n');
   $('share').checked = s.share;
+  $('rating-root').value = s.rating_root;
+  $('general').value = s.general_relays.join('\n');
+  $('trusted').value = s.rating_trusted.join('\n');
   $('pubkey').textContent = s.pubkey;
 }
 
@@ -73,6 +76,9 @@ $('save').addEventListener('click', async () => {
       relays: lines($('relays').value),
       irohRelays: lines($('iroh').value),
       share: $('share').checked,
+      ratingRoot: $('rating-root').value.trim(),
+      ratingTrusted: lines($('trusted').value),
+      generalRelays: lines($('general').value),
     });
     say('Node restarted with the new settings.');
   } catch (e) {

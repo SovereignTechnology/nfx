@@ -14,7 +14,7 @@ This repository is public, and since `c07be45` (2026-09-28) its CI runs on GitHu
 two jobs for GitLab and is a dormant twin: it runs nothing. What the sections below say of the private
 GitLab project, of GitLab CI and of its shared runner is as it stood before that.
 
-Updated 2026-11-05 · `main` = `ff77609` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
+Updated 2026-11-06 · `main` = `abbd8f2` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
 
 ## Since 2026-10-25
 
@@ -66,6 +66,9 @@ from ADR 0104, and two yanked dependencies replaced.
   `--rating-root` and `--general-relay`, `nfxd` orders the seeders it pulls from by the trusted
   score of the user's circle, refreshed hourly: after cooldown and relay-before-gossip, so a
   score never rescues a failing seeder. Off by default; publishing ratings is not built.
+  The desktop viewer has the same settings (#17): the user's npub (never bare hex, which a
+  pasted secret key would pass for), general relays and more trusted npubs. `nfxd` and the
+  app refuse an nsec given as a rating key without repeating it.
 - **Dependencies:** crates.io yanked two versions on our locks, and cargo deny failed the
   check job on them. Neither crate is in the money closure, so neither lock needed a re-pin.
   - #10 (`cf9788a`): crypto-bigint 0.7.6 → 0.7.9. RUSTSEC-2026-0387's fix is kept.
