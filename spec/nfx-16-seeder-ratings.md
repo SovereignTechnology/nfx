@@ -170,6 +170,11 @@ rank by:
 
 A score never rescues a seeder that is failing now.
 
+`nfxd run --rating-root` (2026-11-05) ranks by 1 and 4 and keeps its own tie-breaks: a seeder on
+cooldown after a failure last, a seeder heard only over gossip after one from a relay's beacon,
+then the trusted score, then the order learned. Ranks 2, 3 and 5 wait for publishing and paid
+seeding.
+
 **Seeders.** A seeder MUST NOT use ratings, or any watcher's Nostr identity, to set a watcher's
 credit or `window` (ADR 0104 §6.4). It cannot see that identity anyway, and must not ask for it.
 
@@ -184,6 +189,10 @@ credit or `window` (ADR 0104 §6.4). It cannot see that identity anyway, and mus
     leaves publishing off.
 - **Reading is quieter.** A reader's REQ shows relays whose ratings it reads, which its follow
   list already shows. Without `#p`, it does not show which seeders it is considering.
+  - **What remains:** asking for its own follow and mute lists ties the reader's network
+    address to its key at those relays, as any Nostr client fetching its own lists does. A
+    reader who minds uses relays it trusts, or leaves reading off (it is off unless the user
+    names a key).
 - **Sybil seeders cannot boost themselves.** Ratings by authors who are not admitted never
   count, and a rater cannot rate itself. A followed account that turns hostile can still skew
   scores, and the user's remedy is to mute it.
@@ -222,6 +231,10 @@ credit or `window` (ADR 0104 §6.4). It cannot see that identity anyway, and mus
 The source is `test-vectors/ratings.py`, called by `generate.py`. It holds the reference reader
 and scorer, and every verdict in the files is checked against them when they are generated.
 
+`nfx-proto`'s `rating` module (Rust) is a second reader and scorer. It reads all three files as
+the reference does, every verdict and score included, natively and on `wasm32`
+(`crates/nfx-proto/tests/ratings.rs`).
+
 ## 8. Open issues (before any freeze)
 
 - **Kind 7368 is `nostr-identity`'s, not ours.** It is not yet in
@@ -237,3 +250,7 @@ and scorer, and every verdict in the files is checked against them when they are
   `nostr-social-memory` 0.1.1's, plus `n` and `expiration`. Publishing is off by default, with a
   random 1–24 h delay and at most one rating per seeder a day. Scores come only from the user,
   its follows and trusted authors, minus mutes.
+- Draft 2026-11-05 — a second implementation, no normative change: `nfx-proto`'s Rust reader
+  and scorer match every vector, and `nfxd` orders the seeders it pulls from by trusted score
+  (§4, ranks 1 and 4). §5 names what reading still reveals: the reader's address, to the
+  relays it reads its own lists from.

@@ -1,6 +1,7 @@
 //! NFX wire formats (`spec/`): namespaces and the `n` tag (NFX-01), kind-38504
 //! manifests (NFX-02), kind-20464 beacons (NFX-03), hash lists and playlists (NFX-05),
-//! gossip envelopes (NFX-06), vouchers (NFX-08) and canonical JSON (NFX-11 §9).
+//! gossip envelopes (NFX-06), vouchers (NFX-08), canonical JSON (NFX-11 §9) and seeder
+//! ratings (NFX-16).
 //!
 //! Everything here is pure: no I/O, no clock (callers pass `now`), no RNG. The same
 //! code is built natively and for `wasm32-unknown-unknown`, so browsers and native
@@ -13,6 +14,7 @@ pub mod event;
 pub mod gossip;
 pub mod hashlist;
 pub mod manifest;
+pub mod rating;
 mod verified;
 pub mod voucher;
 
@@ -28,5 +30,7 @@ pub const KIND_MANIFEST: u16 = 38504;
 pub const KIND_BEACON: u16 = 20464;
 /// Kind of a NIP-09 deletion request; NFX admits only manifest deletions (NFX-02 §6).
 pub const KIND_DELETION: u16 = 5;
+/// Kind of a seeder rating: nostr-identity's fact op, profiled by NFX-16 (not ours).
+pub const KIND_RATING: u16 = 7368;
 /// Largest `|now - created_at|` accepted for beacons and gossip envelopes, in seconds.
 pub const MAX_CLOCK_SKEW: u64 = 15 * 60;

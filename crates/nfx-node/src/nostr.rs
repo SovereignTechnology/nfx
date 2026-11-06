@@ -1,4 +1,5 @@
-//! Manifests (NFX-02) and beacons (NFX-03) over Nostr relays, through nostr-sdk.
+//! Manifests (NFX-02) and beacons (NFX-03) over Nostr relays, through nostr-sdk, and the
+//! inputs of seeder ratings (NFX-16) from general relays.
 //!
 //! Signing is nostr-sdk's: any async signer, a local key today and NIP-46 later. Every
 //! event is parsed back through `nfx-proto` before it is sent, so nothing leaves that a
@@ -15,7 +16,8 @@ use nfx_proto::deletion::Deletion;
 use nfx_proto::event::Event;
 use nfx_proto::manifest::Manifest;
 use nfx_proto::namespace::{Namespace, VideoAddr};
-use nfx_proto::{KIND_BEACON, KIND_MANIFEST, Verified};
+use nfx_proto::rating::{Admitted, KIND_FOLLOWS, KIND_MUTES, MAX_AGE, listed_pubkeys};
+use nfx_proto::{KIND_BEACON, KIND_MANIFEST, KIND_RATING, Verified};
 use nostr_sdk::prelude as ns;
 use nostr_sdk::prelude::{AsyncGetPublicKey, AsyncSignEvent, FinalizeEventAsync as _};
 
@@ -31,6 +33,25 @@ pub const MAX_LIVE_BEACONS: usize = 4096;
 
 /// Least time between re-sending a beacon subscription a relay closed.
 pub const RESUBSCRIBE_EVERY: Duration = Duration::from_secs(5);
+
+/// Most rating events [`Relays::rating_inputs`] keeps. A relay can answer with any number
+/// and keys are free to mint, but only admitted authors' ratings are kept, and this bounds
+/// even those.
+pub const MAX_RATING_EVENTS: usize = 20_000;
+
+/// Admitted authors per kind-7368 request; relays cap a filter's size.
+const RATING_AUTHORS_PER_REQ: usize = 256;
+
+/// Most follow and mute lists kept from one answer: an honest relay holds one of each.
+const MAX_LISTS: usize = 64;
+
+/// What NFX-16 §4 scores: who is admitted, and the ratings fetched from them, unscored
+/// (`nfx_proto::rating::score` decides which count).
+#[derive(Debug, Clone, Default)]
+pub struct RatingInputs {
+    pub admitted: Admitted,
+    pub events: Vec<Event>,
+}
 
 /// Sign an event with a nostr-sdk signer and return it in `nfx-proto` form.
 async fn sign<S>(
@@ -374,6 +395,137 @@ impl Relays {
 
     pub async fn shutdown(&self) {
         self.client.shutdown().await;
+    }
+}
+
+impl Relays {
+    /// The distinct events matching `filter` that also pass `keep`, at most `cap`, read as
+    /// they arrive until every relay has sent EOSE or `timeout` passes. A relay can ignore
+    /// the filter and send any number of events signed by fresh keys: those are dropped as
+    /// they come and never counted, so they cost time, not memory, and cannot crowd out
+    /// what was asked for. (`fetch_events` would buffer them all, and fail past its cap.)
+    async fn matching(
+        &self,
+        filter: ns::Filter,
+        timeout: Duration,
+        cap: usize,
+        keep: impl Fn(&Event) -> bool,
+    ) -> Result<Vec<Event>> {
+        let mut stream = self
+            .client
+            .stream_events(filter)
+            .timeout(timeout)
+            .await
+            .map_err(NodeError::relay)?;
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::new();
+        while out.len() < cap {
+            let Some((_, received)) = stream.next().await else {
+                break;
+            };
+            let Ok(event) = received else {
+                continue;
+            };
+            let Ok(event) = from_nostr(&event) else {
+                continue;
+            };
+            if keep(&event) && seen.insert(event.id.clone()) {
+                out.push(event);
+            }
+        }
+        Ok(out)
+    }
+
+    /// NFX-16 §2 and §4, for the user whose key is `root` (64 lowercase hex):
+    /// 1. its follow list (kind 3) and mute list (kind 10000), each the newest valid one by
+    ///    `root` (NIP-01: the highest `created_at`, ties to the lowest id), none dated past
+    ///    the clock-skew window;
+    /// 2. the admitted authors: `root`, its follows and `trusted`, less its mutes;
+    /// 3. their kind-7368 events for `namespace` from the last 30 days, at most
+    ///    [`MAX_RATING_EVENTS`], each by an admitted author.
+    ///
+    /// No `#p` filter: the relays learn whose ratings are read, never which seeder is
+    /// wanted. A relay is untrusted; [`nfx_proto::rating::score`] re-verifies every event.
+    pub async fn rating_inputs(
+        &self,
+        root: &str,
+        trusted: &[String],
+        namespace: &str,
+        now: u64,
+        timeout: Duration,
+    ) -> Result<RatingInputs> {
+        self.require_connected().await?;
+        let root_key = ns::PublicKey::from_hex(root).map_err(NodeError::relay)?;
+        let horizon = now.saturating_add(nfx_proto::MAX_CLOCK_SKEW);
+        let lists = self
+            .matching(
+                ns::Filter::new()
+                    .kinds([ns::Kind::from(KIND_FOLLOWS), ns::Kind::from(KIND_MUTES)])
+                    .author(root_key)
+                    .limit(MAX_LISTS),
+                timeout,
+                MAX_LISTS,
+                |e| e.pubkey == root && (e.kind == KIND_FOLLOWS || e.kind == KIND_MUTES),
+            )
+            .await?;
+        // kind -> (created_at, id, pubkeys); only lists that verify are ranked, so a forged
+        // "newer" list cannot hide the real one.
+        let mut newest: BTreeMap<u16, (u64, String, Vec<String>)> = BTreeMap::new();
+        for event in lists {
+            if event.created_at > horizon {
+                continue;
+            }
+            let Ok(pubkeys) = listed_pubkeys(&event, event.kind, root) else {
+                continue;
+            };
+            let replace = newest.get(&event.kind).is_none_or(|(at, id, _)| {
+                (event.created_at, std::cmp::Reverse(&event.id)) > (*at, std::cmp::Reverse(id))
+            });
+            if replace {
+                newest.insert(event.kind, (event.created_at, event.id.clone(), pubkeys));
+            }
+        }
+        let list = |kind| {
+            newest
+                .get(&kind)
+                .map(|(_, _, p)| p.as_slice())
+                .unwrap_or(&[])
+        };
+        let admitted = Admitted::new(
+            root,
+            list(KIND_FOLLOWS).iter().map(String::as_str),
+            trusted.iter().map(String::as_str),
+            list(KIND_MUTES).iter().map(String::as_str),
+        );
+
+        let authors: Vec<ns::PublicKey> = admitted
+            .authors()
+            .filter_map(|a| ns::PublicKey::from_hex(a).ok())
+            .collect();
+        let since = ns::Timestamp::from(now.saturating_sub(MAX_AGE));
+        let mut events: Vec<Event> = Vec::new();
+        for chunk in authors.chunks(RATING_AUTHORS_PER_REQ) {
+            let room = MAX_RATING_EVENTS - events.len();
+            if room == 0 {
+                break;
+            }
+            let got = self
+                .matching(
+                    ns::Filter::new()
+                        .kind(ns::Kind::from(KIND_RATING))
+                        .authors(chunk.iter().copied())
+                        .custom_tag(n_tag(), namespace)
+                        .since(since)
+                        .limit(room),
+                    timeout,
+                    room,
+                    |e| e.kind == KIND_RATING && admitted.contains(&e.pubkey),
+                )
+                .await?;
+            // Each author is in one chunk only, so no event repeats across chunks.
+            events.extend(got);
+        }
+        Ok(RatingInputs { admitted, events })
     }
 }
 
