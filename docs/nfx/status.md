@@ -69,6 +69,14 @@ from ADR 0104, and two yanked dependencies replaced.
   The desktop viewer has the same settings (#17): the user's npub (never bare hex, which a
   pasted secret key would pass for), general relays and more trusted npubs. `nfxd` and the
   app refuse an nsec given as a rating key without repeating it.
+- **`nfxd --iroh-relay-ca <pem>`:** a network whose iroh relays use a private CA, such as
+  the nutflix-pear exit run's test network (ADR 0103 §3), can be reached through them. The
+  file's CA certificates (at most 4 in all, 8 KiB each, 64 KiB a file, any other PEM block
+  refused) are trusted for the relays' TLS beside the compiled-in Mozilla roots
+  (`NodeConfig::relay_cas`). Refused without `--iroh-relay`. It changes which relay
+  certificates are trusted, never how peers authenticate each other. Proved by a relay-only
+  fetch through a TLS relay with a self-signed CA: it fails without the CA, and succeeds with
+  it, every file under its sha256.
 - **Dependencies:** crates.io yanked two versions on our locks, and cargo deny failed the
   check job on them. Neither crate is in the money closure, so neither lock needed a re-pin.
   - #10 (`cf9788a`): crypto-bigint 0.7.6 → 0.7.9. RUSTSEC-2026-0387's fix is kept.

@@ -3060,6 +3060,7 @@ dependencies = [
  "nfx-proto",
  "nostr-memory",
  "nostr-sdk",
+ "rustls-pki-types",
  "serde_json",
  "str0m",
  "thiserror 2.0.20",

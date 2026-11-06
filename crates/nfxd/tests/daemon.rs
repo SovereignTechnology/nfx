@@ -155,6 +155,19 @@ async fn a_bad_https_url_is_refused_at_start_not_silently_every_minute() {
     .expect("refused");
     assert!(err.to_string().contains("--relay-only"), "{err}");
 
+    // CA roots for relays this node does not use would trust nothing in particular.
+    let (certs, _) = iroh_relay::server::testing::self_signed_tls_certs_and_config();
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("ca-no-relay"),
+        iroh_relay_cas: certs,
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(err.to_string().contains("--iroh-relay-ca"), "{err}");
+
     // An allow-list with no embedded relay would restrict nothing.
     let err = Daemon::start(Config {
         keys: Some(Keys::generate()),
