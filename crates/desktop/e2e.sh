@@ -7,9 +7,15 @@
 #   and verified, and ends up seeding the video itself. The first run also has seeder
 #   ratings (NFX-16) on, read from the embedded relay, which holds none: playback must not
 #   change.
+# NFX_E2E_DISPLAY=xvfb runs the app on a private Xvfb (X11) instead, where GNOME Shell
+# cannot run: it needs systemd-logind, which a container or a Kata guest lacks.
 # Every process started here runs in its own session and only those are killed. The work
 # dir (throwaway keys included) is removed on exit. Prints RESULT PASS|FAIL.
 set -euo pipefail
+case ${NFX_E2E_DISPLAY:=gnome-shell} in
+  gnome-shell|xvfb) ;;
+  *) echo "NFX_E2E_DISPLAY must be gnome-shell or xvfb" >&2; exit 2 ;;
+esac
 here=$(cd "$(dirname "$0")" && pwd)
 crates=$(cd "$here/.." && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/nfx-desktop-e2e-XXXXXX")
@@ -57,21 +63,29 @@ pids+=($!)
 wait_for "$work/seeder.log" 'embedded relay: ws://' 30
 relay=$(grep -oE 'ws://[0-9.:]+' "$work/seeder.log" | head -1)
 
-# The app, in its own headless compositor, with its own data dir: once with sharing off
+# The app, in its own headless display server, with its own data dir: once with sharing off
 # (the default: it plays and only serves), once with sharing on (it plays and seeds).
 start_app() { # share tag [more JSON fields]
   local json
   json=$(printf '{"a":"%s","relays":["%s"],"share":%s%s}' "$a" "$relay" "$1" "${3:-}")
   setsid dbus-run-session -- bash -c '
-    gnome-shell --wayland --no-x11 --headless --virtual-monitor 1280x720 \
-      --wayland-display "$4" >/dev/null 2>&1 &
-    for _ in $(seq 1 100); do [ -S "$XDG_RUNTIME_DIR/$4" ] && break; sleep 0.2; done
-    [ -S "$XDG_RUNTIME_DIR/$4" ] || { echo "the headless compositor never started"; exit 1; }
-    WAYLAND_DISPLAY="$4" GDK_BACKEND=wayland NFX_DESKTOP_TEST="$1" \
-      NFX_DESKTOP_DATA="$2" "$3"
+    if [ "$5" = xvfb ]; then
+      # Xvfb picks a free display itself and writes its number to fd 3.
+      Xvfb -displayfd 3 -screen 0 1280x720x24 -nolisten tcp 3> "$6" >/dev/null 2>&1 &
+      for _ in $(seq 1 100); do [ -s "$6" ] && break; sleep 0.2; done
+      [ -s "$6" ] || { echo "Xvfb never started"; exit 1; }
+      export DISPLAY=":$(head -1 "$6")" GDK_BACKEND=x11
+    else
+      gnome-shell --wayland --no-x11 --headless --virtual-monitor 1280x720 \
+        --wayland-display "$4" >/dev/null 2>&1 &
+      for _ in $(seq 1 100); do [ -S "$XDG_RUNTIME_DIR/$4" ] && break; sleep 0.2; done
+      [ -S "$XDG_RUNTIME_DIR/$4" ] || { echo "the headless compositor never started"; exit 1; }
+      export WAYLAND_DISPLAY="$4" GDK_BACKEND=wayland
+    fi
+    NFX_DESKTOP_TEST="$1" NFX_DESKTOP_DATA="$2" "$3"
     echo "EXIT $?"
   ' _ "$json" "$work/app-$2" "$here/target/release/nfx-desktop" "$display-$2" \
-    > "$work/app-$2.log" 2>&1 &
+    "$NFX_E2E_DISPLAY" "$work/xdisplay-$2" > "$work/app-$2.log" 2>&1 &
   pids+=($!)
 }
 check_app() { # tag step

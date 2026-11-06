@@ -20,7 +20,11 @@ address (`38504:<creator>:<namespace>:<video-id>`). It then:
 ```sh
 ./run.sh      # build (release) and start; needs web/player's npm ci for hls.js
 ./e2e.sh      # end to end in a private headless GNOME Shell: prints RESULT PASS|FAIL
+NFX_E2E_DISPLAY=xvfb ./e2e.sh   # the same on a private Xvfb, where GNOME Shell can't run
 ```
+
+GNOME Shell needs systemd-logind, so in a container or a Kata guest the e2e runs with
+`NFX_E2E_DISPLAY=xvfb` (needs `xvfb`).
 
 It is a separate Cargo workspace, so Tauri's and WebKitGTK's tree stays out of the main
 CI. Check it locally:
