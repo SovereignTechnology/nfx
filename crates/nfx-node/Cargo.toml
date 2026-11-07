@@ -22,6 +22,7 @@ nfx-proto.workspace = true
 # The relay CA roots (`NodeConfig::relay_cas`); already in the lock through rustls. Per crate,
 # never in [workspace.dependencies], so the workspace manifest's pinned line does not move.
 rustls-pki-types = "1.15.1"
+nostr-database.workspace = true
 nostr-memory.workspace = true
 nostr-sdk = { workspace = true, features = ["local-relay"] }
 serde_json.workspace = true
