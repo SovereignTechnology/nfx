@@ -11,14 +11,25 @@ public network at that release; this page is the current state.
 | Service | Address | State |
 |---|---|---|
 | iroh relay | `https://iroh.nutflix.xyz/` | Running. |
-| Scoped Nostr relay (NFX-04) | `wss://relay.nutflix.xyz` | Planned. Not running yet; this page will list it when it exists. |
-
-Until the scoped relay exists, run your own (`nfxd run --embed-relay …`) and point your peers
-at it.
+| Scoped Nostr relay (NFX-04) | `wss://relay.nutflix.xyz` | Running. Admits only NFX-04 events for `nfx:testnet:1`. |
 
 The iroh relay is n0's `iroh-relay` 1.2.0 with a publicly trusted certificate, so no
 `--iroh-relay-ca` is needed. It listens on IPv4 only for now. QUIC address discovery is off,
 so direct hole-punching is limited and many connections will be relayed.
+
+## Using the scoped relay
+
+`wss://relay.nutflix.xyz` is the NFX-04 reference relay (`nfxd`'s embedded scoped relay) and
+nothing else: it takes manifests (kind 38504), availability beacons (kind 20464, never stored)
+and valid deletions (kind 5) for `nfx:testnet:1`, and answers `blocked: out of scope` to every
+other event. In the nutflix-pear desktop app, add it under Settings > NFX network > scoped
+relays; with `nfxd`, pass `--relay wss://relay.nutflix.xyz`.
+
+- Stored manifests live in the relay's memory (at most 20,000 events). A restart forgets them,
+  so publishers must republish, and should also mirror manifests to general public relays
+  (NFX-04 section 4).
+- It does not implement NIP-42 authentication (a SHOULD in NFX-04), and its NIP-11 document
+  carries no operator fields; this page is where the operator is named.
 
 ## Using the iroh relay
 
@@ -49,10 +60,15 @@ checks every file against the signed sha256 hash list (NFX-05). So the relay:
 - **can** see which endpoint ids connect, when, how many bytes they move, and each client's
   network address at connection time.
 
-What is kept:
+The scoped Nostr relay carries events that are public by design (manifests and beacons name
+videos and the endpoints that seed them), and its operator also sees which videos a client
+subscribes to and the client's network address at connection time.
 
-- The relay process logs nothing about clients at warn level.
-- The proxy in front of it does not write the relay's name to its shared access log.
+What is kept, for both relays:
+
+- The relay processes log nothing about clients. The scoped relay's front end logs only
+  certificate management, and never receives the client's address.
+- The proxy in front of them does not write either relay's name to its shared access log.
 - A connection refused for exceeding the per-address limit writes the client address to the
   proxy's error log.
 - Daily byte totals are kept.
@@ -60,8 +76,23 @@ What is kept:
 
 ## Limits
 
+iroh relay:
 - 4 MiB/s per client, with a burst of 16 MiB.
 - 8 simultaneous connections per client address, and 1000 in total.
 - An aggregate bandwidth cap across all clients.
-- No authentication and no SLA. This is a testnet: the relay can be down, and the network may
-  be reset.
+
+Scoped Nostr relay:
+- The NFX-04 baselines: one beacon per 20 s per (pubkey, address), 12 manifest publishes or
+  deletions per pubkey per hour, 20 subscriptions per connection, 64 KiB per manifest and 16 KiB
+  per beacon.
+- 16 simultaneous connections per client address, and 1000 in total.
+- An aggregate bandwidth cap across all clients.
+
+Neither has authentication or an SLA. This is a testnet: either can be down, and the network
+may be reset.
+
+## Known issue: Quad9
+
+Quad9's filtering resolver (`9.9.9.9`) answers `nutflix.xyz` with NXDOMAIN (extended error 17,
+"Filtered") as of 2026-11-07, so clients that resolve through it cannot reach either relay.
+Quad9's unfiltered resolver (`9.9.9.10`) and other public resolvers resolve the names normally.
