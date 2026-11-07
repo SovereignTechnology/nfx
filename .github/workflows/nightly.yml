@@ -107,7 +107,10 @@ jobs:
         working-directory: crates
         env:
           RUSTUP_TOOLCHAIN: nightly
+        # Skipped under miri only (ci.yml's check runs it natively): it signs a 10,001-tag event
+        # twice, which miri's per-allocation tracking cannot hold on a runner (killed, exit 101,
+        # no diagnostic, 2026-11-07).
         run: |
           rustc --version
           cargo miri setup
-          cargo miri test -p nfx-proto --locked
+          cargo miri test -p nfx-proto --locked -- --skip follow_lists_are_capped_and_mute_lists_are_not
