@@ -30,6 +30,7 @@ to rely on. Labels and statuses are as of 2026-11-05.
 | Area | Label | What it is |
 |---|---|---|
 | [`nfx/status.md`](nfx/status.md) | Living | Resume point and status log: where things stand, what was verified, what is next, known gaps |
+| [`nfx/testnet.md`](nfx/testnet.md) | Living | The public testnet `nfx:testnet:1`: the iroh relay and how to use it, who runs it, what the operator sees and keeps, its limits |
 | [`nfx/m2-plan.md`](nfx/m2-plan.md) | Living | M2 plan (paid delivery, open mode): stages M2.0 to M2.2, locked paths, decisions; updated as M2 proceeds |
 | [`nfx/phase-a-exit.md`](nfx/phase-a-exit.md) | Record | Phase A exit run, PASS 2026-09-24: two hosts, a real iroh relay, a real browser |
 | [`nfx/m1-exit.md`](nfx/m1-exit.md) | Record | M1 exit run, PASS 2026-09-24: publish, seed, desktop and browser playback, WebRTC fallback |
