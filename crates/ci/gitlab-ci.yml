@@ -35,9 +35,10 @@ variables:
   # byte-identical to the wasm-pack the local checks ran on.
   WASM_PACK_SHA256: "c539d91ccab2591a7e975bcf82c82e1911b03335c80aa83d67ad25ed2ad06539"
   # Official Node build. Debian bookworm's nodejs 18 crashes (V8 abort) running the
-  # wasm32 test binary; 22.22.0 is what the local checks use. Hash from nodejs.org SHASUMS256.txt.
-  NODE_VERSION: "22.22.0"
-  NODE_SHA256: "9aa8e9d2298ab68c600bd6fb86a6c13bce11a4eca1ba9b39d79fa021755d7c37"
+  # wasm32 test binary; official 22.x passes (22.22.0 proved it; 22.23.4 since 2026-11-06, the
+  # 22.x security releases). Hash from nodejs.org SHASUMS256.txt.
+  NODE_VERSION: "22.23.4"
+  NODE_SHA256: "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce"
 
 # The lock's verdict (crates/ci/check-locked.sh): its own job, running no unpinned
 # repository code, under a clean environment with literal paths, so no pipeline or project
@@ -79,7 +80,7 @@ check:
     - curl -sSfLo /tmp/node.txz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
     - echo "${NODE_SHA256}  /tmp/node.txz" | sha256sum -c -
     - mkdir -p /opt/node && tar -xJf /tmp/node.txz -C /opt/node --strip-components=1 && export PATH="/opt/node/bin:$PATH" && node --version
-    - python3 -m venv /opt/venv && /opt/venv/bin/pip install coincurve==21.0.0 pynacl==1.6.2 blake3==1.0.9 jsonschema==4.26.0
+    - python3 -m venv /opt/venv && /opt/venv/bin/pip install coincurve==21.0.0 pynacl==1.6.2 blake3==1.0.11 jsonschema==4.26.0
     - rustup component add clippy rustfmt && rustup target add wasm32-unknown-unknown
     - curl -sSfLo /tmp/deny.tgz "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
     - echo "${CARGO_DENY_SHA256}  /tmp/deny.tgz" | sha256sum -c -
