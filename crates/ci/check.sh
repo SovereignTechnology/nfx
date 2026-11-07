@@ -6,7 +6,10 @@
 # default: the ones on PATH; with no ffmpeg that test is skipped). The lock's steps are
 # handed PYTHON and, if set, PATH, HOME, CARGO_HOME, RUSTUP_HOME, CI (which puts the lock
 # in its CI mode) and LOCKED_DIRS_UNLOCKED (1 unlocks: the lock then compares nothing with
-# its pins and builds nothing; refused in CI), and no other variable
+# its pins and builds nothing; refused in CI), CARGO_PROFILE_DEV_DEBUG,
+# CARGO_PROFILE_TEST_DEBUG and CARGO_INCREMENTAL (the lock allows them by name; they change
+# what the build costs, not what it compiles or runs), and LOCKED_BUILD_JOBS, a job count
+# that reaches the lock as CARGO_BUILD_JOBS (allowed the same way), and no other variable
 # (crates/ci/check-locked.sh).
 set -euo pipefail
 
@@ -19,9 +22,15 @@ step() { printf '\n== %s\n' "$*"; }
 # a coloured cargo) are none of its business, and in CI mode it refuses any it does not know.
 locked() {
   local keep=() v
-  for v in PATH HOME CI CARGO_HOME RUSTUP_HOME LOCKED_DIRS_UNLOCKED; do
+  for v in PATH HOME CI CARGO_HOME RUSTUP_HOME LOCKED_DIRS_UNLOCKED \
+           CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG CARGO_INCREMENTAL; do
     [ -z "${!v+x}" ] || keep+=("$v=${!v}")
   done
+  # The jobs of the lock's builds, set apart from cargo's own for the checks above them.
+  if [ -n "${LOCKED_BUILD_JOBS:-}" ]; then
+    [[ $LOCKED_BUILD_JOBS =~ ^[1-9][0-9]?$ ]] || { echo "check.sh: LOCKED_BUILD_JOBS is not a job count: ${LOCKED_BUILD_JOBS@Q}" >&2; exit 1; }
+    keep+=("CARGO_BUILD_JOBS=$LOCKED_BUILD_JOBS")
+  fi
   /usr/bin/env -i "${keep[@]}" PYTHON="$py" /bin/bash -p crates/ci/check-locked.sh "$@"
 }
 
