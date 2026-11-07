@@ -1,0 +1,87 @@
+# Dependabot version updates (docs.github.com/code-security/dependabot), in the shape of
+# rbitcoin-org/rbitcoin's: weekly on Monday, patch and minor bumps grouped, every major its own
+# PR. The cooldown is 7 days (rbitcoin keeps 3; zizmor's dependabot-cooldown audit asks for 7):
+# a release is a week old before it is proposed. Security updates do not wait for it.
+#
+# Ecosystems in this tree:
+#   cargo           crates/ (the workspace) and crates/desktop (the Tauri viewer)
+#   npm             web/player
+#   github-actions  .github/workflows/*
+#   pip             .github/zizmor.requirements.txt (the zizmor pin, with its hash)
+#
+# The money lock and Dependabot: a crates/ bump inside the money crates' dependency closure
+# (crates/ci/locked-compiled.txt) turns the `lock` job red, and that red is the right answer:
+# such a bump lands only with the M2 audit loop's re-pin, after sovtech's review. A bump outside
+# the closure passes like any PR. A github-actions bump edits .github/workflows, which the lock
+# guards whole, so it also needs its pin lines (crates/ci/locked.sha256) before it can merge.
+# Merges are local squashes as sovtech, never on GitHub's side.
+# The spikes (crates/spikes/*, web/spikes/*) are left out: nothing ships from them.
+
+version: 2
+
+updates:
+  - package-ecosystem: "cargo"
+    directories:
+      - "/crates"
+      - "/crates/desktop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps(cargo)"
+    groups:
+      cargo-patch:
+        update-types:
+          - "patch"
+      cargo-minor:
+        update-types:
+          - "minor"
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+
+  - package-ecosystem: "npm"
+    directory: "/web/player"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(npm)"
+    groups:
+      npm-patch:
+        update-types:
+          - "patch"
+      npm-minor:
+        update-types:
+          - "minor"
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(actions)"
+    groups:
+      actions:
+        patterns:
+          - "*"
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: "pip"
+    directory: "/.github"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "deps(zizmor)"
+    cooldown:
+      default-days: 7
