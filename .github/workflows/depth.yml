@@ -33,6 +33,9 @@ env:
   CARGO_LLVM_COV_VERSION: "0.9.1"
   # GitHub's asset digest for the release tarball, which a download reproduced.
   CARGO_LLVM_COV_SHA256: "3fca950394a3c49457657c158b1619cec8dfd2647ae5b48746734c0ab969a522"
+  # --exclude drops the money crates from the test run only; nfx-proto's tests still reach
+  # nfx-pay-wire, so the reports filter both crates' sources out as well.
+  MONEY_SOURCES: '/crates/nfx-pay(-wire)?/'
 
 jobs:
   coverage:
@@ -62,9 +65,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ../coverage
-          cargo llvm-cov report --lcov --output-path ../coverage/lcov.info
-          cargo llvm-cov report --json --summary-only --output-path ../coverage/summary.json
-          cargo llvm-cov report --summary-only
+          cargo llvm-cov report --ignore-filename-regex "$MONEY_SOURCES" --lcov --output-path ../coverage/lcov.info
+          cargo llvm-cov report --ignore-filename-regex "$MONEY_SOURCES" --json --summary-only --output-path ../coverage/summary.json
+          cargo llvm-cov report --ignore-filename-regex "$MONEY_SOURCES" --summary-only
+          if grep -qE '/crates/nfx-pay(-wire)?/' ../coverage/lcov.info; then echo "::error::a money crate's source is in the report"; exit 1; fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
