@@ -12,9 +12,10 @@ mesh (browsers) and an HTTP origin, which a public deployment puts behind TLS an
 The optional Hypercore profile (NFX-12) and payments (Cashu ecash, per delivered chunk)
 are specified as drafts.
 
-**Status (2026-11-06):** NFX 0.1.0 is the first release: `nfxd` and `nfx-package` for
-linux-x64 on the [Releases page](https://github.com/SovereignTechnology/nfx/releases), free video
-only ([release notes](docs/nfx/releases/v0.1.0.md)). It is tested against the nutflix-pear desktop
+**Status (2026-11-07):** NFX 0.1.1 is the latest release (0.1.0 was the first): `nfxd` and
+`nfx-package` for linux-x64 on the [Releases page](https://github.com/SovereignTechnology/nfx/releases),
+free video only ([release notes](docs/nfx/releases/v0.1.1.md); [0.1.0](docs/nfx/releases/v0.1.0.md)).
+0.1.1's relay also searches a video's title. It is tested against the nutflix-pear desktop
 app in both directions, behind NATs and over TLS relays. There is no public network yet: run your
 own scoped relay and iroh relay. The free end-to-end slice (milestone M1: publish, seed, fetch,
 play; no payments) is built and passed its exit run. That run and the Phase A exit run before it used two

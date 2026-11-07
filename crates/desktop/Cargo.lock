@@ -3915,7 +3915,7 @@ dependencies = [
 
 [[package]]
 name = "nfx-node"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "hex",
@@ -3968,7 +3968,7 @@ dependencies = [
 
 [[package]]
 name = "nfxd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hex",
  "iroh",

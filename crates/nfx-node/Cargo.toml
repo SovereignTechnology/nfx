@@ -1,6 +1,6 @@
 [package]
 name = "nfx-node"
-version = "0.1.0"
+version = "0.1.1"
 description = "NFX peer: content store, iroh seeding and fetching with sha256 re-anchoring (NFX-05/06), gossip presence, Nostr manifests and beacons (NFX-02/03), the pull-through origin (NFX-05 §6), an embeddable scoped relay (NFX-04)"
 edition.workspace = true
 rust-version.workspace = true
