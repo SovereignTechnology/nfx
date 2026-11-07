@@ -1,0 +1,110 @@
+# Depth checks beside ci.yml, as rbitcoin-org/rbitcoin's coverage and rust-forward jobs (sovtech,
+# 2026-11-06), on every pull request and on main:
+#
+#   coverage      line coverage of the workspace without the money crates (cargo-llvm-cov 0.9.1,
+#                 sha256-pinned, in ci.yml's pinned image), gated by crates/coverage-floor.txt.
+#                 lcov and the JSON summary are the job's artifact.
+#   rust-forward  the workspace on the next rustc (crates/rust-forward.toml), `cargo check
+#                 --workspace --all-targets --locked` with warnings as errors, while the shipped
+#                 toolchain stays the image's (a compiled fact of the money lock).
+#
+# The money crates are compiled here as dependencies of nfx-node and nfx-proto, never measured
+# and never pinned from here: nothing in this file reads or writes the lock. The lock pins this
+# file with the rest of .github/workflows: an edit here needs its pin line in
+# crates/ci/locked.sha256.
+name: depth
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: depth-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_LLVM_COV_VERSION: "0.9.1"
+  # GitHub's asset digest for the release tarball, which a download reproduced.
+  CARGO_LLVM_COV_SHA256: "3fca950394a3c49457657c158b1619cec8dfd2647ae5b48746734c0ab969a522"
+
+jobs:
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: llvm-tools and cargo-llvm-cov (the download checked against its pinned sha256)
+        run: |
+          set -euo pipefail
+          rustup component add llvm-tools-preview
+          curl -sSfLo /tmp/llvm-cov.tgz "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${CARGO_LLVM_COV_VERSION}/cargo-llvm-cov-x86_64-unknown-linux-musl.tar.gz"
+          echo "${CARGO_LLVM_COV_SHA256}  /tmp/llvm-cov.tgz" | sha256sum -c -
+          tar -xzf /tmp/llvm-cov.tgz -C /tmp && install -m 0755 /tmp/cargo-llvm-cov /usr/local/bin/
+      - name: cargo llvm-cov (the workspace without nfx-pay and nfx-pay-wire)
+        working-directory: crates
+        run: cargo llvm-cov --workspace --locked --exclude nfx-pay --exclude nfx-pay-wire --no-report
+      - name: reports
+        working-directory: crates
+        run: |
+          set -euo pipefail
+          mkdir -p ../coverage
+          cargo llvm-cov report --lcov --output-path ../coverage/lcov.info
+          cargo llvm-cov report --json --summary-only --output-path ../coverage/summary.json
+          cargo llvm-cov report --summary-only
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: gate (line coverage at or above crates/coverage-floor.txt)
+        run: |
+          set -euo pipefail
+          floor=$(grep -vE '^\s*(#|$)' crates/coverage-floor.txt)
+          [[ $floor =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "crates/coverage-floor.txt must hold one number, not ${floor@Q}"; exit 1; }
+          rate=$(python3 -I -S -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"][0]["totals"]["lines"]["percent"])' coverage/summary.json)
+          echo "line coverage ${rate}%, floor ${floor}%"
+          python3 -I -S -c 'import sys; sys.exit(0 if float(sys.argv[1]) >= float(sys.argv[2]) else 1)' "$rate" "$floor" \
+            || { echo "::error::line coverage ${rate}% is below the floor ${floor}% (crates/coverage-floor.txt)"; exit 1; }
+
+  rust-forward:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
+    env:
+      RUSTFLAGS: -D warnings
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: the forward toolchain
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' crates/rust-forward.toml)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
+      - name: cargo check (the workspace, all targets, --locked)
+        working-directory: crates
+        run: |
+          rustc --version
+          cargo check --workspace --all-targets --locked
