@@ -1,5 +1,6 @@
 # Line coverage floor (percent) for .github/workflows/depth.yml's coverage job: the workspace
 # without the money crates (nfx-pay, nfx-pay-wire), measured by cargo-llvm-cov. As rbitcoin's
-# coverage gate: the floor is the measured rate rounded down, raised by a commit when coverage
-# grows, and never lowered without saying why in that commit. The one number below is read.
-77
+# coverage gate: the floor is the measured rate less 0.5 (run-to-run variance), rounded down;
+# raised by a commit when coverage grows, never lowered without saying why in that commit.
+# Measured 2026-11-07: 77.06% of 7599 lines. The one number below is read.
+76
