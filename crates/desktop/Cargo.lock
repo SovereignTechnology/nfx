@@ -3927,6 +3927,7 @@ dependencies = [
  "iroh-gossip",
  "n0-future",
  "nfx-proto",
+ "nostr-database",
  "nostr-memory",
  "nostr-sdk",
  "rustls-pki-types",
