@@ -92,6 +92,10 @@ async fn a_scoped_relay_admits_limits_and_forwards_only_nfx() {
     assert_eq!(doc["nfx"]["kinds"], serde_json::json!([38504, 20464, 5]));
     let nips = doc["supported_nips"].as_array().unwrap();
     assert!(nips.contains(&11.into()) && nips.contains(&40.into()));
+    assert!(
+        nips.contains(&50.into()),
+        "search is advertised: it is answered"
+    );
 
     let publisher = Relays::connect(std::slice::from_ref(&url), WAIT)
         .await
@@ -332,5 +336,97 @@ async fn an_allow_list_admits_only_listed_creators_and_their_beacons() {
     client.shutdown().await;
     publisher.shutdown().await;
     relay.shutdown();
+    server.abort();
+}
+
+/// NIP-50: a `search` matches a manifest's title as well as its description, whatever the case. The
+/// store alone matched the content (the description) only, so a video published without one was in
+/// the relay and invisible to the desktop app's search.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_search_matches_a_manifests_title_and_description() {
+    let (manifest, creator, _) = vector();
+    let ns = manifest.addr.namespace().clone();
+    let relay = Arc::new(ScopedRelay::new(std::slice::from_ref(&ns)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(relay.clone().serve(listener));
+    let publisher = Relays::connect(std::slice::from_ref(&url), WAIT)
+        .await
+        .unwrap();
+
+    let now = unix_now();
+    // (video id, title, description, created_at): the newest hit of "salt flats" is the second.
+    let videos = [
+        ("salt-flats-dusk", "Salt Flats at Dusk", "", now - 30),
+        (
+            "lantern-walk",
+            "Lantern Walk",
+            "A slow walk past the salt flats.",
+            now - 20,
+        ),
+        ("city-rain", "City Rain", "", now - 10),
+    ];
+    for (id, title, description, at) in videos {
+        let m = Manifest {
+            addr: VideoAddr::new(ns.clone(), id).unwrap(),
+            title: title.into(),
+            description: description.into(),
+            ..manifest.clone().into_inner()
+        };
+        let (ev, _) = sign_manifest(&creator, &m, at).await.unwrap();
+        assert_eq!(publisher.publish(&ev).await.unwrap(), 1, "{id}");
+    }
+
+    let client = Client::default();
+    client.add_relay(url.as_str()).await.unwrap();
+    client.connect().and_wait(WAIT).await;
+    let titles = |filter: Filter| {
+        let client = &client;
+        async move {
+            let mut got: Vec<String> = client
+                .fetch_events(filter.kind(Kind::from(38504u16)))
+                .timeout(WAIT)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter_map(|e| {
+                    e.tags
+                        .iter()
+                        .find(|t| t.kind() == "title")
+                        .and_then(|t| t.content().map(str::to_owned))
+                })
+                .collect();
+            got.sort();
+            got
+        }
+    };
+
+    // No search: all three, as before.
+    assert_eq!(titles(Filter::new()).await.len(), 3);
+    // A title word finds a video with no description; a description word finds the other; both here.
+    assert_eq!(
+        titles(Filter::new().search("salt flats")).await,
+        ["Lantern Walk", "Salt Flats at Dusk"]
+    );
+    // Case never matters, in the query or the text.
+    assert_eq!(
+        titles(Filter::new().search("  SALT flats ")).await,
+        ["Lantern Walk", "Salt Flats at Dusk"]
+    );
+    // A title alone, with no description to fall back on.
+    assert_eq!(titles(Filter::new().search("rain")).await, ["City Rain"]);
+    assert_eq!(
+        titles(Filter::new().search("lantern")).await,
+        ["Lantern Walk"]
+    );
+    // Nothing matches nothing; `limit` applies after the match, newest first.
+    assert!(titles(Filter::new().search("harbour")).await.is_empty());
+    assert_eq!(
+        titles(Filter::new().search("salt flats").limit(1)).await,
+        ["Lantern Walk"]
+    );
+    // An empty search is no search.
+    assert_eq!(titles(Filter::new().search("   ")).await.len(), 3);
+
     server.abort();
 }
