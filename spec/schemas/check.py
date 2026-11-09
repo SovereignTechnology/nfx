@@ -77,6 +77,14 @@ def main() -> int:
         got = conforms(json.loads(case["event"]["content"]), beacon_schema)
         expect(f"beacon-hyperdht/invalid/{case['name']}", got, case["name"] in SCHEMA_ACCEPTS_HYPERDHT)
 
+    held = json.loads((VECTORS / "beacon-renditions.json").read_text())
+    for case in held["valid"]:
+        got = conforms(json.loads(case["event"]["content"]), beacon_schema)
+        expect(f"beacon-renditions/valid/{case['name']}", got, True)
+    for case in held["invalid"]:
+        got = conforms(json.loads(case["event"]["content"]), beacon_schema)
+        expect(f"beacon-renditions/invalid/{case['name']}", got, False)
+
     if failures:
         print(f"\n{len(failures)} schema/vector disagreement(s)", file=sys.stderr)
         return 1

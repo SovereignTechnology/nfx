@@ -1466,3 +1466,368 @@ async fn a_seeder_answers_stun_and_announces_it_in_its_beacons() {
         "an answer after shutdown"
     );
 }
+
+/// A two-rendition video (720p and 360p, three 2 s segments each, fabricated bytes) as an
+/// `nfx-package` output directory, and its open manifest signed by `creator`.
+async fn two_rendition_package(
+    dir: &Path,
+    creator: &Keys,
+) -> (Event, Verified<Manifest>, HashList) {
+    use nfx_proto::hashlist::{FileEntry, Rendition};
+    let store = FsStore::open(dir.join("store")).unwrap();
+    let video = "nfx:testnet:1:two-renditions";
+    let entry = |name: String, role: Role, bytes: &[u8], dur_ms: Option<u64>| FileEntry {
+        name,
+        role,
+        sha256: hex::encode(nfx_proto::sha256(bytes)),
+        size: bytes.len() as u64,
+        dur_ms,
+    };
+    let mut files = Vec::new();
+    let mut playlists = Vec::new();
+    let mut renditions = Vec::new();
+    let mut media = Vec::new();
+    for (id, res) in [("720p", "1280x720"), ("360p", "640x360")] {
+        let init = format!("init of {id}").into_bytes();
+        let mut text = format!(
+            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"{}.mp4\"\n#EXT-X-INDEPENDENT-SEGMENTS\n",
+            hex::encode(nfx_proto::sha256(&init))
+        );
+        media.push(entry(format!("init-{id}.mp4"), Role::Init, &init, None));
+        store.put(&init).unwrap();
+        for i in 0..3 {
+            let seg = format!("{id} segment {i} ").repeat(64).into_bytes();
+            text.push_str(&format!(
+                "#EXTINF:2.000,\n{}.m4s\n",
+                hex::encode(nfx_proto::sha256(&seg))
+            ));
+            media.push(entry(
+                format!("{id}-seg{i}.m4s"),
+                Role::Segment,
+                &seg,
+                Some(2000),
+            ));
+            store.put(&seg).unwrap();
+        }
+        text.push_str("#EXT-X-ENDLIST\n");
+        let name = format!("r{id}.m3u8");
+        playlists.push(entry(name.clone(), Role::Playlist, text.as_bytes(), None));
+        store.put(text.as_bytes()).unwrap();
+        renditions.push(Rendition {
+            id: id.into(),
+            playlist: name,
+            bandwidth: 1_000_000,
+            codecs: Some("avc1.64001f,mp4a.40.2".into()),
+            resolution: Some(res.into()),
+        });
+    }
+    let mut master = String::from("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n");
+    for (p, r) in playlists.iter().zip(&renditions) {
+        master.push_str(&format!(
+            "#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION={}\n{}.m3u8\n",
+            r.resolution.as_deref().unwrap(),
+            p.sha256
+        ));
+    }
+    store.put(master.as_bytes()).unwrap();
+    files.push(entry(
+        "master.m3u8".into(),
+        Role::PlaylistMaster,
+        master.as_bytes(),
+        None,
+    ));
+    files.extend(playlists);
+    files.extend(media);
+    let list = HashList {
+        v: 1,
+        video: video.into(),
+        files,
+        renditions,
+    };
+    let bytes = list.render();
+    let root = store.put(&bytes).unwrap();
+    let meta = serde_json::json!({ "root": root, "video": video, "segs": list.files.len() });
+    std::fs::write(dir.join("nfx.json"), meta.to_string()).unwrap();
+    let package = Package::open(dir).unwrap();
+    let now = unix_now();
+    let manifest = package
+        .manifest("Two renditions", "a test video", None, &[], now)
+        .unwrap();
+    let (event, manifest) = sign_manifest(creator, &manifest, now).await.unwrap();
+    (event, manifest, list)
+}
+
+/// The files of one rendition: its init and segments.
+fn rendition_files<'a>(list: &'a HashList, id: &str) -> Vec<&'a nfx_proto::hashlist::FileEntry> {
+    let prefix = (format!("init-{id}."), format!("{id}-seg"));
+    list.files
+        .iter()
+        .filter(|f| f.name.starts_with(&prefix.0) || f.name.starts_with(&prefix.1))
+        .collect()
+}
+
+/// The next beacon `watch` hears from `seeder`.
+async fn next_beacon_from(
+    watch: &mut nfx_node::nostr::BeaconWatch,
+    seeder: &str,
+) -> Verified<nfx_proto::beacon::Beacon> {
+    loop {
+        let beacon = next_beacon(watch).await;
+        if beacon.seeder == seeder {
+            return beacon;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_holds_serves_and_announces_only_the_renditions_it_names() {
+    use nfx_proto::beacon::{Chunks, Endpoint};
+    let (_iroh, iroh_url) = iroh_relay().await;
+    let seed_dir = tmp("held-seed");
+    let creator = Keys::generate();
+    let (event, manifest, list) = two_rendition_package(&seed_dir, &creator).await;
+    let a = manifest.a_tag();
+    assert_eq!(list.renditions.len(), 2);
+    let (r720, r360) = (
+        rendition_files(&list, "720p"),
+        rendition_files(&list, "360p"),
+    );
+    assert_eq!((r720.len(), r360.len()), (4, 4));
+
+    // A seeds every rendition, and runs the relay everyone else uses.
+    let a_keys = Keys::generate();
+    let seeder = Daemon::start(Config {
+        keys: Some(a_keys.clone()),
+        store: seed_dir.join("store"),
+        iroh_relays: vec![iroh_url.clone()],
+        seed: vec![a.clone()],
+        embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let relay_url = seeder.relay_url.clone().unwrap();
+    let client = Relays::connect(std::slice::from_ref(&relay_url), Duration::from_secs(10))
+        .await
+        .unwrap();
+    let mut beacons = client
+        .watch_beacons(manifest.addr.namespace(), std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    assert_eq!(client.publish(&event).await.unwrap(), 1);
+    until_state(&seeder, &a, &VideoState::Seeding).await;
+
+    // B fetches only 360p, serves it on its origin and bridge, and seeds it.
+    let b_keys = Keys::generate();
+    let b_store_dir = tmp("held-b-store");
+    let https = "https://origin.example/nfx";
+    let b = Daemon::start(Config {
+        keys: Some(b_keys.clone()),
+        store: b_store_dir.clone(),
+        relays: vec![relay_url.clone()],
+        iroh_relays: vec![iroh_url.clone()],
+        fetch: vec![a.clone()],
+        renditions: [(a.clone(), vec!["360p".to_owned()])].into(),
+        origin: Some("127.0.0.1:0".parse().unwrap()),
+        https_url: Some(https.into()),
+        embed_tracker: Some("127.0.0.1:0".parse().unwrap()),
+        bridge: Some("127.0.0.1:0".parse().unwrap()),
+        tracker_public_url: Some("ws://127.0.0.1:1/announce".into()),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    until_state(&b, &a, &VideoState::Seeding).await;
+
+    // B holds the hash list, every playlist, and 360p's files, and none of 720p's.
+    let b_store = FsStore::open(&b_store_dir).unwrap();
+    assert!(b_store.has(&manifest.root_hex()));
+    for f in list.files.iter().filter(|f| !r720.contains(f)) {
+        assert!(b_store.has(&f.sha256), "{} fetched", f.name);
+    }
+    for f in &r720 {
+        assert!(!b_store.has(&f.sha256), "{} not fetched", f.name);
+    }
+
+    // Its origin serves the meta files and 360p, and answers 404 for 720p's files.
+    let origin = b.origin_addr.unwrap();
+    let root = manifest.root_hex();
+    assert_eq!(
+        get(origin, &format!("/{root}/master.m3u8")).await.0,
+        StatusCode::OK
+    );
+    for f in list.files.iter().filter(|f| f.role == Role::Playlist) {
+        assert_eq!(
+            get(origin, &format!("/{}.m3u8", f.sha256)).await.0,
+            StatusCode::OK
+        );
+    }
+    for f in &r360 {
+        assert_eq!(
+            get(origin, &format!("/{root}/{}.m4s", f.sha256)).await.0,
+            StatusCode::OK,
+            "{}",
+            f.name
+        );
+    }
+    for f in &r720 {
+        assert_eq!(
+            get(origin, &format!("/{root}/{}.m4s", f.sha256)).await.0,
+            StatusCode::NOT_FOUND,
+            "{}",
+            f.name
+        );
+        assert_eq!(
+            get(origin, &format!("/{}", f.sha256)).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    // Its beacons tell the truth: a ticket for 360p and meta only, the origin and the bridge
+    // name 360p, and `chunks` counts the 7 of 11 files it holds.
+    let beacon = next_beacon_from(&mut beacons, &b_keys.public_key().to_hex()).await;
+    let content = &beacon.content;
+    let tickets = content.endpoints.iter().find_map(|e| match e {
+        Endpoint::Iroh { tickets, .. } => Some(tickets.keys().cloned().collect::<Vec<_>>()),
+        _ => None,
+    });
+    assert_eq!(tickets.unwrap(), ["360p", "meta"]);
+    assert!(content.endpoints.contains(&Endpoint::Https {
+        url: https.into(),
+        renditions: vec!["360p".into()],
+    }));
+    let webrtc = content.endpoints.iter().find_map(|e| match e {
+        Endpoint::Webrtc { renditions, .. } => Some(renditions.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        webrtc.unwrap(),
+        ["360p"],
+        "the bridge joins 360p's swarm only"
+    );
+    assert_eq!(content.chunks, Chunks::Count(7));
+    assert_eq!(list.files.len(), 11);
+    // Its tracker still admits both swarms: browsers watching 720p may meet there.
+    let tracker = b.tracker().unwrap();
+    for id in ["720p", "360p"] {
+        assert!(
+            tracker.admits(&manifest.addr.web_tracker_infohash(id)),
+            "{id}"
+        );
+    }
+
+    // A, which holds everything, says so.
+    let full = next_beacon_from(&mut beacons, &a_keys.public_key().to_hex()).await;
+    let tickets = full.content.endpoints.iter().find_map(|e| match e {
+        Endpoint::Iroh { tickets, .. } => Some(tickets.keys().cloned().collect::<Vec<_>>()),
+        _ => None,
+    });
+    assert_eq!(tickets.unwrap(), ["360p", "720p", "meta"]);
+    assert_eq!(full.content.chunks, Chunks::All);
+
+    // A fetcher asking for a rendition the hash list lacks fails, naming those it has.
+    let c = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("held-c-store"),
+        relays: vec![relay_url.clone()],
+        iroh_relays: vec![iroh_url.clone()],
+        fetch: vec![a.clone()],
+        renditions: [(a.clone(), vec!["1080p".to_owned()])].into(),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let failed = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Some(VideoState::Failed(why)) = c.state().get(&a) {
+                return why.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("the fetch fails");
+    assert!(
+        failed.contains("no rendition \"1080p\"") && failed.contains("720p, 360p"),
+        "{failed}"
+    );
+    c.shutdown().await;
+
+    // B's store, holding 360p only, seeds as 360p; seeding it whole is refused.
+    b.shutdown().await;
+    let d_keys = Keys::generate();
+    let d = Daemon::start(Config {
+        keys: Some(d_keys.clone()),
+        store: b_store_dir.clone(),
+        relays: vec![relay_url.clone()],
+        seed: vec![a.clone()],
+        renditions: [(a.clone(), vec!["360p".to_owned()])].into(),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    until_state(&d, &a, &VideoState::Seeding).await;
+    let beacon = next_beacon_from(&mut beacons, &d_keys.public_key().to_hex()).await;
+    assert_eq!(beacon.content.chunks, Chunks::Count(7));
+    d.shutdown().await;
+    let whole = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: b_store_dir.clone(),
+        relays: vec![relay_url.clone()],
+        seed: vec![a.clone()],
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(WAIT, async {
+        while !matches!(whole.state().get(&a), Some(VideoState::Failed(_))) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("seeding a rendition it does not hold fails");
+    whole.shutdown().await;
+
+    client.shutdown().await;
+    seeder.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn held_renditions_that_cannot_work_are_refused_at_start() {
+    let a = "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:testnet:1:two-renditions".to_owned();
+    for (renditions, why) in [
+        (
+            [(
+                "38504:aa:nfx:testnet:1:another-video".to_owned(),
+                vec!["720p".to_owned()],
+            )]
+            .into(),
+            "not a video to seed, fetch or pull",
+        ),
+        ([(a.clone(), vec![])].into(), "no rendition named"),
+        (
+            [(a.clone(), vec!["meta".to_owned()])].into(),
+            "is not a rendition id",
+        ),
+        (
+            [(a.clone(), vec![String::new()])].into(),
+            "is not a rendition id",
+        ),
+        (
+            [(a.clone(), vec!["720p".to_owned(), "720p".to_owned()])].into(),
+            "named twice",
+        ),
+    ] {
+        let err = Daemon::start(Config {
+            keys: Some(Keys::generate()),
+            store: tmp("held-refused"),
+            fetch: vec![a.clone()],
+            renditions,
+            ..Config::default()
+        })
+        .await
+        .err()
+        .expect("refused");
+        assert!(err.to_string().contains(why), "{err}");
+    }
+}

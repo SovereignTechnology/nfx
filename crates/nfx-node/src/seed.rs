@@ -6,22 +6,25 @@ use iroh_blobs::api::blobs::{AddBytesOptions, AddPathOptions, ImportMode};
 use iroh_blobs::hashseq::HashSeq;
 use iroh_blobs::ticket::BlobTicket;
 use iroh_blobs::{BlobFormat, Hash, HashAndFormat};
-use nfx_proto::beacon::Endpoint as BeaconEndpoint;
+use nfx_proto::beacon::{Chunks, Endpoint as BeaconEndpoint};
 use nfx_proto::hashlist::HashList;
 use nfx_proto::namespace::VideoAddr;
 
 use crate::node::Node;
 use crate::store::ContentStore;
-use crate::video::{meta_members, rendition_members};
+use crate::video::{check_held, held_files, meta_members, rendition_members};
 use crate::{NodeError, Result};
 
-/// Tickets for a seeded video: the `meta` collection and one per rendition.
+/// Tickets for a seeded video: the `meta` collection and one per held rendition.
 #[derive(Debug, Clone)]
 pub struct Seeded {
     pub root: String,
     pub list: HashList,
     pub meta: BlobTicket,
     pub renditions: BTreeMap<String, BlobTicket>,
+    /// How much of the hash list is held, for the beacon (NFX-03 §4): `All`, or the count of
+    /// its files a holder of only some renditions holds.
+    pub chunks: Chunks,
 }
 
 impl Seeded {
@@ -51,10 +54,29 @@ impl Node {
         video: &VideoAddr,
         segs: u64,
     ) -> Result<Seeded> {
+        self.seed_renditions(store, root, video, segs, None).await
+    }
+
+    /// [`Node::seed`], holding only the renditions `only` names (every one when `None`):
+    /// the meta collection whole, every playlist included, and one collection per held
+    /// rendition, so beacons carry a ticket for each held rendition and no other (NFX-06
+    /// §2). Only what is announced must be in `store`. An id the hash list does not have is
+    /// an error.
+    pub async fn seed_renditions(
+        &self,
+        store: &dyn ContentStore,
+        root: &str,
+        video: &VideoAddr,
+        segs: u64,
+        only: Option<&[String]>,
+    ) -> Result<Seeded> {
         let mut root_bytes = [0u8; 32];
         hex::decode_to_slice(root, &mut root_bytes)
             .map_err(|_| NodeError::Collection("root is not hex".into()))?;
         let list = HashList::verify(&store.get(root)?, &root_bytes, video, segs)?;
+        if let Some(ids) = only {
+            check_held(&list, ids)?;
+        }
 
         let mut meta_hashes = Vec::new();
         for sha in meta_members(root, &list) {
@@ -67,6 +89,9 @@ impl Node {
 
         let mut renditions = BTreeMap::new();
         for r in &list.renditions {
+            if only.is_some_and(|ids| !ids.contains(&r.id)) {
+                continue;
+            }
             let playlist = list
                 .files
                 .iter()
@@ -79,11 +104,23 @@ impl Node {
             }
             renditions.insert(r.id.clone(), self.ticket(self.add_seq(&hashes).await?));
         }
+        let chunks = if renditions.len() == list.renditions.len() {
+            Chunks::All
+        } else {
+            let held = held_files(&list, store, only)?;
+            Chunks::Count(
+                list.files
+                    .iter()
+                    .filter(|f| held.contains(&f.sha256))
+                    .count() as u64,
+            )
+        };
         Ok(Seeded {
             root: root.to_owned(),
             list,
             meta,
             renditions,
+            chunks,
         })
     }
 

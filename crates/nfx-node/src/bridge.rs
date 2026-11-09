@@ -213,13 +213,22 @@ impl Bridge {
     }
 
     /// Join the swarms of a verified hash list: one per rendition whose VOD playlist is in
-    /// `store`. A rendition whose playlist is not there yet, or that uses byte ranges, is
-    /// skipped. Returns the rendition ids joined.
-    pub async fn serve(&self, list: &HashList, store: &dyn ContentStore) -> Result<Vec<String>> {
+    /// `store`, of the renditions `only` names (every one when `None`: a node that holds
+    /// only some joins only theirs). A rendition whose playlist is not there yet, or that
+    /// uses byte ranges, is skipped. Returns the rendition ids joined.
+    pub async fn serve(
+        &self,
+        list: &HashList,
+        store: &dyn ContentStore,
+        only: Option<&[String]>,
+    ) -> Result<Vec<String>> {
         let video = VideoAddr::parse(&list.video)?;
         let mut swarms = Vec::new();
         let mut ids = Vec::new();
         for r in &list.renditions {
+            if only.is_some_and(|ids| !ids.contains(&r.id)) {
+                continue;
+            }
             let Some(file) = list
                 .files
                 .iter()

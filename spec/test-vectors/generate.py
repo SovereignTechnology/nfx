@@ -690,6 +690,36 @@ def main() -> int:
         },
     }
 
+    # ---- 8c. NFX-03 §4: the renditions an https endpoint's origin serves ----
+    # Optional; absent means every rendition. A seeder that holds only some renditions names
+    # them, as its iroh tickets and its webrtc endpoint do.
+    iroh_ep = beacon_content["endpoints"][0]
+    webrtc_ep = beacon_content["endpoints"][2]
+    held_valid = [
+        {"name": "https-names-one-rendition",
+         "event": hd_beacon([dict(https_ep, renditions=["720p"])])},
+        {"name": "iroh-https-and-webrtc-name-the-same-rendition",
+         "event": hd_beacon([iroh_ep, dict(https_ep, renditions=["720p"]), webrtc_ep])},
+        {"name": "https-names-two-of-several", "event": hd_beacon(
+            [dict(https_ep, renditions=["1080p", "360p"])], chunks=5, free=True,
+            accepts_mints=None, price_hint=0)},
+        {"name": "https-without-renditions-serves-every-rendition", "event": hd_beacon([https_ep])},
+    ]
+
+    def held_case(name, reason, renditions):
+        return {"name": name, "reason": reason,
+                "event": hd_beacon([iroh_ep, dict(https_ep, renditions=renditions)])}
+
+    held_invalid = [
+        held_case("renditions-empty", "present, it names 1 or more renditions", []),
+        held_case("renditions-not-an-array", "an array of rendition ids", "720p"),
+        held_case("renditions-null", "an array of rendition ids", None),
+        held_case("renditions-meta", "`meta` is reserved (NFX-03 §4)", ["meta"]),
+        held_case("renditions-empty-id", "rendition ids are non-empty", [""]),
+        held_case("renditions-repeated", "distinct ids", ["720p", "720p"]),
+        held_case("renditions-not-a-string", "rendition ids are strings", [720]),
+    ]
+
     # ---- 8a (cont.). NFX-12 nfx/files/1 and pay/1 over Protomux (§§4-5) ----
     def u32(n: int) -> bytes:
         return n.to_bytes(4, "little")
@@ -837,6 +867,20 @@ def main() -> int:
             "now": now,
             "cases": beacon_invalid,
             "unknown_endpoint_only": beacon_unknown_only,
+        },
+        "beacon-renditions.json": {
+            "description": "NFX-03 §4 https endpoints that name the renditions their origin "
+                           "serves, in correctly signed kind-20464 beacons, checked at 'now'. "
+                           "'renditions' is optional and absent means every rendition; present, "
+                           "it is a non-empty array of distinct rendition ids, none of them "
+                           "'meta'. A reader that implements the field MUST accept 'valid' and "
+                           "MUST reject every 'invalid' beacon whole; a reader that does not "
+                           "ignores the field (NFX-01 §4) and accepts them all, reading each "
+                           "origin as serving every rendition.",
+            "secret_keys_DO_NOT_USE": {"seeder": secrets["seeder"]},
+            "now": now,
+            "valid": held_valid,
+            "invalid": held_invalid,
         },
         "beacon-hyperdht.json": {
             "description": "NFX-12 §2 hyperdht endpoints in correctly signed kind-20464 beacons, "

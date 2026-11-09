@@ -44,7 +44,7 @@ implement:
 | `t` | Document |
 |---|---|
 | `iroh` | NFX-06 |
-| `https` | NFX-05 §6 |
+| `https` | NFX-05 §6 (optional `renditions`: the renditions its origin serves, NFX-03 §4) |
 | `webrtc` | NFX-10 §2 |
 | `stun` | NFX-10 §1 (a STUN server for browsers' `iceServers`) |
 | `hyperdht` | NFX-12 §2 (optional) |
@@ -126,6 +126,7 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | Gossip envelope vector | `test-vectors/gossip.json` |
 | Derived identifiers (namespaces, topics, infohash) | `test-vectors/derived.json` |
 | `hyperdht` beacon endpoints, valid and invalid (NFX-12 §2) | `test-vectors/beacon-hyperdht.json` |
+| `https` endpoints naming their renditions, valid and invalid (NFX-03 §4) | `test-vectors/beacon-renditions.json` |
 | `nfx/files/1` messages, valid and invalid (NFX-12 §4) | `test-vectors/files1.json` |
 | Seeder ratings, valid (NFX-16 §1) | `test-vectors/ratings.json` |
 | Invalid seeder ratings (every one MUST be rejected; NFX-16 §1) | `test-vectors/ratings-invalid.json` |
@@ -251,3 +252,6 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   conformance level.
 - 2026-11-09 (issue #71) — beacon endpoint type `stun` (NFX-10 §1): the STUN server a
   seeder answers on, for browsers' `iceServers`. Readers that do not implement it skip it.
+- 2026-11-09 (nutflix-pear#97) — the `https` endpoint gains an optional `renditions`
+  (NFX-03 §4): the renditions its origin serves, absent meaning every one. Readers that do
+  not implement it ignore it (NFX-01 §4). New vectors `beacon-renditions.json`.

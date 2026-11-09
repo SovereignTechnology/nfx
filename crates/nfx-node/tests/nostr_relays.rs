@@ -33,6 +33,7 @@ fn content(manifest: &Manifest) -> BeaconContent {
         video: manifest.addr.clone(),
         endpoints: vec![Endpoint::Https {
             url: "https://seed.example/nfx".into(),
+            renditions: vec![],
         }],
         skipped: vec![],
         chunks: Chunks::All,

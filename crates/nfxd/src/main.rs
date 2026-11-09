@@ -8,7 +8,7 @@
 //! nfxd delete --key <file> --relay <url>… --a <a>…   withdraw your own videos (NFX-02 §6)
 //! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--iroh-relay-ca <pem>]… [--relay-only]
 //!          [--iroh-bind <ip:port> [--iroh-external <ip:port>]…]
-//!          [--seed <a>]… [--fetch <a>]… [--pull <a>]… [--origin <addr:port>]
+//!          [--seed <a>[#<id>,…]]… [--fetch <a>[#<id>,…]]… [--pull <a>[#<id>,…]]… [--origin <addr:port>]
 //!          [--https-url <url>] [--embed-relay <addr:port>]
 //!          [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]…
 //!          [--stun <ip:port> [--stun-public <ip:port>]]
@@ -18,6 +18,17 @@
 //!
 //! `<a>` is a manifest address, `38504:<creator-hex>:<namespace>:<video-id>`, as
 //! `publish` prints it. Secrets never reach the terminal: only public keys are printed.
+//!
+//! An item may name the only renditions this node holds of it: `--seed <a>#720p`,
+//! `--fetch <a>#720p,360p`, `--pull <a>#360p`, by the ids in the video's hash list
+//! (`renditions[].id`; a video id never contains `#`). Without, it holds every rendition.
+//! A fetch then takes the hash list, every playlist and the meta collection, and only those
+//! renditions' inits and segments; a seed needs only those in the store. The origin serves
+//! the other renditions' files as `404`, the bridge joins only the held renditions' swarms,
+//! and beacons name only what is held (an iroh ticket per held rendition, the `webrtc` and
+//! `https` endpoints' `renditions`, `chunks` as a count). An id the hash list lacks fails
+//! that item, naming the ids it has. The choice is per item because rendition ids are per
+//! video: each hash list names its own.
 //!
 //! `--iroh-relay-ca` names a PEM file of CA certificates (at most 4 in all, 8 KiB each, 64 KiB
 //! a file) that the `--iroh-relay`s' TLS may chain to, beside the compiled-in Mozilla roots:
@@ -95,7 +106,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]]";
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]]";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -281,6 +292,7 @@ async fn run(args: &[String]) -> Result<()> {
             .transpose()
     };
     let (iroh_bind, iroh_external) = iroh_addrs(&f)?;
+    let (seed, fetch, pull, renditions) = items(&f)?;
     let cfg = Config {
         keys: one(&f, "key")?
             .map(|p| key::load(Path::new(&p)))
@@ -299,9 +311,10 @@ async fn run(args: &[String]) -> Result<()> {
         relay_only,
         iroh_bind,
         iroh_external,
-        seed: all(&f, "seed"),
-        fetch: all(&f, "fetch"),
-        pull: all(&f, "pull"),
+        seed,
+        fetch,
+        pull,
+        renditions,
         origin: addr("origin")?,
         https_url: one(&f, "https-url")?,
         embed_relay: addr("embed-relay")?,
@@ -387,6 +400,74 @@ async fn run(args: &[String]) -> Result<()> {
     }
     daemon.shutdown().await;
     Ok(())
+}
+
+/// The `--seed`, `--fetch` and `--pull` items, each `<a>` or `<a>#<id>[,<id>…]`: their
+/// addresses, and the renditions named for each that names some. An address named with
+/// renditions may be named only once in all.
+#[allow(clippy::type_complexity)]
+fn items(
+    f: &[(String, String)],
+) -> Result<(
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+    std::collections::BTreeMap<String, Vec<String>>,
+)> {
+    let mut renditions = std::collections::BTreeMap::new();
+    let mut lists: [Vec<String>; 3] = Default::default();
+    for (flag, list) in ["seed", "fetch", "pull"].into_iter().zip(&mut lists) {
+        for v in all(f, flag) {
+            let (a, ids) = item(flag, &v)?;
+            if let Some(ids) = ids {
+                renditions.insert(a.clone(), ids);
+            }
+            list.push(a);
+        }
+    }
+    let [seed, fetch, pull] = lists;
+    for a in renditions.keys() {
+        if seed
+            .iter()
+            .chain(&fetch)
+            .chain(&pull)
+            .filter(|x| *x == a)
+            .count()
+            > 1
+        {
+            return Err(Error::Config(format!(
+                "{a}: named more than once; name it once, with its renditions"
+            )));
+        }
+    }
+    Ok((seed, fetch, pull, renditions))
+}
+
+/// One item, `<a>` or `<a>#<id>[,<id>…]`: 1 or more distinct ids, none empty, none `meta`
+/// (reserved, NFX-03 §4), none with `#` or white space in it. The address itself is checked
+/// by `Daemon::start`, the ids against the video's hash list once it is known.
+fn item(flag: &str, v: &str) -> Result<(String, Option<Vec<String>>)> {
+    let Some((a, list)) = v.split_once('#') else {
+        return Ok((v.to_owned(), None));
+    };
+    let bad = |why: String| Error::Config(format!("--{flag} {v}: {why}"));
+    let mut ids: Vec<String> = Vec::new();
+    for id in list.split(',') {
+        if id.is_empty() {
+            return Err(bad("an empty rendition id".into()));
+        }
+        if id == nfx_proto::hashlist::RESERVED_RENDITION_ID
+            || id.contains('#')
+            || id.chars().any(char::is_whitespace)
+        {
+            return Err(bad(format!("{id:?} is not a rendition id")));
+        }
+        if ids.iter().any(|x| x == id) {
+            return Err(bad(format!("rendition {id} named twice")));
+        }
+        ids.push(id.to_owned());
+    }
+    Ok((a.to_owned(), Some(ids)))
 }
 
 /// The CA certificates of every `--iroh-relay-ca` file, at most `MAX_RELAY_CAS` in all. A file
@@ -475,7 +556,7 @@ fn gossip_peers(values: &[String]) -> Result<Vec<iroh::EndpointAddr>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bridge_max_peers, flags, gossip_peers, iroh_addrs, pubkey_hex, relay_cas};
+    use super::{bridge_max_peers, flags, gossip_peers, iroh_addrs, items, pubkey_hex, relay_cas};
 
     fn ca_pem() -> String {
         use base64::Engine as _;
@@ -626,6 +707,89 @@ mod tests {
                 .to_string();
             assert!(err.contains("--gossip-peer"), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn items_name_their_held_renditions_after_a_hash() {
+        let args = |s: &[&str]| s.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let known = ["seed", "fetch", "pull"];
+        let a = "38504:aa:nfx:testnet:1:video-a";
+        let b = "38504:bb:nfx:testnet:1:video-b";
+        let c = "38504:cc:nfx:testnet:1:video-c";
+        let f = flags(
+            &args(&[
+                "--seed",
+                &format!("{a}#720p"),
+                "--fetch",
+                &format!("{b}#1080p,360p"),
+                "--pull",
+                c,
+                "--seed",
+                "38504:dd:nfx:testnet:1:video-d",
+            ]),
+            &known,
+        )
+        .unwrap();
+        let (seed, fetch, pull, renditions) = items(&f).unwrap();
+        assert_eq!(seed, [a, "38504:dd:nfx:testnet:1:video-d"]);
+        assert_eq!((fetch, pull), (vec![b.to_owned()], vec![c.to_owned()]));
+        assert_eq!(
+            renditions.into_iter().collect::<Vec<_>>(),
+            [
+                (a.to_owned(), vec!["720p".to_owned()]),
+                (b.to_owned(), vec!["1080p".to_owned(), "360p".to_owned()]),
+            ]
+        );
+        // Ids are not checked against a hash list here: any non-empty one but `meta`.
+        let f = flags(&args(&["--pull", &format!("{c}#audio-hi,r1")]), &known).unwrap();
+        assert_eq!(items(&f).unwrap().3[c], ["audio-hi", "r1"]);
+        for (flag, value, why) in [
+            ("seed", format!("{a}#"), "an empty rendition id"),
+            ("seed", format!("{a}#720p,"), "an empty rendition id"),
+            ("fetch", format!("{a}#,720p"), "an empty rendition id"),
+            (
+                "fetch",
+                format!("{a}#meta"),
+                "\"meta\" is not a rendition id",
+            ),
+            (
+                "pull",
+                format!("{a}#720p#360p"),
+                "\"720p#360p\" is not a rendition id",
+            ),
+            (
+                "seed",
+                format!("{a}#720p, 360p"),
+                "\" 360p\" is not a rendition id",
+            ),
+            (
+                "seed",
+                format!("{a}#720p,720p"),
+                "rendition 720p named twice",
+            ),
+        ] {
+            let name = format!("--{flag}");
+            let f = flags(&args(&[name.as_str(), &value]), &known).unwrap();
+            let err = items(&f).unwrap_err().to_string();
+            assert_eq!(err, format!("--{flag} {value}: {why}"));
+        }
+        // A video with renditions is named once, so there is one answer to what it holds.
+        for twice in [
+            ["--seed", &format!("{a}#720p"), "--fetch", a],
+            [
+                "--seed",
+                &format!("{a}#720p"),
+                "--seed",
+                &format!("{a}#360p"),
+            ],
+        ] {
+            let f = flags(&args(&twice), &known).unwrap();
+            let err = items(&f).unwrap_err().to_string();
+            assert!(err.contains("named more than once"), "{err}");
+        }
+        // Without renditions, as before: the same address may come twice.
+        let f = flags(&args(&["--seed", a, "--fetch", a]), &known).unwrap();
+        assert!(items(&f).unwrap().3.is_empty());
     }
 
     #[test]
