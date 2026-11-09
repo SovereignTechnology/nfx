@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use iroh::RelayUrl;
-use nfx_node::bridge::Bridge;
+use nfx_node::bridge::{Bridge, BridgeConfig, MAX_PEERS_LIMIT, dialable};
 use nfx_node::gossip::{Announcer, Listener, envelope_wire};
 use nfx_node::node::{Node, NodeConfig};
 use nfx_node::nostr::{BEACON_TTL, ManifestQuery, Relays};
@@ -110,6 +110,12 @@ pub struct Config {
     /// stored segments to browsers. UDP on this address, a specific one browsers can reach.
     /// Needs `embed_tracker`.
     pub bridge: Option<SocketAddr>,
+    /// The address browsers are told for the bridge (`--bridge-public`), when it is not
+    /// `bridge` itself: the public address of a DNAT that forwards to it. Needs `bridge`.
+    pub bridge_public: Option<SocketAddr>,
+    /// Browser connections the bridge holds at once (`--bridge-max-peers`, 1 to 1024; each
+    /// may queue 16 MiB). Default: `nfx_node::bridge::MAX_PEERS` (64). Needs `bridge`.
+    pub bridge_max_peers: Option<usize>,
     /// The embedded tracker's public URL (`wss://`, behind TLS), announced in beacons as the
     /// bridge's `webrtc` endpoint. Needs `bridge`.
     pub tracker_public_url: Option<String>,
@@ -175,6 +181,8 @@ pub struct Daemon {
     pub tracker_url: Option<String>,
     /// The bridge's UDP address.
     pub bridge_addr: Option<SocketAddr>,
+    /// The address browsers are told for the bridge (`bridge_public`, or `bridge_addr`).
+    pub bridge_public: Option<SocketAddr>,
     pub origin_addr: Option<SocketAddr>,
     state: Arc<Mutex<BTreeMap<String, VideoState>>>,
     shared: Arc<Shared>,
@@ -590,6 +598,26 @@ impl Daemon {
         if cfg.bridge.is_some() && cfg.embed_tracker.is_none() {
             return Err(Error::Config("--bridge needs --embed-tracker".into()));
         }
+        if let Some(public) = cfg.bridge_public {
+            if cfg.bridge.is_none() {
+                return Err(Error::Config("--bridge-public needs --bridge".into()));
+            }
+            if !dialable(public) {
+                return Err(Error::Config(format!(
+                    "--bridge-public {public}: not an address a browser can dial"
+                )));
+            }
+        }
+        if let Some(n) = cfg.bridge_max_peers {
+            if cfg.bridge.is_none() {
+                return Err(Error::Config("--bridge-max-peers needs --bridge".into()));
+            }
+            if !(1..=MAX_PEERS_LIMIT).contains(&n) {
+                return Err(Error::Config(format!(
+                    "--bridge-max-peers {n}: not 1 to {MAX_PEERS_LIMIT}"
+                )));
+            }
+        }
         if let Some(url) = &cfg.tracker_public_url {
             if cfg.bridge.is_none() {
                 return Err(Error::Config("--tracker-url needs --bridge".into()));
@@ -757,14 +785,22 @@ impl Daemon {
         let store = Arc::new(FsStore::open(&cfg.store)?);
         let pull = Arc::new(SwarmPull::new(node.clone()));
         let bridge = match (cfg.bridge, &tracker) {
-            (Some(addr), Some(tracker)) => Some(Arc::new(
-                Bridge::start(tracker, store.clone(), addr)
-                    .await
-                    .map_err(|e| Error::Config(format!("--bridge: {e}")))?,
-            )),
+            (Some(addr), Some(tracker)) => {
+                let bridge_cfg = BridgeConfig {
+                    public: cfg.bridge_public,
+                    max_peers: cfg.bridge_max_peers.unwrap_or(nfx_node::bridge::MAX_PEERS),
+                    ..BridgeConfig::new(addr)
+                };
+                Some(Arc::new(
+                    Bridge::start_with(tracker, store.clone(), bridge_cfg)
+                        .await
+                        .map_err(|e| Error::Config(format!("--bridge: {e}")))?,
+                ))
+            }
             _ => None,
         };
         let bridge_addr = bridge.as_ref().map(|b| b.local_addr());
+        let bridge_public = bridge.as_ref().map(|b| b.public_addr());
 
         let (origin, origin_addr) = match cfg.origin {
             None if cfg.internal_origin => (
@@ -868,6 +904,7 @@ impl Daemon {
             relay_url,
             tracker_url,
             bridge_addr,
+            bridge_public,
             origin_addr,
             state,
             shared,

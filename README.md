@@ -107,6 +107,12 @@ nfxd run --key node.key --store pkg/store --seed "$A" --embed-relay 127.0.0.1:74
 Here `203.0.113.7:7843` stands for the public address and port forwarded to the host's UDP
 port 7843. Tickets and beacons then name that address and leave out the host's private ones.
 
+`--embed-tracker` and `--bridge <ip:port>` add the browser mesh (NFX-10): the bridge serves
+the video to browsers over WebRTC, and its address is the one candidate they are told. Behind
+a DNAT, bind `--bridge` to the host's own address and pass the public one as
+`--bridge-public` (for example `--bridge-public 203.0.113.7:7844`); `--bridge-max-peers`
+(default 64) caps the browsers it serves at once.
+
 ## Checks
 
 ```sh
