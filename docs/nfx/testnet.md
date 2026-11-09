@@ -31,6 +31,12 @@ relays; with `nfxd`, pass `--relay wss://relay.nutflix.xyz`.
 - It does not implement NIP-42 authentication (a SHOULD in NFX-04), and its NIP-11 document
   carries no operator fields; this page is where the operator is named.
 
+Nothing on the network depends on this relay. A goal of NFX and nutflix is to work with
+ordinary Nostr relays: manifests and beacons are standard events that general public relays
+carry unchanged, and connection signaling for peers behind NAT (issue #30) is being designed
+the same way, with no relay plugins or custom relay software in the required path. This relay
+is a filter and a convenience.
+
 ## Using the iroh relay
 
 Using it is opt-in; nothing points at it by default.
