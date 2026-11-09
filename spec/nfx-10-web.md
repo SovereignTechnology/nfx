@@ -28,6 +28,30 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   `info_hash` that is not the §2 infohash of a rendition it holds a verified hash list
   for, so it cannot be used as a general signalling service. It relays SDP only, never
   segment bytes.
+- **STUN, from the network itself; no TURN.** A browser learns its public UDP mapping (a
+  server-reflexive candidate) only from the STUN servers in the page's `iceServers`, so a
+  page that names none (the default) reaches peers only through the addresses they can
+  dial. A page MAY name its network's own STUN servers there, the same way it names the
+  network's relays and trackers, and SHOULD NOT name a third party's: the STUN server
+  learns every viewer's address. TURN is not part of NFX: a TURN server carries every
+  byte, which is the browser's equivalent of a relay in the data path. A pair that cannot
+  connect directly falls back to a bridge or to HTTPS.
+- **A seeder's beacon may name its STUN server.** A node that answers STUN Binding
+  requests (RFC 8489; Binding only, no authentication) MAY announce it with an endpoint
+  `{ "t": "stun", "addrs": ["<ip>:<port>", …] }`: 1 to 4 distinct addresses, each in
+  canonical text form (an IPv4 address, or a bracketed RFC 5952 IPv6 address with no
+  zone; an IPv4 address is never written inside IPv6), with a port that is not 0. A
+  reader that implements it parses it strictly, as every known endpoint type (NFX-03
+  §4), and one that does not skips it.
+- **Using beacon-named STUN servers.** A page MAY add the STUN servers live beacons name
+  to `iceServers` as `stun:<ip>:<port>`, after its own, and SHOULD then take at most a
+  few (the reference player takes 4 in all), most-named first, and none whose address is
+  not global unicast (loopback, private, link-local, shared, multicast or unspecified): a
+  beacon from anywhere must not point viewers at their own network. Such a server moves
+  no bytes of video, but it learns each viewer's address and when it watches, as a
+  beacon-named tracker does. Beacons come from any key, so "most-named" counts keys a
+  stranger can multiply: a page that must not tell strangers who watches names only its
+  network's STUN servers, or takes beacon-named ones only from seeders it trusts.
 
 ## 2. Swarms and bridges
 
@@ -425,3 +449,7 @@ NFX-05 byte formats.
   - §3: credit a page holds with a seeder is its ledger's, so its identity's: a seeder
     that refuses everything takes at most half a page's window ceiling for each video from
     each page (NFX-07 §3a, which now states that bound per identity).
+- Draft 2026-11-09 (issue #71): §1 says where a page's STUN servers come from (its
+  network's own nodes, never a third party by default; no TURN) and defines the `stun`
+  beacon endpoint, registered in NFX-11 §3. A reader that does not implement it skips it
+  (NFX-03 §4), so beacons that carry it stay valid to every existing reader.

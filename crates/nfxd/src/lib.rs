@@ -1,11 +1,12 @@
 //! The headless NFX node (ADR 0008): one process that seeds videos over iroh, fetches
 //! videos it is told to watch, serves an NFX-05 §6 origin with swarm pull-through, and
 //! can embed an NFX-04 scoped relay (§7). Everything here is wiring; the protocol lives
-//! in `nfx-node` and `nfx-proto`.
+//! in `nfx-node` and `nfx-proto`, but for [`stun`], a minimal STUN Binding responder.
 
 pub mod daemon;
 pub mod key;
 pub mod package;
+pub mod stun;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

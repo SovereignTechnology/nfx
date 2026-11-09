@@ -11,6 +11,7 @@
 //!          [--seed <a>]… [--fetch <a>]… [--pull <a>]… [--origin <addr:port>]
 //!          [--https-url <url>] [--embed-relay <addr:port>]
 //!          [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]…
+//!          [--stun <ip:port> [--stun-public <ip:port>]]
 //!          [--allow-creator <hex>]… [--gossip [--gossip-peer <id>@<ip:port|relay-url>]…]
 //!          [--rating-root <npub|hex> --general-relay <url>… [--rating-trusted <npub|hex>]…]
 //! ```
@@ -66,6 +67,16 @@
 //! holds at once (default 64, at most 1024). Each may queue 16 MiB of segments, so a small
 //! host sets it lower; one video's swarm takes at most 16 of them, or all when the cap is
 //! lower.
+//!
+//! `--stun <ip:port>` answers STUN Binding requests (RFC 8489) on that UDP address, so a
+//! network's web pages can name its own node in `iceServers` (`stun:<host>:<port>`) and
+//! browsers learn their public mapping from it instead of a third party. Binding requests
+//! only: no TURN, no authentication, at most 16 answers a second per source address (an
+//! IPv6 /64), 256 per /24 or /48 and 4096 in all, and nothing about a client is logged. It
+//! must see clients' source addresses as they are, so a DNAT may sit in front of it, a proxy
+//! may not; on a host with several addresses, bind it to the one clients reach. Beacons
+//! announce it as a `stun` endpoint (NFX-10 §1) when the bound address is public; behind a
+//! DNAT, `--stun-public <ip:port>` names the public address to announce instead.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -84,7 +95,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...]";
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]]";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -251,6 +262,8 @@ async fn run(args: &[String]) -> Result<()> {
             "bridge-public",
             "bridge-max-peers",
             "tracker-url",
+            "stun",
+            "stun-public",
             "namespace",
             "allow-creator",
             "gossip-peer",
@@ -297,6 +310,8 @@ async fn run(args: &[String]) -> Result<()> {
         bridge_public: addr("bridge-public")?,
         bridge_max_peers: bridge_max_peers(&f)?,
         tracker_public_url: one(&f, "tracker-url")?,
+        stun: addr("stun")?,
+        stun_public: addr("stun-public")?,
         namespaces: all(&f, "namespace")
             .iter()
             .map(|n| Namespace::parse(n).map_err(Error::from))
@@ -332,6 +347,16 @@ async fn run(args: &[String]) -> Result<()> {
         eprintln!("bridge: udp {addr}");
         if let Some(public) = daemon.bridge_public.filter(|p| *p != addr) {
             eprintln!("bridge public: udp {public}");
+        }
+    }
+    if let Some(addr) = daemon.stun_addr {
+        eprintln!("stun: udp {addr}");
+        match daemon.stun_public {
+            Some(public) if public != addr => eprintln!("stun public: udp {public}"),
+            Some(_) => {}
+            None => eprintln!(
+                "stun: not announced in beacons (no address a browser can reach; see --stun-public)"
+            ),
         }
     }
     if gossip {

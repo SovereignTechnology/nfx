@@ -1265,3 +1265,204 @@ async fn bridge_public_addresses_and_caps_that_cannot_work_are_refused_at_start(
     assert_eq!(plain.bridge_public, plain.bridge_addr);
     plain.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stun_settings_that_cannot_work_are_refused_at_start() {
+    let sa = |s: &str| -> SocketAddr { s.parse().unwrap() };
+    for (name, stun, public, why) in [
+        (
+            "stun-public-alone",
+            None,
+            Some(sa("203.0.113.7:3478")),
+            "--stun-public needs --stun",
+        ),
+        (
+            "stun-public-unspecified",
+            Some(sa("127.0.0.1:0")),
+            Some(sa("0.0.0.0:3478")),
+            "--stun-public 0.0.0.0:3478: not an address a browser can reach",
+        ),
+        (
+            "stun-public-port-0",
+            Some(sa("127.0.0.1:0")),
+            Some(sa("203.0.113.7:0")),
+            "not an address a browser can reach",
+        ),
+        // Readers refuse a zone or an IPv4 address written as IPv6 (NFX-10 §1); announcing
+        // one would make them refuse every beacon of this node.
+        (
+            "stun-public-zone",
+            Some(sa("127.0.0.1:0")),
+            Some(SocketAddr::V6(std::net::SocketAddrV6::new(
+                "fe80::1".parse().unwrap(),
+                3478,
+                0,
+                2,
+            ))),
+            "not an address a browser can reach",
+        ),
+        (
+            "stun-public-mapped",
+            Some(sa("127.0.0.1:0")),
+            Some(sa("[::ffff:203.0.113.7]:3478")),
+            "not an address a browser can reach",
+        ),
+    ] {
+        let err = Daemon::start(Config {
+            keys: Some(Keys::generate()),
+            store: tmp(name),
+            stun,
+            stun_public: public,
+            ..Config::default()
+        })
+        .await
+        .err()
+        .expect("refused");
+        assert!(err.to_string().contains(why), "{name}: {err}");
+    }
+    // The stun port is free again after a start that failed later on (the tracker's port
+    // was taken).
+    let stun_port = std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let taken_tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("stun-then-tracker-taken"),
+        stun: Some(stun_port),
+        embed_tracker: Some(taken_tcp.local_addr().unwrap()),
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(err.to_string().contains("io:"), "{err}");
+    std::net::UdpSocket::bind(stun_port).expect("the stun port was let go");
+    // A port already taken fails the start, not later.
+    let taken = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("stun-taken"),
+        stun: Some(taken.local_addr().unwrap()),
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(err.to_string().contains("io:"), "{err}");
+    // Bound on every interface and told nothing public: it answers, and announces nothing.
+    let quiet = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("stun-quiet"),
+        stun: Some(sa("0.0.0.0:0")),
+        ..Config::default()
+    })
+    .await
+    .expect("starts");
+    assert!(quiet.stun_addr.is_some());
+    assert_eq!(quiet.stun_public, None);
+    quiet.shutdown().await;
+    // Bound on loopback (or any address that is not public) and told nothing: the same.
+    let local = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("stun-loopback"),
+        stun: Some(sa("127.0.0.1:0")),
+        ..Config::default()
+    })
+    .await
+    .expect("starts");
+    assert!(local.stun_addr.is_some());
+    assert_eq!(local.stun_public, None);
+    local.shutdown().await;
+}
+
+/// The next beacon `watch` hears.
+async fn next_beacon(
+    watch: &mut nfx_node::nostr::BeaconWatch,
+) -> Verified<nfx_proto::beacon::Beacon> {
+    tokio::time::timeout(WAIT, watch.next())
+        .await
+        .expect("a beacon")
+        .expect("a beacon")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seeder_answers_stun_and_announces_it_in_its_beacons() {
+    let seed_dir = tmp("stun-seeder");
+    let (event, manifest, _) = vector_package(&seed_dir);
+    let a = manifest.a_tag();
+    let public: SocketAddr = "203.0.113.7:3478".parse().unwrap();
+    let seeder = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: seed_dir.join("store"),
+        seed: vec![a.clone()],
+        embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        stun: Some("127.0.0.1:0".parse().unwrap()),
+        stun_public: Some(public),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let stun = seeder.stun_addr.unwrap();
+    assert!(stun.ip().is_loopback() && stun.port() != 0, "{stun}");
+    assert_eq!(seeder.stun_public, Some(public));
+
+    // A real Binding round trip with the running daemon.
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(stun).await.unwrap();
+    let txid = [0x5a; 12];
+    let mut request = vec![0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xa4, 0x42];
+    request.extend_from_slice(&txid);
+    client.send(&request).await.unwrap();
+    let mut buf = [0u8; 1500];
+    let n = tokio::time::timeout(Duration::from_secs(5), client.recv(&mut buf))
+        .await
+        .expect("an answer")
+        .unwrap();
+    assert_eq!(
+        nfxd::stun::mapped_address(&buf[..n], &txid),
+        Some(client.local_addr().unwrap())
+    );
+
+    // Its beacons carry the public address as a `stun` endpoint, beside the iroh one.
+    let relay_url = seeder.relay_url.clone().unwrap();
+    let relays = Relays::connect(std::slice::from_ref(&relay_url), Duration::from_secs(10))
+        .await
+        .unwrap();
+    let mut beacons = relays
+        .watch_beacons(manifest.addr.namespace(), std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    relays.publish(&event).await.unwrap();
+    until_state(&seeder, &a, &VideoState::Seeding).await;
+    let beacon = next_beacon(&mut beacons).await;
+    let stun_endpoints: Vec<_> = beacon
+        .content
+        .endpoints
+        .iter()
+        .filter_map(|e| match e {
+            nfx_proto::beacon::Endpoint::Stun { addrs } => Some(addrs.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stun_endpoints, [vec![public.to_string()]]);
+    assert!(
+        beacon
+            .content
+            .endpoints
+            .iter()
+            .any(|e| matches!(e, nfx_proto::beacon::Endpoint::Iroh { .. }))
+    );
+    relays.shutdown().await;
+    seeder.shutdown().await;
+
+    // Shut down, it answers no more.
+    client.send(&request).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), client.recv(&mut buf))
+            .await
+            .map_or(true, |r| r.is_err()),
+        "an answer after shutdown"
+    );
+}

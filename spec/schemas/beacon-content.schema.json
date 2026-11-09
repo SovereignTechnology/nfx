@@ -28,27 +28,59 @@
         "required": [
           "t"
         ],
-        "if": {
-          "properties": {
-            "t": {
-              "const": "hyperdht"
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "t": {
+                  "const": "hyperdht"
+                }
+              },
+              "required": [
+                "t"
+              ]
+            },
+            "then": {
+              "required": [
+                "peer",
+                "bind"
+              ]
             }
           },
-          "required": [
-            "t"
-          ]
-        },
-        "then": {
-          "required": [
-            "peer",
-            "bind"
-          ]
-        },
+          {
+            "if": {
+              "properties": {
+                "t": {
+                  "const": "stun"
+                }
+              },
+              "required": [
+                "t"
+              ]
+            },
+            "then": {
+              "required": [
+                "addrs"
+              ],
+              "properties": {
+                "addrs": {
+                  "minItems": 1,
+                  "maxItems": 4,
+                  "uniqueItems": true,
+                  "items": {
+                    "pattern": "^([0-9]{1,3}(\\.[0-9]{1,3}){3}|\\[[0-9a-f:]+\\]):[1-9][0-9]{0,4}$"
+                  }
+                }
+              },
+              "description": "stun (NFX-10 §1): 1 to 4 distinct ip:port addresses in canonical text form; the schema checks their shape only"
+            }
+          }
+        ],
         "properties": {
           "t": {
             "type": "string",
             "pattern": "^[a-z0-9-]{1,32}$",
-            "description": "endpoint type; known values in NFX-11 §3 (iroh, https, webrtc, hyperdht; hyper deprecated); readers skip unknown types"
+            "description": "endpoint type; known values in NFX-11 §3 (iroh, https, webrtc, stun, hyperdht; hyper deprecated); readers skip unknown types"
           },
           "node": {
             "type": "string",
