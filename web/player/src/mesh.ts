@@ -43,8 +43,9 @@ function engineSignaling(signaling: Signaling): { announceTrackers: string[] } {
     case 'trackers':
       return { announceTrackers: [...signaling.urls] };
     default: {
-      const unknown: never = signaling;
-      throw new TypeError(`nfx: signaling of kind ${String((unknown as { kind?: unknown }).kind)} is not in this build`);
+      // A kind added to `Signaling` and not wired here fails the typecheck.
+      const unknown: never = signaling.kind;
+      throw new TypeError(`nfx: signaling of kind ${String(unknown)} is not in this build`);
     }
   }
 }
