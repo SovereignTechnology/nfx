@@ -15,6 +15,8 @@ use crate::{Error, KIND_BEACON, KIND_MANIFEST, MAX_CLOCK_SKEW, Result, Verified}
 
 /// Allowed `expiration - created_at`, in seconds (NFX-03 §1).
 pub const TTL_RANGE: core::ops::RangeInclusive<u64> = 60..=120;
+/// Most addresses one `stun` endpoint names (NFX-10 §1).
+pub const MAX_STUN_ADDRS: usize = 4;
 
 /// Where a seeder serves the video. Serializes back to the NFX-03 §4 wire form.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -38,6 +40,10 @@ pub enum Endpoint {
     },
     /// NFX-12 (optional).
     Hyper { drive: String },
+    /// NFX-10 §1: a STUN server (RFC 8489 Binding requests only) that the seeder answers on,
+    /// for browsers' `iceServers`. 1 to [`MAX_STUN_ADDRS`] `ip:port` addresses in canonical
+    /// text form (IPv6 in brackets, RFC 5952).
+    Stun { addrs: Vec<String> },
 }
 
 /// How much of the hash list a seeder holds.
@@ -219,6 +225,25 @@ fn parse_endpoint(raw: &Value) -> Result<Parsed> {
                 renditions,
             }
         }
+        "stun" => {
+            let addrs = strings(
+                obj.get("addrs")
+                    .ok_or_else(|| bad("stun endpoint needs `addrs`"))?,
+                "addrs",
+                is_stun_addr,
+            )?;
+            if addrs.is_empty() || addrs.len() > MAX_STUN_ADDRS {
+                return Err(bad("stun `addrs` must hold 1 to 4 addresses"));
+            }
+            if addrs
+                .iter()
+                .enumerate()
+                .any(|(i, a)| addrs[..i].contains(a))
+            {
+                return Err(bad("stun `addrs` must not repeat an address"));
+            }
+            Endpoint::Stun { addrs }
+        }
         "hyper" => {
             let drive = str_field(obj, "drive")?;
             if !is_lower_hex(drive, 64) {
@@ -342,6 +367,24 @@ fn str_field<'a>(obj: &'a serde_json::Map<String, Value>, name: &str) -> Result<
         .ok_or_else(|| Error::Beacon(format!("`{name}` must be a string")))
 }
 
+/// An `ip:port` in the canonical text form Rust and RFC 5952 give it (IPv6 in brackets, no
+/// zone), with a port that is not 0: one spelling per address. An IPv4 address is written
+/// as IPv4, never inside IPv6 (`::ffff:a.b.c.d`, or the deprecated `::a.b.c.d`).
+pub fn is_stun_addr(s: &str) -> bool {
+    match s.parse::<std::net::SocketAddr>() {
+        Ok(std::net::SocketAddr::V6(v6))
+            if v6.scope_id() != 0
+                || v6.flowinfo() != 0
+                || v6.ip().to_ipv4_mapped().is_some()
+                || v6.ip().segments()[..6] == [0; 6] =>
+        {
+            false
+        }
+        Ok(a) => a.port() != 0 && a.to_string() == s,
+        Err(_) => false,
+    }
+}
+
 fn strings(value: &Value, name: &str, ok: impl Fn(&str) -> bool) -> Result<Vec<String>> {
     value
         .as_array()
@@ -356,4 +399,89 @@ fn strings(value: &Value, name: &str, ok: impl Fn(&str) -> bool) -> Result<Vec<S
 
 fn bad(reason: &str) -> Error {
     Error::Beacon(reason.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use serde_json::json;
+
+    use super::*;
+
+    fn content(endpoints: &Value) -> Result<BeaconContent> {
+        BeaconContent::from_json(&json!({
+            "v": 1,
+            "video": "nfx:mainnet:1:salt-flats-dusk",
+            "endpoints": endpoints,
+            "chunks": "all",
+            "price_hint": 0,
+            "free": true,
+        }))
+    }
+
+    #[test]
+    fn a_stun_endpoint_parses_and_renders_back() {
+        let raw = json!([
+            { "t": "https", "url": "https://seed.example/nfx" },
+            { "t": "stun", "addrs": ["203.0.113.10:3478", "[2001:db8::1]:3478"] },
+        ]);
+        let c = content(&raw).unwrap();
+        assert_eq!(
+            c.endpoints[1],
+            Endpoint::Stun {
+                addrs: vec!["203.0.113.10:3478".into(), "[2001:db8::1]:3478".into()]
+            }
+        );
+        let back: Value = serde_json::from_str(&c.to_content()).unwrap();
+        assert_eq!(back["endpoints"], raw);
+    }
+
+    #[test]
+    fn a_malformed_stun_endpoint_rejects_the_beacon() {
+        for addrs in [
+            json!(null),
+            json!("203.0.113.10:3478"),
+            json!([]),
+            Value::from(vec!["203.0.113.10:3478"; 5]),
+            json!(["203.0.113.10"]),
+            json!(["203.0.113.10:0"]),
+            json!(["stun.example:3478"]),
+            json!(["stun:203.0.113.10:3478"]),
+            json!(["2001:db8::1:3478"]),
+            json!(["[2001:DB8::1]:3478"]),
+            json!(["[2001:db8:0::1]:3478"]),
+            json!(["[fe80::1%2]:3478"]),
+            json!(["[::ffff:127.0.0.1]:3478"]),
+            json!(["[::ffff:203.0.113.10]:3478"]),
+            json!(["[::203.0.113.10]:3478"]),
+            json!(["[::1]:3478"]),
+            json!([
+                "203.0.113.10:3478",
+                "198.51.100.7:3478",
+                "203.0.113.10:3478"
+            ]),
+            json!(["203.0.113.010:3478"]),
+            json!(["203.0.113.10:03478"]),
+            json!([3478]),
+        ] {
+            let ep = if addrs.is_null() {
+                json!({ "t": "stun" })
+            } else {
+                json!({ "t": "stun", "addrs": addrs })
+            };
+            assert!(content(&json!([ep])).is_err(), "{ep}");
+        }
+    }
+
+    #[test]
+    fn a_reader_without_stun_would_skip_it_and_unknown_types_still_are() {
+        let c = content(&json!([
+            { "t": "carrier-pigeon", "addrs": "anything" },
+            { "t": "stun", "addrs": ["198.51.100.7:3478"] },
+        ]))
+        .unwrap();
+        assert_eq!(c.skipped, ["carrier-pigeon"]);
+        assert_eq!(c.endpoints.len(), 1);
+    }
 }

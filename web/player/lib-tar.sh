@@ -7,10 +7,11 @@
 #   player.js                 the library: one minified ES module (hls.js and p2p-media-loader in it)
 #   wasm/nfx_wasm_bg.wasm     nfx-proto's verifier; init() loads it from ./wasm/ by default
 #
-# The tar is made the same way on any host: mtime 0, uid/gid 0, mode 0644, no directory entries,
-# POSIX format without atime/ctime, and paths in the WASM remapped to /nfx and /cargo. So the
-# same commit built with the same tools gives the same bytes, and a consumer (nutflix-pear's
-# packages/app-web/nfx-web.lock) can pin its sha256.
+# The tar is written by lib-tar.mjs, not by a tar program, whose output depends on its version
+# (GNU tar with the same flags gave other bytes on another host): plain ustar members, mode 0644,
+# uid/gid 0, mtime 0, no directory entries. Paths in the WASM are remapped to /nfx and /cargo.
+# So the same commit built with the same tools gives the same bytes on any host, and a consumer
+# (nutflix-pear's packages/app-web/nfx-web.lock) can pin its sha256.
 #
 #   bash lib-tar.sh [--commit <40 hex>] [--expect <sha256>] [--no-build]
 #
@@ -23,7 +24,7 @@
 # Tools, checked before building, because another version gives other bytes: rustc 1.98.0 with
 # the wasm32-unknown-unknown target (crates/Cargo.toml rust-version, CI's image), wasm-pack 0.15.1
 # (CI's pin), wasm-bindgen on PATH at the version crates/Cargo.lock pins (so wasm-pack downloads
-# nothing), esbuild and typescript from package-lock.json (run `npm ci` first), GNU tar.
+# nothing), esbuild and typescript from package-lock.json (run `npm ci` first), and node.
 set -euo pipefail
 
 RUST_VERSION=1.98.0
@@ -54,7 +55,6 @@ fi
 [ -z "$expect" ] || [[ $expect =~ ^[0-9a-f]{64}$ ]] || die "--expect must be 64 lowercase hex"
 
 cd "$here"
-tar --version 2>/dev/null | head -1 | grep -q 'GNU tar' || die "needs GNU tar"
 if [ "$build" = 1 ]; then
     lock_bindgen=$(awk '/^name = "wasm-bindgen"$/ {getline; gsub(/[^0-9.]/, ""); print; exit}' "$repo/crates/Cargo.lock")
     lock_esbuild=$(node -p "require('./package-lock.json').packages['node_modules/esbuild'].version")
@@ -96,16 +96,20 @@ imports=$(grep -hoE "(from|import\() *['\"][^'\"]+['\"]" "$stage/player.d.ts" | 
 [ "$(printf '%s\n' "${files[@]}" | sort)" = "$(printf '%s\n' "${files[@]}")" ] || die "file list not sorted"
 
 name="nfx-web-lib-${commit:0:12}.tar"
-tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode=u=rw,go=r \
-    --format=posix --pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime \
-    -cf "out-lib/$name" -C "$stage" "${files[@]}"
+node lib-tar.mjs "out-lib/$name" "$stage" "${files[@]}"
 [ "$(tar -tf "out-lib/$name")" = "$(printf '%s\n' "${files[@]}")" ] || die "the tar holds more or other than its four files"
+for f in "${files[@]}"; do
+    cmp -s <(tar -xOf "out-lib/$name" "$f") "$stage/$f" || die "$f reads back from the tar differently"
+done
 sha=$(sha256sum < "out-lib/$name" | cut -d' ' -f1)
 (cd out-lib && echo "$sha  $name" > "$name.sha256")
 for f in "${files[@]}"; do
     echo "NFX_WEB_LIB_FILE $(sha256sum < "$stage/$f" | cut -d' ' -f1) $(stat -c %s "$stage/$f") $f"
 done
 echo "NFX_WEB_LIB_COMMIT=$commit"
+if [ "$build" = 1 ]; then
+    echo "NFX_WEB_LIB_TOOLS=$(rustc -V | cut -d' ' -f1-2), $(wasm-pack -V), $(wasm-bindgen -V), esbuild $lock_esbuild, typescript $lock_tsc, node $(node -v)"
+fi
 echo "NFX_WEB_LIB_TAR=$here/out-lib/$name"
 echo "NFX_WEB_LIB_TAR_BYTES=$(stat -c %s "out-lib/$name")"
 echo "NFX_WEB_LIB_TAR_SHA256=$sha"

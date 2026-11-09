@@ -46,6 +46,7 @@ implement:
 | `iroh` | NFX-06 |
 | `https` | NFX-05 §6 |
 | `webrtc` | NFX-10 §2 |
+| `stun` | NFX-10 §1 (a STUN server for browsers' `iceServers`) |
 | `hyperdht` | NFX-12 §2 (optional) |
 | `hyper` | deprecated: parsed, never emitted or dialed (NFX-12 §2) |
 
@@ -248,3 +249,5 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   `nostr-identity`'s), new vectors `ratings.json`, `ratings-invalid.json` and
   `ratings-scoring.json` (source `test-vectors/ratings.py`), and an optional claim beside a
   conformance level.
+- 2026-11-09 (issue #71) — beacon endpoint type `stun` (NFX-10 §1): the STUN server a
+  seeder answers on, for browsers' `iceServers`. Readers that do not implement it skip it.

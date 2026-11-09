@@ -119,6 +119,14 @@ pub struct Config {
     /// The embedded tracker's public URL (`wss://`, behind TLS), announced in beacons as the
     /// bridge's `webrtc` endpoint. Needs `bridge`.
     pub tracker_public_url: Option<String>,
+    /// Answer STUN Binding requests on this UDP address ([`crate::stun`]): the STUN server
+    /// web pages name in `iceServers`, so browsers learn their public mapping from a network's
+    /// own node rather than a third party. No TURN. Off by default.
+    pub stun: Option<SocketAddr>,
+    /// The address announced for it in beacons' `stun` endpoint (NFX-10 §1), when it is not
+    /// `stun` itself: the public address of a DNAT that forwards to it. Needs `stun`. With
+    /// neither a dialable `stun` nor this, nothing is announced.
+    pub stun_public: Option<SocketAddr>,
     /// Namespaces the embedded relay serves; by default those of the videos above.
     pub namespaces: Vec<Namespace>,
     /// When non-empty, the embedded relay admits only these creators (x-only pubkey, 64
@@ -183,6 +191,10 @@ pub struct Daemon {
     pub bridge_addr: Option<SocketAddr>,
     /// The address browsers are told for the bridge (`bridge_public`, or `bridge_addr`).
     pub bridge_public: Option<SocketAddr>,
+    /// The STUN responder's UDP address.
+    pub stun_addr: Option<SocketAddr>,
+    /// The STUN address beacons announce (`stun_public`, or a dialable `stun_addr`).
+    pub stun_public: Option<SocketAddr>,
     pub origin_addr: Option<SocketAddr>,
     state: Arc<Mutex<BTreeMap<String, VideoState>>>,
     shared: Arc<Shared>,
@@ -210,6 +222,8 @@ struct Shared {
     tracker: Option<Arc<Tracker>>,
     bridge: Option<Arc<Bridge>>,
     tracker_public_url: Option<String>,
+    /// The STUN address announced as a `stun` beacon endpoint.
+    stun_public: Option<SocketAddr>,
     /// Renditions the bridge serves, by `a` tag, for the `webrtc` beacon endpoint.
     bridged: Mutex<BTreeMap<String, Vec<String>>>,
     /// This node's own pubkey: its own beacons and envelopes are never learned.
@@ -500,6 +514,11 @@ impl Shared {
                 renditions: renditions.clone(),
             });
         }
+        if let Some(addr) = self.stun_public {
+            endpoints.push(Endpoint::Stun {
+                addrs: vec![addr.to_string()],
+            });
+        }
         BeaconContent {
             v: 1,
             video: manifest.addr.clone(),
@@ -632,6 +651,18 @@ impl Daemon {
                 )));
             }
         }
+        if let Some(public) = cfg.stun_public {
+            if cfg.stun.is_none() {
+                return Err(Error::Config("--stun-public needs --stun".into()));
+            }
+            // As every reader will check it (NFX-10 §1): an address readers refuse would make
+            // them refuse every beacon, other endpoints and all.
+            if !dialable(public) || !nfx_proto::beacon::is_stun_addr(&public.to_string()) {
+                return Err(Error::Config(format!(
+                    "--stun-public {public}: not an address a browser can reach"
+                )));
+            }
+        }
         if !cfg.gossip && !cfg.gossip_peers.is_empty() {
             return Err(Error::Config("--gossip-peer needs --gossip".into()));
         }
@@ -695,6 +726,19 @@ impl Daemon {
         }
 
         let mut tasks = Vec::new();
+        // Bound now, so a taken port fails the start; served from the end of it.
+        let stun_socket = match cfg.stun {
+            None => None,
+            Some(addr) => Some(tokio::net::UdpSocket::bind(addr).await?),
+        };
+        let stun_addr = stun_socket.as_ref().map(|s| s.local_addr()).transpose()?;
+        // Without --stun-public, the bound address is announced only if it is public: a
+        // loopback or private one would mean nothing to readers and tell them about the host.
+        let stun_public = cfg.stun_public.or_else(|| {
+            stun_addr.filter(|a| {
+                nfx_node::node::is_public(a) && nfx_proto::beacon::is_stun_addr(&a.to_string())
+            })
+        });
         let (tracker, tracker_url) = match cfg.embed_tracker {
             None => (None, None),
             Some(addr) => {
@@ -828,6 +872,7 @@ impl Daemon {
             https_url: cfg.https_url.clone(),
             bridge,
             tracker_public_url: cfg.tracker_public_url.clone(),
+            stun_public,
             bridged: Mutex::new(BTreeMap::new()),
             deletion_check_every: cfg
                 .deletion_check_every
@@ -897,6 +942,13 @@ impl Daemon {
             }
         }
 
+        if let Some(socket) = stun_socket {
+            tasks.push(tokio::spawn(crate::stun::serve(
+                socket,
+                crate::stun::Limits::default(),
+            )));
+        }
+
         Ok(Self {
             node,
             relays,
@@ -905,6 +957,8 @@ impl Daemon {
             tracker_url,
             bridge_addr,
             bridge_public,
+            stun_addr,
+            stun_public,
             origin_addr,
             state,
             shared,

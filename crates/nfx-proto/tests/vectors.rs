@@ -159,6 +159,7 @@ fn beacon_parses_all_endpoint_types_and_is_reproduced() {
             Endpoint::Https { .. } => "https",
             Endpoint::Webrtc { .. } => "webrtc",
             Endpoint::Hyper { .. } => "hyper",
+            Endpoint::Stun { .. } => "stun",
         })
         .collect();
     assert_eq!(kinds, ["iroh", "https", "webrtc", "hyper"]);

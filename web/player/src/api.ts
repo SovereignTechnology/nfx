@@ -50,6 +50,12 @@ export interface Endpoints {
   origins: string[];
   /** `wss://` trackers from `webrtc` endpoints (NFX-10 §2), at most 4, most-named first. */
   trackers: string[];
+  /**
+   * `stun:<ip>:<port>` URLs from `stun` endpoints (NFX-10 §1), global unicast addresses
+   * only, at most 4, most-named first: for `iceServers`, after the page's own. Such a
+   * server learns each viewer's address, and beacons come from any key.
+   */
+  stunServers: string[];
   /** How many seeders' beacons these come from. */
   seeders: number;
 }
