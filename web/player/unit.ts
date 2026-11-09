@@ -15,6 +15,7 @@ import {
   MAX_ORIGINS,
   MAX_SEEDERS,
   type VerifiedBeacon,
+  beaconStun,
   beaconTracker,
   checkIceServers,
   checkOrigins,
@@ -73,6 +74,34 @@ const trackers: [string, string | null][] = [
 ];
 for (const [input, want] of trackers) eq(`beaconTracker(${input})`, beaconTracker(input), want);
 
+const stuns: [string, string | null][] = [
+  ['203.0.113.10:3478', 'stun:203.0.113.10:3478'],
+  ['[2001:db8::1]:3478', 'stun:[2001:db8::1]:3478'],
+  ['127.0.0.1:3478', null], // loopback
+  ['10.1.2.3:3478', null], // private
+  ['172.20.0.1:3478', null],
+  ['192.168.1.1:3478', null],
+  ['100.64.0.1:3478', null], // shared (CGNAT)
+  ['169.254.1.1:3478', null], // link-local
+  ['0.0.0.0:3478', null],
+  ['224.0.0.1:3478', null], // multicast
+  ['255.255.255.255:3478', null],
+  ['[::1]:3478', null],
+  ['[fe80::1]:3478', null],
+  ['[fd00::1]:3478', null], // unique-local
+  ['[::ffff:203.0.113.10]:3478', null], // IPv4 inside IPv6
+  ['[2001:DB8::1]:3478', null], // not canonical
+  ['[2001:db8:0::1]:3478', null],
+  ['203.0.113.010:3478', null],
+  ['203.0.113.10:03478', null],
+  ['203.0.113.256:3478', null],
+  ['203.0.113.10:0', null],
+  ['203.0.113.10:65536', null],
+  ['stun.example:3478', null], // addresses only
+  ['203.0.113.10', null],
+];
+for (const [input, want] of stuns) eq(`beaconStun(${input})`, beaconStun(input), want);
+
 // ---- EndpointBook ------------------------------------------------------------------------
 const NOW = 1_800_000_000;
 const S = (n: number): string => n.toString(16).padStart(64, '0');
@@ -85,15 +114,20 @@ const webrtc = (...urls: unknown[]) => ({ t: 'webrtc', tracker_urls: urls, rendi
 {
   const book = new EndpointBook();
   eq('first beacon taken', book.add(beacon(S(1), NOW, [https('https://a.example/'), webrtc('wss://t1.example')]), NOW), true);
-  eq('first snapshot', book.snapshot(NOW), { origins: ['https://a.example'], trackers: ['wss://t1.example'], seeders: 1 });
+  eq('first snapshot', book.snapshot(NOW), {
+    origins: ['https://a.example'],
+    trackers: ['wss://t1.example'],
+    stunServers: [],
+    seeders: 1,
+  });
   eq('same beacon again (a second relay)', book.add(beacon(S(1), NOW, [https('https://z.example')]), NOW), false);
   eq('older beacon', book.add(beacon(S(1), NOW - 5, [https('https://z.example')]), NOW), false);
   eq('unchanged by the older one', book.snapshot(NOW).origins, ['https://a.example']);
   // The newer beacon replaces what the seeder said: its tracker is withdrawn.
   eq('newer beacon', book.add(beacon(S(1), NOW + 1, [https('https://b.example')]), NOW + 1), true);
-  eq('newer replaces', book.snapshot(NOW + 1), { origins: ['https://b.example'], trackers: [], seeders: 1 });
+  eq('newer replaces', book.snapshot(NOW + 1), { origins: ['https://b.example'], trackers: [], stunServers: [], seeders: 1 });
   // It expires at NOW + 121.
-  eq('expired out', book.snapshot(NOW + 121), { origins: [], trackers: [], seeders: 0 });
+  eq('expired out', book.snapshot(NOW + 121), { origins: [], trackers: [], stunServers: [], seeders: 0 });
   eq('an expired beacon is refused', book.add(beacon(S(2), NOW, [https('https://c.example')]), NOW + 200), false);
 }
 {
@@ -111,7 +145,7 @@ const webrtc = (...urls: unknown[]) => ({ t: 'webrtc', tracker_urls: urls, rendi
     ]),
     NOW,
   );
-  eq('only valid endpoints kept', book.snapshot(NOW), { origins: [], trackers: ['wss://ok.example'], seeders: 1 });
+  eq('only valid endpoints kept', book.snapshot(NOW), { origins: [], trackers: ['wss://ok.example'], stunServers: [], seeders: 1 });
   eq('content without endpoints', book.add(beacon(S(2), NOW, undefined), NOW), true);
   eq('a non-array endpoints', book.add(beacon(S(3), NOW, { t: 'https' }), NOW), true);
   eq('bad seeder', book.add({ ...beacon(S(4), NOW, []), seeder: 5 as unknown as string }, NOW), false);
@@ -126,8 +160,24 @@ const webrtc = (...urls: unknown[]) => ({ t: 'webrtc', tracker_urls: urls, rendi
   eq('ranked', book.snapshot(NOW), {
     origins: ['https://two.example', 'https://one.example'],
     trackers: ['wss://shared.example', 'wss://lonely.example'],
+    stunServers: [],
     seeders: 3,
   });
+}
+{
+  // STUN servers: global unicast only, ranked like the rest, at most 4 in all.
+  const stun = (...addrs: unknown[]) => ({ t: 'stun', addrs });
+  const book = new EndpointBook();
+  book.add(beacon(S(1), NOW, [stun('203.0.113.1:3478', '127.0.0.1:3478', '192.168.0.2:3478')]), NOW);
+  book.add(beacon(S(2), NOW, [stun('198.51.100.2:3478', '203.0.113.1:3478'), stun(7, null)]), NOW);
+  book.add(beacon(S(3), NOW, [{ t: 'stun', addrs: '203.0.113.9:3478' }, stun('[2001:db8::5]:3478')]), NOW);
+  eq('stun ranked and filtered', book.snapshot(NOW).stunServers, [
+    'stun:203.0.113.1:3478',
+    'stun:198.51.100.2:3478',
+    'stun:[2001:db8::5]:3478',
+  ]);
+  for (let i = 4; i < 10; i++) book.add(beacon(S(i), NOW, [stun(`198.51.100.${i}:3478`)]), NOW);
+  eq('stun cap', book.snapshot(NOW).stunServers.length, 4);
 }
 {
   // Caps: per beacon, and overall.
@@ -137,6 +187,7 @@ const webrtc = (...urls: unknown[]) => ({ t: 'webrtc', tracker_urls: urls, rendi
   eq('per-beacon caps', book.snapshot(NOW), {
     origins: ['https://o0.example', 'https://o1.example', 'https://o2.example', 'https://o3.example'],
     trackers: ['wss://t0.example', 'wss://t1.example', 'wss://t2.example', 'wss://t3.example'],
+    stunServers: [],
     seeders: 1,
   });
   for (let i = 2; i <= 12; i++) book.add(beacon(S(i), NOW, [webrtc(`wss://u${i}.example`), https(`https://p${i}.example`)]), NOW);
@@ -195,6 +246,7 @@ const verified = JSON.parse(verifyBeacon(JSON.stringify(vector.event), vector.no
   eq('vector endpoints', book.snapshot(vector.now), {
     origins: ['https://seed.example/nfx'],
     trackers: ['wss://tracker.example/announce'],
+    stunServers: [],
     seeders: 1,
   });
 }

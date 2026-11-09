@@ -59,6 +59,61 @@ export function beaconTracker(raw: string): string | null {
   return t !== null && t.startsWith('wss://') ? t : null;
 }
 
+/** Whether an IPv4 address (as octets) is global unicast: none of the blocks that point a
+ * viewer at its own network (this network, private, shared, loopback, link-local, IETF,
+ * benchmarking) or that are not unicast (multicast, reserved, broadcast). Documentation
+ * blocks pass: they reach nothing, and they point nowhere local. */
+function globalV4(o: number[]): boolean {
+  const [a = 0, b = 0, c = 0] = o;
+  return !(
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    a >= 224 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 192 && b === 0 && c === 0) ||
+    (a === 198 && (b === 18 || b === 19))
+  );
+}
+
+/**
+ * A beacon-named STUN address (NFX-10 §1: canonical `ip:port`, port not 0) as an
+ * `iceServers` URL, or null: global unicast only (IPv4 above, IPv6 in 2000::/3), so a beacon
+ * from anywhere cannot point viewers at their own network.
+ */
+export function beaconStun(addr: string): string | null {
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/.exec(addr);
+  const v6 = /^\[([0-9a-f:]+)\]:(\d{1,5})$/.exec(addr);
+  const port = Number((v4 ?? v6)?.[(v4 ? 5 : 2)]);
+  if (!(Number.isInteger(port) && port >= 1 && port <= 65535)) return null;
+  if (v4) {
+    const parts = v4.slice(1, 5);
+    const octets = parts.map(Number);
+    // Canonical: no leading zeros, each at most 255, and the port as written.
+    if (parts.some((p, i) => String(octets[i]) !== p) || octets.some((n) => n > 255)) return null;
+    if (String(port) !== v4[5] || !globalV4(octets)) return null;
+    return `stun:${parts.join('.')}:${port}`;
+  }
+  if (v6) {
+    const host = v6[1] ?? '';
+    let canonical: string;
+    try {
+      canonical = new URL(`http://[${host}]/`).hostname;
+    } catch {
+      return null;
+    }
+    // WHATWG's serialisation is RFC 5952's, as the canonical form requires.
+    if (canonical !== `[${host}]` || String(port) !== v6[2]) return null;
+    const first = host.startsWith('::') ? 0 : parseInt(host.split(':')[0] ?? '', 16);
+    if (!(Number.isInteger(first) && (first & 0xe000) === 0x2000)) return null;
+    return `stun:[${host}]:${port}`;
+  }
+  return null;
+}
+
 /** A beacon as nfx-wasm's `verifyBeacon` returns it (the fields used here). */
 export interface VerifiedBeacon {
   seeder: string;
@@ -73,6 +128,7 @@ interface Entry {
   expiration: number;
   origins: string[];
   trackers: string[];
+  stun: string[];
 }
 
 /**
@@ -98,10 +154,16 @@ export class EndpointBook {
     }
     const origins: string[] = [];
     const trackers: string[] = [];
+    const stun: string[] = [];
     const endpoints = Array.isArray(b.content?.endpoints) ? (b.content.endpoints as unknown[]) : [];
     for (const e of endpoints) {
       if (e === null || typeof e !== 'object') continue;
-      const { t, url, tracker_urls: urls } = e as { t?: unknown; url?: unknown; tracker_urls?: unknown };
+      const { t, url, tracker_urls: urls, addrs } = e as {
+        t?: unknown;
+        url?: unknown;
+        tracker_urls?: unknown;
+        addrs?: unknown;
+      };
       if (t === 'https' && typeof url === 'string') {
         const o = originBase(url);
         if (o !== null && !origins.includes(o) && origins.length < PER_BEACON) origins.push(o);
@@ -110,10 +172,15 @@ export class EndpointBook {
           const tr = typeof raw === 'string' ? beaconTracker(raw) : null;
           if (tr !== null && !trackers.includes(tr) && trackers.length < PER_BEACON) trackers.push(tr);
         }
+      } else if (t === 'stun' && Array.isArray(addrs)) {
+        for (const raw of addrs) {
+          const s = typeof raw === 'string' ? beaconStun(raw) : null;
+          if (s !== null && !stun.includes(s) && stun.length < PER_BEACON) stun.push(s);
+        }
       }
     }
     // Map#set on a held key keeps its place: seeders stay in first-heard order.
-    this.#seeders.set(b.seeder, { created_at: b.created_at, expiration: b.expiration, origins, trackers });
+    this.#seeders.set(b.seeder, { created_at: b.created_at, expiration: b.expiration, origins, trackers, stun });
     return true;
   }
 
@@ -124,18 +191,21 @@ export class EndpointBook {
   snapshot(now: number): Endpoints {
     const origins = new Map<string, number>();
     const trackers = new Map<string, number>();
+    const stun = new Map<string, number>();
     let seeders = 0;
     for (const e of this.#seeders.values()) {
       if (e.expiration <= now) continue;
       seeders += 1;
       for (const o of e.origins) origins.set(o, (origins.get(o) ?? 0) + 1);
       for (const t of e.trackers) trackers.set(t, (trackers.get(t) ?? 0) + 1);
+      for (const s of e.stun) stun.set(s, (stun.get(s) ?? 0) + 1);
     }
     // Array#sort is stable, so equal counts keep first-heard order.
     const ranked = (m: Map<string, number>): string[] => [...m].sort((x, y) => y[1] - x[1]).map(([u]) => u);
     return {
       origins: ranked(origins).slice(0, MAX_ORIGINS),
       trackers: ranked(trackers).slice(0, MAX_TRACKERS),
+      stunServers: ranked(stun).slice(0, MAX_ICE_SERVERS),
       seeders,
     };
   }

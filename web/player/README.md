@@ -15,7 +15,8 @@ import { init, resolveManifest, watchEndpoints, open } from './player.js';
 await init();                                   // or init({ wasmUrl }) if the WASM is elsewhere
 const m = await resolveManifest(a, relays);     // NFX-02 over Nostr, deletions applied
 const stop = watchEndpoints(a, m.namespace, relays, (e) => {
-  // e.origins: https bases, e.trackers: wss trackers, from the newest live beacon per seeder
+  // e.origins: https bases, e.trackers: wss trackers, e.stunServers: stun: URLs,
+  // from the newest live beacon per seeder
 });
 const session = await open(videoElement, {
   manifestJson: m.event,                        // verified again in WASM
@@ -62,9 +63,10 @@ loopback only.
 
 `bash lib-tar.sh` builds the WASM and the library and packs `out-lib/nfx-web-lib-<commit>.tar`
 (the first 12 hex digits of the nfx commit): `api.d.ts`, `player.d.ts`, `player.js` and
-`wasm/nfx_wasm_bg.wasm`, names sorted, mtime 0, uid and gid 0, mode 0644, no directory
-entries, POSIX format without atime or ctime, and the WASM's paths remapped to `/nfx` and
-`/cargo`. It prints each file's sha256 and the tar's.
+`wasm/nfx_wasm_bg.wasm`, names sorted, with the WASM's paths remapped to `/nfx` and `/cargo`.
+The archive is written by `lib-tar.mjs`, not by a tar program (whose bytes vary with its
+version): plain ustar members, mode 0644, uid and gid 0, mtime 0, no directory entries. It
+prints each file's sha256 and the tar's.
 
 The same commit built with the same tools gives the same bytes, so a consumer pins the
 tar's sha256 beside the commit. The script refuses other tools: rustc 1.98.0 with the

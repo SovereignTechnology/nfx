@@ -8,9 +8,9 @@
 <p>Give a manifest address and a relay to resolve the signed manifest over Nostr and find an
   origin in seeders' beacons, or give an origin and a root directly. Every file is checked
   against its sha256 and the hash list before the player uses it (NFX-05 §4). By address, the
-  player also joins the browser mesh through any tracker a seeder's beacon names: it then
-  shares verified segments with other viewers, and the trackers and those peers see your IP
-  address.</p>
+  player also joins the browser mesh through any tracker a seeder's beacon names, and asks
+  the STUN servers beacons name for its public address: it then shares verified segments with
+  other viewers, and those trackers, STUN servers and peers see your IP address.</p>
 <form method="get">
   <input id="a" name="a" placeholder="manifest address, 38504:&lt;creator&gt;:&lt;namespace&gt;:&lt;video-id&gt;" autocomplete="off">
   <input id="relay" name="relay" placeholder="relay, e.g. wss://relay.example" autocomplete="off">

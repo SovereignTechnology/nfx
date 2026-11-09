@@ -5,7 +5,9 @@
  * - `?a=<manifest address>&relay=<ws(s) URL>[&relay=…][&origin=<hint>]`: resolve the
  *   current signed manifest over Nostr, then play from an origin named by a verified
  *   beacon's `https` endpoint (or the hint). The trackers seeders' beacons name in
- *   `webrtc` endpoints are used too. Signatures give the anchor; endpoints are only hints.
+ *   `webrtc` endpoints are used too, and the STUN servers they name in `stun` endpoints
+ *   (NFX-10 §1, global unicast only), after any `&stun=`. Signatures give the anchor;
+ *   endpoints are only hints.
  * - `?origin=<url>&root=<hex>[&video=<d>&segs=<n>]`: play a known root from a known origin.
  *
  * A loader wrapper checks every playlist, init and segment with nfx-proto (WASM) before
@@ -23,6 +25,7 @@
 import {
   type Endpoints,
   type Level,
+  MAX_ICE_SERVERS,
   MAX_TRACKERS,
   type MeshStats,
   type OpenCommon,
@@ -45,6 +48,8 @@ interface State {
   origins: string[];
   /** Trackers named by seeders' beacons (all heard, before the cap). */
   beaconTrackers: string[];
+  /** STUN servers named by seeders' beacons. */
+  beaconStun: string[];
   origin: string | null;
   root: string | null;
   engine: string | null;
@@ -62,6 +67,7 @@ const st: State = {
   resolved: null,
   origins: [],
   beaconTrackers: [],
+  beaconStun: [],
   origin: null,
   root: null,
   engine: null,
@@ -120,7 +126,7 @@ const urlTrackers = [
 ].slice(0, MAX_TRACKERS);
 const iceServers: RTCIceServer[] = params
   .getAll('stun')
-  .filter((u) => /^stuns?:[A-Za-z0-9.-]+(:\d{1,5})?$/.test(u))
+  .filter((u) => /^stuns?:(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:\d{1,5})?$/.test(u))
   .slice(0, 2)
   .map((urls) => ({ urls }));
 /** The mesh through these trackers, or no mesh. */
@@ -152,7 +158,7 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
   const m = await resolveManifest(a, relays);
   st.resolved = { a: m.a, title: m.title, root: m.root, video: m.video, segs: m.segs, created_at: m.created_at };
   log(`manifest "${m.title}" (${m.video}), revision ${m.created_at}, root ${m.root.slice(0, 12)}…`);
-  let heard: Endpoints = { origins: [], trackers: [], seeders: 0 };
+  let heard: Endpoints = { origins: [], trackers: [], stunServers: [], seeders: 0 };
   let wake: (() => void) | null = null;
   const stop = watchEndpoints(a, m.namespace, relays, (e) => {
     heard = e;
@@ -168,6 +174,12 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
         log(`a seeder names tracker ${t}`);
       }
     }
+    for (const s of e.stunServers) {
+      if (!st.beaconStun.includes(s)) {
+        st.beaconStun.push(s);
+        log(`a seeder names STUN server ${s}`);
+      }
+    }
     wake?.();
   });
   const tried = new Set<string>();
@@ -181,8 +193,10 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
         fresh.forEach((o) => tried.add(o));
         // The page's own trackers first, then what seeders named by now.
         const trackers = [...new Set([...urlTrackers, ...heard.trackers])].slice(0, MAX_TRACKERS);
+        // Likewise its own STUN servers, then those seeders named (NFX-10 §1).
+        const stun = [...iceServers, ...heard.stunServers.map((urls) => ({ urls }))].slice(0, MAX_ICE_SERVERS);
         try {
-          await play({ ...common, manifestJson: m.event, origins: fresh, signaling: trackerSignaling(trackers) });
+          await play({ ...common, iceServers: stun, manifestJson: m.event, origins: fresh, signaling: trackerSignaling(trackers) });
           return;
         } catch (e) {
           log(e instanceof Error ? e.message : String(e));

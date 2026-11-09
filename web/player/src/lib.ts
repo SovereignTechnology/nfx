@@ -89,9 +89,10 @@ export function resolveManifest(a: string, relays: string[], options: ResolveOpt
 }
 
 /**
- * Report the origins and trackers seeders' live beacons for `a` name, each time they
- * change (the newest unexpired beacon per seeder counts; `wss://` trackers only, at most
- * 4; `https://` origins only, at most 8). Returns `stop`, which closes the subscriptions.
+ * Report the origins, trackers and STUN servers seeders' live beacons for `a` name, each
+ * time they change (the newest unexpired beacon per seeder counts; `https://` origins only,
+ * at most 8; `wss://` trackers only, at most 4; global unicast STUN addresses only, at most
+ * 4). Returns `stop`, which closes the subscriptions.
  */
 export function watchEndpoints(
   a: string,
