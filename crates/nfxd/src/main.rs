@@ -8,7 +8,8 @@
 //! nfxd delete --key <file> --relay <url>… --a <a>…   withdraw your own videos (NFX-02 §6)
 //! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--iroh-relay-ca <pem>]… [--relay-only]
 //!          [--seed <a>]… [--fetch <a>]… [--pull <a>]… [--origin <addr:port>]
-//!          [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--tracker-url <wss url>]]] [--namespace <ns>]…
+//!          [--https-url <url>] [--embed-relay <addr:port>]
+//!          [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]…
 //!          [--allow-creator <hex>]… [--gossip [--gossip-peer <id>@<ip:port|relay-url>]…]
 //!          [--rating-root <npub|hex> --general-relay <url>… [--rating-trusted <npub|hex>]…]
 //! ```
@@ -39,6 +40,14 @@
 //! `wss://`, and `--tracker-url` names that URL). A proxy on the same host must set
 //! `X-Forwarded-For`: the tracker counts clients by it, and without it every client
 //! shares the proxy's one allowance.
+//!
+//! The bridge's `--bridge` address is its only ICE candidate, so by default it must be one
+//! browsers reach. Behind a DNAT, bind `--bridge` to the host's own address and give the
+//! DNAT's public address as `--bridge-public`: browsers are told that one, and the bridge
+//! takes what arrives as sent to it. `--bridge-max-peers` caps the browser connections it
+//! holds at once (default 64, at most 1024). Each may queue 16 MiB of segments, so a small
+//! host sets it lower; one video's swarm takes at most 16 of them, or all when the cap is
+//! lower.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -57,7 +66,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...]";
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...]";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -219,6 +228,8 @@ async fn run(args: &[String]) -> Result<()> {
             "embed-relay",
             "embed-tracker",
             "bridge",
+            "bridge-public",
+            "bridge-max-peers",
             "tracker-url",
             "namespace",
             "allow-creator",
@@ -260,6 +271,8 @@ async fn run(args: &[String]) -> Result<()> {
         embed_relay: addr("embed-relay")?,
         embed_tracker: addr("embed-tracker")?,
         bridge: addr("bridge")?,
+        bridge_public: addr("bridge-public")?,
+        bridge_max_peers: bridge_max_peers(&f)?,
         tracker_public_url: one(&f, "tracker-url")?,
         namespaces: all(&f, "namespace")
             .iter()
@@ -294,6 +307,9 @@ async fn run(args: &[String]) -> Result<()> {
     }
     if let Some(addr) = daemon.bridge_addr {
         eprintln!("bridge: udp {addr}");
+        if let Some(public) = daemon.bridge_public.filter(|p| *p != addr) {
+            eprintln!("bridge public: udp {public}");
+        }
     }
     if gossip {
         let me = daemon.node().addr();
@@ -349,6 +365,16 @@ fn relay_cas(files: &[String]) -> Result<Vec<nfx_node::node::CertificateDer<'sta
     Ok(out)
 }
 
+/// `--bridge-max-peers N`, a count; `Daemon::start` checks its range.
+fn bridge_max_peers(f: &[(String, String)]) -> Result<Option<usize>> {
+    one(f, "bridge-max-peers")?
+        .map(|v| {
+            v.parse()
+                .map_err(|_| Error::Config(format!("--bridge-max-peers {v}: not a number")))
+        })
+        .transpose()
+}
+
 /// A public key given as an npub or 64 hex digits, as 64 lowercase hex. The error never
 /// repeats the value: it may be a secret key given by mistake.
 fn pubkey_hex(flag: &str, v: &str) -> Result<String> {
@@ -382,7 +408,7 @@ fn gossip_peers(values: &[String]) -> Result<Vec<iroh::EndpointAddr>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{gossip_peers, pubkey_hex, relay_cas};
+    use super::{bridge_max_peers, flags, gossip_peers, pubkey_hex, relay_cas};
 
     fn ca_pem() -> String {
         use base64::Engine as _;
@@ -485,5 +511,27 @@ mod tests {
                 .to_string();
             assert!(err.contains("--gossip-peer"), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn bridge_max_peers_is_a_count_given_once() {
+        let args = |s: &[&str]| s.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let known = ["bridge-max-peers"];
+        let f = flags(&args(&["--bridge-max-peers", "16"]), &known).unwrap();
+        assert_eq!(bridge_max_peers(&f).unwrap(), Some(16));
+        assert_eq!(bridge_max_peers(&[]).unwrap(), None);
+        for bad in ["", "sixteen", "-1", "1.5", "16 "] {
+            let f = flags(&args(&["--bridge-max-peers", bad]), &known).unwrap();
+            let err = bridge_max_peers(&f).unwrap_err().to_string();
+            assert_eq!(err, format!("--bridge-max-peers {bad}: not a number"));
+        }
+        let f = flags(
+            &args(&["--bridge-max-peers", "8", "--bridge-max-peers", "9"]),
+            &known,
+        )
+        .unwrap();
+        let err = bridge_max_peers(&f).unwrap_err().to_string();
+        assert!(err.contains("given twice"), "{err}");
+        assert!(flags(&args(&["--bridge-max-peers"]), &known).is_err());
     }
 }

@@ -83,6 +83,21 @@ from ADR 0104, and two yanked dependencies replaced.
   - #13 (`0f86e9a`): nostr-sdk 0.45.4 → 0.45.6. 0.45.0 to 0.45.5 were yanked over a
     verification-cache bypass; 0.45.6 binds each cache entry to the event's signature.
     nfx-node and nfxd read beacons through this client.
+- **A bridge behind a DNAT, and its connection cap** (`nfxd --bridge-public`,
+  `--bridge-max-peers`).
+  - The bridge's address is its one ICE candidate, and str0m answers a browser's checks only
+    at a local candidate, so a bridge behind a DNAT told browsers its private address.
+    `--bridge-public ip:port` (needs `--bridge`) is now the candidate browsers are told, and
+    what the bridge takes their packets as sent to (`BridgeConfig::public`); `--bridge` stays
+    the address it binds.
+  - `--bridge-max-peers n` (1 to 1024, default 64) caps the browser connections it holds at
+    once. Each may queue 16 MiB, so this bounds the bridge's memory on a small host. One
+    swarm still takes at most 16 (or all, when the cap is lower): a small bridge usually
+    serves few videos, and a per-swarm share scaled down with the cap would turn their
+    viewers away while connections sat free.
+  - Proved in memory by a str0m browser and the bridge's own answering code: told a public
+    address and bound on another, the data channel opens; taking packets as sent to the bound
+    address, as before, it never does. The cap is proved at both limits.
 
 ## Since 2026-10-19
 
