@@ -102,6 +102,18 @@ from ADR 0104, and two yanked dependencies replaced.
   comes up (seeds after the wait, announcing its direct addresses), one whose relay comes up
   during the wait (a relay-only fetcher fetches through its tickets), and a node whose relay
   connects after seeding (its next beacon's tickets name it).
+- **A long video fetches over a slow relay, and a failed fetch resumes.** One collection
+  transfer had a fixed 120 s, so `nfxd --fetch` of a 963-file, 652 MiB video through an iroh
+  relay (4 MiB/s a client, at least 163 s) timed out, threw its progress away and started
+  over, forever. Now the deadline grows with the work: 120 s to connect and fetch the hash
+  list, then 1 s per file plus its size at 1 MiB/s (`FETCH_PER_FILE`, `FETCH_FLOOR_RATE`), at
+  most 30 s a file. Worst case, N files of B bytes are cut off 120 s + N s + B / 1 MiB/s after
+  the start (about 29 minutes for that video), and a seeder that stalls is still dropped
+  after 30 s (`MEMBER_TIMEOUT`). Files already in the store, each verified when stored, are
+  not fetched again, so a retry goes on where the failed attempt stopped. Proved scaled down:
+  a transfer paced past its base deadline completes (and fails under a fixed cap), retries
+  that each time out still finish by resuming, and a peer that never answers is cut off by
+  the member limit.
 - **Dependencies:** crates.io yanked two versions on our locks, and cargo deny failed the
   check job on them. Neither crate is in the money closure, so neither lock needed a re-pin.
   - #10 (`cf9788a`): crypto-bigint 0.7.6 → 0.7.9. RUSTSEC-2026-0387's fix is kept.
