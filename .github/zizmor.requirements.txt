@@ -1,0 +1,6 @@
+# zizmor (https://docs.zizmor.sh), the workflow linter that .github/workflows/zizmor.yml runs. The
+# wheel is a prebuilt binary with no dependencies; the job installs it into a venv with
+# `pip install --require-hashes --only-binary :all:`, so this hash is the whole pin.
+# dependabot.yml (pip, /.github) proposes the bumps.
+zizmor==1.31.1 \
+    --hash=sha256:58e878eb2dbd2c6183c105e1ac28c14f7dd1eca44a783f1fe2a69647d012c410
