@@ -11,6 +11,15 @@ work; the wire profile (NFX-12) stands either way.
 Revisited 2026-10-25: S5′ failed, and [ADR 0103](0103-meet-over-iroh.md) records the course
 sovtech chose. nfx does not speak HyperDHT, and the two implementations meet over iroh.
 
+Amended 2026-11-09 (sovtech's decision for the web client at web.nutflix.xyz, recorded on that
+side as nutflix-pear's ADR 0022): nfx ships its web player as a library (`web/player/src/lib.ts`,
+packed by `web/player/lib-tar.sh` into a reproducible tar), and nutflix-pear's NFX-only web
+client plays NFX video through it, pinned by nfx commit and tar sha256 in its own repository.
+The dependency runs one way: nfx does not import nutflix-pear, and nothing in nfx is shaped
+for it beyond the library's public API (`web/player/README.md`). This is the one place where
+nutflix-pear runs nfx code, in the browser only, the WASM verifier included; its own NFX
+implementation (§1: manifests, beacons and feeds from the specs) stays independent.
+
 Amends ADR 0006 ("any production implementation of NFX is a new codebase") and ADR 0008 §1 and
 §3 (the demo is never reshaped; the harvest of the Hypercore seeder as the NFX-12 sidecar; spike
 S5).

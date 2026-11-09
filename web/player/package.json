@@ -2,16 +2,18 @@
   "name": "@nfx/test-player",
   "private": true,
   "type": "module",
-  "description": "A2 test player: hls.js over an NFX-05 §6 origin, every file verified by nfx-proto (WASM) before hls.js sees it",
+  "description": "The NFX web player (a library, and the test player page over it): hls.js over an NFX-05 §6 origin, every file verified by nfx-proto (WASM) before hls.js sees it",
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "wasm": "wasm-pack build --target web --release --no-opt --out-dir ../../web/player/out/wasm --out-name nfx_wasm ../../crates/nfx-wasm",
     "build": "npm run wasm && esbuild src/player.ts --bundle --format=esm --target=es2022 --outdir=out",
+    "build:lib": "esbuild src/lib.ts --bundle --format=esm --target=es2022 --minify --legal-comments=eof --outfile=out-lib/player.js && tsc -p tsconfig.lib.json",
+    "lib-tar": "bash lib-tar.sh",
     "serve": "npm run wasm && esbuild src/player.ts --bundle --format=esm --target=es2022 --outdir=out --servedir=. --serve=0.0.0.0:3471",
     "typecheck": "tsc -p .",
     "e2e": "tsx e2e.ts",
     "unit": "tsx unit.ts",
-    "e2e:mesh": "esbuild e2e-peer.ts --bundle --format=esm --target=es2022 --outfile=out-e2e/e2e-peer.js && tsx e2e-mesh.ts"
+    "e2e:mesh": "esbuild e2e-peer.ts --bundle --format=esm --target=es2022 --outfile=out-e2e/e2e-peer.js && esbuild e2e-lib.ts --bundle --format=esm --target=es2022 --outfile=out-e2e/e2e-lib.js && tsx e2e-mesh.ts"
   },
   "devDependencies": {
     "@types/node": "22.18.0",
