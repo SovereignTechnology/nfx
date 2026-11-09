@@ -84,12 +84,13 @@ nfxd run --key node.key --store pkg/store --seed "$A" \
   --embed-relay 127.0.0.1:7447 --origin 127.0.0.1:3473
 ```
 
-`nfx-package` makes one rendition by default: 720p, or the clip's own height when it is
-shorter. While the network is small, each extra rendition is another set of segments to
-store and another browser swarm to split viewers across
+`nfx-package` makes one rendition by default: 720p, or the clip's own size when it is
+smaller. A size is the picture's short side, so 720p is 1280x720, or 720x1280 for a
+portrait clip. While the network is small, each extra rendition is another set of segments
+to store and another browser swarm to split viewers across
 ([nutflix-pear#97](https://github.com/SovereignTechnology/nutflix-pear/issues/97) tracks a
 fuller default). `--renditions` picks the sizes instead, from those the clip offers: the
-tiers 2160p, 1440p, 1080p, 720p, 480p and 360p up to its height, and its own height
+tiers 2160p, 1440p, 1080p, 720p, 480p and 360p up to its size, and its own size
 (`--renditions 2160p` for one 4K rendition, `--renditions 1080p,720p,360p` for the old
 three-size ladder). Nothing is upscaled: a size the clip does not offer is refused.
 

@@ -1,5 +1,5 @@
 //! Package a source file as NFX-05 content: the renditions asked for ([`Renditions`]; by
-//! default one, 720p or the source's own height) encoded to CMAF by ffmpeg, every
+//! default one, 720p or the source's own size) encoded to CMAF by ffmpeg, every
 //! output file content-addressed into a store directory, playlists rewritten to content
 //! names (NFX-05 §3), and the hash list assembled and self-verified with `nfx-proto`.
 
@@ -79,9 +79,10 @@ impl Runner for SystemRunner {
 #[derive(Debug, Clone)]
 pub struct PackageOptions {
     pub video: VideoAddr,
-    /// Which renditions to make: by default one, 720p or the source's own height.
+    /// Which renditions to make: by default one, 720p or the source's own size (its short
+    /// side as displayed).
     pub renditions: Renditions,
-    /// Treat the source as at most this tall: no rendition is taller.
+    /// Treat the source's short side as at most this many lines: no rendition is larger.
     pub max_height: Option<u32>,
     /// x264 preset (L8 default `medium`).
     pub preset: Option<String>,

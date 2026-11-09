@@ -177,6 +177,54 @@ fn packages_a_720p_clip_into_verified_nfx05_content() {
         "nothing encoded"
     );
 
+    // A portrait clip: its size is its short side, so the default 720p is 720 wide.
+    let tall = tmp.join("portrait.mp4");
+    let status = Command::new(&runner().ffmpeg)
+        .args([
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=1080x1920:rate=30:duration=4",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=4",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+        ])
+        .arg(&tall)
+        .status()
+        .unwrap();
+    assert!(status.success(), "could not make the portrait clip");
+    let portrait = package(
+        &tall,
+        &tmp.join("store-tall"),
+        &tmp.join("work-tall"),
+        &runner(),
+        &PackageOptions {
+            video: VideoAddr::parse("nfx:regtest:1:media-it-portrait").unwrap(),
+            ..opts.clone()
+        },
+    )
+    .expect("package a portrait clip");
+    let r = &portrait.hash_list.renditions;
+    assert_eq!(
+        (r.len(), r[0].id.as_str(), r[0].resolution.as_deref()),
+        (1, "720p", Some("720x1280"))
+    );
+
     // A playlist posing as a video would make ffmpeg read other local files into the
     // output; the input guard refuses the HLS demuxer outright.
     let hostile = tmp.join("upload.m3u8");

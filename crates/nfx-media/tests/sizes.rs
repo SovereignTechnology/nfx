@@ -1,5 +1,6 @@
 //! Rendition sizes (`ladder.rs`): the sizes a source offers, the one-rendition default, and
-//! a creator's `--renditions` choice, including 4K.
+//! a creator's `--renditions` choice, including 4K. A size is the short side of the picture
+//! as displayed, so portrait sources get the same sizes as landscape ones.
 //!
 //! The `canonical_*` cases are the size rule's vectors, shared word for word with
 //! nutflix-pear's `packages/core/src/media/ladder.ts` (its Studio offers the same sizes):
@@ -11,7 +12,7 @@ use nfx_media::MediaError;
 use nfx_media::argv::{rendition_cmaf_argv, rendition_dimensions};
 use nfx_media::ladder::{
     Codec, Container, DEFAULT_HEIGHT, LADDER_TIERS, MAX_HEIGHT, RenditionSpec, Renditions,
-    StoryboardGeometry, offered, plan, rendition_at, source_height,
+    StoryboardGeometry, fit_short_side, offered, plan, rendition_at, source_size,
 };
 use nfx_media::probe::{AudioInfo, MediaProbe, VideoInfo};
 
@@ -39,6 +40,11 @@ fn src(width: u32, height: u32, rotation: Option<u32>, duration_sec: f64) -> Med
 /// A 16:9 source `height` lines tall.
 fn wide(height: u32) -> MediaProbe {
     src(height * 16 / 9, height, None, 120.0)
+}
+
+/// A 9:16 source `width` pixels wide: the same size as `wide(width)`, standing up.
+fn tall(width: u32) -> MediaProbe {
+    src(width, width * 16 / 9, None, 120.0)
 }
 
 /// A size as the vectors write it: (label, video kbps, audio kbps).
@@ -86,7 +92,7 @@ fn canonical_tiers() {
             .iter()
             .map(|t| (
                 t.label,
-                t.height,
+                t.short_side,
                 t.video_bitrate_kbps,
                 t.audio_bitrate_kbps
             ))
@@ -134,14 +140,16 @@ fn canonical_vectors_h264_offered_then_default() {
         (240, &[("240p", 533, 96)], "240p"),
         (4320, &all, "720p"),
     ];
-    for (height, want, default) in cases {
-        let probe = wide(height);
-        let got = offered(&probe, None, Codec::H264).unwrap();
-        assert_eq!(sizes(&got), owned(want), "offered for {height}");
-        let plan = plan(&probe, &Renditions::Default, None, Codec::H264).unwrap();
-        assert_eq!(labels(&plan.renditions), [default], "default for {height}");
-        // The default is one of the offered sizes, with the same bitrates.
-        assert!(got.contains(&plan.renditions[0]), "{height}");
+    for (size, want, default) in cases {
+        // Landscape and portrait sources of one size offer the same sizes.
+        for probe in [wide(size), tall(size)] {
+            let got = offered(&probe, None, Codec::H264).unwrap();
+            assert_eq!(sizes(&got), owned(want), "offered for {size}");
+            let plan = plan(&probe, &Renditions::Default, None, Codec::H264).unwrap();
+            assert_eq!(labels(&plan.renditions), [default], "default for {size}");
+            // The default is one of the offered sizes, with the same bitrates.
+            assert!(got.contains(&plan.renditions[0]), "{size}");
+        }
     }
 }
 
@@ -189,58 +197,140 @@ fn bitrates_between_tiers_are_interpolated_and_tiers_are_exact() {
     assert_eq!(rendition_at(362, Codec::H264).audio_bitrate_kbps, 128);
     assert_eq!(rendition_at(358, Codec::H264).audio_bitrate_kbps, 96);
     for t in &LADDER_TIERS {
-        let r = rendition_at(t.height, Codec::H264);
+        let r = rendition_at(t.short_side, Codec::H264);
         assert_eq!(
             (
                 r.label.as_str(),
-                r.height,
+                r.short_side,
                 r.video_bitrate_kbps,
                 r.audio_bitrate_kbps
             ),
             (
                 t.label,
-                t.height,
+                t.short_side,
                 t.video_bitrate_kbps,
                 t.audio_bitrate_kbps
             )
         );
     }
-    // Heights are made even: an odd one rounds down, never below 2.
+    // Sizes are made even: an odd one rounds down, never below 2.
     assert_eq!(rendition_at(721, Codec::H264).label, "720p");
     assert_eq!(rendition_at(135, Codec::H264).label, "134p");
-    assert_eq!(rendition_at(1, Codec::H264).height, 2);
+    assert_eq!(rendition_at(1, Codec::H264).short_side, 2);
 }
 
 #[test]
-fn the_source_height_is_its_display_height_even_and_capped() {
-    assert_eq!(source_height(&wide(1080), None).unwrap(), 1080);
-    assert_eq!(source_height(&src(200, 135, None, 1.0), None).unwrap(), 134);
-    assert_eq!(source_height(&wide(4320), None).unwrap(), 2160);
-    assert_eq!(source_height(&wide(1080), Some(721)).unwrap(), 720);
-    // A portrait phone video stored landscape with a 90° rotation is 1920 lines tall.
+fn the_source_size_is_its_short_side_as_displayed_even_and_capped() {
+    assert_eq!(source_size(&wide(1080), None).unwrap(), 1080);
+    assert_eq!(source_size(&tall(1080), None).unwrap(), 1080);
+    assert_eq!(source_size(&src(720, 720, None, 1.0), None).unwrap(), 720);
+    assert_eq!(
+        source_size(&src(3840, 1080, None, 1.0), None).unwrap(),
+        1080
+    );
+    assert_eq!(source_size(&src(200, 135, None, 1.0), None).unwrap(), 134);
+    assert_eq!(source_size(&src(135, 200, None, 1.0), None).unwrap(), 134);
+    assert_eq!(source_size(&wide(4320), None).unwrap(), 2160);
+    assert_eq!(source_size(&tall(4320), None).unwrap(), 2160);
+    assert_eq!(source_size(&wide(1080), Some(721)).unwrap(), 720);
+    assert_eq!(source_size(&tall(1080), Some(721)).unwrap(), 720);
+    // A phone video stored landscape with a 90° rotation is portrait as displayed: 1080
+    // on its short side, as if it had been stored standing up.
     let rotated = src(1920, 1080, Some(90), 1.0);
-    assert_eq!(source_height(&rotated, None).unwrap(), 1920);
+    assert_eq!(source_size(&rotated, None).unwrap(), 1080);
     assert_eq!(
         labels(&offered(&rotated, None, Codec::H264).unwrap()),
-        ["1440p", "1080p", "720p", "480p", "360p", "1920p"]
+        ["1080p", "720p", "480p", "360p"]
     );
 }
 
+/// A portrait vector: width and height as displayed, the sizes offered, the default, and
+/// the default's width and height.
+type Portrait = (u32, u32, &'static [&'static str], &'static str, u32, u32);
+
 #[test]
-fn the_default_is_one_rendition_720p_or_the_source_height() {
+fn canonical_vectors_portrait_the_short_side_is_the_size() {
+    let cases: [Portrait; 5] = [
+        (
+            1080,
+            1920,
+            &["1080p", "720p", "480p", "360p"],
+            "720p",
+            720,
+            1280,
+        ),
+        (
+            2160,
+            3840,
+            &["2160p", "1440p", "1080p", "720p", "480p", "360p"],
+            "720p",
+            720,
+            1280,
+        ),
+        (576, 1024, &["480p", "360p", "576p"], "576p", 576, 1024),
+        (
+            1000,
+            1778,
+            &["720p", "480p", "360p", "1000p"],
+            "720p",
+            720,
+            1280,
+        ),
+        (240, 426, &["240p"], "240p", 240, 426),
+    ];
+    for (w, h, want, default, dw, dh) in cases {
+        let probe = src(w, h, None, 60.0);
+        assert_eq!(
+            labels(&offered(&probe, None, Codec::H264).unwrap()),
+            want,
+            "{w}x{h}"
+        );
+        let plan = plan(&probe, &Renditions::Default, None, Codec::H264).unwrap();
+        assert_eq!(labels(&plan.renditions), [default], "{w}x{h}");
+        assert_eq!(
+            rendition_dimensions(&probe, &plan.renditions[0]).unwrap(),
+            (dw, dh),
+            "{w}x{h}"
+        );
+    }
+    // The same file rotated: 1920x1080 stored, 90°, is 1080x1920 displayed.
+    let rotated = src(1920, 1080, Some(90), 60.0);
+    let plan = plan(&rotated, &Renditions::Default, None, Codec::H264).unwrap();
+    assert_eq!(
+        rendition_dimensions(&rotated, &plan.renditions[0]).unwrap(),
+        (720, 1280)
+    );
+    // A portrait 4K rendition, picked.
+    let uhd = src(2160, 3840, None, 60.0);
+    let got = planned(&uhd, "2160p");
+    assert_eq!(rendition_dimensions(&uhd, &got[0]).unwrap(), (2160, 3840));
+}
+
+#[test]
+fn fit_short_side_scales_the_short_side_keeping_aspect_and_even() {
+    assert_eq!(fit_short_side((1920, 1080), 720), (1280, 720));
+    assert_eq!(fit_short_side((1080, 1920), 720), (720, 1280));
+    assert_eq!(fit_short_side((720, 720), 360), (360, 360));
+    assert_eq!(fit_short_side((1080, 1920), 361), (360, 640));
+    assert_eq!(fit_short_side((1000, 1778), 1000), (1000, 1778));
+    assert_eq!(fit_short_side((3, 4), 361), (360, 480));
+}
+
+#[test]
+fn the_default_is_one_rendition_720p_or_the_source_size() {
     let plan = plan(&wide(1080), &Renditions::Default, None, Codec::H264).unwrap();
     assert_eq!(
         plan.renditions,
         [RenditionSpec {
             label: "720p".into(),
-            height: 720,
+            short_side: 720,
             video_bitrate_kbps: 2500,
             audio_bitrate_kbps: 128,
             codec: Codec::H264,
             container: Container::Mp4,
         }]
     );
-    for (height, want) in [
+    for (size, want) in [
         (2160, "720p"),
         (721, "720p"),
         (720, "720p"),
@@ -250,8 +340,8 @@ fn the_default_is_one_rendition_720p_or_the_source_height() {
         (240, "240p"),
         (135, "134p"),
     ] {
-        let got = planned_default(&wide(height), None);
-        assert_eq!(got, [want], "{height}");
+        assert_eq!(planned_default(&wide(size), None), [want], "{size}");
+        assert_eq!(planned_default(&tall(size), None), [want], "{size}");
     }
     // --max-height caps the source: the default never exceeds it.
     assert_eq!(planned_default(&wide(1080), Some(500)), ["500p"]);
@@ -292,7 +382,7 @@ fn a_creator_picks_any_size_the_source_offers() {
         labels(&planned(&uhd, "360p,2160p,720p")),
         ["2160p", "720p", "360p"]
     );
-    // A source's own height, alone or beside tiers.
+    // A source's own size, alone or beside tiers.
     let odd = wide(1000);
     assert_eq!(
         sizes(&planned(&odd, "1000p")),
@@ -310,10 +400,13 @@ fn a_size_the_source_does_not_offer_is_refused_naming_those_it_does() {
     assert!(why.contains("2160p is not offered"), "{why}");
     assert!(why.contains("never upscales"), "{why}");
     assert!(why.ends_with("offered 1080p, 720p, 480p, 360p"), "{why}");
-    // The old ladder from a 720-line source: 1080p is taller than it.
+    // Portrait the same: 1080 wide offers no 1440p, however tall it stands.
+    let why = refused(&tall(1080), &pick("1440p"), None);
+    assert!(why.ends_with("offered 1080p, 720p, 480p, 360p"), "{why}");
+    // The old ladder from a 720-line source: 1080p is larger than it.
     let why = refused(&wide(720), &pick("1080p,720p,360p"), None);
     assert!(why.starts_with("1080p is not offered"), "{why}");
-    // A height that is neither a tier nor the source's own.
+    // A size that is neither a tier nor the source's own.
     let why = refused(&wide(1000), &pick("900p"), None);
     assert!(why.ends_with("offered 720p, 480p, 360p, 1000p"), "{why}");
     let why = refused(&wide(240), &pick("360p"), None);
@@ -437,7 +530,7 @@ fn a_2160p_rendition_encodes_at_3840x2160_with_its_rates_and_no_pinned_level() {
     // x264 picks the level from the size and rate (5.1 for 2160p30): none is pinned.
     assert!(!argv.iter().any(|a| a == "-level" || a == "-level:v"));
     assert_eq!(rendition_dimensions(&uhd, &spec).unwrap(), (3840, 2160));
-    // A source's own height off the tiers keeps its aspect, even.
+    // A source's own size off the tiers keeps its aspect, even.
     let odd = src(1778, 1000, None, 60.0);
     let own = rendition_at(1000, Codec::H264);
     assert_eq!(rendition_dimensions(&odd, &own).unwrap(), (1778, 1000));

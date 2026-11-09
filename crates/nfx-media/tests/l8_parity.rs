@@ -103,7 +103,7 @@ fn source() -> MediaProbe {
 fn spec720() -> RenditionSpec {
     RenditionSpec {
         label: "720p".into(),
-        height: 720,
+        short_side: 720,
         video_bitrate_kbps: 2500,
         audio_bitrate_kbps: 128,
         codec: Codec::H264,
@@ -171,12 +171,14 @@ fn rendition_argv_is_a_plain_argv_array() {
 fn rendition_argv_portrait_vp9_av1_and_gop_fallback() {
     let mut portrait = source();
     portrait.video.as_mut().unwrap().rotation = Some(90);
+    // L8 scaled a portrait source to 720 lines tall (406x720). Since 2026-11-09 a size is
+    // the short side (`ladder.rs`), so 720p of a portrait source is 720 wide.
     assert_eq!(
         opt(
             &rendition_argv("/in", "/out", &portrait, &spec720(), 30.0, None).unwrap(),
             "-vf"
         ),
-        Some("scale=406:720")
+        Some("scale=720:1280")
     );
 
     let vp9 = rendition_argv(
