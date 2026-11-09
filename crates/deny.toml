@@ -13,8 +13,13 @@ all-features = true
 
 [advisories]
 # Every RustSec advisory (vulnerability, unmaintained, unsound, notice) fails the check
-# unless it is listed here with a reason.
+# unless it is listed here with a reason. cargo-deny's default scope for unsound advisories
+# leaves out transitive dependencies: 0.20.2 passed crates/desktop with glib's
+# RUSTSEC-2024-0429 in the tree (measured 2026-11-09). Both scopes are "all" so the sentence
+# above holds for the whole tree.
 yanked = "deny"
+unmaintained = "all"
+unsound = "all"
 ignore = [
     # "Unmaintained" notices, not vulnerabilities: compile-time proc macros deep in iroh's
     # tree that cannot be swapped without forking it. Revisit at every iroh bump.
