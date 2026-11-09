@@ -95,6 +95,18 @@ cd "$repo/web/player" && npm ci --ignore-scripts && npm run serve
 # open http://127.0.0.1:3471/?a=<address>&relay=ws://127.0.0.1:7447&origin=http://127.0.0.1:3473
 ```
 
+A node binds iroh to a random UDP port, and peers on the internet reach it through an iroh
+relay (`--iroh-relay`) or by hole-punching. A host that can forward one UDP port to itself, a
+home router's port forward or a DNAT in front of a VM, can be dialled directly instead:
+
+```sh
+nfxd run --key node.key --store pkg/store --seed "$A" --embed-relay 127.0.0.1:7447 \
+  --iroh-bind 0.0.0.0:7843 --iroh-external 203.0.113.7:7843
+```
+
+Here `203.0.113.7:7843` stands for the public address and port forwarded to the host's UDP
+port 7843. Tickets and beacons then name that address and leave out the host's private ones.
+
 `--embed-tracker` and `--bridge <ip:port>` add the browser mesh (NFX-10): the bridge serves
 the video to browsers over WebRTC, and its address is the one candidate they are told. Behind
 a DNAT, bind `--bridge` to the host's own address and pass the public one as

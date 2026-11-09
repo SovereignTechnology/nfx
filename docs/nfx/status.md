@@ -77,6 +77,31 @@ from ADR 0104, and two yanked dependencies replaced.
   certificates are trusted, never how peers authenticate each other. Proved by a relay-only
   fetch through a TLS relay with a self-signed CA: it fails without the CA, and succeeds with
   it, every file under its sha256.
+- **A seeder behind a NAT or a DNAT** (`nfxd --iroh-bind`, `--iroh-external`): #30's case of a
+  seeder with a public UDP port, which needs no iroh relay.
+  - `--iroh-bind ip:port` binds the iroh endpoint's UDP socket to a fixed port that a router
+    or a DNAT can forward (`NodeConfig::bind_addr`), in place of a random one.
+  - `--iroh-external ip:port` (repeatable, at most 4, needs `--iroh-bind`) names the public
+    address in front of it (`NodeConfig::external_addrs`). Tickets and beacons carry it as
+    given, and no other direct address unless it is public: `nfx_node::node::is_public`
+    fails closed, leaving out private, shared, loopback, link-local, unique-local,
+    documentation and the other special-purpose blocks. So the host's interface addresses
+    never reach a relay. Peers that are already connected still learn them from iroh's own
+    NAT traversal and from gossip peer data.
+  - Proved by a fetcher with no relay and no address book that fetches the test video from a
+    seeder bound on every interface through its external address alone, every file under
+    its sha256 (`crates/nfx-node/tests/external_addr.rs`).
+- **An iroh relay is never required to seed** (the principle on #30: client to client, or
+  client to Nostr relay to client). Beacons are now made from the node's current address, so
+  their tickets name a relay that connects after seeding started; before, tickets were fixed
+  at seeding and a relay missed in the first 10 s was missing from them until a restart.
+  With `--iroh-external`, `nfxd` seeds at once. Without it, it waits at most 60 s
+  (`RELAY_WAIT`) for an `--iroh-relay` so that its first beacons name it (each video is
+  `AwaitingRelay` meanwhile, naming the relay), then seeds without it and warns. Proved by a
+  seeder with an external address and a dead relay (seeds at once), one whose relay never
+  comes up (seeds after the wait, announcing its direct addresses), one whose relay comes up
+  during the wait (a relay-only fetcher fetches through its tickets), and a node whose relay
+  connects after seeding (its next beacon's tickets name it).
 - **Dependencies:** crates.io yanked two versions on our locks, and cargo deny failed the
   check job on them. Neither crate is in the money closure, so neither lock needed a re-pin.
   - #10 (`cf9788a`): crypto-bigint 0.7.6 → 0.7.9. RUSTSEC-2026-0387's fix is kept.
