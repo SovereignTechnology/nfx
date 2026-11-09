@@ -20,9 +20,16 @@ const st = { ready: true, playing: false, errors: [] as string[], events: 0 };
 interface Opts {
   origins: string[];
   root: string;
+  /** WebTorrent trackers, unless `relays` is given. */
   trackers: string[];
+  /** Nostr relays (NFX-10 §6): signaling over Nostr instead of trackers. */
+  relays?: string[];
   httpWindow?: number;
   level?: number;
+}
+
+function signaling(o: { trackers: string[]; relays?: string[] }): Lib.Signaling {
+  return o.relays ? { kind: 'nostr', relays: o.relays } : { kind: 'trackers', urls: o.trackers };
 }
 
 (window as unknown as { __lib: unknown }).__lib = {
@@ -30,10 +37,10 @@ interface Opts {
   async open(opts: Opts): Promise<void> {
     st.playing = false;
     control = new AbortController();
-    const { trackers, ...rest } = opts;
+    const { trackers, relays, ...rest } = opts;
     session = await lib.open(video, {
       ...rest,
-      signaling: { kind: 'trackers', urls: trackers },
+      signaling: signaling({ trackers, relays }),
       signal: control.signal,
       onEvent: (e) => {
         st.events += 1;
@@ -57,8 +64,8 @@ interface Opts {
   /** open(), aborted straight away: it must reject, and leave nothing behind. */
   async openAborted(opts: Opts): Promise<string> {
     const c = new AbortController();
-    const { trackers, ...rest } = opts;
-    const p = lib.open(video, { ...rest, signaling: { kind: 'trackers', urls: trackers }, signal: c.signal });
+    const { trackers, relays, ...rest } = opts;
+    const p = lib.open(video, { ...rest, signaling: signaling({ trackers, relays }), signal: c.signal });
     c.abort();
     try {
       (await p).destroy();

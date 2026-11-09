@@ -10,8 +10,9 @@
  * - `open(videoElement, options)`: verify the manifest again, fetch the hash list from the
  *   first origin whose copy verifies, and play with hls.js behind a loader that checks
  *   every playlist, init and segment against it before hls.js sees a byte. With a
- *   `signaling` (today WebTorrent trackers), the NFX-10 browser mesh (p2p-media-loader)
- *   joins in, its segments checked the same way. `destroy()` stops all of it.
+ *   `signaling` (WebTorrent trackers, or Nostr relays with no tracker: NFX-10 §6), the
+ *   NFX-10 browser mesh (p2p-media-loader) joins in, its segments checked the same way.
+ *   `destroy()` stops all of it.
  *
  * Nothing here reads the page's URL or DOM beyond the element it is given, and nothing
  * here keeps state between sessions but the loaded WASM module.
@@ -46,10 +47,17 @@ import {
   MAX_ICE_SERVERS as ENDPOINTS_MAX_ICE_SERVERS,
   checkIceServers,
   checkOrigins,
-  checkSignaling,
+  checkSignaling as checkSignalingOption,
   originBase as beaconOrigin,
 } from './endpoints';
-import { MAX_TRACKERS as MESH_MAX_TRACKERS, meshConfig, trackerUrl as meshTrackerUrl } from './mesh';
+import {
+  MAX_RELAYS as MESH_MAX_RELAYS,
+  MAX_TRACKERS as MESH_MAX_TRACKERS,
+  meshConfig,
+  relayUrl as meshRelayUrl,
+  trackerUrl as meshTrackerUrl,
+} from './mesh';
+import { NostrSignaler } from './signal-nostr';
 import { resolveManifest as resolveOverRelays, watchEndpoints as watchBeacons } from './resolve';
 import { Anchor, type ManifestBinding, loadWasm } from './verify';
 
@@ -59,6 +67,11 @@ export type * from './api';
 
 /** Most trackers one session takes. */
 export const MAX_TRACKERS: number = MESH_MAX_TRACKERS;
+/** Most relays one session's Nostr signaling takes (NFX-10 §6). */
+export const MAX_RELAYS: number = MESH_MAX_RELAYS;
+/** The Nostr signaling kind, and the protocol identifier its events carry (NFX-10 §6). */
+export const NOSTR_SIGNAL_KIND: number = 25050;
+export const NOSTR_SIGNAL_PROTOCOL: string = 'nfx-mesh/1';
 /** Most STUN servers one session takes. */
 export const MAX_ICE_SERVERS: number = ENDPOINTS_MAX_ICE_SERVERS;
 
@@ -71,12 +84,31 @@ export function trackerUrl(raw: string): string | null {
   return meshTrackerUrl(raw);
 }
 
+/**
+ * A relay URL a session may signal through (NFX-10 §6), reduced to scheme, host, port and
+ * path: `wss:`, or `ws:` on a loopback host (tests). No credentials, query or fragment.
+ * `null` otherwise.
+ */
+export function relayUrl(raw: string): string | null {
+  return meshRelayUrl(raw);
+}
+
+/**
+ * `signaling` as `open()` will take it, normalised (URLs reduced, duplicates dropped), or
+ * `null` for none; throws a `TypeError` for anything `open()` refuses, so a page can check
+ * its settings first.
+ */
+export function checkSignaling(signaling: Signaling | undefined): Signaling | null {
+  return checkSignalingOption(signaling);
+}
+
 /** A beacon-named origin as a plain `https://host[:port][/prefix]` base, or null. */
 export function originBase(url: string): string | null {
   return beaconOrigin(url);
 }
 
-const P2P_ENGINE = 'p2p-media-loader 4.0.0';
+/** The mesh engine: p2p-media-loader-core 4.0.0 built from its source with web/player/engine's patch. */
+const P2P_ENGINE = 'p2p-media-loader 4.0.0 (nfx engine patch)';
 
 /** Load the WASM verifier (once). Every other call waits for it; call this first. */
 export async function init(options: InitOptions = {}): Promise<void> {
@@ -120,7 +152,7 @@ function abortError(signal: AbortSignal): unknown {
 export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<Session> {
   const { signal } = options;
   const origins = checkOrigins(options.origins);
-  const signaling = checkSignaling(options.signaling);
+  const signaling = checkSignalingOption(options.signaling);
   const iceServers = checkIceServers(options.iceServers ?? []);
   const autoplay = options.autoplay ?? true;
   const level = options.level;
@@ -218,15 +250,17 @@ function start(
   };
   let hls: Hls;
   let mesh: MeshStats | null = null;
+  let nostr: NostrSignaler | undefined;
   let engine: string;
   if (o.signaling !== null) {
     const signaling = o.signaling;
-    mesh = { signaling: signaling.kind, trackers: [], swarms: [], bytes: { http: 0, p2p: 0 }, uploaded: 0, peers: 0, rejected: [] };
+    mesh = { signaling: signaling.kind, trackers: [], relays: [], swarms: [], bytes: { http: 0, p2p: 0 }, uploaded: 0, peers: 0, rejected: [] };
     const HlsWithP2P = HlsJsP2PEngine.injectMixin(Hls);
     const tuning = o.httpWindow === undefined ? {} : { httpWindow: o.httpWindow };
-    hls = new HlsWithP2P({ ...base, ...meshConfig(anchor, signaling, o.iceServers, mesh, log, tuning) } as never);
+    if (signaling.kind === 'nostr') nostr = new NostrSignaler(signaling.relays, log);
+    hls = new HlsWithP2P({ ...base, ...meshConfig(anchor, signaling, o.iceServers, mesh, log, tuning, nostr) } as never);
     engine = `hls.js ${Hls.version} + ${P2P_ENGINE}`;
-    log(`mesh: ${signaling.kind} ${signaling.urls.join(' ')}`);
+    log(`mesh: ${signaling.kind} ${(signaling.kind === 'nostr' ? signaling.relays : signaling.urls).join(' ')}`);
   } else {
     hls = new Hls(base);
     engine = `hls.js ${Hls.version}`;
@@ -262,8 +296,10 @@ function start(
     el.removeEventListener('playing', onPlaying);
     // hls.js stops its loaders and its worker, detaches the media (revoking the
     // MediaSource URL), and fires DESTROYING, on which the p2p engine destroys its core:
-    // stream loaders, peers and the tracker sockets.
+    // stream loaders, peers and the tracker sockets (or the Nostr rooms, which send their
+    // disconnects). Then the Nostr signaler closes its relay sockets.
     hls.destroy();
+    nostr?.destroy();
     if (el.src.startsWith('blob:')) {
       el.removeAttribute('src');
       el.load();

@@ -21,6 +21,7 @@
     "unit.ts",
     "e2e-mesh.ts",
     "e2e-peer.ts",
-    "e2e-lib.ts"
+    "e2e-lib.ts",
+    "e2e-nostr.ts"
   ]
 }

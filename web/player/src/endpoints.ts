@@ -5,7 +5,7 @@
  * checked against the signed anchor whatever its source.
  */
 import type { Endpoints, Signaling } from './api';
-import { MAX_TRACKERS, trackerUrl } from './mesh';
+import { MAX_RELAYS, MAX_TRACKERS, relayUrl, trackerUrl } from './mesh';
 
 /** Most distinct origins reported. */
 export const MAX_ORIGINS = 8;
@@ -217,6 +217,7 @@ export class EndpointBook {
 
 /** The trackers a session may use, normalised; throws on any it may not. */
 export function checkTrackers(list: readonly string[]): string[] {
+  if (!Array.isArray(list)) throw new TypeError('nfx: trackers must be a list');
   const out: string[] = [];
   for (const raw of list) {
     const t = typeof raw === 'string' ? trackerUrl(raw) : null;
@@ -227,14 +228,32 @@ export function checkTrackers(list: readonly string[]): string[] {
   return out;
 }
 
+/** The Nostr relays a session may signal through, normalised; throws on any it may not. */
+export function checkRelays(list: readonly string[]): string[] {
+  if (!Array.isArray(list)) throw new TypeError('nfx: relays must be a list');
+  const out: string[] = [];
+  for (const raw of list) {
+    const r = typeof raw === 'string' ? relayUrl(raw) : null;
+    if (r === null) throw new TypeError(`nfx: not a relay URL this player may signal through: ${String(raw)}`);
+    if (!out.includes(r)) out.push(r);
+  }
+  if (out.length > MAX_RELAYS) throw new TypeError(`nfx: at most ${MAX_RELAYS} relays`);
+  return out;
+}
+
 /** The signaling a session may use, normalised; null for none; throws otherwise. */
 export function checkSignaling(s: Signaling | undefined): Signaling | null {
   if (s === undefined) return null;
   const kind = (s as { kind?: unknown } | null)?.kind;
   if (kind === 'trackers') {
-    const urls = checkTrackers(s.urls);
+    const urls = checkTrackers((s as { urls: string[] }).urls ?? []);
     if (urls.length === 0) throw new TypeError('nfx: trackers signaling needs at least one tracker');
     return { kind, urls };
+  }
+  if (kind === 'nostr') {
+    const relays = checkRelays((s as { relays: string[] }).relays ?? []);
+    if (relays.length === 0) throw new TypeError('nfx: nostr signaling needs at least one relay');
+    return { kind, relays };
   }
   throw new TypeError(`nfx: signaling of kind ${JSON.stringify(kind)} is not in this build`);
 }

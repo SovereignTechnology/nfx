@@ -4,7 +4,9 @@
 #
 #   api.d.ts                  the library's public types (self-contained)
 #   player.d.ts               the library's declarations (imports only ./api)
-#   player.js                 the library: one minified ES module (hls.js and p2p-media-loader in it)
+#   player.js                 the library: one minified ES module (hls.js and p2p-media-loader in it,
+#                             the engine built from p2p-media-loader-core's source with
+#                             engine/p2p-media-loader-core-4.0.0.patch, both pinned in engine/pin.json)
 #   wasm/nfx_wasm_bg.wasm     nfx-proto's verifier; init() loads it from ./wasm/ by default
 #
 # The tar is written by lib-tar.mjs, not by a tar program, whose output depends on its version
@@ -107,6 +109,7 @@ for f in "${files[@]}"; do
     echo "NFX_WEB_LIB_FILE $(sha256sum < "$stage/$f" | cut -d' ' -f1) $(stat -c %s "$stage/$f") $f"
 done
 echo "NFX_WEB_LIB_COMMIT=$commit"
+echo "NFX_WEB_LIB_ENGINE=$(node -p "const p = require('./engine/pin.json'); p.package + ' ' + p.version + ' src ' + p.src_sha256 + ' patch ' + p.patch_sha256")"
 if [ "$build" = 1 ]; then
     echo "NFX_WEB_LIB_TOOLS=$(rustc -V | cut -d' ' -f1-2), $(wasm-pack -V), $(wasm-bindgen -V), esbuild $lock_esbuild, typescript $lock_tsc, node $(node -v)"
 fi

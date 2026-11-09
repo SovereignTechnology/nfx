@@ -10,7 +10,10 @@
   against its sha256 and the hash list before the player uses it (NFX-05 §4). By address, the
   player also joins the browser mesh through any tracker a seeder's beacon names, and asks
   the STUN servers beacons name for its public address: it then shares verified segments with
-  other viewers, and those trackers, STUN servers and peers see your IP address.</p>
+  other viewers, and those trackers, STUN servers and peers see your IP address. With
+  <code>&amp;signal=nostr</code> the mesh signals through the relays you give instead of
+  trackers: those relays then see your IP address and when you watch, peers see your IP
+  address, and the offers and answers that carry it are encrypted to the peer.</p>
 <form method="get">
   <input id="a" name="a" placeholder="manifest address, 38504:&lt;creator&gt;:&lt;namespace&gt;:&lt;video-id&gt;" autocomplete="off">
   <input id="relay" name="relay" placeholder="relay, e.g. wss://relay.example" autocomplete="off">

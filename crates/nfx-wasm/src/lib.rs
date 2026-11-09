@@ -1,7 +1,8 @@
 //! `nfx-proto` for browsers. JS gets the same verification native peers run: manifests
 //! (NFX-02), beacons (NFX-03), hash lists, playlists and files (NFX-05), with sha256
 //! from RustCrypto, so verification does not depend on WebCrypto and its secure-context
-//! rule (spike S3).
+//! rule (spike S3). The mesh's Nostr signaling (NFX-10 §6) is built and read here too:
+//! [`MeshRoom`] and [`MeshSession`].
 //!
 //! The logic lives in plain functions returning `Result<_, String>` (tested natively);
 //! the `#[wasm_bindgen]` wrappers only convert errors to `JsError`. Integers cross as
@@ -13,6 +14,7 @@ use nfx_proto::event::Event;
 use nfx_proto::hashlist::{HashList, Role};
 use nfx_proto::manifest::{License, Manifest};
 use nfx_proto::namespace::VideoAddr;
+use nfx_proto::signal::{self, Parsed, Received, Room, Session, Signal};
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 
@@ -300,6 +302,225 @@ pub fn js_verify_beacon(event_json: &str, now: f64) -> Result<String, JsError> {
     beacon_json(event_json, now).map_err(|e| JsError::new(&e))
 }
 
+/// A mesh room (NFX-10 §6.1): one stream swarm's key pair.
+#[wasm_bindgen]
+pub struct MeshRoom {
+    room: Room,
+}
+
+#[wasm_bindgen]
+impl MeshRoom {
+    /// `new MeshRoom(streamSwarmId)`.
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(stream_swarm_id: &str) -> Self {
+        Self {
+            room: Room::derive(stream_swarm_id),
+        }
+    }
+
+    /// The room key (the `P` tag), 64 lowercase hex.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn pubkey(&self) -> String {
+        self.room.pubkey().to_owned()
+    }
+}
+
+/// A mesh session (NFX-10 §6.4): a random key and id, made by the page and held here.
+#[wasm_bindgen]
+pub struct MeshSession {
+    session: Session,
+}
+
+fn bytes<const N: usize>(b: &[u8], what: &str) -> Result<[u8; N], String> {
+    b.try_into()
+        .map_err(|_| format!("{what} must be {N} bytes"))
+}
+
+impl MeshSession {
+    /// A session from 32 random bytes (a secret key) and 16 random bytes (its id).
+    pub fn create(secret: &[u8], id: &[u8]) -> Result<Self, String> {
+        let session = Session::new(bytes(secret, "the secret")?, bytes(id, "the session id")?)
+            .map_err(|e| e.to_string())?;
+        Ok(Self { session })
+    }
+
+    fn json(ev: nfx_proto::Result<Event>) -> Result<String, String> {
+        let ev = ev.map_err(|e| e.to_string())?;
+        serde_json::to_string(&ev).map_err(|e| e.to_string())
+    }
+
+    pub fn connect_json(&self, room: &MeshRoom, created_at: u64) -> Result<String, String> {
+        Self::json(self.session.connect(&room.room, created_at))
+    }
+
+    pub fn disconnect_json(&self, room: &MeshRoom, created_at: u64) -> Result<String, String> {
+        Self::json(self.session.disconnect(&room.room, created_at))
+    }
+
+    pub fn offer_json(
+        &self,
+        room: &MeshRoom,
+        to: &str,
+        sdp: &str,
+        nonce: &[u8],
+        created_at: u64,
+    ) -> Result<String, String> {
+        let nonce = bytes(nonce, "the nonce")?;
+        Self::json(self.session.offer(&room.room, to, sdp, &nonce, created_at))
+    }
+
+    pub fn answer_json(
+        &self,
+        room: &MeshRoom,
+        to: &str,
+        offer_id: &str,
+        sdp: &str,
+        nonce: &[u8],
+        created_at: u64,
+    ) -> Result<String, String> {
+        let nonce = bytes(nonce, "the nonce")?;
+        Self::json(
+            self.session
+                .answer(&room.room, to, offer_id, sdp, &nonce, created_at),
+        )
+    }
+
+    /// [`signal::read`] for this session in `room` at `now`, as JSON: `{"ignored": why}`, or
+    /// `{"type", "id", "sender", "session", "created_at"}` with `expiration` (connect),
+    /// `content` (offer, answer) and `offer` (answer).
+    pub fn read_json(&self, room: &MeshRoom, event_json: &str, now: u64) -> Result<String, String> {
+        let ev = parse_event(event_json)?;
+        let parsed = signal::read(&ev, room.room.pubkey(), self.session.pubkey(), now)
+            .map_err(|e| e.to_string())?;
+        let r = match parsed {
+            Parsed::Ignored(why) => return Ok(json!({ "ignored": why }).to_string()),
+            Parsed::Ours(r) => r,
+        };
+        let mut out = json!({
+            "id": r.id,
+            "sender": r.sender,
+            "session": r.session,
+            "created_at": r.created_at,
+        });
+        match r.signal {
+            Signal::Connect { expiration } => {
+                out["type"] = "connect".into();
+                out["expiration"] = expiration.into();
+            }
+            Signal::Disconnect => out["type"] = "disconnect".into(),
+            Signal::Offer { content } => {
+                out["type"] = "offer".into();
+                out["content"] = content.into();
+            }
+            Signal::Answer { offer, content } => {
+                out["type"] = "answer".into();
+                out["offer"] = offer.into();
+                out["content"] = content.into();
+            }
+        }
+        Ok(out.to_string())
+    }
+
+    /// The SDP of an offer or answer `read_json` accepted: `content` from `sender`.
+    pub fn open_sdp(&self, sender: &str, content: &str) -> Result<String, String> {
+        let received = Received {
+            id: String::new(),
+            sender: sender.to_owned(),
+            session: String::new(),
+            created_at: 0,
+            signal: Signal::Offer {
+                content: content.to_owned(),
+            },
+        };
+        self.session.open(&received).map_err(|e| e.to_string())
+    }
+}
+
+#[wasm_bindgen]
+impl MeshSession {
+    /// `new MeshSession(secret, id)`: 32 random bytes (a valid secret key) and 16 random
+    /// bytes. The page must not reuse or keep them.
+    #[wasm_bindgen(constructor)]
+    pub fn js_new(secret: &[u8], id: &[u8]) -> Result<MeshSession, JsError> {
+        Self::create(secret, id).map_err(|e| JsError::new(&e))
+    }
+
+    /// The session key, 64 lowercase hex.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn pubkey(&self) -> String {
+        self.session.pubkey().to_owned()
+    }
+
+    /// The session id, 32 lowercase hex.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn id(&self) -> String {
+        self.session.id().to_owned()
+    }
+
+    /// `connect(room, createdAt)`: the signed presence event, as JSON.
+    #[wasm_bindgen(js_name = connect)]
+    pub fn js_connect(&self, room: &MeshRoom, created_at: f64) -> Result<String, JsError> {
+        let t = safe_u64(created_at, "createdAt").map_err(|e| JsError::new(&e))?;
+        self.connect_json(room, t).map_err(|e| JsError::new(&e))
+    }
+
+    /// `disconnect(room, createdAt)`: the signed leave event, as JSON.
+    #[wasm_bindgen(js_name = disconnect)]
+    pub fn js_disconnect(&self, room: &MeshRoom, created_at: f64) -> Result<String, JsError> {
+        let t = safe_u64(created_at, "createdAt").map_err(|e| JsError::new(&e))?;
+        self.disconnect_json(room, t).map_err(|e| JsError::new(&e))
+    }
+
+    /// `offer(room, to, sdp, nonce, createdAt)`: the signed, encrypted offer, as JSON.
+    #[wasm_bindgen(js_name = offer)]
+    pub fn js_offer(
+        &self,
+        room: &MeshRoom,
+        to: &str,
+        sdp: &str,
+        nonce: &[u8],
+        created_at: f64,
+    ) -> Result<String, JsError> {
+        let t = safe_u64(created_at, "createdAt").map_err(|e| JsError::new(&e))?;
+        self.offer_json(room, to, sdp, nonce, t)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// `answer(room, to, offerId, sdp, nonce, createdAt)`: the signed, encrypted answer.
+    #[wasm_bindgen(js_name = answer)]
+    pub fn js_answer(
+        &self,
+        room: &MeshRoom,
+        to: &str,
+        offer_id: &str,
+        sdp: &str,
+        nonce: &[u8],
+        created_at: f64,
+    ) -> Result<String, JsError> {
+        let t = safe_u64(created_at, "createdAt").map_err(|e| JsError::new(&e))?;
+        self.answer_json(room, to, offer_id, sdp, nonce, t)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// `read(room, eventJson, now)`: see `read_json`; throws for an event to drop.
+    #[wasm_bindgen(js_name = read)]
+    pub fn js_read(&self, room: &MeshRoom, event_json: &str, now: f64) -> Result<String, JsError> {
+        let now = safe_u64(now, "now").map_err(|e| JsError::new(&e))?;
+        self.read_json(room, event_json, now)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// `open(sender, content)`: the SDP, or a thrown error.
+    #[wasm_bindgen(js_name = open)]
+    pub fn js_open(&self, sender: &str, content: &str) -> Result<String, JsError> {
+        self.open_sdp(sender, content).map_err(|e| JsError::new(&e))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -435,6 +656,66 @@ mod tests {
         ] {
             assert_eq!(v.stream_swarm_id(&unmapped), None, "{unmapped}");
         }
+    }
+
+    #[test]
+    fn mesh_signals_round_trip_against_the_vector() {
+        let v: Value =
+            serde_json::from_str(include_str!("../../../spec/test-vectors/mesh-signal.json"))
+                .unwrap();
+        let hex32 =
+            |key: &str| hex::decode(v["secret_keys_DO_NOT_USE"][key].as_str().unwrap()).unwrap();
+        let id =
+            |role: &str| hex::decode(v["sessions"][role]["session_id"].as_str().unwrap()).unwrap();
+        let room = MeshRoom::new(v["room"]["stream_swarm_id"].as_str().unwrap());
+        assert_eq!(room.pubkey(), v["room"]["pubkey"].as_str().unwrap());
+        let off = MeshSession::create(&hex32("offerer"), &id("offerer")).unwrap();
+        let ans = MeshSession::create(&hex32("answerer"), &id("answerer")).unwrap();
+        let evs = &v["events"];
+        let at = evs["connect"]["created_at"].as_u64().unwrap();
+        let now = v["now"].as_u64().unwrap();
+        let connect: Value = serde_json::from_str(&off.connect_json(&room, at).unwrap()).unwrap();
+        assert_eq!(connect, evs["connect"]);
+        let nonce = hex::decode(v["nip44"]["offer_nonce"].as_str().unwrap()).unwrap();
+        let sdp = v["sdp"]["offer"].as_str().unwrap();
+        let offer = off
+            .offer_json(&room, &ans.pubkey(), sdp, &nonce, at)
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&offer).unwrap(), evs["offer"]);
+        let read: Value =
+            serde_json::from_str(&ans.read_json(&room, &offer, now).unwrap()).unwrap();
+        assert_eq!(read["type"], "offer");
+        assert_eq!(read["sender"], off.pubkey().as_str());
+        assert_eq!(
+            ans.open_sdp(
+                read["sender"].as_str().unwrap(),
+                read["content"].as_str().unwrap()
+            )
+            .unwrap(),
+            sdp
+        );
+        let ignored: Value =
+            serde_json::from_str(&off.read_json(&room, &offer, now).unwrap()).unwrap();
+        assert!(ignored["ignored"].is_string());
+        let presence: Value = serde_json::from_str(
+            &ans.read_json(&room, &evs["connect"].to_string(), now)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(presence["expiration"], at + 90);
+        assert!(
+            ans.read_json(&room, &evs["connect"].to_string(), now + 1000)
+                .is_err()
+        );
+        assert!(
+            MeshSession::create(&[0; 32], &[0; 16]).is_err(),
+            "zero is no key"
+        );
+        assert!(MeshSession::create(&[1; 31], &[0; 16]).is_err());
+        assert!(
+            off.offer_json(&room, &ans.pubkey(), sdp, &[0; 31], at)
+                .is_err()
+        );
     }
 
     #[test]
