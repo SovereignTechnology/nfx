@@ -27,6 +27,7 @@ use nfx_proto::deletion::Deletion;
 use nfx_proto::manifest::Manifest;
 use nfx_proto::namespace::Namespace;
 use nfx_proto::{KIND_BEACON, KIND_DELETION, KIND_MANIFEST, MAX_CLOCK_SKEW, Verified};
+use nostr_database::error::Error as DbError;
 use nostr_sdk::prelude as ns;
 use tokio::net::TcpListener;
 
@@ -295,6 +296,107 @@ impl ns::QueryPolicy for QueryLimits {
     }
 }
 
+/// The relay's event store: the in-memory one, with a NIP-50 `search` that matches the way the
+/// desktop app's own test relay does: a case-insensitive substring of the event's content **or** of
+/// its `title` tag. The memory store alone matches the content only, and a manifest's content is its
+/// optional description, so a video published without one was in the relay yet invisible to a search
+/// (measured 2026-11-07 on a live nfxd 0.1.0 relay: 0 hits for a title word until a description was added;
+/// the app finds NFX videos by search, since its Trending and Shorts feeds never list them).
+#[derive(Debug)]
+struct TitleSearch {
+    inner: nostr_memory::MemoryDatabase,
+}
+
+/// Whether `ev` answers a search for `needle` (already trimmed and lowercased).
+fn search_matches(ev: &ns::Event, needle: &str) -> bool {
+    ev.content.to_lowercase().contains(needle)
+        || ev
+            .tags
+            .iter()
+            .filter(|t| t.kind() == "title")
+            .filter_map(|t| t.content())
+            .any(|title| title.to_lowercase().contains(needle))
+}
+
+impl TitleSearch {
+    /// `filter` without its `search` and `limit`, and the lowercase needle, when it searches.
+    fn split(filter: &ns::Filter) -> Option<(ns::Filter, String)> {
+        // A blank search matches everything: it is no search, not a search for spaces.
+        let needle = filter.search.as_deref()?.trim().to_lowercase();
+        let mut wide = filter.clone();
+        wide.search = None;
+        wide.limit = None;
+        Some((wide, needle))
+    }
+}
+
+impl ns::NostrDatabase for TitleSearch {
+    fn backend(&self) -> &'static str {
+        self.inner.backend()
+    }
+
+    fn features(&self) -> ns::Features {
+        self.inner.features()
+    }
+
+    fn save_event<'a>(
+        &'a self,
+        event: &'a ns::Event,
+    ) -> BoxFuture<'a, Result<ns::SaveEventStatus, DbError>> {
+        self.inner.save_event(event)
+    }
+
+    fn check_id<'a>(
+        &'a self,
+        event_id: &'a ns::EventId,
+    ) -> BoxFuture<'a, Result<ns::DatabaseEventStatus, DbError>> {
+        self.inner.check_id(event_id)
+    }
+
+    fn event_by_id<'a>(
+        &'a self,
+        event_id: &'a ns::EventId,
+    ) -> BoxFuture<'a, Result<Option<ns::Event>, DbError>> {
+        self.inner.event_by_id(event_id)
+    }
+
+    fn count(&self, filter: ns::Filter) -> BoxFuture<'_, Result<usize, DbError>> {
+        Box::pin(async move {
+            match Self::split(&filter) {
+                None => self.inner.count(filter).await,
+                Some(_) => Ok(self.query(filter).await?.len()),
+            }
+        })
+    }
+
+    fn query(&self, filter: ns::Filter) -> BoxFuture<'_, Result<BTreeSet<ns::Event>, DbError>> {
+        Box::pin(async move {
+            let Some((wide, needle)) = Self::split(&filter) else {
+                return self.inner.query(filter).await;
+            };
+            // The newest first, as the store returns them; `limit` applies after the match.
+            let hits = self
+                .inner
+                .query(wide)
+                .await?
+                .into_iter()
+                .filter(|ev| search_matches(ev, &needle));
+            Ok(match filter.limit {
+                Some(n) => hits.take(n).collect(),
+                None => hits.collect(),
+            })
+        })
+    }
+
+    fn delete(&self, filter: ns::Filter) -> BoxFuture<'_, Result<(), DbError>> {
+        self.inner.delete(filter)
+    }
+
+    fn wipe(&self) -> BoxFuture<'_, Result<(), DbError>> {
+        self.inner.wipe()
+    }
+}
+
 /// A scoped relay for `namespaces`.
 pub struct ScopedRelay {
     local: ns::LocalRelay,
@@ -337,11 +439,12 @@ impl ScopedRelay {
 
     fn build(namespaces: &[Namespace], creators: Option<BTreeSet<String>>) -> Self {
         let names: BTreeSet<String> = namespaces.iter().map(ToString::to_string).collect();
-        let database: Arc<dyn ns::NostrDatabase> =
-            ns::IntoNostrDatabase::into_nostr_database(nostr_memory::MemoryDatabase::bounded(
+        let database: Arc<dyn ns::NostrDatabase> = Arc::new(TitleSearch {
+            inner: nostr_memory::MemoryDatabase::bounded(
                 std::num::NonZeroUsize::new(MAX_STORED_EVENTS)
                     .unwrap_or(std::num::NonZeroUsize::MIN),
-            ));
+            ),
+        });
         let local = ns::LocalRelay::builder()
             .database(database.clone())
             .write_policy(Admission {
@@ -364,7 +467,7 @@ impl ScopedRelay {
             "description": "NFX-04 scoped relay: NFX manifests and beacons only",
             "software": "nfx-node",
             "version": env!("CARGO_PKG_VERSION"),
-            "supported_nips": [1, 11, 40],
+            "supported_nips": [1, 11, 40, 50],
             "limitation": {
                 "max_message_length": MAX_MANIFEST_BYTES,
                 "max_subscriptions": MAX_SUBSCRIPTIONS,
@@ -518,5 +621,83 @@ mod tests {
         let wide = ns::Filter::new().custom_tags(ns::SingleLetterTag::LOWERCASE_A, a(257));
         assert!(!filter_too_wide(&ok));
         assert!(filter_too_wide(&wide));
+    }
+
+    /// A search only narrows: it never returns an event the same filter without it would not, and
+    /// `count`, `limit` and `delete` agree with `query`.
+    #[tokio::test]
+    async fn a_search_never_widens_the_other_constraints() {
+        use ns::FinalizeEvent as _;
+        use ns::NostrDatabase as _;
+        let (a, b) = (ns::Keys::generate(), ns::Keys::generate());
+        let db = TitleSearch {
+            inner: nostr_memory::MemoryDatabase::bounded(std::num::NonZeroUsize::new(100).unwrap()),
+        };
+        let event = |keys: &ns::Keys, kind: u16, d: &str, title: &str, text: &str, at: u64| {
+            ns::EventBuilder::new(ns::Kind::from(kind), text)
+                .tags([
+                    ns::Tag::parse(["d", d]).unwrap(),
+                    ns::Tag::parse(["title", title]).unwrap(),
+                ])
+                .custom_created_at(ns::Timestamp::from_secs(at))
+                .finalize(keys)
+                .unwrap()
+        };
+        for ev in [
+            event(&a, 38504, "one", "Salt Flats", "", 100),
+            event(&b, 38504, "two", "Salt Marsh", "", 200),
+            // Not a manifest, from `a`, with the word in its content.
+            event(&a, 1, "note", "Note", "salt in a note", 300),
+        ] {
+            db.save_event(&ev).await.unwrap();
+        }
+        let kind = ns::Kind::from(38504u16);
+        let query = |f: ns::Filter| async { db.query(f).await.unwrap().len() };
+        // Without a search nothing changes.
+        assert_eq!(query(ns::Filter::new().kind(kind)).await, 2);
+        // The kind constraint holds: the note is not returned.
+        assert_eq!(query(ns::Filter::new().kind(kind).search("salt")).await, 2);
+        // So does the author constraint: `a` has a manifest and the note, `b` neither of them.
+        let by_a = ns::Filter::new().author(a.public_key()).search("salt");
+        assert_eq!(query(by_a.clone()).await, 2);
+        assert_eq!(query(by_a.clone().kind(kind)).await, 1);
+        assert_eq!(
+            query(ns::Filter::new().author(b.public_key()).search("flats")).await,
+            0
+        );
+        // And the time window.
+        assert_eq!(
+            query(
+                ns::Filter::new()
+                    .kind(kind)
+                    .search("salt")
+                    .since(ns::Timestamp::from_secs(150))
+            )
+            .await,
+            1
+        );
+        // `count` agrees with `query`; `limit` applies after the match.
+        for f in [
+            by_a.clone(),
+            by_a.clone().kind(kind),
+            ns::Filter::new().kind(kind).search("marsh"),
+        ] {
+            assert_eq!(db.count(f.clone()).await.unwrap(), query(f).await);
+        }
+        let newest = db
+            .query(ns::Filter::new().kind(kind).search("salt").limit(1))
+            .await
+            .unwrap();
+        assert_eq!(newest.len(), 1);
+        assert_eq!(
+            newest.iter().next().unwrap().pubkey,
+            b.public_key(),
+            "the newest hit"
+        );
+        // `delete` goes straight to the store.
+        db.delete(ns::Filter::new().author(b.public_key()))
+            .await
+            .unwrap();
+        assert_eq!(query(ns::Filter::new().kind(kind).search("salt")).await, 1);
     }
 }

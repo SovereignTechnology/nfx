@@ -1,0 +1,1378 @@
+{
+  "description": "NFX-16 §4: a reader of namespace nfx:mainnet:1 at 'now', with this root, follow list, trusted authors and mute list, scores the events as 'scores' says. 'verdict' per event is informative.",
+  "secret_keys_DO_NOT_USE": {
+    "watcher": "2f3b62562c4ce7ced973f1b898bdb57be1b0800f3ae703bde94458db0f2a258e",
+    "friend-a": "cb1e132d2fe96e30acf2a31ce0e690df1689d736316fbb4a4c223ad8d85c31d3",
+    "friend-b": "aa406a4ea17016412d38be017a05d1d9ecc7d6f59f33ac629a9e9ccc57045e3f",
+    "friend-c": "06c6812c0e9fd95dbfca7d7519dfcbf848c05aa1989e9460dec4a7d4c0223aa6",
+    "trusted": "9a171a08e917f4f1af8f72194b67f65d9b1d5a70e14aba1e05bfeaaa47b618ee",
+    "muted": "ff721d976707a85e5dddd6923740c226041a99db8ef4318427b862cc6e8ced66",
+    "stranger": "2ff209c9aeb2300fc9f0f2fd3e0a7a37987bafca39806bd47505895586e6d8f6",
+    "seeder": "115ac24798fa94a35206459d31583a3ad9c57955a9e9784f749cb38327714683",
+    "seeder-2": "0b781069ad83b5a2904045637b78217cbb9dd58c9391e0c015c3c5c0a378bd45",
+    "seeder-3": "123b8e5a0edd0ff00fe1e9e71ef36bff7534c645f4e0e0c62e780bc4bc30ffd9"
+  },
+  "namespace": "nfx:mainnet:1",
+  "now": 1790604800,
+  "root": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+  "follows": [
+    "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b",
+    "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66",
+    "50a493a8a598682d8a72ebfe6eb817f31db8b110175b7960ff5d12e2ee2f68dc",
+    "c48dc1339a32d71296108e40772ce727fccfb485de1eb9be84e278f2295c6bf1"
+  ],
+  "trusted": [
+    "24c873a1006f22014998661d37706417c4b133725f285c0e5913093ae283b380"
+  ],
+  "muted": [
+    "c48dc1339a32d71296108e40772ce727fccfb485de1eb9be84e278f2295c6bf1"
+  ],
+  "pubkeys": {
+    "watcher": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+    "friend-a": "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b",
+    "friend-b": "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66",
+    "friend-c": "50a493a8a598682d8a72ebfe6eb817f31db8b110175b7960ff5d12e2ee2f68dc",
+    "trusted": "24c873a1006f22014998661d37706417c4b133725f285c0e5913093ae283b380",
+    "muted": "c48dc1339a32d71296108e40772ce727fccfb485de1eb9be84e278f2295c6bf1",
+    "stranger": "dab5a77a9cadd0945d70ffd1c4d93f79ce75465c2eb497116ed19ad65aad8116",
+    "seeder": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+    "seeder-2": "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2",
+    "seeder-3": "ea783516e8ef8af5847bc2ac3fdbcb6bd1e85283af19b88b34bcccc62512a6c6"
+  },
+  "events": [
+    {
+      "name": "a-old",
+      "note": "superseded by friend-a's newer rating of the same seeder",
+      "verdict": "superseded by a newer rating from the same author",
+      "event": {
+        "id": "61ff9fc98fef27c4e5e788195fded5445850063bb16cf49eab9d9a75c2d37a06",
+        "pubkey": "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b",
+        "created_at": 1790432000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "543016ef-779a-4cc3-a183-ee11dd9f7a12",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b"
+          ],
+          [
+            "created_at",
+            "1790432000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b"
+          ],
+          [
+            "rating",
+            "80"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1793024000"
+          ]
+        ],
+        "content": "",
+        "sig": "5af13b2014aa71899343349ebd64fcfaaa3eaf6312e97bc1692ec8c5baf1a7fb06aacaf34aae728c8dd44c0b3cb1b492de388048b6fa62ac84f9ac472877621c"
+      }
+    },
+    {
+      "name": "a-new",
+      "note": "friend-a's newest rating of seeder: counts",
+      "verdict": "counted",
+      "event": {
+        "id": "56f986ee3c5b82e577365fe0fe78cde2a6cddf38d03f44222806fcf9ed2757d4",
+        "pubkey": "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b",
+        "created_at": 1790518400,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "51cf0692-f016-4617-a053-ea8b6f04c9c9",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b"
+          ],
+          [
+            "created_at",
+            "1790518400"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b"
+          ],
+          [
+            "rating",
+            "40"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1793110400"
+          ]
+        ],
+        "content": "",
+        "sig": "07b91e5b64bd97f2a9dadb3708c5ddf89ec8fa677bb406cf859ece58ae3bb16af5238c34ccfc947895d82caa328b34d4be1ba09710794d19a497e8cb2f63f9e4"
+      }
+    },
+    {
+      "name": "b",
+      "note": "friend-b: counts",
+      "verdict": "counted",
+      "event": {
+        "id": "f441449609bfe4c592732146e8e488fe22bbba1aa7d69d57867370aede32fc4d",
+        "pubkey": "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66",
+        "created_at": 1790518400,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "e8df9d74-0468-4249-89ad-1a270d63f8f8",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66"
+          ],
+          [
+            "created_at",
+            "1790518400"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66"
+          ],
+          [
+            "rating",
+            "-30"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1793110400"
+          ]
+        ],
+        "content": "",
+        "sig": "aea94ba58564890c0b480fa35a162f124b02f4f01908ee9882ad1c4f788baf8b6d2afa4762205a1a771cd9d340e492984a490266c5b08a4b42d296918ca89878"
+      }
+    },
+    {
+      "name": "root",
+      "note": "the watcher's own vote: counts",
+      "verdict": "counted",
+      "event": {
+        "id": "18235adeb69ab77e4bf374629eeb0ffeeebf435eb4616de5d7fbc86ece51c803",
+        "pubkey": "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e",
+        "created_at": 1790345600,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "ed46244a-6878-4db1-a70c-c52cb5938054",
+            "subject"
+          ],
+          [
+            "i",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "i",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "p",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "created_at",
+            "1790345600"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a8089b0b535dbf690e9dbd919447b8778d6c4ad2814c89974696ba0caff4618e"
+          ],
+          [
+            "rating",
+            "100"
+          ],
+          [
+            "reason",
+            "user"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1792937600"
+          ]
+        ],
+        "content": "",
+        "sig": "2f32c340231153cee5ddd68bdf7e6e8ef04d22d20457cc5759256450902d3d0bba9903f6f2680fdf6ffe918fb00f78dde7c3db3f967f59e6299dd63aced13477"
+      }
+    },
+    {
+      "name": "c-s2",
+      "note": "friend-c: counts",
+      "verdict": "counted",
+      "event": {
+        "id": "b99bd99e0e8d8964a9c0948d2a07da3e17be468fc71badbc972444cd6c3389cd",
+        "pubkey": "50a493a8a598682d8a72ebfe6eb817f31db8b110175b7960ff5d12e2ee2f68dc",
+        "created_at": 1790518400,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "d03dcb04-4f0e-4a73-948c-54c7395adf90",
+            "subject"
+          ],
+          [
+            "i",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "i",
+            "50a493a8a598682d8a72ebfe6eb817f31db8b110175b7960ff5d12e2ee2f68dc"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "p",
+            "50a493a8a598682d8a72ebfe6eb817f31db8b110175b7960ff5d12e2ee2f68dc"
+          ],
+          [
+            "created_at",
+            "1790518400"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "50a493a8a598682d8a72ebfe6eb817f31db8b110175b7960ff5d12e2ee2f68dc"
+          ],
+          [
+            "rating",
+            "-50"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1793110400"
+          ]
+        ],
+        "content": "",
+        "sig": "c75b3aa0f78055025f2330440af666ff86113847922e0e0ab6e61f429c11683257819e78b66298c8f6e42712d62cce517fe1d83cab56bdfd33091c2d3e7bdfd0"
+      }
+    },
+    {
+      "name": "trusted",
+      "note": "a configured trusted author: counts",
+      "verdict": "counted",
+      "event": {
+        "id": "3674b4edead767161b7908ee39d1ee0a1510d4f82181f577222570502a8db8ff",
+        "pubkey": "24c873a1006f22014998661d37706417c4b133725f285c0e5913093ae283b380",
+        "created_at": 1790518400,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "80cd4ab2-1b04-4725-ab24-04a5766c6f32",
+            "subject"
+          ],
+          [
+            "i",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "i",
+            "24c873a1006f22014998661d37706417c4b133725f285c0e5913093ae283b380"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "p",
+            "24c873a1006f22014998661d37706417c4b133725f285c0e5913093ae283b380"
+          ],
+          [
+            "created_at",
+            "1790518400"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "24c873a1006f22014998661d37706417c4b133725f285c0e5913093ae283b380"
+          ],
+          [
+            "rating",
+            "25"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1793110400"
+          ]
+        ],
+        "content": "",
+        "sig": "37675a8712f00cecbcc18c63e7ae914488abf2a45d1258b8cc8fda975ee75577fb67a8733df97b2ce4d6afc1ed429977e777966bdd187d3c3fe3e4d396d3b2bf"
+      }
+    },
+    {
+      "name": "muted",
+      "note": "followed but muted: ignored",
+      "verdict": "ignored: author not admitted",
+      "event": {
+        "id": "729f0d3506549521f247c647e6e35a3d4013a32bd50f1f87365e241c2ef34917",
+        "pubkey": "c48dc1339a32d71296108e40772ce727fccfb485de1eb9be84e278f2295c6bf1",
+        "created_at": 1790518400,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "c64d7af3-3439-4322-b7a6-d3fb63a42c4d",
+            "subject"
+          ],
+          [
+            "i",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "i",
+            "c48dc1339a32d71296108e40772ce727fccfb485de1eb9be84e278f2295c6bf1"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "p",
+            "c48dc1339a32d71296108e40772ce727fccfb485de1eb9be84e278f2295c6bf1"
+          ],
+          [
+            "created_at",
+            "1790518400"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "c48dc1339a32d71296108e40772ce727fccfb485de1eb9be84e278f2295c6bf1"
+          ],
+          [
+            "rating",
+            "-100"
+          ],
+          [
+            "reason",
+            "user"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1793110400"
+          ]
+        ],
+        "content": "",
+        "sig": "04353f89339384c34e8c8ed5caa5f28aa98b150d20707626fa25cf804542b37fdde5fa2e5c89f6f67cff30537bf545e41d7ea6a43a13250af77912b57b96f4e5"
+      }
+    },
+    {
+      "name": "stranger",
+      "note": "not followed: ignored",
+      "verdict": "ignored: author not admitted",
+      "event": {
+        "id": "a737121a514f42d7ca14c9fe363969d377ee6058b58018aab4b597a9b5d91dbb",
+        "pubkey": "dab5a77a9cadd0945d70ffd1c4d93f79ce75465c2eb497116ed19ad65aad8116",
+        "created_at": 1790518400,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "9f76fff9-fc87-4c7a-b817-b0a627bc3b87",
+            "subject"
+          ],
+          [
+            "i",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "i",
+            "dab5a77a9cadd0945d70ffd1c4d93f79ce75465c2eb497116ed19ad65aad8116"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "p",
+            "dab5a77a9cadd0945d70ffd1c4d93f79ce75465c2eb497116ed19ad65aad8116"
+          ],
+          [
+            "created_at",
+            "1790518400"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "dab5a77a9cadd0945d70ffd1c4d93f79ce75465c2eb497116ed19ad65aad8116"
+          ],
+          [
+            "rating",
+            "100"
+          ],
+          [
+            "reason",
+            "user"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1793110400"
+          ]
+        ],
+        "content": "",
+        "sig": "07aa724f482a86d66c04a4e061e47fc6c3d4de07b68f0647380bd98364dcf04485e69eed5f0cf095165f2b27e130b14c93861959ac43b99e7401f7f0661db430"
+      }
+    },
+    {
+      "name": "stale",
+      "note": "older than 30 days: ignored",
+      "verdict": "ignored: expired",
+      "event": {
+        "id": "f40f0aca0153f312558a0c50f8b84836880b93bdfaa2f4f01d0ea89de375cb83",
+        "pubkey": "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66",
+        "created_at": 1787926400,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "ecde3bda-0f85-4e4f-98ec-1ce0ac9a8227",
+            "subject"
+          ],
+          [
+            "i",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "i",
+            "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "p",
+            "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66"
+          ],
+          [
+            "created_at",
+            "1787926400"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66"
+          ],
+          [
+            "rating",
+            "60"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790518400"
+          ]
+        ],
+        "content": "",
+        "sig": "eb7df8ed3f6e15033853b1ec873e73d8eb8b7e7b629ab44abcef94500f71d55b2859a0a56f0cef53aa624d02fc4c37111ce9312ff93399eb1561078b9e045375"
+      }
+    },
+    {
+      "name": "future",
+      "note": "more than 15 minutes ahead: ignored",
+      "verdict": "ignored: from the future",
+      "event": {
+        "id": "e8dd0882eeabc715cca094540cc87fe401eb1a04f3434f1c0ae85437a59252e1",
+        "pubkey": "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b",
+        "created_at": 1790608400,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "2ff10808-df98-437c-a763-71174879ad1d",
+            "subject"
+          ],
+          [
+            "i",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "i",
+            "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "p",
+            "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b"
+          ],
+          [
+            "created_at",
+            "1790608400"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b"
+          ],
+          [
+            "rating",
+            "100"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1793200400"
+          ]
+        ],
+        "content": "",
+        "sig": "c222d76a0975b011edbf2db079acd08706ee9cded2835b583dbbe05f5512e08b0598978a278665b97801d47517a536b7e09b3d693f1343bf58965eaf19b7a859"
+      }
+    },
+    {
+      "name": "testnet",
+      "note": "another network: ignored",
+      "verdict": "ignored: invalid (n names another network)",
+      "event": {
+        "id": "bbd4d9681a880eb6b9517cca9bdc9583b010acb75f862a3a8d3734e15309bf7f",
+        "pubkey": "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b",
+        "created_at": 1790518400,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "48e77703-b3da-4158-a613-c20f228c69be",
+            "subject"
+          ],
+          [
+            "i",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "i",
+            "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "p",
+            "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b"
+          ],
+          [
+            "created_at",
+            "1790518400"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "9dc4d2631f6977bbfec1e7a951ac5bc0c345305d5c5785e9ee31f8f82bf6ff7b"
+          ],
+          [
+            "rating",
+            "-100"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:testnet:1"
+          ],
+          [
+            "expiration",
+            "1793110400"
+          ]
+        ],
+        "content": "",
+        "sig": "e28c808b36d8eed96ce348b72a732e697cb69906f5557471ff1ebec9b6307f26fcacfa7f00ede067739329c044d151b6de954385bfcc60d9636e7c8f3cab9c7d"
+      }
+    },
+    {
+      "name": "c-s3",
+      "note": "superseded by friend-c's withdrawal",
+      "verdict": "superseded by a newer rating from the same author",
+      "event": {
+        "id": "bdc9804535c3e6c4e37382fee817f6f85fe31f5386b9aa1ea999e5091ddfe042",
+        "pubkey": "50a493a8a598682d8a72ebfe6eb817f31db8b110175b7960ff5d12e2ee2f68dc",
+        "created_at": 1790432000,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "95e1a2ba-7c74-468d-8bb4-cb29a3ad44fb",
+            "subject"
+          ],
+          [
+            "i",
+            "50a493a8a598682d8a72ebfe6eb817f31db8b110175b7960ff5d12e2ee2f68dc"
+          ],
+          [
+            "i",
+            "ea783516e8ef8af5847bc2ac3fdbcb6bd1e85283af19b88b34bcccc62512a6c6"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "50a493a8a598682d8a72ebfe6eb817f31db8b110175b7960ff5d12e2ee2f68dc"
+          ],
+          [
+            "p",
+            "ea783516e8ef8af5847bc2ac3fdbcb6bd1e85283af19b88b34bcccc62512a6c6"
+          ],
+          [
+            "created_at",
+            "1790432000"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "50a493a8a598682d8a72ebfe6eb817f31db8b110175b7960ff5d12e2ee2f68dc"
+          ],
+          [
+            "rating",
+            "70"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "ea783516e8ef8af5847bc2ac3fdbcb6bd1e85283af19b88b34bcccc62512a6c6"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1793024000"
+          ]
+        ],
+        "content": "",
+        "sig": "273bb88fade7dbf59427161f4f26c2dff75193d2cba1eccc974f3357fd8137f5bf59946d17a6b6db92d2e1965a4d6fa2e7c33b4c325bf476e09c06e823815ac2"
+      }
+    },
+    {
+      "name": "c-s3-withdraw",
+      "note": "0: friend-c withdraws, and adds nothing to the mean",
+      "verdict": "newest, a withdrawal: adds nothing",
+      "event": {
+        "id": "92e66ea56c664181b126c330927ca88557d5f55c30bd4db962be087586559da9",
+        "pubkey": "50a493a8a598682d8a72ebfe6eb817f31db8b110175b7960ff5d12e2ee2f68dc",
+        "created_at": 1790518400,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "ea5ffb8b-f3af-4e35-bbee-59a17e429f60",
+            "subject"
+          ],
+          [
+            "i",
+            "50a493a8a598682d8a72ebfe6eb817f31db8b110175b7960ff5d12e2ee2f68dc"
+          ],
+          [
+            "i",
+            "ea783516e8ef8af5847bc2ac3fdbcb6bd1e85283af19b88b34bcccc62512a6c6"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "50a493a8a598682d8a72ebfe6eb817f31db8b110175b7960ff5d12e2ee2f68dc"
+          ],
+          [
+            "p",
+            "ea783516e8ef8af5847bc2ac3fdbcb6bd1e85283af19b88b34bcccc62512a6c6"
+          ],
+          [
+            "created_at",
+            "1790518400"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "50a493a8a598682d8a72ebfe6eb817f31db8b110175b7960ff5d12e2ee2f68dc"
+          ],
+          [
+            "rating",
+            "0"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "ea783516e8ef8af5847bc2ac3fdbcb6bd1e85283af19b88b34bcccc62512a6c6"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1793110400"
+          ]
+        ],
+        "content": "",
+        "sig": "58000d11b8253bc1d2fc7124d588739af9731fedb46ab16f65c9c1f876b278ad689acd2ad01030d0081ab536fc4c8230147f144410252315f2791e618f907934"
+      }
+    },
+    {
+      "name": "b-s3-tie-1",
+      "note": "same created_at as b-s3-tie-2: the larger event id wins",
+      "verdict": "counted",
+      "event": {
+        "id": "be77895bca8819b2efc369a3f363ab048d971ec454808411fac66568bec3ab95",
+        "pubkey": "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66",
+        "created_at": 1790518400,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "1dab51d0-e272-49d3-be36-b277d50e2a83",
+            "subject"
+          ],
+          [
+            "i",
+            "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66"
+          ],
+          [
+            "i",
+            "ea783516e8ef8af5847bc2ac3fdbcb6bd1e85283af19b88b34bcccc62512a6c6"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66"
+          ],
+          [
+            "p",
+            "ea783516e8ef8af5847bc2ac3fdbcb6bd1e85283af19b88b34bcccc62512a6c6"
+          ],
+          [
+            "created_at",
+            "1790518400"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66"
+          ],
+          [
+            "rating",
+            "10"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "ea783516e8ef8af5847bc2ac3fdbcb6bd1e85283af19b88b34bcccc62512a6c6"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1793110400"
+          ]
+        ],
+        "content": "",
+        "sig": "d4cfa95bd6b30d47e83ea65b46d4e0c4b23ddb8aa47b8f4f94a14a194994c082ef2b87164ef90a16368c11720e2415b4620eacf81a8356d17611d5372ce1f078"
+      }
+    },
+    {
+      "name": "b-s3-tie-2",
+      "note": "same created_at as b-s3-tie-1: the larger event id wins",
+      "verdict": "superseded by a newer rating from the same author",
+      "event": {
+        "id": "35ce5d52a8376141c13c842d1ac4191dbb13267f72321bef2598fc8e2ef783b1",
+        "pubkey": "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66",
+        "created_at": 1790518400,
+        "kind": 7368,
+        "tags": [
+          [
+            "i",
+            "f9fc65c0-e307-475e-b476-a9b6e1f2ca37",
+            "subject"
+          ],
+          [
+            "i",
+            "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66"
+          ],
+          [
+            "i",
+            "ea783516e8ef8af5847bc2ac3fdbcb6bd1e85283af19b88b34bcccc62512a6c6"
+          ],
+          [
+            "i",
+            "nfx.seeder"
+          ],
+          [
+            "p",
+            "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66"
+          ],
+          [
+            "p",
+            "ea783516e8ef8af5847bc2ac3fdbcb6bd1e85283af19b88b34bcccc62512a6c6"
+          ],
+          [
+            "created_at",
+            "1790518400"
+          ],
+          [
+            "max_rating",
+            "100"
+          ],
+          [
+            "min_rating",
+            "-100"
+          ],
+          [
+            "rater",
+            "a750b8f3238495cff8103fbf552265d26faeb90c4b9423fe2c96c3c383e4ee66"
+          ],
+          [
+            "rating",
+            "90"
+          ],
+          [
+            "reason",
+            "measured"
+          ],
+          [
+            "schema",
+            "1"
+          ],
+          [
+            "scope",
+            "nfx.seeder"
+          ],
+          [
+            "subject",
+            "ea783516e8ef8af5847bc2ac3fdbcb6bd1e85283af19b88b34bcccc62512a6c6"
+          ],
+          [
+            "type",
+            "rating"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1793110400"
+          ]
+        ],
+        "content": "",
+        "sig": "0443dfce4a60f3821f2439ef8cf5144d027f67fc3afb429b7e9cb7deb9ba3248bc929e1b73ec7e0cdce5985675432eca000d4f9d11faa823f3195a2d0c97c880"
+      }
+    }
+  ],
+  "scores": {
+    "0041e12160302235da2d1e4e52ee34cddf642b0d7bfd60678b1e1a42af345eb2": {
+      "score": -12,
+      "authors": 2
+    },
+    "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb": {
+      "score": 36,
+      "authors": 3
+    },
+    "ea783516e8ef8af5847bc2ac3fdbcb6bd1e85283af19b88b34bcccc62512a6c6": {
+      "score": 10,
+      "authors": 1
+    }
+  }
+}

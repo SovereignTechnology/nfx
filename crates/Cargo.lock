@@ -3033,7 +3033,7 @@ dependencies = [
 
 [[package]]
 name = "nfx-media"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hex",
  "nfx-proto",
@@ -3043,7 +3043,7 @@ dependencies = [
 
 [[package]]
 name = "nfx-node"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -3058,8 +3058,10 @@ dependencies = [
  "iroh-tickets",
  "n0-future",
  "nfx-proto",
+ "nostr-database",
  "nostr-memory",
  "nostr-sdk",
+ "rustls-pki-types",
  "serde_json",
  "str0m",
  "thiserror 2.0.20",
@@ -3120,7 +3122,7 @@ dependencies = [
 
 [[package]]
 name = "nfxd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -3280,9 +3282,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-sdk"
-version = "0.45.4"
+version = "0.45.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db717044f755b5ed9be53cacb59660c36efbe578bde870151a24d6bead3cb218"
+checksum = "6241efa2469244b0c40ad9b32172d07e363a537cb822d3d5ba8c3a78e2829746"
 dependencies = [
  "async-utility",
  "async-wsocket",

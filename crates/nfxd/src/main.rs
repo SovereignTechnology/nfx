@@ -6,20 +6,33 @@
 //! nfxd publish --key <file> --relay <url>… --package <dir> --title <text>
 //!              [--description <md>] [--alt <text>] [--tag <t>]…
 //! nfxd delete --key <file> --relay <url>… --a <a>…   withdraw your own videos (NFX-02 §6)
-//! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--relay-only]
+//! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--iroh-relay-ca <pem>]… [--relay-only]
 //!          [--seed <a>]… [--fetch <a>]… [--pull <a>]… [--origin <addr:port>]
 //!          [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--tracker-url <wss url>]]] [--namespace <ns>]…
 //!          [--allow-creator <hex>]… [--gossip [--gossip-peer <id>@<ip:port|relay-url>]…]
+//!          [--rating-root <npub|hex> --general-relay <url>… [--rating-trusted <npub|hex>]…]
 //! ```
 //!
 //! `<a>` is a manifest address, `38504:<creator-hex>:<namespace>:<video-id>`, as
 //! `publish` prints it. Secrets never reach the terminal: only public keys are printed.
+//!
+//! `--iroh-relay-ca` names a PEM file of CA certificates (at most 4 in all, 8 KiB each, 64 KiB
+//! a file) that the `--iroh-relay`s' TLS may chain to, beside the compiled-in Mozilla roots:
+//! for a network whose relays use a private CA, such as a test network. It changes which
+//! relay certificates are trusted, never how peers authenticate each other.
 //!
 //! With `--gossip`, `run` joins each video's gossip swarm (NFX-06 §4) through the seeders
 //! relay beacons name and any `--gossip-peer`, and prints its own `gossip peer:` lines for
 //! others to use. Gossip is off by default: iroh-gossip hands the addresses swarm members
 //! advertise to the node's endpoint unfiltered, so any member can make the node contact
 //! hosts of its choosing. A `--relay-only` node never gossips.
+//!
+//! With `--rating-root` (your own key), the seeders `run` pulls from are ordered by their
+//! seeder ratings (NFX-16): those by you, the authors you follow and any
+//! `--rating-trusted`, less those you mute, read hourly from the `--general-relay`s.
+//! Scoped relays carry neither ratings nor follow lists. Off by default; ratings only
+//! ever order seeders, and never change what this node grants anyone. Reading your own
+//! lists tells those relays this node's address belongs to your key.
 //!
 //! `--embed-tracker` serves the NFX-10 browser mesh (plain `ws`), and `--bridge` joins it
 //! as a native WebRTC peer. In public, put the tracker behind a TLS proxy (browsers need
@@ -44,7 +57,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...]";
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...]";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -197,6 +210,7 @@ async fn run(args: &[String]) -> Result<()> {
             "state",
             "relay",
             "iroh-relay",
+            "iroh-relay-ca",
             "seed",
             "fetch",
             "pull",
@@ -209,6 +223,9 @@ async fn run(args: &[String]) -> Result<()> {
             "namespace",
             "allow-creator",
             "gossip-peer",
+            "rating-root",
+            "rating-trusted",
+            "general-relay",
         ],
     )?;
     let addr = |name: &str| -> Result<Option<std::net::SocketAddr>> {
@@ -233,6 +250,7 @@ async fn run(args: &[String]) -> Result<()> {
                     .map_err(|_| Error::Config(format!("--iroh-relay {u}: not a URL")))
             })
             .collect::<Result<_>>()?,
+        iroh_relay_cas: relay_cas(&all(&f, "iroh-relay-ca"))?,
         relay_only,
         seed: all(&f, "seed"),
         fetch: all(&f, "fetch"),
@@ -251,6 +269,14 @@ async fn run(args: &[String]) -> Result<()> {
         allow_creators: all(&f, "allow-creator"),
         gossip,
         gossip_peers: gossip_peers(&all(&f, "gossip-peer"))?,
+        rating_root: one(&f, "rating-root")?
+            .map(|v| pubkey_hex("rating-root", &v))
+            .transpose()?,
+        rating_trusted: all(&f, "rating-trusted")
+            .iter()
+            .map(|v| pubkey_hex("rating-trusted", v))
+            .collect::<Result<_>>()?,
+        general_relays: all(&f, "general-relay"),
         internal_origin: false,
         // `run` seeds only what `--seed` names, and a seeder may use the portmapper.
         seed_watched: false,
@@ -299,6 +325,36 @@ async fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The CA certificates of every `--iroh-relay-ca` file, at most `MAX_RELAY_CAS` in all. A file
+/// is checked for size before it is read; errors name the file and the rule, never its content.
+fn relay_cas(files: &[String]) -> Result<Vec<nfx_node::node::CertificateDer<'static>>> {
+    use nfx_node::node::{MAX_RELAY_CA_PEM, MAX_RELAY_CAS, relay_cas_from_pem};
+    let mut out = Vec::new();
+    for file in files {
+        let bad = |why: String| Error::Config(format!("--iroh-relay-ca {file}: {why}"));
+        let meta = std::fs::metadata(file).map_err(|e| bad(e.kind().to_string()))?;
+        if !meta.is_file() {
+            return Err(bad("not a regular file".into()));
+        }
+        if meta.len() > MAX_RELAY_CA_PEM as u64 {
+            return Err(bad("over 64 KiB".into()));
+        }
+        let pem = std::fs::read(file).map_err(|e| bad(e.kind().to_string()))?;
+        let cas = relay_cas_from_pem(&pem).map_err(|e| bad(e.to_string()))?;
+        out.extend(cas);
+        if out.len() > MAX_RELAY_CAS {
+            return Err(bad("more than 4 certificates in all".into()));
+        }
+    }
+    Ok(out)
+}
+
+/// A public key given as an npub or 64 hex digits, as 64 lowercase hex. The error never
+/// repeats the value: it may be a secret key given by mistake.
+fn pubkey_hex(flag: &str, v: &str) -> Result<String> {
+    key::public_hex(v).map_err(|why| Error::Config(format!("--{flag}: {why}")))
+}
+
 /// `--gossip-peer ID@ADDR`, where `ADDR` is `ip:port` or an iroh relay URL; repeat the flag
 /// for more addresses of the same peer. `nfxd run` prints its own in this form.
 fn gossip_peers(values: &[String]) -> Result<Vec<iroh::EndpointAddr>> {
@@ -326,7 +382,87 @@ fn gossip_peers(values: &[String]) -> Result<Vec<iroh::EndpointAddr>> {
 
 #[cfg(test)]
 mod tests {
-    use super::gossip_peers;
+    use super::{gossip_peers, pubkey_hex, relay_cas};
+
+    fn ca_pem() -> String {
+        use base64::Engine as _;
+        let (certs, _) = iroh_relay::server::testing::self_signed_tls_certs_and_config();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(certs[0].as_ref());
+        let lines: Vec<String> = b64
+            .as_bytes()
+            .chunks(64)
+            .map(|c| String::from_utf8(c.to_vec()).unwrap())
+            .collect();
+        format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            lines.join("\n")
+        )
+    }
+
+    fn file(name: &str, text: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("nfxd-relay-ca-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        path.to_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn iroh_relay_ca_files_are_read_capped_and_never_echoed() {
+        let pem = ca_pem();
+        assert_eq!(relay_cas(&[file("one.pem", &pem)]).unwrap().len(), 1);
+        assert!(relay_cas(&[]).unwrap().is_empty());
+        // At most 4 in all, across files.
+        let three = file("three.pem", &pem.repeat(3));
+        let two = file("two.pem", &pem.repeat(2));
+        let err = relay_cas(&[three.clone(), two]).unwrap_err().to_string();
+        assert!(err.contains("more than 4"), "{err}");
+        assert_eq!(relay_cas(&[three, file("1.pem", &pem)]).unwrap().len(), 4);
+        // Size first: a big file is refused before it is read.
+        let big = file("big.pem", &"x".repeat(64 * 1024 + 1));
+        let err = relay_cas(&[big]).unwrap_err().to_string();
+        assert!(
+            err.contains("over 64 KiB") && err.contains("--iroh-relay-ca"),
+            "{err}"
+        );
+        // A key block, a missing file, a directory: refused, the content never repeated.
+        // The label is built at run time: a literal key block would trip secret scanners.
+        let label = ["PRIVATE", "KEY"].join(" ");
+        let keyed = file(
+            "key.pem",
+            &format!("{pem}-----BEGIN {label}-----\nc2VjcmV0LWtleQ==\n-----END {label}-----\n"),
+        );
+        let err = relay_cas(&[keyed]).unwrap_err().to_string();
+        assert!(err.contains("not a CERTIFICATE"), "{err}");
+        assert!(!err.contains("c2VjcmV0"), "the content leaked: {err}");
+        assert!(relay_cas(&["/nonexistent/ca.pem".into()]).is_err());
+        let dir = std::env::temp_dir().to_str().unwrap().to_owned();
+        let err = relay_cas(&[dir]).unwrap_err().to_string();
+        assert!(err.contains("not a regular file"), "{err}");
+    }
+
+    #[test]
+    fn rating_keys_are_npubs_or_hex_and_come_out_as_hex() {
+        use nostr_sdk::prelude::ToBech32 as _;
+        let keys = nostr_sdk::prelude::Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let npub = keys.public_key().to_bech32().unwrap();
+        assert_eq!(pubkey_hex("rating-root", &npub).unwrap(), hex);
+        assert_eq!(pubkey_hex("rating-root", &hex).unwrap(), hex);
+        for bad in ["", "npub1nope", &hex[..63], "nsec1abc"] {
+            let err = pubkey_hex("rating-root", bad).unwrap_err().to_string();
+            assert!(err.contains("--rating-root"), "{bad}: {err}");
+        }
+        // A secret key given by mistake is named as one and never repeated.
+        let nsec = keys.secret_key().to_bech32().unwrap();
+        for secret in [nsec.clone(), format!("nostr:{nsec}")] {
+            let err = pubkey_hex("rating-root", &secret).unwrap_err().to_string();
+            assert!(err.contains("secret key"), "{err}");
+            assert!(!err.contains(&nsec[5..]), "the nsec is repeated: {err}");
+        }
+        assert_eq!(nfxd::key::npub(&hex).as_deref(), Some(npub.as_str()));
+        assert_eq!(nfxd::key::npub("nope"), None);
+    }
 
     #[test]
     fn gossip_peers_merge_by_id_and_refuse_what_they_cannot_parse() {

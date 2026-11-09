@@ -13,8 +13,47 @@ use iroh_blobs::BlobsProtocol;
 use iroh_blobs::api::Store;
 use iroh_blobs::store::GcConfig;
 use iroh_gossip::Gossip;
+pub use rustls_pki_types::CertificateDer;
+use rustls_pki_types::pem::{PemObject, SectionKind};
 
 use crate::{GOSSIP_ALPN, NodeError, Result};
+
+/// At most this many CA certificates (`NodeConfig::relay_cas`), as the nutflix-pear iroh
+/// helper allows.
+pub const MAX_RELAY_CAS: usize = 4;
+/// At most this many DER bytes per CA certificate.
+pub const MAX_RELAY_CA_DER: usize = 8192;
+/// At most this many bytes of PEM text in one file.
+pub const MAX_RELAY_CA_PEM: usize = 64 * 1024;
+
+/// The CA certificates of a PEM file for `NodeConfig::relay_cas`: one to `MAX_RELAY_CAS`
+/// `CERTIFICATE` blocks of at most `MAX_RELAY_CA_DER` bytes each, in at most
+/// `MAX_RELAY_CA_PEM` bytes. Any other block (a private key given by mistake) is refused,
+/// not skipped. Errors name the rule only, never the file's content.
+pub fn relay_cas_from_pem(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
+    let bad = |why: &str| NodeError::Relay(format!("relay CA file: {why}"));
+    if pem.len() > MAX_RELAY_CA_PEM {
+        return Err(bad("over 64 KiB"));
+    }
+    let mut out = Vec::new();
+    for item in <(SectionKind, Vec<u8>)>::pem_slice_iter(pem) {
+        let (kind, der) = item.map_err(|_| bad("not valid PEM"))?;
+        if kind != SectionKind::Certificate {
+            return Err(bad("a block that is not a CERTIFICATE"));
+        }
+        if der.is_empty() || der.len() > MAX_RELAY_CA_DER {
+            return Err(bad("a certificate over 8192 bytes, or empty"));
+        }
+        if out.len() == MAX_RELAY_CAS {
+            return Err(bad("more than 4 certificates"));
+        }
+        out.push(CertificateDer::from(der));
+    }
+    if out.is_empty() {
+        return Err(bad("no CERTIFICATE block"));
+    }
+    Ok(out)
+}
 
 /// How often iroh-blobs deletes untagged blobs. Seeded content is tagged; anything fetched
 /// is read back into the NFX store and then left untagged, so it does not accumulate and
@@ -41,6 +80,12 @@ pub struct NodeConfig {
     /// Never ask the local gateway (UPnP, PCP, NAT-PMP) to open a port. A node that only
     /// fetches, such as a viewer that shares nothing, needs no inbound port.
     pub no_portmapper: bool,
+    /// Extra CA roots for the TLS of this network's iroh relays, beside the compiled-in
+    /// Mozilla roots (`relay_cas_from_pem`). For a network whose relays use a private CA,
+    /// such as a test network. Empty: the compiled-in roots only, as before. It changes what
+    /// relay certificates are trusted, never how peers authenticate each other (iroh's own
+    /// keys do that).
+    pub relay_cas: Vec<CertificateDer<'static>>,
 }
 
 /// The secret key is never printed.
@@ -53,6 +98,7 @@ impl std::fmt::Debug for NodeConfig {
             .field("blobs_dir", &self.blobs_dir)
             .field("lookup", &self.lookup.is_some())
             .field("no_portmapper", &self.no_portmapper)
+            .field("relay_cas", &self.relay_cas.len())
             .finish()
     }
 }
@@ -85,6 +131,11 @@ impl Node {
         }
         if cfg.no_portmapper {
             builder = builder.portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
+        }
+        if !cfg.relay_cas.is_empty() {
+            builder = builder.ca_tls_config(
+                iroh::tls::CaTlsConfig::default().with_extra_roots(cfg.relay_cas.clone()),
+            );
         }
         if let Some(lookup) = cfg.lookup {
             builder = builder.address_lookup(lookup);
@@ -215,5 +266,86 @@ impl Node {
         // the store is gone); calling it anyway makes the release independent of that.
         let _ = self.blobs.shutdown().await;
         routed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use base64::Engine as _;
+
+    use super::*;
+
+    fn pem_block(label: &str, der: &[u8]) -> String {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+        let body: Vec<&str> = b64
+            .as_bytes()
+            .chunks(64)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        format!(
+            "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
+            body.join("\n")
+        )
+    }
+
+    fn a_ca() -> Vec<u8> {
+        let (certs, _) = iroh_relay::server::testing::self_signed_tls_certs_and_config();
+        certs[0].to_vec()
+    }
+
+    #[test]
+    fn relay_cas_from_pem_reads_one_to_four_certificates() {
+        let der = a_ca();
+        let one = relay_cas_from_pem(pem_block("CERTIFICATE", &der).as_bytes()).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].as_ref(), der.as_slice());
+        // Text around the blocks is ignored, as PEM allows.
+        let four = format!(
+            "a comment\n{}",
+            pem_block("CERTIFICATE", &der).repeat(MAX_RELAY_CAS)
+        );
+        assert_eq!(relay_cas_from_pem(four.as_bytes()).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn relay_cas_from_pem_refuses_what_it_should_and_never_echoes_content() {
+        let der = a_ca();
+        let five = pem_block("CERTIFICATE", &der).repeat(MAX_RELAY_CAS + 1);
+        let key = format!(
+            "{}{}",
+            pem_block("CERTIFICATE", &der),
+            pem_block("PRIVATE KEY", b"0123456789-secret-key-bytes")
+        );
+        let big = pem_block("CERTIFICATE", &vec![0x30; MAX_RELAY_CA_DER + 1]);
+        let huge = "x".repeat(MAX_RELAY_CA_PEM + 1);
+        let broken = "-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n";
+        for (input, why) in [
+            (five.as_str(), "more than 4"),
+            (key.as_str(), "not a CERTIFICATE"),
+            (big.as_str(), "over 8192"),
+            (huge.as_str(), "over 64 KiB"),
+            (broken, "not valid PEM"),
+            ("no pem at all", "no CERTIFICATE"),
+            ("", "no CERTIFICATE"),
+        ] {
+            let err = relay_cas_from_pem(input.as_bytes())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(why), "{why}: {err}");
+            assert!(!err.contains("secret-key"), "the content leaked: {err}");
+            assert!(!err.contains("not base64"), "the content leaked: {err}");
+        }
+    }
+
+    #[test]
+    fn the_config_debug_prints_only_how_many_cas() {
+        let cfg = NodeConfig {
+            relay_cas: vec![CertificateDer::from(a_ca())],
+            ..NodeConfig::default()
+        };
+        let text = format!("{cfg:?}");
+        assert!(text.contains("relay_cas: 1"), "{text}");
     }
 }

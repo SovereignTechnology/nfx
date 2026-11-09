@@ -407,6 +407,8 @@ pub async fn serve_with_limits(
 #[derive(Debug, Clone)]
 struct Source {
     seeder: String,
+    /// The network (NFX-01) of the video this source serves; ratings are per network.
+    namespace: String,
     created_at: u64,
     expiration: u64,
     /// Rendition id, or `meta` → ticket.
@@ -415,6 +417,29 @@ struct Source {
     cooldown_until: u64,
     /// Heard only over gossip, never in a relay's beacon.
     gossip: bool,
+}
+
+/// Sort sources into the order they are tried at `now`:
+/// 1. not on cooldown first, the rest by when their cooldown ends, so no score rescues a
+///    seeder that is failing now (NFX-16 §4, rank 1);
+/// 2. a relay's source before one heard only over gossip;
+/// 3. the higher trusted score for the source's namespace, an unrated seeder counting 0
+///    (NFX-16 §4, rank 4);
+/// 4. the order learned (the sort is stable).
+fn rank(live: &mut [Source], scores: &BTreeMap<String, BTreeMap<String, i64>>, now: u64) {
+    live.sort_by_key(|s| {
+        let cooling = if s.cooldown_until > now {
+            s.cooldown_until
+        } else {
+            0
+        };
+        let score = scores
+            .get(&s.namespace)
+            .and_then(|m| m.get(&s.seeder))
+            .copied()
+            .unwrap_or(0);
+        (cooling, s.gossip, std::cmp::Reverse(score))
+    });
 }
 
 /// A [`Pull`] over iroh: the tickets come from verified beacons ([`SwarmPull::learn`]).
@@ -430,10 +455,15 @@ struct Source {
 /// - A source heard only over gossip ([`SwarmPull::learn_gossip`]) is evicted first and
 ///   never displaces one from a relay's beacon. A swarm member can announce under any
 ///   number of fresh keys at no cost, while relays budget beacons (NFX-04 §2).
+/// - Within those buckets, a seeder with a higher trusted score
+///   ([`SwarmPull::set_scores`], NFX-16 §4) is tried first; an unrated seeder counts 0.
+///   A score never lifts a seeder out of cooldown: it never rescues one failing now.
 pub struct SwarmPull {
     node: Arc<Node>,
     /// manifest a-tag → sources, in the order learned.
     sources: RwLock<BTreeMap<String, Vec<Source>>>,
+    /// namespace → seeder (hex) → trusted score (NFX-16 §4).
+    scores: RwLock<BTreeMap<String, BTreeMap<String, i64>>>,
 }
 
 impl SwarmPull {
@@ -442,7 +472,32 @@ impl SwarmPull {
         Self {
             node,
             sources: RwLock::new(BTreeMap::new()),
+            scores: RwLock::new(BTreeMap::new()),
         }
+    }
+
+    /// Replace the trusted scores (NFX-16 §4) for one namespace: seeder pubkey (hex) →
+    /// score. Seeders absent from the map count 0. These only order the sources this
+    /// node tries; nothing a seeder sees depends on them (ADR 0104 §6.4).
+    pub fn set_scores(&self, namespace: &str, scores: BTreeMap<String, i64>) {
+        let mut all = self.scores.write().unwrap_or_else(PoisonError::into_inner);
+        if scores.is_empty() {
+            all.remove(namespace);
+        } else {
+            all.insert(namespace.to_string(), scores);
+        }
+    }
+
+    /// The namespaces of every video this node holds a source for.
+    #[must_use]
+    pub fn namespaces(&self) -> std::collections::BTreeSet<String> {
+        self.sources
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .flatten()
+            .map(|s| s.namespace.clone())
+            .collect()
     }
 
     /// Record the iroh tickets of a verified beacon from a relay ([`Beacon::from_event`]).
@@ -528,6 +583,7 @@ impl SwarmPull {
         }
         list.push(Source {
             seeder: beacon.seeder.clone(),
+            namespace: beacon.content.video.namespace().to_string(),
             created_at: beacon.created_at,
             expiration: beacon.expiration,
             tickets,
@@ -536,8 +592,7 @@ impl SwarmPull {
         });
     }
 
-    /// Unexpired sources for a manifest at `now`: those not on cooldown first, in the
-    /// order learned, then the rest by when their cooldown ends.
+    /// Unexpired sources for a manifest at `now`, in the order to try them ([`rank`]).
     fn live(&self, manifest_a: &str, now: u64) -> Vec<Source> {
         let mut live: Vec<Source> = self
             .sources
@@ -551,15 +606,11 @@ impl SwarmPull {
                     .collect()
             })
             .unwrap_or_default();
-        // Cooldown first; within a bucket, a relay's source before a gossip one.
-        live.sort_by_key(|s| {
-            let cooling = if s.cooldown_until > now {
-                s.cooldown_until
-            } else {
-                0
-            };
-            (cooling, s.gossip)
-        });
+        rank(
+            &mut live,
+            &self.scores.read().unwrap_or_else(PoisonError::into_inner),
+            now,
+        );
         live
     }
 
@@ -754,5 +805,85 @@ impl Pull for SwarmPull {
             })
             .await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source(seeder: &str, namespace: &str, cooldown_until: u64, gossip: bool) -> Source {
+        Source {
+            seeder: seeder.to_string(),
+            namespace: namespace.to_string(),
+            created_at: 1,
+            expiration: u64::MAX,
+            tickets: BTreeMap::new(),
+            cooldown_until,
+            gossip,
+        }
+    }
+
+    fn order(live: &[Source]) -> Vec<&str> {
+        live.iter().map(|s| s.seeder.as_str()).collect()
+    }
+
+    #[test]
+    fn scores_order_within_buckets_and_never_rescue_a_cooling_seeder() {
+        let ns = "nfx:mainnet:1";
+        let now = 1_000;
+        let mut live = vec![
+            source("unrated", ns, 0, false),
+            source("liked-but-cooling", ns, now + 60, false),
+            source("disliked", ns, 0, false),
+            source("liked", ns, 0, false),
+            source("liked-gossip", ns, 0, true),
+            source("liked-elsewhere", "nfx:testnet:1", 0, false),
+            source("cooled-off", ns, now, false), // cooldown ended: not cooling
+        ];
+        let none = BTreeMap::new();
+        rank(&mut live, &none, now);
+        assert_eq!(
+            order(&live),
+            [
+                "unrated",
+                "disliked",
+                "liked",
+                "liked-elsewhere",
+                "cooled-off",
+                "liked-gossip",
+                "liked-but-cooling",
+            ],
+            "unrated: today's order"
+        );
+
+        let scores = BTreeMap::from([
+            (
+                ns.to_string(),
+                BTreeMap::from([
+                    ("liked".to_string(), 90),
+                    ("liked-but-cooling".to_string(), 100),
+                    ("liked-gossip".to_string(), 100),
+                    ("disliked".to_string(), -40),
+                ]),
+            ),
+            (
+                "nfx:testnet:1".to_string(),
+                BTreeMap::from([("unrated".to_string(), 100)]),
+            ),
+        ]);
+        rank(&mut live, &scores, now);
+        assert_eq!(
+            order(&live),
+            [
+                "liked",
+                "unrated",
+                "liked-elsewhere",
+                "cooled-off",
+                "disliked",
+                "liked-gossip",
+                "liked-but-cooling",
+            ]
+        );
     }
 }

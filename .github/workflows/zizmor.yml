@@ -1,0 +1,73 @@
+# zizmor (https://docs.zizmor.sh) lints these workflows and .github/dependabot.yml, as
+# rbitcoin-org/rbitcoin's zizmor.yml does. One install, two passes:
+#   - SARIF of every finding to code scanning (the Security tab); this pass never fails the job;
+#   - a gate that fails on any finding of medium severity or above. rbitcoin gates through an org
+#     ruleset that reads the SARIF; this repo has none, so the job gates itself.
+#
+# As ci.yml installs its tools: first-party actions pinned by commit SHA, every download checked
+# against a pinned sha256, no third-party action. zizmor is the PyPI wheel pinned by sha256 in
+# .github/zizmor.requirements.txt, installed into a venv. The money lock pins this file with the
+# rest of .github/workflows (crates/ci/check-locked.sh): an edit here needs its pin line in
+# crates/ci/locked.sha256. Its online audits (impostor commits, known-vulnerable actions, ref confusion) read
+# the GitHub API with this job's token, which can only read the repo and write code-scanning alerts.
+#
+# No `branches:` filter on pull_request, so stacked PRs are linted too. The weekly run has its own
+# concurrency group, so a push never cancels it.
+name: zizmor
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: zizmor-${{ github.event_name == 'schedule' && 'schedule-' || '' }}${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  zizmor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read # check out the files it lints
+      security-events: write # upload the SARIF to code scanning
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: zizmor (the wheel checked against its pinned sha256)
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/zizmor"
+          "$RUNNER_TEMP/zizmor/bin/pip" install --quiet --disable-pip-version-check \
+            --require-hashes --only-binary :all: -r .github/zizmor.requirements.txt
+          echo "$RUNNER_TEMP/zizmor/bin" >> "$GITHUB_PATH"
+      - name: every finding, as SARIF
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Exit 10-14 names the worst finding's severity; the gate below judges those. Any other
+          # non-zero exit (an error, or a panic's 101) is zizmor failing, and fails here.
+          rc=0
+          zizmor --format=sarif --color=never --no-progress . > "$RUNNER_TEMP/zizmor.sarif" || rc=$?
+          case "$rc" in 0 | 1[0-4]) ;; *) exit "$rc" ;; esac
+      # A fork's pull request gets no security-events write: its findings are in the gate's log.
+      - name: upload SARIF to code scanning
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: ${{ runner.temp }}/zizmor.sarif
+          category: zizmor
+      - name: gate (medium severity and above)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --format=plain --color=never --no-progress --min-severity=medium .

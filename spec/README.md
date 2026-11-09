@@ -37,6 +37,10 @@ desktop shell.
 | NFX-10 | Web transport profile | Draft | M4 |
 | NFX-11 | Registry, schemas, test vectors, conformance | Living | per-milestone |
 | NFX-12 | HyperDHT transport profile (optional) | Draft | later |
+| NFX-16 | Seeder ratings (kind 7368; optional) | Draft | — |
+
+NFX-13 to NFX-15 are reserved for documents not yet written: creator-managed mode
+(ADR 0100), the creator share (ADR 0102) and channel payments (ADR 0104).
 
 Lower numbers are dependencies of higher numbers. NFX-01 and NFX-05 are the two every
 implementation needs.
@@ -89,3 +93,6 @@ the repository license. Rationale and full context: `docs/decisions/0006-*` (f).
 - 2026-10-11 — the mirror of the demo is removed from this repository (ADR 0008
   amendment). No NFX document changes; the paragraph above that named `packages/` now
   names the demo's own repository.
+- 2026-11-04 — NFX-16 (seeder ratings) added as Draft, optional, after ADR 0104: the
+  `nostr-social-memory` rating record (kind 7368) with scope `nfx.seeder`. Publishing is
+  off by default. New vectors `ratings*.json`.

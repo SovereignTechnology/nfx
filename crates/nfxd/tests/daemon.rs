@@ -155,6 +155,19 @@ async fn a_bad_https_url_is_refused_at_start_not_silently_every_minute() {
     .expect("refused");
     assert!(err.to_string().contains("--relay-only"), "{err}");
 
+    // CA roots for relays this node does not use would trust nothing in particular.
+    let (certs, _) = iroh_relay::server::testing::self_signed_tls_certs_and_config();
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("ca-no-relay"),
+        iroh_relay_cas: certs,
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(err.to_string().contains("--iroh-relay-ca"), "{err}");
+
     // An allow-list with no embedded relay would restrict nothing.
     let err = Daemon::start(Config {
         keys: Some(Keys::generate()),
@@ -735,4 +748,62 @@ async fn a_viewer_that_does_not_share_plays_but_never_announces() {
     client.shutdown().await;
     viewer.shutdown().await;
     seeder.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rating_settings_that_cannot_work_are_refused_at_start() {
+    // NFX-16: ratings are read only with the user's key and general relays, and every
+    // key is 64 lowercase hex by the time it reaches the daemon.
+    let root = "ab".repeat(32);
+    let relay = || vec!["wss://relay.example".to_string()];
+    for (name, rating_root, rating_trusted, general_relays, why) in [
+        (
+            "rating-no-relay",
+            Some(root.clone()),
+            vec![],
+            vec![],
+            "--rating-root needs --general-relay",
+        ),
+        (
+            "relay-no-root",
+            None,
+            vec![],
+            relay(),
+            "--general-relay needs --rating-root",
+        ),
+        (
+            "trusted-no-root",
+            None,
+            vec![root.clone()],
+            vec![],
+            "--rating-trusted needs --rating-root",
+        ),
+        (
+            "root-uppercase",
+            Some("AB".repeat(32)),
+            vec![],
+            relay(),
+            "not 64 lowercase hex",
+        ),
+        (
+            "trusted-short",
+            Some(root.clone()),
+            vec!["ab".to_string()],
+            relay(),
+            "not 64 lowercase hex",
+        ),
+    ] {
+        let err = Daemon::start(Config {
+            keys: Some(Keys::generate()),
+            store: tmp(name),
+            rating_root,
+            rating_trusted,
+            general_relays,
+            ..Config::default()
+        })
+        .await
+        .err()
+        .expect("refused");
+        assert!(err.to_string().contains(why), "{name}: {err}");
+    }
 }

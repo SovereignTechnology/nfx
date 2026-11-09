@@ -1,6 +1,6 @@
 [package]
 name = "nfxd"
-version = "0.1.0"
+version = "0.1.1"
 description = "The headless NFX node: seed, fetch, pull-through origin and an embedded scoped relay"
 edition.workspace = true
 rust-version.workspace = true
@@ -24,7 +24,7 @@ bytes.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client"] }
 hyper-util.workspace = true
-iroh-relay = { workspace = true, features = ["server"] }
+iroh-relay = { workspace = true, features = ["server", "test-utils"] }
 
 [lints]
 workspace = true
