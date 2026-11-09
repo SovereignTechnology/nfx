@@ -176,7 +176,7 @@ impl Node {
             .first()
             .ok_or_else(|| NodeError::Collection("empty meta collection".into()))?;
         let list_bytes = match stored(dest, anchor.root) {
-            Some(bytes) => bytes,
+            Some(bytes) => Bytes::from(bytes),
             None => {
                 self.fetch_member(&conn, first, MAX_HASH_LIST_BYTES, &deadline)
                     .await?
