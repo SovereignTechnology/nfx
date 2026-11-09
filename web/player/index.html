@@ -3,18 +3,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NFX test player</title>
-<style>
-  :root { color-scheme: dark; }
-  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #111; color: #eee; }
-  form { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-  input { flex: 1 1 18rem; min-width: 0; padding: 6px; background: #222; color: #eee; border: 1px solid #444; }
-  video { width: 100%; max-width: 960px; background: #000; }
-  pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; }
-</style>
+<link rel="stylesheet" href="player.css">
 <h1>NFX test player</h1>
 <p>Give a manifest address and a relay to resolve the signed manifest over Nostr and find an
   origin in seeders' beacons, or give an origin and a root directly. Every file is checked
-  against its sha256 and the hash list before the player uses it (NFX-05 §4).</p>
+  against its sha256 and the hash list before the player uses it (NFX-05 §4). By address, the
+  player also joins the browser mesh through any tracker a seeder's beacon names: it then
+  shares verified segments with other viewers, and the trackers and those peers see your IP
+  address.</p>
 <form method="get">
   <input id="a" name="a" placeholder="manifest address, 38504:&lt;creator&gt;:&lt;namespace&gt;:&lt;video-id&gt;" autocomplete="off">
   <input id="relay" name="relay" placeholder="relay, e.g. wss://relay.example" autocomplete="off">

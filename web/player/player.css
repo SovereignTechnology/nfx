@@ -1,0 +1,7 @@
+/* The test player's styles: a file, not inline, so a CSP of style-src 'self' allows them. */
+:root { color-scheme: dark; }
+body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #111; color: #eee; }
+form { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+input { flex: 1 1 18rem; min-width: 0; padding: 6px; background: #222; color: #eee; border: 1px solid #444; }
+video { width: 100%; max-width: 960px; background: #000; }
+pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; }

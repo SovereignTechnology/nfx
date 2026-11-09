@@ -2,3 +2,4 @@ node_modules/
 out/
 out[0-9]*/
 out-e2e/
+out-lib/

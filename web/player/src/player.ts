@@ -1,37 +1,40 @@
 /**
- * The NFX test player. Two ways in:
+ * The NFX test player: a thin page over the library (./lib.ts), so its e2e suites test the
+ * library's code. Two ways in:
  *
  * - `?a=<manifest address>&relay=<ws(s) URL>[&relay=…][&origin=<hint>]`: resolve the
  *   current signed manifest over Nostr, then play from an origin named by a verified
- *   beacon's `https` endpoint (or the hint). Signatures give the anchor; endpoints are
- *   only hints.
+ *   beacon's `https` endpoint (or the hint). The trackers seeders' beacons name in
+ *   `webrtc` endpoints are used too. Signatures give the anchor; endpoints are only hints.
  * - `?origin=<url>&root=<hex>[&video=<d>&segs=<n>]`: play a known root from a known origin.
  *
- * A loader wrapper checks every playlist, init and segment with nfx-proto (WASM,
- * ./verify.ts) before hls.js sees a byte: a mismatch is a load error, never data.
+ * A loader wrapper checks every playlist, init and segment with nfx-proto (WASM) before
+ * hls.js sees a byte: a mismatch is a load error, never data.
  *
- * With `&tracker=<wss URL>` (repeatable) the player also joins the NFX-10 browser mesh
- * (./mesh.ts): segments may then come from other viewers, checked by the same verifier.
- * `&stun=<stun: URL>` adds an ICE server; there is none by default, so no third party
- * learns who watches. Test knobs, which change where bytes come from and never whether
- * they are checked: `&httpWindow=<s>` (seconds ahead fetched over HTTP) and `&level=<n>`
- * (pin a rendition).
+ * With `&tracker=<wss URL>` (repeatable), or trackers from beacons, the player also joins
+ * the NFX-10 browser mesh: segments may then come from other viewers, checked by the same
+ * verifier. `&stun=<stun: URL>` adds an ICE server; there is none by default, so no third
+ * party learns who watches. Test knobs, which change where bytes come from and never
+ * whether they are checked: `&httpWindow=<s>` (seconds ahead fetched over HTTP) and
+ * `&level=<n>` (pin a rendition).
  *
  * `window.__nfx` exposes state for automation.
  */
-import Hls, {
-  type HlsConfig,
-  type Loader,
-  type LoaderCallbacks,
-  type LoaderConfiguration,
-  type LoaderContext,
-} from 'hls.js';
-
-import { HlsJsP2PEngine } from 'p2p-media-loader-hlsjs';
-
-import { MAX_TRACKERS, type MeshStats, meshConfig, trackerUrl } from './mesh';
-import { resolveManifest, watchOrigins } from './resolve';
-import { Anchor, type ManifestBinding } from './verify';
+import {
+  type Endpoints,
+  type Level,
+  MAX_TRACKERS,
+  type MeshStats,
+  type OpenCommon,
+  type PlayerEvent,
+  type Session,
+  type Signaling,
+  init,
+  open,
+  resolveManifest,
+  trackerUrl,
+  watchEndpoints,
+} from './lib';
 
 /** How long to wait for a seeder's beacon to name an origin (beacons republish at TTL/2). */
 const ORIGIN_WAIT_MS = 90_000;
@@ -40,6 +43,8 @@ interface State {
   secureContext: boolean;
   resolved: { a: string; title: string; root: string; video: string; segs: number; created_at: number } | null;
   origins: string[];
+  /** Trackers named by seeders' beacons (all heard, before the cap). */
+  beaconTrackers: string[];
   origin: string | null;
   root: string | null;
   engine: string | null;
@@ -48,13 +53,15 @@ interface State {
   levels: { height: number; bitrate: number }[];
   playing: boolean;
   errors: string[];
-  mesh: MeshStats | null;
+  readonly mesh: MeshStats | null;
 }
 
+let session: Session | null = null;
 const st: State = {
   secureContext: window.isSecureContext,
   resolved: null,
   origins: [],
+  beaconTrackers: [],
   origin: null,
   root: null,
   engine: null,
@@ -63,7 +70,9 @@ const st: State = {
   levels: [],
   playing: false,
   errors: [],
-  mesh: null,
+  get mesh(): MeshStats | null {
+    return session?.stats().mesh ?? null;
+  },
 };
 (window as unknown as { __nfx: State }).__nfx = st;
 
@@ -73,93 +82,69 @@ const log = (m: string): void => {
   logEl.textContent += `${new Date().toISOString().slice(11, 19)} ${m}\n`;
 };
 
-/** Wraps hls.js' default loader: fetch as bytes, verify, then hand over. */
-function verifyingLoader(anchor: Anchor): new (config: HlsConfig) => Loader<LoaderContext> {
-  const Base = Hls.DefaultConfig.loader as unknown as new (config: HlsConfig) => Loader<LoaderContext>;
-  return class VerifyingLoader extends Base {
-    override load(
-      context: LoaderContext,
-      config: LoaderConfiguration,
-      callbacks: LoaderCallbacks<LoaderContext>,
-    ): void {
-      const wantText = context.responseType !== 'arraybuffer';
-      context.responseType = 'arraybuffer';
-      super.load(context, config, {
-        onError: callbacks.onError,
-        onTimeout: callbacks.onTimeout,
-        onAbort: callbacks.onAbort,
-        // No onProgress: unverified bytes must never reach hls.js.
-        onSuccess: (response, stats, ctx, details) => {
-          if (stats.aborted) return;
-          const bytes = response.data as ArrayBuffer;
-          let sha: string;
-          try {
-            sha = anchor.check(ctx.url, bytes);
-          } catch (e) {
-            const why = e instanceof Error ? e.message : String(e);
-            let expected: string | null = null;
-            try {
-              expected = anchor.expected(ctx.url);
-            } catch {
-              // an unanchored URL is reported with sha256 null
-            }
-            st.rejected.push({ sha256: expected, url: ctx.url, why });
-            log(`REJECTED ${ctx.url}: ${why}`);
-            callbacks.onError({ code: 0, text: `nfx: ${why}` }, ctx, details, stats);
-            return;
-          }
-          st.verified.push(sha);
-          response.data = wantText ? new TextDecoder('utf-8', { fatal: true }).decode(bytes) : bytes;
-          callbacks.onSuccess(response, stats, ctx, details);
-        },
-      });
-    }
-  };
-}
-
-$<HTMLVideoElement>('v').addEventListener('playing', () => {
-  st.playing = true;
-});
-
-/** Play `root` from `origin`. Throws if the origin cannot serve a hash list that verifies. */
-async function start(origin: string, root: string, manifest?: ManifestBinding): Promise<void> {
-  const video = $<HTMLVideoElement>('v');
-  const anchor = await Anchor.load(origin, root, manifest);
-  st.origin = origin;
-  st.root = root;
-  log(`hash list verified: ${anchor.size} files of ${anchor.video}${manifest ? ' (bound to the manifest)' : ''}`);
-  if (!Hls.isSupported()) {
-    // Native HLS would fetch unverified bytes; this player refuses rather than degrade.
-    throw new Error('MediaSource unavailable: this player only plays verified bytes');
+const onEvent = (e: PlayerEvent): void => {
+  switch (e.type) {
+    case 'log':
+      log(e.message);
+      break;
+    case 'origin':
+      if (!e.ok) log(`origin ${e.origin} did not serve a verifying copy: ${e.why ?? ''}`);
+      break;
+    case 'verified':
+      st.verified.push(e.sha256);
+      break;
+    case 'rejected':
+      st.rejected.push({ sha256: e.sha256, url: e.url, why: e.why });
+      break;
+    case 'levels':
+      st.levels = e.levels.map((l: Level) => ({ height: l.height, bitrate: l.bitrate }));
+      break;
+    case 'playing':
+      st.playing = true;
+      break;
+    case 'error':
+      st.errors.push(e.message);
+      break;
   }
-  const base = { loader: verifyingLoader(anchor), progressive: false };
-  let hls: Hls;
-  if (trackers.length > 0) {
-    const mesh: MeshStats = { trackers: [], swarms: [], bytes: { http: 0, p2p: 0 }, uploaded: 0, peers: 0, rejected: [] };
-    st.mesh = mesh;
-    const HlsWithP2P = HlsJsP2PEngine.injectMixin(Hls);
-    const tuning = httpWindow === null ? {} : { httpWindow };
-    hls = new HlsWithP2P({ ...base, ...meshConfig(anchor, trackers, iceServers, mesh, log, tuning) } as never);
-    st.engine = `hls.js ${Hls.version} + p2p-media-loader 4.0.0`;
-    log(`mesh: trackers ${trackers.join(' ')}`);
-  } else {
-    hls = new Hls(base);
-    st.engine = `hls.js ${Hls.version}`;
-  }
-  hls.on(Hls.Events.MANIFEST_PARSED, (_, d) => {
-    if (level !== null && level < d.levels.length) hls.currentLevel = level;
-    st.levels = d.levels.map((l) => ({ height: l.height, bitrate: l.bitrate }));
-    log(`levels: ${st.levels.map((l) => `${l.height}p`).join(' ')}`);
-    video.play().catch((e: unknown) => st.errors.push(`play: ${String(e)}`));
-  });
-  hls.on(Hls.Events.ERROR, (_, d) => {
-    if (d.fatal) {
-      st.errors.push(`${d.type}:${d.details}`);
-      log(`fatal: ${d.details}`);
-    }
-  });
-  hls.loadSource(`${origin}/${root}/master.m3u8`);
-  hls.attachMedia(video);
+};
+
+const params = new URLSearchParams(location.search);
+const a = params.get('a') ?? '';
+const relays = params.getAll('relay').filter((r) => /^wss?:\/\//.test(r));
+const origin = (params.get('origin') ?? '').replace(/\/+$/, '');
+const root = params.get('root') ?? '';
+const video = params.get('video');
+const segs = Number(params.get('segs'));
+const urlTrackers = [
+  ...new Set(params.getAll('tracker').map(trackerUrl).filter((t): t is string => t !== null)),
+].slice(0, MAX_TRACKERS);
+const iceServers: RTCIceServer[] = params
+  .getAll('stun')
+  .filter((u) => /^stuns?:[A-Za-z0-9.-]+(:\d{1,5})?$/.test(u))
+  .slice(0, 2)
+  .map((urls) => ({ urls }));
+/** The mesh through these trackers, or no mesh. */
+const trackerSignaling = (urls: string[]): Signaling | undefined =>
+  urls.length > 0 ? { kind: 'trackers', urls } : undefined;
+const whole = (v: string | null, max: number): number | undefined => {
+  const n = Number(v);
+  return v !== null && Number.isSafeInteger(n) && n >= 0 && n <= max ? n : undefined;
+};
+const common = {
+  iceServers,
+  onEvent,
+  httpWindow: whole(params.get('httpWindow'), 600),
+  level: whole(params.get('level'), 16),
+} satisfies Partial<OpenCommon>;
+
+/** Open a session, and show it in `__nfx`. */
+async function play(opts: Parameters<typeof open>[1]): Promise<void> {
+  const s = await open($<HTMLVideoElement>('v'), opts);
+  session = s;
+  const stats = s.stats();
+  st.origin = stats.origin;
+  st.root = stats.root;
+  st.engine = stats.engine;
 }
 
 /** Resolve `a` over `relays`, then play from the first origin that serves a verifying copy. */
@@ -167,34 +152,46 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
   const m = await resolveManifest(a, relays);
   st.resolved = { a: m.a, title: m.title, root: m.root, video: m.video, segs: m.segs, created_at: m.created_at };
   log(`manifest "${m.title}" (${m.video}), revision ${m.created_at}, root ${m.root.slice(0, 12)}…`);
-  const binding = { video: m.video, segs: m.segs };
-  const queue: string[] = hint ? [hint] : [];
-  const seen = new Set(queue);
+  let heard: Endpoints = { origins: [], trackers: [], seeders: 0 };
   let wake: (() => void) | null = null;
-  const stop = watchOrigins(a, m.namespace, relays, (url) => {
-    if (seen.has(url)) return;
-    seen.add(url);
-    queue.push(url);
-    st.origins.push(url);
-    log(`a seeder names origin ${url}`);
+  const stop = watchEndpoints(a, m.namespace, relays, (e) => {
+    heard = e;
+    for (const o of e.origins) {
+      if (!st.origins.includes(o)) {
+        st.origins.push(o);
+        log(`a seeder names origin ${o}`);
+      }
+    }
+    for (const t of e.trackers) {
+      if (!st.beaconTrackers.includes(t)) {
+        st.beaconTrackers.push(t);
+        log(`a seeder names tracker ${t}`);
+      }
+    }
     wake?.();
   });
+  const tried = new Set<string>();
+  let pending = hint ? [hint] : [];
   try {
     const deadline = Date.now() + ORIGIN_WAIT_MS;
     for (;;) {
-      const next = queue.shift();
-      if (next) {
+      const fresh = [...new Set([...pending, ...heard.origins])].filter((o) => !tried.has(o));
+      pending = [];
+      if (fresh.length > 0) {
+        fresh.forEach((o) => tried.add(o));
+        // The page's own trackers first, then what seeders named by now.
+        const trackers = [...new Set([...urlTrackers, ...heard.trackers])].slice(0, MAX_TRACKERS);
         try {
-          await start(next, m.root, binding);
+          await play({ ...common, manifestJson: m.event, origins: fresh, signaling: trackerSignaling(trackers) });
           return;
         } catch (e) {
-          log(`origin ${next} did not serve a verifying copy: ${e instanceof Error ? e.message : String(e)}`);
+          log(e instanceof Error ? e.message : String(e));
           continue;
         }
       }
       const left = deadline - Date.now();
       if (left <= 0) throw new Error('no origin served a verifying copy in time');
-      if (queue.length === 0) log('waiting for a seeder beacon that names an https origin…');
+      if (heard.origins.length === 0) log('waiting for a seeder beacon that names an https origin…');
       await new Promise<void>((r) => {
         wake = r;
         setTimeout(r, Math.min(left, 5_000));
@@ -211,35 +208,16 @@ const fail = (e: Error): void => {
   log(`error: ${e.message}`);
 };
 
-const params = new URLSearchParams(location.search);
-const a = params.get('a') ?? '';
-const relays = params.getAll('relay').filter((r) => /^wss?:\/\//.test(r));
-const origin = (params.get('origin') ?? '').replace(/\/+$/, '');
-const root = params.get('root') ?? '';
-const video = params.get('video');
-const segs = Number(params.get('segs'));
-const trackers = [
-  ...new Set(params.getAll('tracker').map(trackerUrl).filter((t): t is string => t !== null)),
-].slice(0, MAX_TRACKERS);
-const iceServers: RTCIceServer[] = params
-  .getAll('stun')
-  .filter((u) => /^stuns?:[A-Za-z0-9.-]+(:\d{1,5})?$/.test(u))
-  .slice(0, 2)
-  .map((urls) => ({ urls }));
-const whole = (v: string | null, max: number): number | null => {
-  const n = Number(v);
-  return v !== null && Number.isSafeInteger(n) && n >= 0 && n <= max ? n : null;
-};
-const httpWindow = whole(params.get('httpWindow'), 600);
-const level = whole(params.get('level'), 16);
 $<HTMLInputElement>('a').value = a;
 $<HTMLInputElement>('relay').value = relays[0] ?? '';
 $<HTMLInputElement>('origin').value = origin;
 $<HTMLInputElement>('root').value = root;
 if (a) {
   if (relays.length === 0) fail(new Error('an address needs at least one ws:// or wss:// relay'));
-  else startByAddress(a, relays, origin || null).catch(fail);
+  else init().then(() => startByAddress(a, relays, origin || null)).catch(fail);
 } else if (origin && root) {
-  const binding = video && Number.isSafeInteger(segs) && segs > 0 ? { video, segs } : undefined;
-  start(origin, root, binding).catch(fail);
+  const bound = video && Number.isSafeInteger(segs) && segs > 0 ? { video, segs } : {};
+  init()
+    .then(() => play({ ...common, root, ...bound, origins: [origin], signaling: trackerSignaling(urlTrackers) }))
+    .catch(fail);
 }

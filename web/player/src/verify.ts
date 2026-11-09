@@ -7,12 +7,59 @@
  */
 import init, { VerifiedHashList } from '../out/wasm/nfx_wasm.js';
 
-let ready: Promise<unknown> | null = null;
+/** The largest hash list fetched, as native peers cap it (nfx-node `MAX_HASH_LIST_BYTES`). */
+export const MAX_HASH_LIST_BYTES = 16 * 1024 * 1024;
 
-/** Load the WASM module once; it sits next to the bundle in out/wasm/. */
-export function loadWasm(): Promise<unknown> {
-  ready ??= init({ module_or_path: new URL('./wasm/nfx_wasm_bg.wasm', import.meta.url) });
+let ready: Promise<unknown> | null = null;
+let readyFrom: string | null = null;
+
+/**
+ * Load the WASM module once, from `url` or by default from `./wasm/nfx_wasm_bg.wasm` next
+ * to the bundle. A second call with another URL is an error; a failed load may be retried.
+ */
+export function loadWasm(url?: string | URL): Promise<unknown> {
+  const from = url === undefined ? null : new URL(url, location.href).href;
+  if (ready !== null) {
+    if (from !== null && from !== readyFrom) {
+      return Promise.reject(new Error(`nfx: WASM already loaded from ${readyFrom ?? 'the default URL'}`));
+    }
+    return ready;
+  }
+  readyFrom = from;
+  const attempt = init({ module_or_path: from ?? new URL('./wasm/nfx_wasm_bg.wasm', import.meta.url) });
+  ready = attempt.catch((e: unknown) => {
+    ready = null;
+    readyFrom = null;
+    throw e;
+  });
   return ready;
+}
+
+/** `res`'s body, refused past `max` bytes without reading the rest. */
+async function cappedBody(res: Response, max: number): Promise<Uint8Array> {
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > max) throw new Error(`hash list: over ${max} bytes`);
+  if (!res.body) return new Uint8Array(await res.arrayBuffer());
+  const reader = res.body.getReader();
+  const parts: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel();
+      throw new Error(`hash list: over ${max} bytes`);
+    }
+    parts.push(value);
+  }
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.byteLength;
+  }
+  return out;
 }
 
 /** Optional manifest binding for the hash list (NFX-02 `d` and `segs`). */
@@ -29,12 +76,12 @@ export class Anchor {
     private readonly list: VerifiedHashList,
   ) {}
 
-  static async load(origin: string, root: string, manifest?: ManifestBinding): Promise<Anchor> {
+  static async load(origin: string, root: string, manifest?: ManifestBinding, signal?: AbortSignal): Promise<Anchor> {
     if (!/^[0-9a-f]{64}$/.test(root)) throw new Error('root must be 64 lowercase hex');
     await loadWasm();
-    const res = await fetch(`${origin}/${root}`);
+    const res = await fetch(`${origin}/${root}`, { signal, credentials: 'omit' });
     if (!res.ok) throw new Error(`hash list: HTTP ${res.status}`);
-    const bytes = new Uint8Array(await res.arrayBuffer());
+    const bytes = await cappedBody(res, MAX_HASH_LIST_BYTES);
     const list = manifest
       ? new VerifiedHashList(bytes, root, manifest.video, manifest.segs)
       : VerifiedHashList.fromRoot(bytes, root);
