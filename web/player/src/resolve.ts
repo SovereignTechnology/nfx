@@ -6,56 +6,42 @@
  * - **where to fetch** comes from verified beacons' `https` endpoints (NFX-03 §5) or an
  *   operator's hint. Those are hints only: every byte is still checked against the anchor.
  */
+import type { Endpoints, ResolvedManifest } from './api';
 import { parseATag, verifyBeacon, verifyDeletion, verifyManifest } from '../out/wasm/nfx_wasm.js';
+import { EndpointBook, type VerifiedBeacon } from './endpoints';
 import { query, subscribe } from './nostr';
 import { loadWasm } from './verify';
 
+export { originBase } from './endpoints';
+
 /** A revision dated beyond this is ignored (NFX-02 §4 "Revisions"). */
 const FUTURE_HORIZON = 15 * 60;
-/** Most distinct beacon-named origins one watch reports. */
-const MAX_ORIGINS = 8;
-
-/**
- * A beacon-named origin as a plain `https://host[:port][/prefix]` base, or null. Beacons
- * are untrusted and the player appends `/<root>/…` to this, so a query string, fragment or
- * credentials (which would steer requests to attacker-chosen URLs) are refused.
- */
-export function originBase(url: string): string | null {
-  let u: URL;
-  try {
-    u = new URL(url);
-  } catch {
-    return null;
-  }
-  if (u.protocol !== 'https:' || u.search || u.hash || u.username || u.password) return null;
-  return u.origin + u.pathname.replace(/\/+$/, '');
-}
-
-export interface Resolved {
-  id: string;
-  a: string;
-  author: string;
-  created_at: number;
-  video: string;
-  namespace: string;
-  title: string;
-  root: string;
-  segs: number;
-}
 
 const now = (): number => Math.floor(Date.now() / 1000);
 
 /** The current revision of the manifest at `a` across `relays`. */
-export async function resolveManifest(a: string, relays: string[], timeoutMs = 8000): Promise<Resolved> {
+export async function resolveManifest(a: string, relays: string[], timeoutMs = 8000): Promise<ResolvedManifest> {
   await loadWasm();
   const want = JSON.parse(parseATag(a)) as { creator: string; video: string };
   const filter = { kinds: [38504], authors: [want.creator], '#d': [want.video] };
   const answers = await Promise.all(relays.map((r) => query(r, filter, timeoutMs)));
-  let best: Resolved | null = null;
+  let best: ResolvedManifest | null = null;
   for (const json of answers.flat()) {
-    let m: Resolved;
+    let m: ResolvedManifest;
     try {
-      m = JSON.parse(verifyManifest(json)) as Resolved;
+      const v = JSON.parse(verifyManifest(json)) as Omit<ResolvedManifest, 'event'>;
+      m = {
+        id: v.id,
+        a: v.a,
+        author: v.author,
+        created_at: v.created_at,
+        video: v.video,
+        namespace: v.namespace,
+        title: v.title,
+        root: v.root,
+        segs: v.segs,
+        event: json,
+      };
     } catch {
       continue; // fails NFX-02: whichever relay sent it, it does not exist
     }
@@ -85,40 +71,48 @@ export async function resolveManifest(a: string, relays: string[], timeoutMs = 8
 }
 
 /**
- * Report each `https` endpoint of a verified, unexpired beacon for `a`, as beacons arrive.
- * Beacons are ephemeral, so a fresh subscription sees the next republish (≤ TTL/2).
+ * Watch seeders' live beacons for `a` (in `namespace`) and report what they name together
+ * (`Endpoints`) each time that changes: `https` origins and `webrtc` trackers, from the
+ * newest unexpired beacon of each seeder (./endpoints.ts). Beacons are ephemeral, so a
+ * fresh subscription hears each seeder at its next republish (≤ TTL/2). Returns `stop`.
  */
-export function watchOrigins(
+export function watchEndpoints(
   a: string,
   namespace: string,
   relays: string[],
-  onOrigin: (url: string, seeder: string) => void,
+  onChange: (endpoints: Endpoints) => void,
 ): () => void {
   const filter = { kinds: [20464], '#n': [namespace], '#a': [a] };
-  const reported = new Set<string>();
+  const book = new EndpointBook();
+  let last = '';
+  let stopped = false;
+  const hear = (json: string): void => {
+    if (stopped) return;
+    let b: VerifiedBeacon;
+    try {
+      b = JSON.parse(verifyBeacon(json, now())) as VerifiedBeacon;
+    } catch {
+      return; // fails NFX-03: not a beacon
+    }
+    if (b.a !== a || !book.add(b, now())) return;
+    const snapshot = book.snapshot(now());
+    const key = JSON.stringify(snapshot);
+    if (key === last) return;
+    last = key;
+    onChange(snapshot);
+  };
   const subs = relays.map((r) =>
     subscribe(
       r,
       filter,
-      (json) => {
-        let b: { a: string; seeder: string; content: { endpoints?: { t?: string; url?: unknown }[] } };
-        try {
-          b = JSON.parse(verifyBeacon(json, now()));
-        } catch {
-          return;
-        }
-        if (b.a !== a) return;
-        for (const e of b.content.endpoints ?? []) {
-          if (e.t !== 'https' || typeof e.url !== 'string') continue;
-          const base = originBase(e.url);
-          if (!base || reported.has(base) || reported.size >= MAX_ORIGINS) continue;
-          reported.add(base);
-          onOrigin(base, b.seeder);
-        }
-      },
+      // Events can arrive before the WASM has loaded only if the caller skipped init().
+      (json) => void loadWasm().then(() => hear(json), () => {}),
       () => {},
       () => {},
     ),
   );
-  return () => subs.forEach((s) => s.close());
+  return () => {
+    stopped = true;
+    subs.forEach((s) => s.close());
+  };
 }

@@ -1,6 +1,10 @@
 /**
  * The NFX-10 free browser mesh (M1): p2p-media-loader 4.0.0 on hls.js, one swarm per
- * rendition (NFX-10 §2), signalled through WebTorrent trackers.
+ * rendition (NFX-10 §2). How peers find each other is a `Signaling` (./api.ts), turned into
+ * the engine's configuration in one place, `engineSignaling` below. p2p-media-loader 4.0.0
+ * signals only through WebTorrent trackers, whose sockets it opens itself; another kind
+ * (Nostr, nfx #71) needs an engine that lets this module carry the offer/answer/candidate
+ * exchange, and goes in there.
  *
  * Every segment, whether it came from a peer or over HTTP, is checked by the same WASM
  * verifier as the rest of the player before hls.js sees it (the library validates before
@@ -8,19 +12,13 @@
  * Playlists and inits never travel over the mesh: they go through the player's verifying
  * loader.
  */
+import type { MeshStats, Signaling } from './api';
 import type { Anchor } from './verify';
+
+export type { MeshStats };
 
 /** At most this many trackers are used. */
 export const MAX_TRACKERS = 4;
-
-export interface MeshStats {
-  trackers: string[];
-  swarms: { rendition: string | null; swarm: string }[];
-  bytes: { http: number; p2p: number };
-  uploaded: number;
-  peers: number;
-  rejected: string[];
-}
 
 /**
  * A tracker URL this page may use, reduced to scheme, host, port and path: `wss:`, or
@@ -39,6 +37,19 @@ export function trackerUrl(raw: string): string | null {
   return `${u.protocol}//${u.host}${u.pathname === '/' ? '' : u.pathname}`;
 }
 
+/** The engine's configuration for `signaling`: the one place a new kind is wired in. */
+function engineSignaling(signaling: Signaling): { announceTrackers: string[] } {
+  switch (signaling.kind) {
+    case 'trackers':
+      return { announceTrackers: [...signaling.urls] };
+    default: {
+      // A kind added to `Signaling` and not wired here fails the typecheck.
+      const unknown: never = signaling.kind;
+      throw new TypeError(`nfx: signaling of kind ${String(unknown)} is not in this build`);
+    }
+  }
+}
+
 /** A unique swarm ID for a stream that maps to no rendition: it meets no one. */
 function nowhere(): string {
   const b = new Uint8Array(12);
@@ -55,7 +66,7 @@ export interface MeshTuning {
 /** The `p2p` part of the hls.js config, and the stats it fills in. */
 export function meshConfig(
   anchor: Anchor,
-  trackers: string[],
+  signaling: Signaling,
   iceServers: RTCIceServer[],
   stats: MeshStats,
   log: (m: string) => void,
@@ -86,11 +97,12 @@ export function meshConfig(
         return false;
       }
     };
-  stats.trackers = trackers;
+  stats.signaling = signaling.kind;
+  stats.trackers = signaling.kind === 'trackers' ? [...signaling.urls] : [];
   return {
     p2p: {
       core: {
-        announceTrackers: trackers,
+        ...engineSignaling(signaling),
         rtcConfig: { iceServers },
         ...windows,
         streamSwarmIdBuilder: ({ runtimeId }: { runtimeId: string }) => {

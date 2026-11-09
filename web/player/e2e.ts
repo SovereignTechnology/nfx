@@ -70,6 +70,7 @@ function listen(server: Server): Promise<number> {
 async function playerServer(): Promise<string> {
   const files: Record<string, [string, string]> = {
     '/': ['index.html', 'text/html; charset=utf-8'],
+    '/player.css': ['player.css', 'text/css'],
     '/out/player.js': ['out/player.js', 'text/javascript'],
     '/out/wasm/nfx_wasm_bg.wasm': ['out/wasm/nfx_wasm_bg.wasm', 'application/wasm'],
   };
