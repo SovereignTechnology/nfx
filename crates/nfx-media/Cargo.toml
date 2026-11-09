@@ -1,7 +1,7 @@
 [package]
 name = "nfx-media"
 version = "0.1.1"
-description = "NFX-05 packaging: the demo's L8 ladder/argv planning ported to Rust, an HLS/fMP4 tail, content addressing and hash-list assembly"
+description = "NFX-05 packaging: rendition sizes (one by default) and the demo's L8 argv planning ported to Rust, an HLS/fMP4 tail, content addressing and hash-list assembly"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

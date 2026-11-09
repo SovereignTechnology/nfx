@@ -1,5 +1,20 @@
-//! The rendition ladder (port of L8 `ladder.ts`, build-plan §6.4): 1080p / 720p / 360p,
+//! Rendition sizes (after L8 `ladder.ts`, build-plan §6.4): six tiers from 2160p to 360p,
 //! never upscaled, one keyframe interval for every rendition so switches align.
+//!
+//! - **Offered sizes** ([`offered`]): for a source `H` lines tall (its display height, even,
+//!   at most [`MAX_HEIGHT`]), every tier no taller than `H`, then `<H>p` itself when `H` is no
+//!   tier. Nothing is ever upscaled.
+//! - **What packaging makes** ([`Renditions`]): by default **one** rendition, 720p, or
+//!   `<H>p` for a source shorter than 720; or exactly the offered sizes a creator names
+//!   (`nfx-package --renditions 2160p`, `1080p,360p`, `1000p` for a 1000-line source, or
+//!   `1080p,720p,360p`, the old ladder). While the network is small every rendition is its
+//!   own set of segments and its own browser swarm (NFX-10 §2), so more of them cost storage
+//!   and split the swarms for little gain (nutflix-pear#97 tracks a fuller default).
+//! - **Bitrates** ([`rendition_at`]): a tier's own; between two tiers, interpolated linearly
+//!   by height; below 360p, L8's rule for a source shorter than every tier.
+//!
+//! nutflix-pear's `packages/core/src/media/ladder.ts` ports these rules for its Studio's size
+//! picker: labels and bitrates must stay identical in both.
 
 use crate::probe::{MediaProbe, display_dimensions};
 use crate::{MediaError, Result};
@@ -27,7 +42,20 @@ pub struct Tier {
     pub audio_bitrate_kbps: u32,
 }
 
-pub const LADDER_TIERS: [Tier; 3] = [
+/// The tiers, tallest first (H.264 bitrates; [`rendition_at`] scales them for other codecs).
+pub const LADDER_TIERS: [Tier; 6] = [
+    Tier {
+        label: "2160p",
+        height: 2160,
+        video_bitrate_kbps: 16000,
+        audio_bitrate_kbps: 128,
+    },
+    Tier {
+        label: "1440p",
+        height: 1440,
+        video_bitrate_kbps: 8000,
+        audio_bitrate_kbps: 128,
+    },
     Tier {
         label: "1080p",
         height: 1080,
@@ -41,12 +69,25 @@ pub const LADDER_TIERS: [Tier; 3] = [
         audio_bitrate_kbps: 128,
     },
     Tier {
+        label: "480p",
+        height: 480,
+        video_bitrate_kbps: 1200,
+        audio_bitrate_kbps: 128,
+    },
+    Tier {
         label: "360p",
         height: 360,
         video_bitrate_kbps: 800,
         audio_bitrate_kbps: 96,
     },
 ];
+
+/// The tallest output: a taller source is packaged at most this tall.
+pub const MAX_HEIGHT: u32 = 2160;
+
+/// The height of the one rendition a video gets when its creator names none. Never
+/// upscaled: a shorter source gets its own (even) height.
+pub const DEFAULT_HEIGHT: u32 = 720;
 
 /// Keyframe interval in seconds — identical for every rendition so switches align.
 pub const GOP_SECONDS: u32 = 2;
@@ -60,7 +101,8 @@ const STORYBOARD_INTERVALS: [u32; 9] = [1, 2, 5, 10, 20, 30, 60, 120, 300];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenditionSpec {
-    /// "1080p" | "720p" | "360p" — never taller than the source.
+    /// A tier's label, or `<height>p` for a source's own height — never taller than the
+    /// source.
     pub label: String,
     pub height: u32,
     pub video_bitrate_kbps: u32,
@@ -151,54 +193,192 @@ pub fn storyboard_geometry(duration_sec: f64) -> Option<StoryboardGeometry> {
     })
 }
 
-/// Plan the renditions for a probed source.
-pub fn plan_ladder(
-    probe: &MediaProbe,
-    max_height: Option<u32>,
-    codec: Codec,
-) -> Result<LadderPlan> {
+/// Which renditions packaging makes (`nfx-package --renditions`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Renditions {
+    /// One rendition: 720p, or `<H>p` for a source shorter than 720 lines.
+    #[default]
+    Default,
+    /// Exactly these sizes, by label, each one of the source's [`offered`] sizes and named
+    /// once. Planned tallest first, whatever order they are named in.
+    Sizes(Vec<String>),
+}
+
+impl Renditions {
+    /// A comma-separated list of labels, as `--renditions` takes it: `720p`, `1080p,360p`.
+    /// Each entry is `<height>p` (a positive height, no leading zero) and named once;
+    /// nothing else (no spaces, no empty entries) is accepted. Whether the source offers
+    /// them is checked by [`plan`].
+    pub fn parse(list: &str) -> Result<Self> {
+        let mut labels: Vec<String> = Vec::new();
+        for label in list.split(',') {
+            if label_height(label).is_none() {
+                return Err(MediaError::Renditions(format!(
+                    "{label:?} is not a size (a height and p, such as 720p)"
+                )));
+            }
+            if labels.iter().any(|l| l == label) {
+                return Err(MediaError::Renditions(format!("{label} is named twice")));
+            }
+            labels.push(label.to_owned());
+        }
+        Ok(Self::Sizes(labels))
+    }
+}
+
+/// The height a label names: `720p` → 720. Digits without a leading zero, then `p`.
+fn label_height(label: &str) -> Option<u32> {
+    let digits = label.strip_suffix('p')?;
+    if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Even, and at least 2.
+fn even(height: u32) -> u32 {
+    2.max(height - height % 2)
+}
+
+fn tier_spec(t: &Tier, codec: Codec) -> RenditionSpec {
+    RenditionSpec {
+        label: t.label.to_owned(),
+        height: t.height,
+        video_bitrate_kbps: round_u32(f64::from(t.video_bitrate_kbps) * bitrate_scale(codec)),
+        audio_bitrate_kbps: t.audio_bitrate_kbps,
+        codec,
+        container: codec_container(codec),
+    }
+}
+
+/// The rendition for an output `height` lines tall (made even and at least 2, at most
+/// [`MAX_HEIGHT`]), labelled `<height>p`:
+/// - at a tier's height, that tier;
+/// - between two tiers, `vk = round(lo.v + (hi.v − lo.v) × (h − lo.h) / (hi.h − lo.h))`
+///   from their H.264 video bitrates, audio 128 kbps;
+/// - below the lowest tier (360p), `vk = round(800 × h / 360)`, audio 96 kbps (L8's
+///   rendition for a source shorter than every tier).
+///
+/// Off a tier the video bitrate is then `max(200, round(vk × scale))` for the codec's scale.
+#[must_use]
+pub fn rendition_at(height: u32, codec: Codec) -> RenditionSpec {
+    let h = even(height.min(MAX_HEIGHT));
+    if let Some(t) = LADDER_TIERS.iter().find(|t| t.height == h) {
+        return tier_spec(t, codec);
+    }
+    // LADDER_TIERS runs tallest first, so `above` exists: h is below MAX_HEIGHT here.
+    let lowest = &LADDER_TIERS[LADDER_TIERS.len() - 1];
+    let above = LADDER_TIERS
+        .iter()
+        .rev()
+        .find(|t| t.height > h)
+        .unwrap_or(&LADDER_TIERS[0]);
+    let (vk, audio) = match LADDER_TIERS.iter().find(|t| t.height < h) {
+        Some(below) => {
+            let (lo_h, lo_v) = (f64::from(below.height), f64::from(below.video_bitrate_kbps));
+            let (hi_h, hi_v) = (f64::from(above.height), f64::from(above.video_bitrate_kbps));
+            (
+                round_u32(lo_v + (hi_v - lo_v) * (f64::from(h) - lo_h) / (hi_h - lo_h)),
+                128,
+            )
+        }
+        None => (
+            round_u32(
+                f64::from(lowest.video_bitrate_kbps) * f64::from(h) / f64::from(lowest.height),
+            ),
+            lowest.audio_bitrate_kbps,
+        ),
+    };
+    RenditionSpec {
+        label: format!("{h}p"),
+        height: h,
+        video_bitrate_kbps: 200.max(round_u32(f64::from(vk) * bitrate_scale(codec))),
+        audio_bitrate_kbps: audio,
+        codec,
+        container: codec_container(codec),
+    }
+}
+
+/// The source's height as packaging sees it: its display height (rotation applied), capped
+/// by `max_height` and [`MAX_HEIGHT`], even and at least 2.
+pub fn source_height(probe: &MediaProbe, max_height: Option<u32>) -> Result<u32> {
     let video = probe
         .video
         .as_ref()
         .ok_or_else(|| MediaError::NoVideoStream("input has no video stream".into()))?;
-    let container = codec_container(codec);
-    let (_, src_height) = display_dimensions(video);
-    let cap = max_height.map_or(src_height, |m| src_height.min(m));
-    let scale = bitrate_scale(codec);
+    let display = display_dimensions(video).1;
+    Ok(even(
+        display.min(max_height.unwrap_or(u32::MAX)).min(MAX_HEIGHT),
+    ))
+}
 
-    let mut renditions: Vec<RenditionSpec> = LADDER_TIERS
+/// The sizes a source offers, as [`offered`] lists them, for a source height `h` (already
+/// even and capped).
+fn offered_at(h: u32, codec: Codec) -> Vec<RenditionSpec> {
+    let mut out: Vec<RenditionSpec> = LADDER_TIERS
         .iter()
-        .filter(|t| t.height <= cap)
-        .map(|t| RenditionSpec {
-            label: t.label.to_owned(),
-            height: t.height,
-            video_bitrate_kbps: round_u32(f64::from(t.video_bitrate_kbps) * scale),
-            audio_bitrate_kbps: t.audio_bitrate_kbps,
-            codec,
-            container,
-        })
+        .filter(|t| t.height <= h)
+        .map(|t| tier_spec(t, codec))
         .collect();
-
-    if renditions.is_empty() {
-        // Source shorter than the lowest tier: one rendition at native (even) height.
-        let h = 2.max(cap - cap % 2);
-        let lowest = &LADDER_TIERS[LADDER_TIERS.len() - 1];
-        let vk = round_u32(
-            f64::from(lowest.video_bitrate_kbps) * f64::from(h) / f64::from(lowest.height),
-        );
-        renditions.push(RenditionSpec {
-            label: format!("{h}p"),
-            height: h,
-            video_bitrate_kbps: 200.max(round_u32(f64::from(vk) * scale)),
-            audio_bitrate_kbps: lowest.audio_bitrate_kbps,
-            codec,
-            container,
-        });
+    if !LADDER_TIERS.iter().any(|t| t.height == h) {
+        out.push(rendition_at(h, codec));
     }
+    out
+}
 
+/// The sizes a creator may pick for this source: every tier no taller than it (tallest
+/// first), then its own height when that is no tier. Never taller than the source.
+pub fn offered(
+    probe: &MediaProbe,
+    max_height: Option<u32>,
+    codec: Codec,
+) -> Result<Vec<RenditionSpec>> {
+    Ok(offered_at(source_height(probe, max_height)?, codec))
+}
+
+/// Plan what `renditions` asks for, for a probed source no taller than `max_height`.
+pub fn plan(
+    probe: &MediaProbe,
+    renditions: &Renditions,
+    max_height: Option<u32>,
+    codec: Codec,
+) -> Result<LadderPlan> {
+    let h = source_height(probe, max_height)?;
+    let specs = match renditions {
+        Renditions::Default => vec![rendition_at(DEFAULT_HEIGHT.min(h), codec)],
+        Renditions::Sizes(labels) => {
+            if labels.is_empty() {
+                return Err(MediaError::Renditions("no size named".into()));
+            }
+            let offered = offered_at(h, codec);
+            if let Some(missing) = labels
+                .iter()
+                .find(|l| !offered.iter().any(|o| &o.label == *l))
+            {
+                let list: Vec<&str> = offered.iter().map(|o| o.label.as_str()).collect();
+                return Err(MediaError::Renditions(format!(
+                    "{missing} is not offered for this source ({h} lines; packaging never upscales): offered {}",
+                    list.join(", ")
+                )));
+            }
+            if let Some(twice) = labels
+                .iter()
+                .enumerate()
+                .find_map(|(i, l)| labels[..i].contains(l).then_some(l))
+            {
+                return Err(MediaError::Renditions(format!("{twice} is named twice")));
+            }
+            let mut specs: Vec<RenditionSpec> = offered
+                .into_iter()
+                .filter(|o| labels.contains(&o.label))
+                .collect();
+            specs.sort_by_key(|s| std::cmp::Reverse(s.height));
+            specs
+        }
+    };
     Ok(LadderPlan {
         source: probe.clone(),
-        renditions,
+        renditions: specs,
         thumbnail_times: thumbnail_times(probe.duration_sec),
         storyboard: storyboard_geometry(probe.duration_sec),
     })

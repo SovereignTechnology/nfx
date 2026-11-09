@@ -11,8 +11,8 @@ use nfx_media::argv::{
     rendition_dimensions, storyboard_argv, thumbnail_argv,
 };
 use nfx_media::ladder::{
-    Codec, Container, LADDER_TIERS, RenditionSpec, STORYBOARD_MAX_TILES, StoryboardGeometry,
-    fit_to_height, plan_ladder, storyboard_geometry, thumbnail_times,
+    Codec, Container, RenditionSpec, STORYBOARD_MAX_TILES, StoryboardGeometry, fit_to_height,
+    storyboard_geometry, thumbnail_times,
 };
 use nfx_media::probe::{
     AudioInfo, MediaProbe, VideoInfo, ffprobe_argv, parse_ffprobe_json, parse_rational,
@@ -40,148 +40,11 @@ fn src(width: u32, height: u32, rotation: Option<u32>, duration_sec: f64) -> Med
     }
 }
 
-fn labels(p: &MediaProbe, max: Option<u32>, codec: Codec) -> Vec<String> {
-    plan_ladder(p, max, codec)
-        .unwrap()
-        .renditions
-        .into_iter()
-        .map(|r| r.label)
-        .collect()
-}
-
 // ---------------------------------------------------------------- ladder.test.ts
-
-#[test]
-fn ladder_1080p_source_gives_three_h264_mp4_tiers() {
-    let plan = plan_ladder(&src(1920, 1080, None, 120.0), None, Codec::H264).unwrap();
-    assert_eq!(
-        plan.renditions
-            .iter()
-            .map(|r| r.label.as_str())
-            .collect::<Vec<_>>(),
-        ["1080p", "720p", "360p"]
-    );
-    assert!(
-        plan.renditions
-            .iter()
-            .all(|r| r.codec == Codec::H264 && r.container == Container::Mp4)
-    );
-    assert_eq!(
-        plan.renditions[0],
-        RenditionSpec {
-            label: "1080p".into(),
-            height: 1080,
-            video_bitrate_kbps: 5000,
-            audio_bitrate_kbps: 128,
-            codec: Codec::H264,
-            container: Container::Mp4,
-        }
-    );
-}
-
-#[test]
-fn ladder_never_upscales() {
-    assert_eq!(
-        labels(&src(1280, 720, None, 120.0), None, Codec::H264),
-        ["720p", "360p"]
-    );
-    assert_eq!(
-        labels(&src(854, 480, None, 120.0), None, Codec::H264),
-        ["360p"]
-    );
-}
-
-#[test]
-fn ladder_caps_4k_at_1080p() {
-    assert_eq!(
-        labels(&src(3840, 2160, None, 120.0), None, Codec::H264),
-        ["1080p", "720p", "360p"]
-    );
-}
-
-#[test]
-fn ladder_below_360p_yields_one_native_even_rendition() {
-    let plan = plan_ladder(&src(320, 240, None, 120.0), None, Codec::H264).unwrap();
-    assert_eq!(plan.renditions.len(), 1);
-    assert_eq!(plan.renditions[0].label, "240p");
-    assert_eq!(plan.renditions[0].height, 240);
-    assert!(plan.renditions[0].video_bitrate_kbps >= 200);
-    assert_eq!(
-        plan_ladder(&src(200, 135, None, 120.0), None, Codec::H264)
-            .unwrap()
-            .renditions[0]
-            .height,
-        134
-    );
-}
-
-#[test]
-fn ladder_uses_rotated_display_height() {
-    assert_eq!(
-        labels(&src(1920, 1080, Some(90), 120.0), None, Codec::H264),
-        ["1080p", "720p", "360p"]
-    );
-}
-
-#[test]
-fn ladder_honours_max_height_and_codec() {
-    let plan = plan_ladder(&src(1920, 1080, None, 120.0), Some(720), Codec::Vp9).unwrap();
-    assert_eq!(
-        plan.renditions
-            .iter()
-            .map(|r| r.label.as_str())
-            .collect::<Vec<_>>(),
-        ["720p", "360p"]
-    );
-    assert!(
-        plan.renditions
-            .iter()
-            .all(|r| r.codec == Codec::Vp9 && r.container == Container::Webm)
-    );
-    assert!(plan.renditions[0].video_bitrate_kbps < 2500);
-    assert_eq!(
-        plan_ladder(&src(1920, 1080, None, 120.0), None, Codec::Av1)
-            .unwrap()
-            .renditions[0]
-            .container,
-        Container::Mp4
-    );
-}
-
-#[test]
-fn ladder_rejects_audio_only_input() {
-    let audio_only = MediaProbe {
-        container: "mp3".into(),
-        duration_sec: 10.0,
-        bitrate_kbps: None,
-        video: None,
-        audio: Some(AudioInfo {
-            codec: "mp3".into(),
-            channels: 2,
-            sample_rate: 44100,
-        }),
-    };
-    assert!(matches!(
-        plan_ladder(&audio_only, None, Codec::H264),
-        Err(MediaError::NoVideoStream(_))
-    ));
-}
-
-#[test]
-fn ladder_adds_thumbnails_and_storyboard() {
-    let plan = plan_ladder(&src(1920, 1080, None, 100.0), None, Codec::H264).unwrap();
-    assert_eq!(plan.thumbnail_times, [10.0, 30.0, 50.0, 70.0]);
-    assert_eq!(
-        plan.storyboard,
-        Some(StoryboardGeometry {
-            interval_sec: 1,
-            cols: 10,
-            rows: 10,
-            tile_width: 160
-        })
-    );
-    assert_eq!(LADDER_TIERS.map(|t| t.height), [1080, 720, 360]);
-}
+//
+// L8's ladder cases (every tier up to 1080p) were replaced on 2026-11-09 by the size rule
+// in `ladder.rs`: one rendition by default, any size the source offers up to 2160p. Their
+// successors, and the vectors shared with nutflix-pear's `ladder.ts`, are in `sizes.rs`.
 
 #[test]
 fn fit_to_height_keeps_aspect_and_even_dimensions() {

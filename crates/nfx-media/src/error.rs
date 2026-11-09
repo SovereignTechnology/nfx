@@ -13,6 +13,9 @@ pub enum MediaError {
     Tool(String),
     #[error("package: {0}")]
     Package(String),
+    /// The renditions asked for cannot be made (`nfx-package --renditions`).
+    #[error("renditions: {0}")]
+    Renditions(String),
     #[error("NFX self-check failed: {0}")]
     Nfx(#[from] nfx_proto::Error),
     #[error("io: {0}")]
