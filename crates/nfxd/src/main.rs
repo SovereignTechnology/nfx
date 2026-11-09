@@ -7,6 +7,7 @@
 //!              [--description <md>] [--alt <text>] [--tag <t>]…
 //! nfxd delete --key <file> --relay <url>… --a <a>…   withdraw your own videos (NFX-02 §6)
 //! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--iroh-relay-ca <pem>]… [--relay-only]
+//!          [--iroh-bind <ip:port> [--iroh-external <ip:port>]…]
 //!          [--seed <a>]… [--fetch <a>]… [--pull <a>]… [--origin <addr:port>]
 //!          [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--tracker-url <wss url>]]] [--namespace <ns>]…
 //!          [--allow-creator <hex>]… [--gossip [--gossip-peer <id>@<ip:port|relay-url>]…]
@@ -20,6 +21,23 @@
 //! a file) that the `--iroh-relay`s' TLS may chain to, beside the compiled-in Mozilla roots:
 //! for a network whose relays use a private CA, such as a test network. It changes which
 //! relay certificates are trusted, never how peers authenticate each other.
+//!
+//! `--iroh-bind` binds the iroh endpoint's UDP socket to a fixed `ip:port` (`0.0.0.0:<port>`
+//! for every interface) instead of a random port, so a NAT or a firewall can forward it. It
+//! replaces the default socket of that address family only. `--iroh-external` (repeatable, at
+//! most 4, needs `--iroh-bind`) names an address where internet peers reach that socket, such
+//! as the public address of a DNAT in front of the host. It is advertised as given in tickets
+//! and beacons, and with any set, `run` advertises no other direct address that is not public:
+//! private, shared, loopback, link-local, unique-local, documentation and other special-purpose
+//! addresses are left out, so a host's interface addresses behind the DNAT never reach a relay.
+//! (Peers that are already connected still learn them from iroh's own NAT traversal.) Neither
+//! works with `--relay-only`.
+//!
+//! An `--iroh-relay` is extra reachability, never a requirement: a node never stops seeding
+//! for want of one. With `--iroh-external` it seeds at once. Without, it waits at most 60 s to
+//! reach a relay first, so that its first beacons name it (meanwhile each video's state is
+//! `AwaitingRelay`, naming the relay), then seeds without it and warns. Beacons are made from
+//! the node's current address, so they name a relay as soon as it connects.
 //!
 //! With `--gossip`, `run` joins each video's gossip swarm (NFX-06 §4) through the seeders
 //! relay beacons name and any `--gossip-peer`, and prints its own `gossip peer:` lines for
@@ -57,7 +75,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...]";
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>]... [--fetch <a>]... [--pull <a>]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...]";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -211,6 +229,8 @@ async fn run(args: &[String]) -> Result<()> {
             "relay",
             "iroh-relay",
             "iroh-relay-ca",
+            "iroh-bind",
+            "iroh-external",
             "seed",
             "fetch",
             "pull",
@@ -236,6 +256,7 @@ async fn run(args: &[String]) -> Result<()> {
             })
             .transpose()
     };
+    let (iroh_bind, iroh_external) = iroh_addrs(&f)?;
     let cfg = Config {
         keys: one(&f, "key")?
             .map(|p| key::load(Path::new(&p)))
@@ -252,6 +273,8 @@ async fn run(args: &[String]) -> Result<()> {
             .collect::<Result<_>>()?,
         iroh_relay_cas: relay_cas(&all(&f, "iroh-relay-ca"))?,
         relay_only,
+        iroh_bind,
+        iroh_external,
         seed: all(&f, "seed"),
         fetch: all(&f, "fetch"),
         pull: all(&f, "pull"),
@@ -349,6 +372,25 @@ fn relay_cas(files: &[String]) -> Result<Vec<nfx_node::node::CertificateDer<'sta
     Ok(out)
 }
 
+/// `--iroh-bind ip:port` (once) and `--iroh-external ip:port` (repeatable). Only the form is
+/// checked here; `Daemon::start` checks that the daemon can use them.
+fn iroh_addrs(
+    f: &[(String, String)],
+) -> Result<(Option<std::net::SocketAddr>, Vec<std::net::SocketAddr>)> {
+    let parse = |name: &str, v: &str| -> Result<std::net::SocketAddr> {
+        v.parse()
+            .map_err(|_| Error::Config(format!("--{name} {v}: not an ip:port")))
+    };
+    let bind = one(f, "iroh-bind")?
+        .map(|v| parse("iroh-bind", &v))
+        .transpose()?;
+    let external = all(f, "iroh-external")
+        .iter()
+        .map(|v| parse("iroh-external", v))
+        .collect::<Result<_>>()?;
+    Ok((bind, external))
+}
+
 /// A public key given as an npub or 64 hex digits, as 64 lowercase hex. The error never
 /// repeats the value: it may be a secret key given by mistake.
 fn pubkey_hex(flag: &str, v: &str) -> Result<String> {
@@ -382,7 +424,7 @@ fn gossip_peers(values: &[String]) -> Result<Vec<iroh::EndpointAddr>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{gossip_peers, pubkey_hex, relay_cas};
+    use super::{flags, gossip_peers, iroh_addrs, pubkey_hex, relay_cas};
 
     fn ca_pem() -> String {
         use base64::Engine as _;
@@ -462,6 +504,54 @@ mod tests {
         }
         assert_eq!(nfxd::key::npub(&hex).as_deref(), Some(npub.as_str()));
         assert_eq!(nfxd::key::npub("nope"), None);
+    }
+
+    #[test]
+    fn iroh_bind_and_external_addresses_parse_and_externals_repeat() {
+        let args = |s: &[&str]| s.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let known = ["iroh-bind", "iroh-external"];
+        let f = flags(
+            &args(&[
+                "--iroh-bind",
+                "0.0.0.0:7843",
+                "--iroh-external",
+                "203.0.113.7:7843",
+                "--iroh-external",
+                "[2001:db8::7]:7843",
+            ]),
+            &known,
+        )
+        .unwrap();
+        let sa = |s: &str| s.parse::<std::net::SocketAddr>().unwrap();
+        let (bind, external) = iroh_addrs(&f).unwrap();
+        assert_eq!(bind, Some(sa("0.0.0.0:7843")));
+        assert_eq!(external, [sa("203.0.113.7:7843"), sa("[2001:db8::7]:7843")]);
+        // Neither given: iroh's defaults.
+        assert_eq!(iroh_addrs(&[]).unwrap(), (None, vec![]));
+        for (flag, bad) in [
+            ("iroh-bind", "7843"),
+            ("iroh-bind", ":7843"),
+            ("iroh-bind", "localhost:7843"),
+            ("iroh-bind", "0.0.0.0:65536"),
+            ("iroh-external", "203.0.113.7"),
+            ("iroh-external", "relay.example:7843"),
+            ("iroh-external", "2001:db8::7:7843"),
+            ("iroh-external", "udp://203.0.113.7:7843"),
+        ] {
+            let name = format!("--{flag}");
+            let f = flags(&args(&[name.as_str(), bad]), &known).unwrap();
+            let err = iroh_addrs(&f).unwrap_err().to_string();
+            assert_eq!(err, format!("--{flag} {bad}: not an ip:port"));
+        }
+        // One bind address; a flag needs its value.
+        let f = flags(
+            &args(&["--iroh-bind", "0.0.0.0:1", "--iroh-bind", "0.0.0.0:2"]),
+            &known,
+        )
+        .unwrap();
+        let err = iroh_addrs(&f).unwrap_err().to_string();
+        assert!(err.contains("--iroh-bind given twice"), "{err}");
+        assert!(flags(&args(&["--iroh-external"]), &known).is_err());
     }
 
     #[test]

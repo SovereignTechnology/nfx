@@ -1,5 +1,6 @@
 //! The iroh side of a peer: one endpoint serving iroh-blobs and `nfx/gossip/1`.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -55,6 +56,89 @@ pub fn relay_cas_from_pem(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
     Ok(out)
 }
 
+/// At most this many external addresses (`NodeConfig::external_addrs`): each one goes into
+/// every ticket of every beacon.
+pub const MAX_EXTERNAL_ADDRS: usize = 4;
+
+/// IPv4 blocks that are never public: IANA's special-purpose blocks that are not globally
+/// reachable, plus multicast and the reserved 240/4 (which holds the broadcast address).
+const NOT_PUBLIC_V4: [(Ipv4Addr, u32); 15] = [
+    (Ipv4Addr::new(0, 0, 0, 0), 8),       // "this network"
+    (Ipv4Addr::new(10, 0, 0, 0), 8),      // private
+    (Ipv4Addr::new(100, 64, 0, 0), 10),   // shared address space (CGNAT)
+    (Ipv4Addr::new(127, 0, 0, 0), 8),     // loopback
+    (Ipv4Addr::new(169, 254, 0, 0), 16),  // link-local
+    (Ipv4Addr::new(172, 16, 0, 0), 12),   // private
+    (Ipv4Addr::new(192, 0, 0, 0), 24),    // IETF protocol assignments
+    (Ipv4Addr::new(192, 0, 2, 0), 24),    // documentation
+    (Ipv4Addr::new(192, 88, 99, 0), 24),  // 6to4 relay anycast (deprecated)
+    (Ipv4Addr::new(192, 168, 0, 0), 16),  // private
+    (Ipv4Addr::new(198, 18, 0, 0), 15),   // benchmarking
+    (Ipv4Addr::new(198, 51, 100, 0), 24), // documentation
+    (Ipv4Addr::new(203, 0, 113, 0), 24),  // documentation
+    (Ipv4Addr::new(224, 0, 0, 0), 4),     // multicast
+    (Ipv4Addr::new(240, 0, 0, 0), 4),     // reserved, and the broadcast address
+];
+
+/// Only global unicast IPv6 (2000::/3) can be public, and within it not these blocks.
+const NOT_PUBLIC_V6: [(Ipv6Addr, u32); 4] = [
+    // IETF protocol assignments: Teredo, benchmarking, ORCHID and others.
+    (Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 23),
+    (Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32), // documentation
+    // 6to4: it wraps an IPv4 address, which may be a private one.
+    (Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0), 16),
+    (Ipv6Addr::new(0x3fff, 0, 0, 0, 0, 0, 0, 0), 20), // documentation
+];
+
+/// Whether `addr` is a public unicast address that peers on the internet can dial. It fails
+/// closed: anything not known to be public is not. So private, shared (CGNAT), loopback,
+/// link-local, unique-local, documentation, benchmarking, multicast and reserved addresses
+/// are not, nor IPv6 outside 2000::/3 (which takes in IPv4-mapped and NAT64 addresses),
+/// 6to4, Teredo and the other IETF blocks, nor any address with port 0.
+#[must_use]
+pub fn is_public(addr: &SocketAddr) -> bool {
+    if addr.port() == 0 {
+        return false;
+    }
+    match addr.ip() {
+        IpAddr::V4(ip) => {
+            let bits = ip.to_bits();
+            !NOT_PUBLIC_V4.iter().any(|&(net, len)| {
+                let mask = u32::MAX << (32 - len);
+                bits & mask == net.to_bits() & mask
+            })
+        }
+        IpAddr::V6(ip) => {
+            let bits = ip.to_bits();
+            let within = |net: Ipv6Addr, len: u32| {
+                let mask = u128::MAX << (128 - len);
+                bits & mask == net.to_bits() & mask
+            };
+            within(Ipv6Addr::new(0x2000, 0, 0, 0, 0, 0, 0, 0), 3)
+                && !NOT_PUBLIC_V6.iter().any(|&(net, len)| within(net, len))
+        }
+    }
+}
+
+/// `addr` as [`Node::addr`] advertises it, given the configured external addresses. With
+/// none, it is unchanged. Otherwise it keeps its relays and those of its direct addresses
+/// that are public ([`is_public`]), drops every other direct address (the interface
+/// addresses of a host behind a NAT or a DNAT) and any transport it does not know, and adds
+/// every external address as given.
+#[must_use]
+pub fn advertised(addr: EndpointAddr, external: &[SocketAddr]) -> EndpointAddr {
+    if external.is_empty() {
+        return addr;
+    }
+    let kept = addr.addrs.into_iter().filter(|t| match t {
+        TransportAddr::Relay(_) => true,
+        TransportAddr::Ip(ip) => is_public(ip),
+        _ => false,
+    });
+    let external = external.iter().copied().map(TransportAddr::Ip);
+    EndpointAddr::from_parts(addr.id, kept.chain(external))
+}
+
 /// How often iroh-blobs deletes untagged blobs. Seeded content is tagged; anything fetched
 /// is read back into the NFX store and then left untagged, so it does not accumulate and
 /// is not re-served by BLAKE3 hash for long.
@@ -86,6 +170,17 @@ pub struct NodeConfig {
     /// relay certificates are trusted, never how peers authenticate each other (iroh's own
     /// keys do that).
     pub relay_cas: Vec<CertificateDer<'static>>,
+    /// Bind the endpoint's UDP socket here, a fixed port that a NAT or a firewall can
+    /// forward, instead of a random port on every interface. It replaces iroh's default
+    /// socket for this address family only; the other family keeps its default. `None`:
+    /// iroh's defaults, as before. Refused with `relay_only`.
+    pub bind_addr: Option<SocketAddr>,
+    /// Addresses at which this endpoint is reachable directly from outside, such as a public
+    /// address whose UDP port is forwarded to `bind_addr` (at most [`MAX_EXTERNAL_ADDRS`]).
+    /// They are advertised as given. With any set, [`Node::addr`] (tickets and beacons)
+    /// leaves out every direct address that is not public ([`advertised`]). Refused with
+    /// `relay_only`.
+    pub external_addrs: Vec<SocketAddr>,
 }
 
 /// The secret key is never printed.
@@ -99,6 +194,8 @@ impl std::fmt::Debug for NodeConfig {
             .field("lookup", &self.lookup.is_some())
             .field("no_portmapper", &self.no_portmapper)
             .field("relay_cas", &self.relay_cas.len())
+            .field("bind_addr", &self.bind_addr)
+            .field("external_addrs", &self.external_addrs)
             .finish()
     }
 }
@@ -111,10 +208,22 @@ pub struct Node {
     relay_only: bool,
     /// Addresses learned out of band (gossip bootstrap peers), filtered by [`Node::trusted`].
     book: MemoryLookup,
+    /// `NodeConfig::external_addrs`: with any, only public direct addresses are advertised.
+    external: Vec<SocketAddr>,
 }
 
 impl Node {
     pub async fn spawn(cfg: NodeConfig) -> Result<Self> {
+        if cfg.relay_only && (cfg.bind_addr.is_some() || !cfg.external_addrs.is_empty()) {
+            return Err(NodeError::Transport(
+                "a relay-only node binds no UDP socket and has no external address".into(),
+            ));
+        }
+        if cfg.external_addrs.len() > MAX_EXTERNAL_ADDRS {
+            return Err(NodeError::Transport(format!(
+                "more than {MAX_EXTERNAL_ADDRS} external addresses"
+            )));
+        }
         let mut builder = Endpoint::builder(presets::Minimal);
         builder = if cfg.relays.is_empty() {
             builder.relay_mode(RelayMode::Disabled)
@@ -128,6 +237,12 @@ impl Node {
         }
         if cfg.relay_only {
             builder = builder.clear_ip_transports();
+        }
+        if let Some(addr) = cfg.bind_addr {
+            builder = builder.bind_addr(addr).map_err(NodeError::transport)?;
+        }
+        for addr in &cfg.external_addrs {
+            builder = builder.external_addr(*addr);
         }
         if cfg.no_portmapper {
             builder = builder.portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
@@ -178,6 +293,7 @@ impl Node {
             relays: cfg.relays,
             relay_only: cfg.relay_only,
             book,
+            external: cfg.external_addrs,
         })
     }
 
@@ -225,10 +341,15 @@ impl Node {
         self.router.endpoint().id()
     }
 
-    /// What to publish: the endpoint id plus its home relay and any direct addresses.
+    /// What to publish (tickets, beacons, `gossip peer:` lines): the endpoint id plus its
+    /// home relay and its direct addresses. With external addresses configured, those are
+    /// always in it and the other direct addresses only when public ([`advertised`]), so an
+    /// interface address behind a NAT or a DNAT is never published. iroh itself still tells
+    /// a peer that is already connected all of its candidates (NAT traversal, gossip peer
+    /// data): this filters what reaches the world, not what a connected peer learns.
     #[must_use]
     pub fn addr(&self) -> EndpointAddr {
-        self.router.endpoint().addr()
+        advertised(self.router.endpoint().addr(), &self.external)
     }
 
     #[must_use]
@@ -336,6 +457,155 @@ mod tests {
             assert!(err.contains(why), "{why}: {err}");
             assert!(!err.contains("secret-key"), "the content leaked: {err}");
             assert!(!err.contains("not base64"), "the content leaked: {err}");
+        }
+    }
+
+    fn sa(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn only_public_unicast_addresses_with_a_port_count_as_public() {
+        for public in [
+            "8.8.8.8:7843",
+            "1.0.0.1:1",
+            "172.15.255.255:1",  // just below 172.16/12
+            "172.32.0.0:1",      // just above it
+            "100.63.255.255:1",  // just below 100.64/10
+            "100.128.0.0:1",     // just above it
+            "192.0.1.255:1",     // between 192.0.0/24 and 192.0.2/24
+            "198.17.255.255:1",  // just below 198.18/15
+            "198.20.0.0:1",      // just above it
+            "223.255.255.255:1", // just below multicast
+            "[2001:4860:4860::8888]:7843",
+            "[2001:200::1]:1",  // just above 2001::/23
+            "[2003::1]:1",      // just above 6to4
+            "[3ffe:ffff::1]:1", // just below 3fff::/20
+        ] {
+            assert!(is_public(&sa(public)), "{public} is public");
+        }
+        for not in [
+            "0.0.0.0:1",
+            "0.1.2.3:1",
+            "10.1.2.3:1",
+            "100.64.0.0:1",
+            "100.127.255.255:1",
+            "127.0.0.1:1",
+            "127.1.2.3:1",
+            "169.254.10.20:1",
+            "172.16.0.1:1",
+            "172.31.255.255:1",
+            "192.0.0.9:1",
+            "192.0.2.1:1",
+            "192.88.99.1:1",
+            "192.168.1.1:1",
+            "198.18.0.1:1",
+            "198.19.255.255:1",
+            "198.51.100.7:1",
+            "203.0.113.7:1",
+            "224.0.0.1:1",
+            "239.255.255.250:1",
+            "240.0.0.1:1",
+            "255.255.255.255:1",
+            "8.8.8.8:0",
+            "[::]:1",
+            "[::1]:1",
+            "[::ffff:8.8.8.8]:1",
+            "[64:ff9b::808:808]:1",
+            "[fc00::1]:1",
+            "[fd12:3456::1]:1",
+            "[fe80::1]:1",
+            "[ff02::1]:1",
+            "[2001::1]:1",
+            "[2001:1ff:ffff::1]:1",
+            "[2001:db8::1]:1",
+            "[2002:c0a8:101::1]:1",
+            "[3fff::1]:1",
+            "[2001:4860:4860::8888]:0",
+        ] {
+            assert!(!is_public(&sa(not)), "{not} is not public");
+        }
+        // Never public where the standard library's stable predicates say otherwise.
+        for a in 0..=255u8 {
+            for b in [0, 2, 16, 31, 51, 64, 88, 127, 168, 254, 255] {
+                for c in [0, 2, 99, 100, 113, 255] {
+                    let ip = Ipv4Addr::new(a, b, c, 1);
+                    let std_says_not = ip.is_unspecified()
+                        || ip.is_private()
+                        || ip.is_loopback()
+                        || ip.is_link_local()
+                        || ip.is_documentation()
+                        || ip.is_multicast()
+                        || ip.is_broadcast();
+                    if std_says_not {
+                        assert!(!is_public(&SocketAddr::new(ip.into(), 1)), "{ip}");
+                    }
+                }
+            }
+        }
+        for ip in [Ipv6Addr::LOCALHOST, Ipv6Addr::UNSPECIFIED] {
+            assert!(!is_public(&SocketAddr::new(ip.into(), 1)), "{ip}");
+        }
+    }
+
+    #[test]
+    fn with_an_external_address_only_public_ones_are_advertised() {
+        let id = SecretKey::from([9u8; 32]).public();
+        let relay: RelayUrl = "https://relay.example/".parse().unwrap();
+        let ip = |s: &str| TransportAddr::Ip(sa(s));
+        let seen = EndpointAddr::from_parts(
+            id,
+            [
+                TransportAddr::Relay(relay.clone()),
+                ip("10.1.2.3:7843"),
+                ip("127.0.0.1:7843"),
+                ip("[fe80::1]:7843"),
+                ip("[fd00::5]:7843"),
+                ip("8.8.8.8:40000"),
+            ],
+        );
+        // Without one, nothing changes.
+        assert_eq!(advertised(seen.clone(), &[]), seen);
+        // With one: the relay, the public address and the external one; no interface
+        // address. The external address is kept as given even where it is not public.
+        let external = [sa("203.0.113.7:7843")];
+        let out = advertised(seen.clone(), &external);
+        let want = EndpointAddr::from_parts(
+            id,
+            [
+                TransportAddr::Relay(relay.clone()),
+                ip("8.8.8.8:40000"),
+                ip("203.0.113.7:7843"),
+            ],
+        );
+        assert_eq!(out, want);
+        // Before iroh has reported any address, the external one is there already.
+        let bare = EndpointAddr::from_parts(id, []);
+        assert_eq!(
+            advertised(bare, &external).ip_addrs().collect::<Vec<_>>(),
+            [&external[0]]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relay_only_node_takes_no_bind_or_external_address() {
+        for cfg in [
+            NodeConfig {
+                relay_only: true,
+                bind_addr: Some(sa("0.0.0.0:7843")),
+                ..NodeConfig::default()
+            },
+            NodeConfig {
+                relay_only: true,
+                external_addrs: vec![sa("203.0.113.7:7843")],
+                ..NodeConfig::default()
+            },
+            NodeConfig {
+                external_addrs: vec![sa("203.0.113.7:7843"); MAX_EXTERNAL_ADDRS + 1],
+                ..NodeConfig::default()
+            },
+        ] {
+            assert!(Node::spawn(cfg).await.is_err());
         }
     }
 

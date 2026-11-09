@@ -98,7 +98,11 @@ async fn get(addr: SocketAddr, path: &str) -> (StatusCode, Bytes) {
 }
 
 async fn until_state(daemon: &Daemon, a: &str, want: &VideoState) {
-    tokio::time::timeout(WAIT, async {
+    until_state_within(daemon, a, want, WAIT).await;
+}
+
+async fn until_state_within(daemon: &Daemon, a: &str, want: &VideoState, limit: Duration) {
+    tokio::time::timeout(limit, async {
         loop {
             let state = daemon.state();
             match state.get(a) {
@@ -806,4 +810,356 @@ async fn rating_settings_that_cannot_work_are_refused_at_start() {
         .expect("refused");
         assert!(err.to_string().contains(why), "{name}: {err}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn iroh_bind_and_external_addresses_that_cannot_work_are_refused_at_start() {
+    let sa = |s: &str| -> SocketAddr { s.parse().unwrap() };
+    let relay: RelayUrl = "https://relay.ours.example/".parse().unwrap();
+    for (name, relay_only, bind, external, why) in [
+        (
+            "bind-relay-only",
+            true,
+            Some(sa("0.0.0.0:7843")),
+            vec![],
+            "relay-only node has no direct address",
+        ),
+        (
+            "bind-port-0",
+            false,
+            Some(sa("0.0.0.0:0")),
+            vec![],
+            "--iroh-bind 0.0.0.0:0: port 0 is not a fixed port",
+        ),
+        (
+            "external-no-bind",
+            false,
+            None,
+            vec![sa("203.0.113.7:7843")],
+            "--iroh-external needs --iroh-bind",
+        ),
+        (
+            "external-five",
+            false,
+            Some(sa("0.0.0.0:7843")),
+            vec![sa("203.0.113.7:7843"); 5],
+            "at most 4",
+        ),
+        (
+            "external-unspecified",
+            false,
+            Some(sa("0.0.0.0:7843")),
+            vec![sa("0.0.0.0:7843")],
+            "--iroh-external 0.0.0.0:7843: not an address a peer can dial",
+        ),
+        (
+            "external-port-0",
+            false,
+            Some(sa("0.0.0.0:7843")),
+            vec![sa("203.0.113.7:0")],
+            "not an address a peer can dial",
+        ),
+        (
+            "external-multicast",
+            false,
+            Some(sa("0.0.0.0:7843")),
+            vec![sa("224.0.0.1:7843")],
+            "not an address a peer can dial",
+        ),
+        (
+            "external-broadcast",
+            false,
+            Some(sa("0.0.0.0:7843")),
+            vec![sa("255.255.255.255:7843")],
+            "not an address a peer can dial",
+        ),
+        (
+            "external-v6-unspecified",
+            false,
+            Some(sa("[::]:7843")),
+            vec![sa("[::]:7843")],
+            "not an address a peer can dial",
+        ),
+    ] {
+        let err = Daemon::start(Config {
+            keys: Some(Keys::generate()),
+            store: tmp(name),
+            relay_only,
+            iroh_relays: vec![relay.clone()],
+            iroh_bind: bind,
+            iroh_external: external,
+            ..Config::default()
+        })
+        .await
+        .err()
+        .expect("refused");
+        assert!(err.to_string().contains(why), "{name}: {err}");
+    }
+
+    // A fixed port that is taken is an error, never a quiet fallback to a random one.
+    let taken = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("bind-taken"),
+        iroh_bind: Some(taken.local_addr().unwrap()),
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    drop(taken);
+    assert!(!err.to_string().is_empty());
+
+    // Bound and advertised: the external address, and no loopback or private address.
+    let port = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let external = sa(&format!("203.0.113.7:{port}"));
+    let ok = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("bind-ok"),
+        iroh_bind: Some(sa(&format!("0.0.0.0:{port}"))),
+        iroh_external: vec![external],
+        ..Config::default()
+    })
+    .await
+    .expect("starts");
+    let advertised: Vec<SocketAddr> = ok.node().addr().ip_addrs().copied().collect();
+    assert!(advertised.contains(&external), "{advertised:?}");
+    assert!(
+        advertised
+            .iter()
+            .all(|a| *a == external || nfx_node::node::is_public(a)),
+        "{advertised:?}"
+    );
+    ok.shutdown().await;
+}
+
+/// Wait until `a`'s state matches `want`, failing after `limit`.
+async fn until_matches(
+    daemon: &Daemon,
+    a: &str,
+    limit: Duration,
+    want: impl Fn(&VideoState) -> bool,
+) {
+    tokio::time::timeout(limit, async {
+        loop {
+            match daemon.state().get(a) {
+                Some(s) if want(s) => return,
+                Some(VideoState::Failed(e)) => panic!("{a} failed: {e}"),
+                _ => tokio::time::sleep(Duration::from_millis(200)).await,
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{a}: {:?}", daemon.state()));
+}
+
+/// An iroh relay URL on loopback with nothing behind it (yet), and its port.
+fn relay_not_up() -> (u16, RelayUrl) {
+    let port = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    (port, format!("http://127.0.0.1:{port}").parse().unwrap())
+}
+
+/// The iroh endpoint of the next beacon `watch` hears.
+async fn next_iroh_endpoint(watch: &mut nfx_node::nostr::BeaconWatch) -> (String, Vec<String>) {
+    let beacon = tokio::time::timeout(WAIT, watch.next())
+        .await
+        .expect("a beacon")
+        .expect("a beacon");
+    beacon
+        .content
+        .endpoints
+        .iter()
+        .find_map(|e| match e {
+            nfx_proto::beacon::Endpoint::Iroh { relay, addrs, .. } => {
+                Some((relay.clone(), addrs.clone()))
+            }
+            _ => None,
+        })
+        .expect("an iroh endpoint")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seeder_with_an_external_address_seeds_at_once_whatever_its_iroh_relay_does() {
+    let (_, dead) = relay_not_up();
+    let seed_dir = tmp("external-no-wait");
+    let (event, manifest, _) = vector_package(&seed_dir);
+    let a = manifest.a_tag();
+    let port = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let external: SocketAddr = format!("203.0.113.7:{port}").parse().unwrap();
+    let started = std::time::Instant::now();
+    let seeder = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: seed_dir.join("store"),
+        iroh_relays: vec![dead],
+        iroh_bind: Some(format!("0.0.0.0:{port}").parse().unwrap()),
+        iroh_external: vec![external],
+        seed: vec![a.clone()],
+        embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    // No wait for the relay at start (a node without an external address waits 10 s there).
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "start took {:?}",
+        started.elapsed()
+    );
+    let relay_url = seeder.relay_url.clone().unwrap();
+    let client = Relays::connect(std::slice::from_ref(&relay_url), Duration::from_secs(10))
+        .await
+        .unwrap();
+    let mut beacons = client
+        .watch_beacons(manifest.addr.namespace(), std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    client.publish(&event).await.unwrap();
+    // Nor before seeding: it seeds and announces its external address, with no relay.
+    until_state_within(&seeder, &a, &VideoState::Seeding, Duration::from_secs(20)).await;
+    let (relay, addrs) = next_iroh_endpoint(&mut beacons).await;
+    assert!(relay.is_empty(), "{relay}");
+    assert!(addrs.contains(&external.to_string()), "{addrs:?}");
+    client.shutdown().await;
+    seeder.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seeder_whose_iroh_relay_never_comes_up_seeds_without_it_after_the_wait() {
+    let (_, dead) = relay_not_up();
+    let seed_dir = tmp("relay-never");
+    let (event, manifest, _) = vector_package(&seed_dir);
+    let a = manifest.a_tag();
+    let seeder = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: seed_dir.join("store"),
+        iroh_relays: vec![dead],
+        seed: vec![a.clone()],
+        embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let started = std::time::Instant::now();
+    let relay_url = seeder.relay_url.clone().unwrap();
+    let client = Relays::connect(std::slice::from_ref(&relay_url), Duration::from_secs(10))
+        .await
+        .unwrap();
+    let mut beacons = client
+        .watch_beacons(manifest.addr.namespace(), std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    client.publish(&event).await.unwrap();
+    until_matches(
+        &seeder,
+        &a,
+        WAIT,
+        |s| matches!(s, VideoState::AwaitingRelay(why) if why.contains("127.0.0.1")),
+    )
+    .await;
+    // The wait is bounded: it seeds without the relay, announcing its direct addresses.
+    until_state_within(
+        &seeder,
+        &a,
+        &VideoState::Seeding,
+        nfxd::daemon::RELAY_WAIT + Duration::from_secs(30),
+    )
+    .await;
+    assert!(
+        started.elapsed() + Duration::from_secs(5)
+            >= nfxd::daemon::RELAY_WAIT - Duration::from_secs(10),
+        "it waited for the relay first: {:?}",
+        started.elapsed()
+    );
+    let (relay, addrs) = next_iroh_endpoint(&mut beacons).await;
+    assert!(relay.is_empty(), "{relay}");
+    assert!(!addrs.is_empty(), "direct addresses still announced");
+    client.shutdown().await;
+    seeder.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seeder_waits_for_an_iroh_relay_that_comes_up_late_and_then_seeds_through_it() {
+    // The relay's port: free now, taken only later.
+    let (port, late) = relay_not_up();
+    let seed_dir = tmp("late-relay");
+    let (event, manifest, list) = vector_package(&seed_dir);
+    let a = manifest.a_tag();
+    let seeder_keys = Keys::generate();
+    // Start waits a first 10 s for the relay, then goes on without it.
+    let seeder = Daemon::start(Config {
+        keys: Some(seeder_keys.clone()),
+        store: seed_dir.join("store"),
+        iroh_relays: vec![late.clone()],
+        seed: vec![a.clone()],
+        embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let relay_url = seeder.relay_url.clone().unwrap();
+    let client = Relays::connect(std::slice::from_ref(&relay_url), Duration::from_secs(10))
+        .await
+        .unwrap();
+    let mut beacons = client
+        .watch_beacons(manifest.addr.namespace(), std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    client.publish(&event).await.unwrap();
+
+    // The manifest is found, the relay is not: the seeder waits (at most RELAY_WAIT) and says
+    // why, and announces nothing meanwhile.
+    until_matches(
+        &seeder,
+        &a,
+        WAIT,
+        |s| matches!(s, VideoState::AwaitingRelay(why) if why.contains("not reached")),
+    )
+    .await;
+    let early = tokio::time::timeout(Duration::from_secs(3), beacons.next()).await;
+    assert!(early.is_err(), "announced before the relay");
+
+    // The relay comes up: the seeder seeds and announces.
+    let _relay = {
+        use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+        let mut config = ServerConfig::default();
+        config.relay = Some(RelayConfig::new((Ipv4Addr::LOCALHOST, port)));
+        Server::spawn(config).await.unwrap()
+    };
+    until_state_within(&seeder, &a, &VideoState::Seeding, Duration::from_secs(120)).await;
+
+    // Its tickets carry the relay: a relay-only fetcher, which dials nothing else, fetches
+    // the video through them.
+    let fetcher_dir = tmp("late-relay-fetcher");
+    let fetcher = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: fetcher_dir.clone(),
+        relays: vec![relay_url.clone()],
+        iroh_relays: vec![late.clone()],
+        relay_only: true,
+        fetch: vec![a.clone()],
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    until_state_within(&fetcher, &a, &VideoState::Seeding, Duration::from_secs(120)).await;
+    let store = FsStore::open(&fetcher_dir).unwrap();
+    for f in &list.files {
+        assert!(store.has(&f.sha256), "{} fetched", f.name);
+    }
+
+    client.shutdown().await;
+    fetcher.shutdown().await;
+    seeder.shutdown().await;
 }

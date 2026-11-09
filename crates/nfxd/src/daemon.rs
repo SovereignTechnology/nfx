@@ -40,6 +40,7 @@ use nfx_proto::hashlist::HashList;
 use nfx_proto::manifest::Manifest;
 use nfx_proto::namespace::Namespace;
 use nostr_sdk::prelude::Keys;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::{Error, Result};
@@ -53,6 +54,11 @@ pub const RATING_RETRY: Duration = Duration::from_secs(10 * 60);
 /// How often the rating task looks for a namespace it has no scores for yet.
 const RATING_TICK: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a node with `iroh_relays` and no `iroh_external` waits to reach one before it
+/// seeds without it, with a warning. An iroh relay is extra reachability, never a
+/// requirement: beacons name it once it connects. A node with an external address does not
+/// wait at all.
+pub const RELAY_WAIT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Default)]
 pub struct Config {
@@ -71,6 +77,14 @@ pub struct Config {
     /// No direct IP transports: every iroh byte crosses a relay. For proving the relay
     /// path, and for hosts that must not expose UDP.
     pub relay_only: bool,
+    /// Bind iroh's UDP socket here (`--iroh-bind`): a fixed port that a NAT or a firewall can
+    /// forward. Default: a random port on every interface.
+    pub iroh_bind: Option<SocketAddr>,
+    /// Where peers on the internet reach this node directly (`--iroh-external`, at most
+    /// `nfx_node::node::MAX_EXTERNAL_ADDRS`), such as the public address whose UDP port is
+    /// forwarded to `iroh_bind`. Advertised as given; with any set, no interface address that
+    /// is not public is advertised. Needs `iroh_bind`.
+    pub iroh_external: Vec<SocketAddr>,
     pub seed: Vec<String>,
     pub fetch: Vec<String>,
     pub pull: Vec<String>,
@@ -140,6 +154,10 @@ pub enum VideoState {
     Seeding,
     /// Seeding, but the last beacon reached no relay (the reason).
     Unannounced(String),
+    /// Ready to seed, and waiting at most [`RELAY_WAIT`] to reach one of the `iroh_relays`
+    /// first, so that the first beacons name it (which relay, and for how long). Only a node
+    /// with no `iroh_external` waits.
+    AwaitingRelay(String),
     /// Withdrawn by its creator (NFX-02 §6): no longer announced. Stored bytes stay.
     Deleted,
     /// On the origin only.
@@ -189,6 +207,9 @@ struct Shared {
     /// This node's own pubkey: its own beacons and envelopes are never learned.
     own: Option<String>,
     state: Arc<Mutex<BTreeMap<String, VideoState>>>,
+    /// Why seeding waits for an iroh relay ([`come_online`]); `None` once one is reached,
+    /// after [`RELAY_WAIT`], or when there is nothing to wait for.
+    relay_wait: watch::Receiver<Option<String>>,
 }
 
 /// Aborts its task when dropped (a loop's helper dies with the loop).
@@ -368,11 +389,28 @@ impl Shared {
         }
     }
 
+    /// Wait, at most [`RELAY_WAIT`] from start, until an iroh relay is reached, so that the
+    /// first beacons name it. Meanwhile `a`'s state says why.
+    async fn until_online(&self, a: &str) {
+        let mut wait = self.relay_wait.clone();
+        loop {
+            let why = wait.borrow_and_update().clone();
+            match why {
+                None => return,
+                Some(why) => self.set(a, VideoState::AwaitingRelay(why)),
+            }
+            if wait.changed().await.is_err() {
+                return; // shutting down
+            }
+        }
+    }
+
     async fn seed_and_announce(&self, a: &str, manifest: &Verified<Manifest>) -> Result<()> {
         let keys = self
             .keys
             .clone()
             .ok_or_else(|| Error::Config("seeding needs --key".into()))?;
+        self.until_online(a).await;
         let seeded = self
             .node
             .seed(
@@ -539,6 +577,7 @@ impl Daemon {
         if !cfg.iroh_relay_cas.is_empty() && cfg.iroh_relays.is_empty() {
             return Err(Error::Config("--iroh-relay-ca needs --iroh-relay".into()));
         }
+        check_iroh_addrs(&cfg)?;
         // The allow-list governs the embedded relay; without one it would govern nothing.
         if !cfg.allow_creators.is_empty() && cfg.embed_relay.is_none() {
             return Err(Error::Config("--allow-creator needs --embed-relay".into()));
@@ -683,13 +722,36 @@ impl Daemon {
                 relay_cas: cfg.iroh_relay_cas.clone(),
                 blobs_dir: Some(state.join("iroh-blobs")),
                 no_portmapper: cfg.no_portmapper,
+                bind_addr: cfg.iroh_bind,
+                external_addrs: cfg.iroh_external.clone(),
                 ..NodeConfig::default()
             })
             .await?,
         );
-        if !cfg.iroh_relays.is_empty() {
-            // Tickets carry the home relay; best effort, direct addresses still work.
-            let _ = node.online(CONNECT_TIMEOUT).await;
+        // An iroh relay is extra reachability, never a requirement. A node with an external
+        // address seeds at once; any other waits at most RELAY_WAIT for one, so that its first
+        // beacons name it, then seeds without it. Beacons name it whenever it connects.
+        let (relay_status, relay_wait) = watch::channel(None);
+        if !cfg.iroh_relays.is_empty()
+            && cfg.iroh_external.is_empty()
+            && node.online(CONNECT_TIMEOUT).await.is_err()
+        {
+            let relays = cfg
+                .iroh_relays
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            relay_status.send_replace(Some(format!(
+                "iroh relay {relays} not reached in {} s; seeding without it in {} s at most",
+                CONNECT_TIMEOUT.as_secs(),
+                RELAY_WAIT.saturating_sub(CONNECT_TIMEOUT).as_secs()
+            )));
+            tasks.push(tokio::spawn(come_online(
+                node.clone(),
+                relay_status,
+                relays,
+            )));
         }
         let relays = Arc::new(Relays::connect(&relays, CONNECT_TIMEOUT).await?);
         let store = Arc::new(FsStore::open(&cfg.store)?);
@@ -740,6 +802,7 @@ impl Daemon {
             tracker,
             own: cfg.keys.as_ref().map(|k| k.public_key().to_hex()),
             state: state.clone(),
+            relay_wait,
         });
 
         // Beacons for everything we fetch or pull feed the pull sources.
@@ -959,6 +1022,63 @@ impl Daemon {
         }
         self.relays.shutdown().await;
         let _ = self.node.close().await;
+    }
+}
+
+/// `--iroh-bind` and `--iroh-external`, checked before anything binds.
+fn check_iroh_addrs(cfg: &Config) -> Result<()> {
+    if cfg.relay_only && (cfg.iroh_bind.is_some() || !cfg.iroh_external.is_empty()) {
+        return Err(Error::Config(
+            "--iroh-bind, --iroh-external: a relay-only node has no direct address".into(),
+        ));
+    }
+    if let Some(addr) = cfg.iroh_bind
+        && addr.port() == 0
+    {
+        return Err(Error::Config(format!(
+            "--iroh-bind {addr}: port 0 is not a fixed port"
+        )));
+    }
+    // An external address points at the bound port; a random one cannot be forwarded.
+    if !cfg.iroh_external.is_empty() && cfg.iroh_bind.is_none() {
+        return Err(Error::Config("--iroh-external needs --iroh-bind".into()));
+    }
+    if cfg.iroh_external.len() > nfx_node::node::MAX_EXTERNAL_ADDRS {
+        return Err(Error::Config(format!(
+            "--iroh-external: at most {} addresses",
+            nfx_node::node::MAX_EXTERNAL_ADDRS
+        )));
+    }
+    for addr in &cfg.iroh_external {
+        let ip = addr.ip();
+        let broadcast = matches!(ip, std::net::IpAddr::V4(v4) if v4.is_broadcast());
+        if addr.port() == 0 || ip.is_unspecified() || ip.is_multicast() || broadcast {
+            return Err(Error::Config(format!(
+                "--iroh-external {addr}: not an address a peer can dial"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Wait for the node's home relay until [`RELAY_WAIT`] has passed since start
+/// (`Daemon::start` waited the first [`CONNECT_TIMEOUT`]), then clear `status` so seeding
+/// goes ahead, with a warning naming `relays` if none was reached. iroh keeps redialling
+/// them meanwhile and after; the beacons name one as soon as it connects.
+async fn come_online(node: Arc<Node>, status: watch::Sender<Option<String>>, relays: String) {
+    let reached = node
+        .online(RELAY_WAIT.saturating_sub(CONNECT_TIMEOUT))
+        .await
+        .is_ok();
+    status.send_replace(None);
+    if !reached {
+        eprintln!(
+            "nfxd: warning: iroh relay {relays} not reached in {} s; seeding without it \
+             (beacons name it once it connects)",
+            RELAY_WAIT.as_secs()
+        );
+        node.endpoint().online().await;
+        eprintln!("nfxd: iroh relay reached; the next beacons name it");
     }
 }
 

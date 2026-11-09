@@ -25,7 +25,9 @@ pub struct Seeded {
 }
 
 impl Seeded {
-    /// Beacon `tickets`: rendition id → ticket string, plus `meta` (NFX-03 §4).
+    /// Beacon `tickets`: rendition id → ticket string, plus `meta` (NFX-03 §4), as made
+    /// when seeding started. [`Node::beacon_endpoint`] remakes them with the node's current
+    /// address.
     #[must_use]
     pub fn tickets(&self) -> BTreeMap<String, String> {
         let mut out: BTreeMap<String, String> = self
@@ -85,10 +87,19 @@ impl Node {
         })
     }
 
-    /// The NFX-03 iroh endpoint for a seeded video.
+    /// The NFX-03 iroh endpoint for a seeded video. Its tickets name the node's address
+    /// as it is now ([`Node::addr`]), not as it was when seeding started: a relay reached
+    /// later, or an address that changed, is in the next beacon.
     #[must_use]
     pub fn beacon_endpoint(&self, seeded: &Seeded) -> BeaconEndpoint {
         let addr = self.addr();
+        let ticket = |t: &BlobTicket| BlobTicket::new(addr.clone(), t.hash(), t.format());
+        let mut tickets: BTreeMap<String, String> = seeded
+            .renditions
+            .iter()
+            .map(|(id, t)| (id.clone(), ticket(t).to_string()))
+            .collect();
+        tickets.insert("meta".into(), ticket(&seeded.meta).to_string());
         BeaconEndpoint::Iroh {
             node: self.id().to_string(),
             relay: addr
@@ -97,7 +108,7 @@ impl Node {
                 .map(ToString::to_string)
                 .unwrap_or_default(),
             addrs: addr.ip_addrs().map(ToString::to_string).collect(),
-            tickets: seeded.tickets(),
+            tickets,
         }
     }
 
