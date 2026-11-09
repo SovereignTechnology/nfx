@@ -493,11 +493,8 @@ pub fn read(ev: &Event, room: &str, me: &str, now: u64) -> Result<Parsed> {
             if ev.content.is_empty() || ev.content.starts_with('#') {
                 return Err(bad("content is not a NIP-44 v2 payload"));
             }
-            if to != me {
-                return Ok(Parsed::Ignored("addressed to another session"));
-            }
             let content = ev.content.clone();
-            if t == Type::Offer {
+            let signal = if t == Type::Offer {
                 if single(ev, "e")?.is_some() {
                     return Err(bad("an offer has no e"));
                 }
@@ -511,7 +508,11 @@ pub fn read(ev: &Event, room: &str, me: &str, now: u64) -> Result<Parsed> {
                     offer: offer.to_owned(),
                     content,
                 }
+            };
+            if to != me {
+                return Ok(Parsed::Ignored("addressed to another session"));
             }
+            signal
         }
     };
     ev.verify()?;

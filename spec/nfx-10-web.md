@@ -479,14 +479,24 @@ A session subscribes to each of its rooms with
 6. Decrypt an offer or answer (NIP-44 v2, MAC first) and drop it unless the plaintext is
    an SDP (first line `v=0`).
 
+A session takes each event once, by event id, whichever relays deliver it, and remembers
+only the ids of events that passed these checks: a relay that sends a forgery under a real
+event's id must not make the real one look like a repeat. It drops its own events, which
+relays echo, before any of this.
+
 Presence is kept per sender session key: the newest event by `created_at` wins, and a
 `disconnect` wins a tie with a `connect` of the same second. A peer is gone at its
 presence's `expiration` or at its `disconnect`.
 
+A `disconnect` is kept until it is 60 s old, so an older `connect` replayed later does not
+bring its peer back.
+
 **Bounds.** A session MUST bound what strangers can make it hold or do. The reference
-library: at most 256 peers' presence per room, one negotiation in flight per peer, 8
-directed events decrypted per sender per 30 s, the ids of the last 4096 events seen, and
-relay messages over 70 KiB dropped unparsed.
+library: at most 256 peers' presence per room; one negotiation in flight per peer and 16
+per room, of which at most 4 are offers of its own awaiting an answer (so presence from
+keys that never answer cannot take the slots that answering needs); 8 directed events
+decrypted per sender per 30 s; the ids of the last 4096 events taken; and relay messages
+over 70 KiB (UTF-8) dropped unparsed.
 
 ### 6.6 Connecting
 
@@ -501,8 +511,11 @@ relay messages over 70 KiB dropped unparsed.
 - An offer opens one data channel, ordered and reliable, which carries p2p-media-loader's
   peer protocol (§2). Its label is not significant.
 - The offerer applies only the answer whose `e` names its pending offer.
-- An offer unanswered within 50 s, or a connection not open within 15 s of the answer,
-  has failed; the offerer may try again at the peer's next `connect`.
+- An offer unanswered within 15 s (an honest answer takes ICE gathering, at most 5 s, and
+  two trips through the relays), or a connection not open within 15 s of the answer, has
+  failed. The offerer may try that peer again at a later `connect`, after a backoff: 30 s,
+  doubling with each failure, at most 10 min. Without it, a key that announces itself and
+  never answers would cost every lower key an offer per presence.
 
 ### 6.7 Privacy
 
@@ -512,9 +525,11 @@ relay messages over 70 KiB dropped unparsed.
   client.
 - The SDP, and with it every candidate address, is encrypted to its receiver: relays do
   not see the addresses peers punch with.
-- Anyone who can derive a room can join it, see its members' session keys and, by sending
-  an offer, receive a member's answer and its addresses. That is what a tracker's swarm
-  gives away too (§1), and why a page says so before it joins the mesh.
+- Anyone who can derive a room can join it and see its members' session keys. By
+  announcing presence it receives offers from every member whose key is lower, and by
+  sending an offer it receives the others' answers: either way it learns their addresses,
+  public ones included. That is what a tracker's swarm gives away too (§1), and why a page
+  says so before it joins the mesh.
 - A session key is per session: a viewer is linkable across the rooms of one session
   (the renditions it plays), not across sessions, beyond what its IP address links.
 
