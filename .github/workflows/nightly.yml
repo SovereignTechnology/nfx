@@ -1,10 +1,15 @@
 # Scheduled checks on an unchanged tree, as rbitcoin-org/rbitcoin's nightly workflows run (sovtech,
-# 2026-11-06). Nothing here gates a merge, and nothing here builds or runs the money code.
+# 2026-11-06). Nothing here gates a merge, and nothing here measures, pins or changes the money code.
 #
 #   advisories   RUSTSEC for crates/ (the workspace ci.yml checks on every push) and
 #                crates/desktop (the Tauri viewer, which no other job checks), and npm's
 #                advisories for web/player: a new advisory shows here the night it is published,
 #                not at the next push.
+#   miri         nfx-proto's tests (the wire parser) under miri on the latest nightly, as rbitcoin
+#                runs its primitives. The workspace forbids unsafe code (unsafe_code = "forbid"),
+#                so what miri can still find is undefined behaviour reached through a dependency's
+#                unsafe code (k256, sha2, base64, serde_json); nfx-pay-wire, a dependency, is
+#                compiled under miri with it.
 #
 # A pull request that touches this file runs it once, so an edit is proven before the schedule
 # runs it. The same tools as ci.yml: its pinned rust image, its sha256-pinned cargo-deny and Node.
@@ -83,3 +88,29 @@ jobs:
         run: |
           echo "crates: $CRATES, crates/desktop: $DESKTOP, web/player: $PLAYER"
           [ "$CRATES" = success ] && [ "$DESKTOP" = success ] && [ "$PLAYER" = success ]
+
+  miri:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: nightly with miri
+        run: rustup toolchain install nightly --component miri --component rust-src --profile minimal --allow-downgrade
+      - name: cargo miri test -p nfx-proto
+        working-directory: crates
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        # Skipped under miri only (ci.yml's check runs it natively): it signs a 10,001-tag event
+        # twice, which miri's per-allocation tracking cannot hold on a runner (killed, exit 101,
+        # no diagnostic, 2026-11-07).
+        run: |
+          rustc --version
+          cargo miri setup
+          cargo miri test -p nfx-proto --locked -- --skip follow_lists_are_capped_and_mute_lists_are_not

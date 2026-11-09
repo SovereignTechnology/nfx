@@ -1,0 +1,6 @@
+# The next rustc the workspace must build on, warning-free (.github/workflows/depth.yml's
+# rust-forward job), as rbitcoin-org/rbitcoin's rust-forward.toml. The shipped toolchain stays
+# ci.yml's rust:1.98.0 image, a compiled fact of the money lock: it moves only with the audit
+# loop's re-pin. Raise this channel when a new stable is out.
+[toolchain]
+channel = "1.99.1"
