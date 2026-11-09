@@ -807,3 +807,105 @@ async fn rating_settings_that_cannot_work_are_refused_at_start() {
         assert!(err.to_string().contains(why), "{name}: {err}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_public_addresses_and_caps_that_cannot_work_are_refused_at_start() {
+    let sa = |s: &str| -> SocketAddr { s.parse().unwrap() };
+    let tracker = Some(sa("127.0.0.1:0"));
+    for (name, bridge, public, max_peers, why) in [
+        (
+            "public-no-bridge",
+            None,
+            Some(sa("203.0.113.7:7844")),
+            None,
+            "--bridge-public needs --bridge",
+        ),
+        (
+            "public-unspecified",
+            Some(sa("127.0.0.1:0")),
+            Some(sa("0.0.0.0:7844")),
+            None,
+            "--bridge-public 0.0.0.0:7844: not an address a browser can dial",
+        ),
+        (
+            "public-port-0",
+            Some(sa("127.0.0.1:0")),
+            Some(sa("203.0.113.7:0")),
+            None,
+            "not an address a browser can dial",
+        ),
+        (
+            "public-multicast",
+            Some(sa("127.0.0.1:0")),
+            Some(sa("239.1.2.3:7844")),
+            None,
+            "not an address a browser can dial",
+        ),
+        (
+            "cap-no-bridge",
+            None,
+            None,
+            Some(16),
+            "--bridge-max-peers needs --bridge",
+        ),
+        (
+            "cap-zero",
+            Some(sa("127.0.0.1:0")),
+            None,
+            Some(0),
+            "--bridge-max-peers 0: not 1 to 1024",
+        ),
+        (
+            "cap-huge",
+            Some(sa("127.0.0.1:0")),
+            None,
+            Some(1025),
+            "--bridge-max-peers 1025: not 1 to 1024",
+        ),
+    ] {
+        let err = Daemon::start(Config {
+            keys: Some(Keys::generate()),
+            store: tmp(name),
+            embed_tracker: tracker,
+            bridge,
+            bridge_public: public,
+            bridge_max_peers: max_peers,
+            ..Config::default()
+        })
+        .await
+        .err()
+        .expect("refused");
+        assert!(err.to_string().contains(why), "{name}: {err}");
+    }
+
+    // Bound on loopback, told to browsers as the public address in front of it.
+    let public = sa("203.0.113.7:7844");
+    let ok = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("bridge-public-ok"),
+        embed_tracker: tracker,
+        bridge: Some(sa("127.0.0.1:0")),
+        bridge_public: Some(public),
+        bridge_max_peers: Some(16),
+        ..Config::default()
+    })
+    .await
+    .expect("starts");
+    assert_eq!(ok.bridge_public, Some(public));
+    let bound = ok.bridge_addr.unwrap();
+    assert!(bound.ip().is_loopback() && bound.port() != 0, "{bound}");
+    ok.shutdown().await;
+
+    // Without --bridge-public, browsers are told the bound address, as before.
+    let plain = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("bridge-plain"),
+        embed_tracker: tracker,
+        bridge: Some(sa("127.0.0.1:0")),
+        ..Config::default()
+    })
+    .await
+    .expect("starts");
+    assert_eq!(plain.bridge_public, plain.bridge_addr);
+    plain.shutdown().await;
+}
