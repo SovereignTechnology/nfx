@@ -54,7 +54,8 @@ jobs:
         run: |
           set -euo pipefail
           rustup component add llvm-tools-preview
-          curl -sSfLo /tmp/llvm-cov.tgz "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${CARGO_LLVM_COV_VERSION}/cargo-llvm-cov-x86_64-unknown-linux-musl.tar.gz"
+          # Each download retries with backoff (8 tries, about 4 min): release-download 504s turned CI red on 2026-11-09.
+          curl -sSfL --retry 8 --retry-all-errors -o /tmp/llvm-cov.tgz "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${CARGO_LLVM_COV_VERSION}/cargo-llvm-cov-x86_64-unknown-linux-musl.tar.gz"
           echo "${CARGO_LLVM_COV_SHA256}  /tmp/llvm-cov.tgz" | sha256sum -c -
           tar -xzf /tmp/llvm-cov.tgz -C /tmp && install -m 0755 /tmp/cargo-llvm-cov /usr/local/bin/
       - name: cargo llvm-cov (the workspace without nfx-pay and nfx-pay-wire)
