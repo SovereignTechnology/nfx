@@ -11,10 +11,10 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
 - **hls.js** on the master playlist (NFX-05 §§3,6 conventions; hash-named URIs).
 - **p2p-media-loader** (v4, pinned in NFX-11 §4) as the WebRTC mesh layer. Two peer-source plug-ins, both
   conformant:
-  1. **WebTorrent trackers** (wss) — primary; fast, mature;
-  2. **scoped-relay signaling** (NFX-04) — censorship-resistant fallback: SDP offers/
-     answers relayed as short-lived nostr ephemerals (profile TBD before freeze;
-     never carry blob bytes).
+  1. **WebTorrent trackers** (wss) — fast, mature;
+  2. **Nostr signaling** (§6) — no tracker: presence, offers and answers travel as
+     ephemeral kind-25050 events through ordinary Nostr relays, offers and answers NIP-44
+     encrypted. They never carry segment bytes.
 - **Every segment is verified before use, whatever its source.** A player MUST check
   each segment, from a peer or over HTTPS, against the verified hash list (NFX-05 §4)
   before handing it to the media stack. With p2p-media-loader that means both
@@ -356,6 +356,176 @@ Browser-side iroh emulation, torrent protocol bridging, Subresource-Integrity CS
 policy of specific deployments (deployment concern), and anything that changes the
 NFX-05 byte formats.
 
+## 6. Signaling over Nostr
+
+Mesh peers MAY find each other, and exchange their WebRTC offers and answers, through
+ordinary Nostr relays instead of trackers. Nothing of NFX's own is in the path: no
+tracker, no TURN, no relay plugin. Any relay that carries ephemeral events (NIP-01) will
+do. A scoped relay (NFX-04 §1) admits only NFX's catalog kinds and refuses kind 25050,
+so a page names general relays for signaling. Once two peers hold each other's complete
+SDP, ICE runs its connectivity checks from both ends, which is the hole punch; STUN (§1)
+gives each its public mapping.
+
+The wire is **signaling-compatible with the NIP-DC draft §§2, 4–6** (nostr4j's
+`NIP-DC.md`, 2026-11-02, commit `3a9def15`): its kind, tags, room proof, presence, offer
+and answer. **It is not a NIP-DC implementation.** NFX does not adopt NIP-DC's data plane
+(the payload envelope, `version: dc4` and its routing, TURN kind 25051): the data channel
+carries p2p-media-loader's peer protocol, as it does with trackers (§§1–2).
+
+### 6.1 Rooms
+
+One room per stream swarm (§2). Its key pair:
+
+```
+h_0         = sha256( utf8("nfx/1/web/room") || 0x00 || utf8(stream swarm ID) )
+h_(i+1)     = sha256( h_i )
+room secret = the first h_i that is a secp256k1 secret key (0 < h_i < n, big-endian)
+room key    = the BIP-340 x-only public key of the room secret, 64 lowercase hex: `P`
+```
+
+- An `h_0` out of range has a probability of about 2^-128, so no swarm ID is known that
+  needs a rehash. `mesh-signal.json` pins the derivation for real swarm IDs and the rehash
+  step from forced out-of-range values.
+- **A room key is not access control.** The stream swarm ID is public to anyone who has
+  the manifest and its hash list, so anyone who can play the video can derive its rooms,
+  join them and sign their room proofs. What the room key buys is narrower:
+  - relays and passers-by see a room key, not the video's name. Anyone with the catalog
+    can derive every rendition's room key and map it back;
+  - the room proof (§6.3) makes every event prove knowledge of the room secret, so blind
+    spam from anyone who never derived it is dropped before any work but a signature check.
+
+### 6.2 Events
+
+Every event is kind **25050** (ephemeral). `t` tells the four types apart:
+
+```json
+{ "kind": 25050, "pubkey": "<session key>", "content": "",
+  "tags": [ ["t", "connect"], ["P", "<room key>"], ["d", "<session id>"],
+            ["i", "nfx-mesh/1"], ["y", "nfx"],
+            ["expiration", "<created_at + 90>"],
+            ["roomproof", "<id>", "<sig>"] ] }
+```
+
+| `t` | content | tags beyond `t`, `P`, `d`, `i`, `y` and `roomproof` |
+|---|---|---|
+| `connect` | `""` | `expiration`: `created_at` + at most 90 (senders use 90) |
+| `disconnect` | `""` | none |
+| `offer` | NIP-44 v2 of the SDP offer | `p`: the receiver's session key |
+| `answer` | NIP-44 v2 of the SDP answer | `p`: the receiver's session key; `e`: the offer's event id |
+
+- `pubkey` is the sender's **session key** (§6.4) and `d` its **session id**: 16 random
+  bytes, 32 lowercase hex, fixed for the session.
+- `i` is the protocol identifier, exactly `nfx-mesh/1`; `y` is the application, `nfx`.
+- Offer and answer content is **NIP-44 v2**, from the sender's session key to the
+  receiver's (the `p`), of the complete SDP text (`RTCSessionDescription.sdp`, first line
+  `v=0`). Peers wait for ICE gathering to finish (at most 5 s) and send one SDP that
+  carries every candidate. NIP-DC's `route` (trickle candidates) is not sent in
+  `nfx-mesh/1`, and readers ignore it. The content is at most **32768 bytes**.
+- Tags are written in the order shown; readers do not depend on order, and ignore tags
+  they do not know.
+
+### 6.3 Room proof
+
+Every event carries `["roomproof", "<id>", "<sig>"]`, NIP-DC §2:
+
+```
+id  = sha256( JSON([0, P, created_at, 25050, pubkey, challenge, ""]) )
+sig = BIP-340 signature by the room secret over the 32 bytes of id
+```
+
+`JSON` is NIP-01's serialization of event ids: no whitespace, NIP-01 string escaping.
+`challenge` is a string, itself the `JSON` of:
+
+- for `connect` and `disconnect`:
+  `["nip-dc-presence-v1", t, P, d, i, y, version, expiration, content]`, each the first
+  value of that tag, or `""` if absent (`nfx-mesh/1` sends no `version`, and a
+  `disconnect` no `expiration`);
+- for `offer` and `answer`: `[p, content]`.
+
+The proof binds the room, the time, the sender, the receiver and the ciphertext; the
+event's own signature (NIP-01) binds everything else.
+
+### 6.4 Sessions
+
+- A session key is a fresh random secp256k1 key for each page session (each `open()` in
+  the reference library), never a user's identity key and never stored. One session key
+  and one session id serve every room of the session.
+- **Sign every event when it is sent** (`created_at` = now). Stock relays refuse
+  ephemeral events older than about 60 s (strfry's default), so a signed event is never
+  queued or replayed.
+- A session publishes to, and subscribes on, every relay it is configured with, and takes
+  each event once (by event id), whichever relays deliver it.
+
+### 6.5 Reading
+
+A session subscribes to each of its rooms with
+`{"kinds": [25050], "#P": ["<room key>"], "since": <now - 60>}`, and for each event:
+
+1. **Not ours: ignore it**, without error and before any cryptography, if it has no `i`
+   tag, more than one, or one other than `nfx-mesh/1`. Other applications use kind
+   25050 (NIP-DC under other protocol identifiers; hashtree, with another shape). Ignore
+   a `t` other than the four, `route` included.
+2. **Drop it** if a tag of its type is missing, repeated or malformed: `P` other than the
+   room's, `y` other than `nfx`, `d` not 32 lowercase hex, `p` or `e` not 64 lowercase
+   hex, `p` on presence, `expiration` on anything but `connect`, `e` on an offer, a
+   presence's content not empty, or an offer's or answer's content empty, over 32768
+   bytes, or starting with `#` (a NIP-44 version this profile does not use).
+3. **Freshness**: drop it if `created_at` is before now − 60 or after now + 30. A
+   `connect` needs exactly one `expiration`, a plain decimal with
+   `created_at < expiration ≤ created_at + 90`; drop it once `expiration ≤ now`.
+4. **Directed events** whose `p` is not this session's key are ignored here, before the
+   signature, the room proof or any decryption.
+5. Verify the event (NIP-01 id and signature) and its room proof (§6.3) against `P`.
+6. Decrypt an offer or answer (NIP-44 v2, MAC first) and drop it unless the plaintext is
+   an SDP (first line `v=0`).
+
+Presence is kept per sender session key: the newest event by `created_at` wins, and a
+`disconnect` wins a tie with a `connect` of the same second. A peer is gone at its
+presence's `expiration` or at its `disconnect`.
+
+**Bounds.** A session MUST bound what strangers can make it hold or do. The reference
+library: at most 256 peers' presence per room, one negotiation in flight per peer, 8
+directed events decrypted per sender per 30 s, the ids of the last 4096 events seen, and
+relay messages over 70 KiB dropped unparsed.
+
+### 6.6 Connecting
+
+- **Presence.** A session sends `connect` when it joins a room and every 30 s after, with
+  `expiration` = `created_at` + 90, and `disconnect` when it leaves (best effort).
+- **Who offers (glare).** On a valid `connect` from a peer it is neither connected nor
+  connecting to, and with room for another peer, the session whose key is lower
+  (comparing the 64-character lowercase hex strings) sends an offer; the other waits for
+  it. If an offer arrives from a peer while the session's own offer to that peer is
+  pending, the same rule decides: the lower key's offer stands. The higher side drops its
+  own offer and answers; the lower side ignores the incoming one.
+- An offer opens one data channel, ordered and reliable, which carries p2p-media-loader's
+  peer protocol (§2). Its label is not significant.
+- The offerer applies only the answer whose `e` names its pending offer.
+- An offer unanswered within 50 s, or a connection not open within 15 s of the answer,
+  has failed; the offerer may try again at the peer's next `connect`.
+
+### 6.7 Privacy
+
+- Relays, and anyone reading them, see: room keys (which the catalog maps back to videos
+  and renditions, §6.1); session keys and session ids; who signals whom and when (`p`,
+  `e`, timing); the size of each ciphertext; and the IP address of every WebSocket
+  client.
+- The SDP, and with it every candidate address, is encrypted to its receiver: relays do
+  not see the addresses peers punch with.
+- Anyone who can derive a room can join it, see its members' session keys and, by sending
+  an offer, receive a member's answer and its addresses. That is what a tracker's swarm
+  gives away too (§1), and why a page says so before it joins the mesh.
+- A session key is per session: a viewer is linkable across the rooms of one session
+  (the renditions it plays), not across sessions, beyond what its IP address links.
+
+### 6.8 No TURN
+
+TURN is not part of NFX (§1), and this profile has none: no TURN server and no NIP-DC
+TURN (kind 25051), so no relay carries a byte of video. A pair that cannot punch
+(symmetric NAT on both sides, some CGNAT) fails at the connection timeout, and each page
+keeps fetching from its origin or a bridge. Issue #71 tracks the rest: native endpoints
+with full ICE, and a NAT test.
+
 ## Changelog
 
 - Draft 2026-09-16 — initial.
@@ -453,3 +623,11 @@ NFX-05 byte formats.
   network's own nodes, never a third party by default; no TURN) and defines the `stun`
   beacon endpoint, registered in NFX-11 §3. A reader that does not implement it skips it
   (NFX-03 §4), so beacons that carry it stay valid to every existing reader.
+- Draft 2026-11-09 (issue #71, phase 1): §6, signaling over Nostr. Kind 25050 with `i` =
+  `nfx-mesh/1`, signaling-compatible with the NIP-DC draft §§2, 4–6 and not adopting its
+  data plane: one room per stream swarm, its key derived from the swarm ID (not access
+  control); `connect`/`disconnect` presence and NIP-44 v2 `offer`/`answer` between
+  per-session keys, each with a room proof; freshness (60 s back, 30 s ahead, presence 90
+  s); the lower session key offers; what relays see; no TURN. §1's second plug-in, the
+  scoped-relay signaling left "TBD", is now §6. Vectors `mesh-signal.json` and
+  `mesh-signal-invalid.json`; the `stun` endpoint's in `beacon-stun.json`.
