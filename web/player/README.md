@@ -73,6 +73,12 @@ npm run e2e:nostr      # two browsers over Nostr only (strfry, no tracker), the 
 The suites build `nfxd` and `nfx-package` and run headless Chromium in fresh contexts, on
 loopback only.
 
+`e2e-nat/run.sh` is the same mesh through NATs (nfx #71): one browser behind each of two
+nftables routers in network namespaces, signaling only through strfry and taking STUN only
+from a public nfxd (`--stun`), with router byte counters for the path the bytes took. It
+needs root, so it runs in CI only (`.github/workflows/nfx-nat-browsers.yml`), never on a
+developer's machine; its header lists the cells.
+
 ## The mesh engine
 
 The library bundles p2p-media-loader-core 4.0.0 from its own TypeScript source with one
