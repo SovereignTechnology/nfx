@@ -37,7 +37,7 @@ Frozen; the status of every document and its freeze milestone is in
 | `spec/` | NFX-01 to NFX-12, the JSON schemas (`schemas/`) and the regenerable test vectors (`test-vectors/`) |
 | `crates/` | The Cargo workspace (edition 2024), with the members below |
 | `crates/nfx-proto` | Wire formats: manifests, beacons, hash lists, canonical JSON, vouchers, gossip envelopes. Pure (no I/O, clock or RNG); builds natively and for `wasm32` |
-| `crates/nfx-node` | The peer: content store, iroh seeding and fetching, gossip presence, Nostr manifests and beacons, pull-through origin, embeddable scoped relay, browser-mesh tracker and WebRTC bridge |
+| `crates/nfx-node` | The peer: content store, iroh seeding and fetching, gossip presence, Nostr manifests and beacons, pull-through origin, embeddable scoped relay, browser-mesh tracker and WebRTC bridge, and the Nostr-signaled full-ICE mesh endpoint |
 | `crates/nfx-media` | NFX-05 packaging (ladder planning, CMAF output, content addressing); ships the `nfx-package` binary |
 | `crates/nfx-wasm` | `nfx-proto` for browsers: verifies manifests, beacons, hash lists and files from JS |
 | `crates/nfxd` | The headless node: `key`, `publish`, `delete` and `run` |
@@ -122,6 +122,22 @@ the video to browsers over WebRTC, and its address is the one candidate they are
 a DNAT, bind `--bridge` to the host's own address and pass the public one as
 `--bridge-public` (for example `--bridge-public 203.0.113.7:7844`); `--bridge-max-peers`
 (default 64) caps the browsers it serves at once.
+
+A node behind a NAT, a home node say, serves browsers with no tracker and no forwarded port
+through the mesh endpoint (NFX-10 §6): `--mesh-relay <url>` (1 to 8 general Nostr relays;
+a scoped relay refuses the signaling kind) turns it on, and `--mesh-stun <ip:port>` names a
+public node's `--stun` so it learns its public mapping. Browsers that play a rendition it
+holds meet it in that rendition's room, and both ends punch through their NATs with full
+ICE:
+
+```sh
+nfxd run --key node.key --store pkg/store --seed "$A" --relay wss://relay.example \
+  --mesh-relay wss://general-relay.example --mesh-stun 203.0.113.7:3478
+```
+
+Joining a room tells anyone present there the node's candidate addresses, its public mapping
+included, as a tracker's swarm would. `--mesh-bind` fixes its UDP port and `--mesh-max-peers`
+(default 16) caps its connections.
 
 ## Checks
 

@@ -10,6 +10,10 @@ publish = false
 
 [dependencies]
 bytes.workspace = true
+# The mesh endpoint's session keys and NIP-44 nonces (crate::mesh). Already in the lock and in
+# this crate's tree (through iroh), at the version and features the money crates' closure
+# pins: no feature is added, so crates/ci/locked-compiled.txt does not move.
+getrandom = { version = "0.4.3", default-features = false }
 hex.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
@@ -25,6 +29,9 @@ rustls-pki-types = "1.15.1"
 nostr-database.workspace = true
 nostr-memory.workspace = true
 nostr-sdk = { workspace = true, features = ["local-relay"] }
+# The mesh endpoint's gateway port mapping (crate::mesh): the one iroh already runs, at the same
+# version and with no default feature, as iroh takes it.
+portmapper = { version = "0.19.3", default-features = false }
 serde_json.workspace = true
 str0m.workspace = true
 thiserror.workspace = true
