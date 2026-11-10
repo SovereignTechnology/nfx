@@ -23,6 +23,7 @@
     "e2e-peer.ts",
     "e2e-lib.ts",
     "e2e-nostr.ts",
+    "e2e-nostr-node.ts",
     "e2e-nat/driver.ts"
   ]
 }
