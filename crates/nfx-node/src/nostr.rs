@@ -83,7 +83,7 @@ pub(crate) fn from_nostr(event: &ns::Event) -> Result<Event> {
     serde_json::from_str(&json).map_err(NodeError::relay)
 }
 
-fn to_nostr(event: &Event) -> Result<ns::Event> {
+pub(crate) fn to_nostr(event: &Event) -> Result<ns::Event> {
     let json = serde_json::to_string(event).map_err(NodeError::relay)?;
     ns::Event::from_json(json).map_err(NodeError::relay)
 }

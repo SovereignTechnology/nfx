@@ -1831,3 +1831,225 @@ async fn held_renditions_that_cannot_work_are_refused_at_start() {
         assert!(err.to_string().contains(why), "{err}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_settings_that_cannot_work_are_refused_at_start() {
+    let sa = |s: &str| -> SocketAddr { s.parse().unwrap() };
+    let relay = || vec!["ws://127.0.0.1:9".to_owned()];
+    for (name, cfg, why) in [
+        (
+            "mesh-bind-alone",
+            Config {
+                mesh_bind: Some(sa("127.0.0.1:0")),
+                ..Config::default()
+            },
+            "--mesh-bind needs --mesh-relay",
+        ),
+        (
+            "mesh-stun-alone",
+            Config {
+                mesh_stun: vec![sa("203.0.113.7:3478")],
+                ..Config::default()
+            },
+            "--mesh-stun needs --mesh-relay",
+        ),
+        (
+            "mesh-peers-alone",
+            Config {
+                mesh_max_peers: Some(4),
+                ..Config::default()
+            },
+            "--mesh-max-peers needs --mesh-relay",
+        ),
+        (
+            "mesh-relay-scheme",
+            Config {
+                mesh_relays: vec!["https://relay.example".into()],
+                ..Config::default()
+            },
+            "--mesh-relay https://relay.example: not a wss:// or ws:// URL",
+        ),
+        (
+            "mesh-relay-credentials",
+            Config {
+                mesh_relays: vec!["wss://u:p@relay.example".into()],
+                ..Config::default()
+            },
+            "no credentials",
+        ),
+        (
+            "mesh-relays-nine",
+            Config {
+                mesh_relays: vec!["wss://relay.example".into(); 9],
+                ..Config::default()
+            },
+            "--mesh-relay: at most 8",
+        ),
+        (
+            "mesh-stun-five",
+            Config {
+                mesh_relays: relay(),
+                mesh_stun: vec![sa("203.0.113.7:3478"); 5],
+                ..Config::default()
+            },
+            "--mesh-stun: at most 4",
+        ),
+        (
+            "mesh-stun-family",
+            Config {
+                mesh_relays: relay(),
+                mesh_stun: vec![sa("[2001:db8::7]:3478")],
+                ..Config::default()
+            },
+            "not a unicast address of --mesh-bind's family",
+        ),
+        (
+            "mesh-stun-port-0",
+            Config {
+                mesh_relays: relay(),
+                mesh_stun: vec![sa("203.0.113.7:0")],
+                ..Config::default()
+            },
+            "not a unicast address",
+        ),
+        (
+            "mesh-peers-0",
+            Config {
+                mesh_relays: relay(),
+                mesh_max_peers: Some(0),
+                ..Config::default()
+            },
+            "--mesh-max-peers 0: not 1 to 1024",
+        ),
+        (
+            "mesh-relay-only",
+            Config {
+                mesh_relays: relay(),
+                relay_only: true,
+                iroh_relays: vec!["https://relay.example".parse().unwrap()],
+                ..Config::default()
+            },
+            "a relay-only node opens no direct UDP",
+        ),
+    ] {
+        let err = Daemon::start(Config {
+            keys: Some(Keys::generate()),
+            store: tmp(name),
+            ..cfg
+        })
+        .await
+        .err()
+        .expect("refused");
+        assert!(err.to_string().contains(why), "{name}: {err}");
+    }
+}
+
+/// The next signaling event on `notes` from `session` in `room` whose `t` is `t`.
+async fn next_signal(
+    notes: &mut std::pin::Pin<
+        Box<dyn n0_future::Stream<Item = nostr_sdk::prelude::ClientNotification> + Send>,
+    >,
+    room: &str,
+    session: &str,
+    t: &str,
+) {
+    use n0_future::StreamExt as _;
+    use nfx_proto::signal::{self, Parsed, Signal};
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let n = tokio::time::timeout(left, notes.next())
+            .await
+            .unwrap_or_else(|_| panic!("no {t} from {session}"));
+        let Some(nostr_sdk::prelude::ClientNotification::Event { event, .. }) = n else {
+            continue;
+        };
+        let ev: Event = serde_json::from_str(&event.as_json()).unwrap();
+        if ev.pubkey != session {
+            continue;
+        }
+        let me = "0".repeat(64);
+        if let Ok(Parsed::Ours(r)) = signal::read(&ev, room, &me, unix_now()) {
+            let got = match r.signal {
+                Signal::Connect { .. } => "connect",
+                Signal::Disconnect => "disconnect",
+                Signal::Offer { .. } => "offer",
+                Signal::Answer { .. } => "answer",
+            };
+            if got == t {
+                return;
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seeder_with_the_mesh_is_present_in_its_room_and_leaves_it_on_shutdown() {
+    use nostr_sdk::prelude as ns;
+    // A general relay for the signaling: the embedded scoped relay refuses kind 25050.
+    let general = ns::LocalRelay::builder().build();
+    general.run().await.unwrap();
+    let general_url = general.url().await.to_string();
+
+    let seed_dir = tmp("mesh-seeder");
+    let (event, manifest, _) = vector_package(&seed_dir);
+    let a = manifest.a_tag();
+    let keys = Keys::generate();
+    let seeder = Daemon::start(Config {
+        keys: Some(keys.clone()),
+        store: seed_dir.join("store"),
+        seed: vec![a.clone()],
+        embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        mesh_relays: vec![general_url.clone()],
+        mesh_bind: Some("127.0.0.1:0".parse().unwrap()),
+        no_portmapper: true,
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let session = seeder.mesh_session.clone().unwrap();
+    assert_eq!(session.len(), 64);
+    assert_ne!(
+        session,
+        keys.public_key().to_hex(),
+        "the session key is not the node's"
+    );
+    assert!(seeder.mesh_addr.unwrap().ip().is_loopback());
+
+    // Listen in the 720p room before the video is seeded.
+    let room = nfx_proto::signal::Room::derive(&manifest.addr.web_stream_swarm_id("720p"));
+    let listener = ns::Client::default();
+    listener.add_relay(general_url.as_str()).await.unwrap();
+    listener.connect().and_wait(Duration::from_secs(5)).await;
+    let mut notes = listener.notifications();
+    listener
+        .subscribe(
+            ns::Filter::new()
+                .kind(ns::Kind::from(nfx_proto::signal::KIND_SIGNAL))
+                .custom_tag(ns::SingleLetterTag::UPPERCASE_P, room.pubkey()),
+        )
+        .await
+        .unwrap();
+
+    let relays = Relays::connect(
+        std::slice::from_ref(seeder.relay_url.as_ref().unwrap()),
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    relays.publish(&event).await.unwrap();
+    until_state(&seeder, &a, &VideoState::Seeding).await;
+    next_signal(&mut notes, room.pubkey(), &session, "connect").await;
+    let status = seeder.mesh_status().unwrap();
+    assert_eq!(status.rooms, 1, "{status:?}");
+    assert!(status.gathered, "{status:?}");
+    assert_eq!(
+        status.candidates,
+        vec![format!("host {}", seeder.mesh_addr.unwrap())]
+    );
+
+    relays.shutdown().await;
+    seeder.shutdown().await;
+    next_signal(&mut notes, room.pubkey(), &session, "disconnect").await;
+    listener.shutdown().await;
+}
