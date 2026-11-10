@@ -41,13 +41,65 @@ export interface ResolveOptions {
 }
 
 /**
+ * An origin `open()` may play from, and the renditions it serves (NFX-03 §4).
+ * `watchEndpoints` reports them (`Endpoints.originSources`); a page may also write its own.
+ */
+export interface OriginSource {
+  /** `http(s)://host[:port][/prefix]`, as `OpenCommon.origins` takes a bare string. */
+  url: string;
+  /**
+   * The ids of the renditions whose `init` and `segment` files it serves (the hash list's
+   * `renditions[].id`): its `https` endpoint's `renditions`. Absent: every rendition. Empty:
+   * none, so `open()` skips it. Ids the hash list does not name are ignored. At most 32.
+   */
+  renditions?: string[];
+}
+
+/**
+ * Who holds which renditions of one video, by seeders' live beacons (NFX-03 §5): each
+ * seeder, counted by its key, by its newest unexpired beacon only, at most 64 of them (as
+ * `Endpoints`). A seeder holds the renditions its `iroh` endpoints have a ticket for, and
+ * those its `webrtc` and `https` endpoints name in `renditions`; such an endpoint without
+ * `renditions` holds every rendition. Only these three endpoint types count, whether or not
+ * this page can reach them: it is a hint about where the swarm is, for ranking. Which
+ * levels a session offers is `open()`'s rule (`OpenCommon.renditions`).
+ *
+ * Keys are cheap, so a count is a hint, never proof of how many hosts hold the bytes.
+ */
+export interface RenditionAvailability {
+  /** How many seeders hold at least one rendition (or every one). */
+  seeders: number;
+  /** Of those, how many hold every rendition: a rendition no seeder names has this many. */
+  all: number;
+  /**
+   * Each rendition id some seeder names, with how many seeders hold it (the `all` ones
+   * included), most-held first, ties in the order first heard. At most 32 ids of at most 64
+   * characters each (a seeder's first 32 count), never `meta` (NFX-03 §4). An id here may
+   * be one the video's hash list does not have: beacons come from any key.
+   */
+  renditions: { id: string; seeders: number }[];
+}
+
+/**
  * What seeders' live beacons (NFX-03, kind 20464) name for one video: the newest unexpired
  * beacon of each seeder counts, and nothing else. Endpoints are hints, never trust: every
  * byte is still checked against the signed anchor.
  */
 export interface Endpoints {
-  /** `https://host[:port][/prefix]` origin bases (NFX-05 §6), at most 8, most-named first. */
+  /**
+   * `https://host[:port][/prefix]` origin bases (NFX-05 §6), at most 8, most-named first.
+   * Give `open()` `originSources` instead: a bare URL is taken to serve every rendition, so
+   * a session could offer a level that origin answers with `404`.
+   */
   origins: string[];
+  /**
+   * `origins` again, in the same order, each with the renditions it serves, as `open()`'s
+   * `origins` takes them. When several seeders name one origin, it serves only what every
+   * one of them says it does: a beacon can narrow what an origin is taken to serve, never
+   * widen it, so the worst a lying beacon does is have `open()` skip that origin, rather
+   * than offer a level whose segments it answers with `404`.
+   */
+  originSources: OriginSource[];
   /** `wss://` trackers from `webrtc` endpoints (NFX-10 §2), at most 4, most-named first. */
   trackers: string[];
   /**
@@ -58,12 +110,19 @@ export interface Endpoints {
   stunServers: string[];
   /** How many seeders' beacons these come from. */
   seeders: number;
+  /** Which renditions those seeders hold, and how many hold each. */
+  availability: RenditionAvailability;
 }
 
 /** One rendition as hls.js parsed it from the master playlist. */
 export interface Level {
   /** What `setLevel()` takes. */
   index: number;
+  /**
+   * The rendition id (the hash list's `renditions[].id`), by the content name of the
+   * level's playlist (NFX-10 §2), never by its bitrate or size.
+   */
+  id: string;
   width: number;
   height: number;
   bitrate: number;
@@ -129,7 +188,10 @@ export interface NostrSignaling {
 /** What `onEvent` hears. Nothing is delivered after `destroy()`. */
 export type PlayerEvent =
   | { type: 'log'; message: string }
-  /** An origin served a hash list that verified (`ok`), or did not (`why`). */
+  /**
+   * An origin served a hash list that verified and is used (`ok`), or was not (`why`: no
+   * hash list that verifies, or none of the allowed renditions held).
+   */
   | { type: 'origin'; origin: string; ok: boolean; why?: string }
   | { type: 'verified'; sha256: string; url: string }
   | ({ type: 'rejected' } & Rejection)
@@ -138,14 +200,38 @@ export type PlayerEvent =
   /** A fatal hls.js error (playback has stopped), or a refused `play()`. */
   | { type: 'error'; message: string };
 
-/** What `open()` plays, from where, and how. */
+/**
+ * What `open()` plays, from where, and how.
+ *
+ * **Which levels a session offers** (NFX-10 §1, NFX-03 §5). The session takes every file
+ * from one origin: the first of `origins`, in order, that serves a hash list that verifies
+ * and holds at least one allowed rendition (an origin that cannot is skipped, with an
+ * `origin` event saying why). The session's levels are then the allowed renditions
+ * (`renditions`, or every rendition of the hash list) that this origin serves (its
+ * `OriginSource.renditions`, or every one). The mesh never adds a level: a segment peers do
+ * not deliver in time comes over HTTP from that origin, so a rendition it does not serve
+ * would only fail. hls.js is told of no other level: the master playlist it reads is cut to
+ * those renditions' variants, matched by playlist content name (NFX-10 §2), and a level
+ * outside them stops the session with an `error` event before any segment is fetched.
+ */
 export interface OpenCommon {
   /**
-   * Origin bases (NFX-05 §6) to try in order: the first that serves a hash list that
-   * verifies against the anchor is used. `http(s)://host[:port][/prefix]`, no query,
-   * fragment or credentials.
+   * Origin bases (NFX-05 §6) to try in order (above): `http(s)://host[:port][/prefix]`, no
+   * query, fragment or credentials. A bare string serves every rendition; an
+   * `OriginSource` names those it serves (`Endpoints.originSources` are such).
    */
-  origins: string[];
+  origins: (string | OriginSource)[];
+  /**
+   * The renditions the session may play, by id (the hash list's `renditions[].id`), in the
+   * caller's order of preference: 1 to 32 distinct ids, each one the hash list has.
+   * Default: every rendition. `open()` refuses an empty or malformed list with a
+   * `TypeError` before it fetches anything, and an id the hash list lacks with a
+   * `RangeError` once the hash list has verified, leaving nothing running either way.
+   * Levels are cut to these (and to what the origin serves, above); hls.js's ABR then picks
+   * freely among them, starting on the first of them the origin serves unless `level` says
+   * otherwise.
+   */
+  renditions?: string[];
   /**
    * How mesh peers find each other (`Signaling`). None (the default) means no mesh:
    * every byte comes from the origin. With it, the viewer also uploads verified segments
@@ -163,7 +249,12 @@ export interface OpenCommon {
   signal?: AbortSignal;
   /** Start playing once the master playlist is parsed. Default true. */
   autoplay?: boolean;
-  /** Pin this level once the master playlist is parsed (test knob). */
+  /**
+   * Pin this level once the master playlist is parsed (test knob): an index into the
+   * session's levels (`Session.levels`, after `renditions` and the origin have cut them, in
+   * hls.js's order), not into the master playlist. It turns ABR off and overrides the start
+   * `renditions` would give; past the last level it is ignored.
+   */
   level?: number;
   /** Seconds ahead of the playhead fetched over HTTP; the rest may come from peers (test knob). */
   httpWindow?: number;
@@ -200,7 +291,10 @@ export interface Stats {
 
 /** One video playing in one element. */
 export interface Session {
-  /** The renditions, once hls.js has parsed the master playlist (empty before). */
+  /**
+   * The session's levels (`OpenCommon`: only renditions allowed and served by its origin),
+   * once hls.js has parsed the master playlist (empty before).
+   */
   readonly levels: Level[];
   /** Play `index` from now on, or -1 to let hls.js pick. */
   setLevel(index: number): void;

@@ -1,17 +1,20 @@
 /**
  * Unit checks for the player's pure parts (`npm run unit`, after `npm run wasm`): the URL
- * sanitisers, the beacon endpoint book behind `watchEndpoints`, `open()`'s option checks,
- * and the Nostr signaler's bookkeeping (presence, glare, freshness, bounds). One case runs
- * the spec's signed beacon vector through nfx-wasm into the book, so the shape
- * `verifyBeacon` returns is the shape the book reads; the NFX-10 §6 vectors run through
- * nfx-wasm's MeshSession, which builds and reads every signaling event in the browser.
+ * sanitisers, the beacon endpoint book behind `watchEndpoints` (rendition availability and
+ * what each origin serves included), `open()`'s option checks and the levels it offers
+ * (`renditions`, origin sources, the master playlist cut), and the Nostr signaler's
+ * bookkeeping (presence, glare, freshness, bounds). The spec's signed beacon vectors
+ * (`beacon.json`, `beacon-renditions.json`) run through nfx-wasm into the book, so the shape
+ * `verifyBeacon` returns is the shape the book reads, and the hash list vector through
+ * nfx-wasm into what `open()` reads of it; the NFX-10 §6 vectors run through nfx-wasm's
+ * MeshSession, which builds and reads every signaling event in the browser.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import initWasm, { MeshRoom, MeshSession, verifyBeacon } from './out/wasm/nfx_wasm.js';
-import type { Signaling } from './src/api';
+import initWasm, { MeshRoom, MeshSession, VerifiedHashList, sha256Hex, verifyBeacon } from './out/wasm/nfx_wasm.js';
+import type { OriginSource, Signaling } from './src/api';
 import {
   EndpointBook,
   MAX_ORIGINS,
@@ -20,6 +23,7 @@ import {
   beaconStun,
   beaconTracker,
   checkIceServers,
+  checkOriginSources,
   checkOrigins,
   checkSignaling,
   checkTrackers,
@@ -27,6 +31,15 @@ import {
   checkRelays,
   pageOrigin,
 } from './src/endpoints';
+import {
+  MAX_RENDITIONS,
+  checkRenditions,
+  contentHash,
+  cutMaster,
+  hashListLevels,
+  mayServe,
+  sessionRenditions,
+} from './src/levels';
 import { MAX_RELAYS, relayUrl } from './src/mesh';
 import {
   LIMITS,
@@ -125,24 +138,35 @@ function beacon(seeder: string, createdAt: number, endpoints: unknown, ttl = 120
 }
 const https = (url: string) => ({ t: 'https', url });
 const webrtc = (...urls: unknown[]) => ({ t: 'webrtc', tracker_urls: urls, renditions: ['720p'] });
+/** Availability when every counted seeder holds every rendition, and when none is counted. */
+const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
 
 {
   const book = new EndpointBook();
   eq('first beacon taken', book.add(beacon(S(1), NOW, [https('https://a.example/'), webrtc('wss://t1.example')]), NOW), true);
   eq('first snapshot', book.snapshot(NOW), {
     origins: ['https://a.example'],
+    originSources: [{ url: 'https://a.example' }],
     trackers: ['wss://t1.example'],
     stunServers: [],
     seeders: 1,
+    availability: allOf(1),
   });
   eq('same beacon again (a second relay)', book.add(beacon(S(1), NOW, [https('https://z.example')]), NOW), false);
   eq('older beacon', book.add(beacon(S(1), NOW - 5, [https('https://z.example')]), NOW), false);
   eq('unchanged by the older one', book.snapshot(NOW).origins, ['https://a.example']);
   // The newer beacon replaces what the seeder said: its tracker is withdrawn.
   eq('newer beacon', book.add(beacon(S(1), NOW + 1, [https('https://b.example')]), NOW + 1), true);
-  eq('newer replaces', book.snapshot(NOW + 1), { origins: ['https://b.example'], trackers: [], stunServers: [], seeders: 1 });
+  eq('newer replaces', book.snapshot(NOW + 1), {
+    origins: ['https://b.example'],
+    originSources: [{ url: 'https://b.example' }],
+    trackers: [],
+    stunServers: [],
+    seeders: 1,
+    availability: allOf(1),
+  });
   // It expires at NOW + 121.
-  eq('expired out', book.snapshot(NOW + 121), { origins: [], trackers: [], stunServers: [], seeders: 0 });
+  eq('expired out', book.snapshot(NOW + 121), { origins: [], originSources: [], trackers: [], stunServers: [], seeders: 0, availability: allOf(0) });
   eq('an expired beacon is refused', book.add(beacon(S(2), NOW, [https('https://c.example')]), NOW + 200), false);
 }
 {
@@ -160,7 +184,14 @@ const webrtc = (...urls: unknown[]) => ({ t: 'webrtc', tracker_urls: urls, rendi
     ]),
     NOW,
   );
-  eq('only valid endpoints kept', book.snapshot(NOW), { origins: [], trackers: ['wss://ok.example'], stunServers: [], seeders: 1 });
+  eq('only valid endpoints kept', book.snapshot(NOW), {
+    origins: [],
+    originSources: [],
+    trackers: ['wss://ok.example'],
+    stunServers: [],
+    seeders: 1,
+    availability: allOf(1),
+  });
   eq('content without endpoints', book.add(beacon(S(2), NOW, undefined), NOW), true);
   eq('a non-array endpoints', book.add(beacon(S(3), NOW, { t: 'https' }), NOW), true);
   eq('bad seeder', book.add({ ...beacon(S(4), NOW, []), seeder: 5 as unknown as string }, NOW), false);
@@ -174,9 +205,11 @@ const webrtc = (...urls: unknown[]) => ({ t: 'webrtc', tracker_urls: urls, rendi
   book.add(beacon(S(3), NOW, [webrtc('wss://shared.example'), https('https://two.example')]), NOW);
   eq('ranked', book.snapshot(NOW), {
     origins: ['https://two.example', 'https://one.example'],
+    originSources: [{ url: 'https://two.example' }, { url: 'https://one.example' }],
     trackers: ['wss://shared.example', 'wss://lonely.example'],
     stunServers: [],
     seeders: 3,
+    availability: allOf(3),
   });
 }
 {
@@ -201,9 +234,11 @@ const webrtc = (...urls: unknown[]) => ({ t: 'webrtc', tracker_urls: urls, rendi
   book.add(beacon(S(1), NOW, [webrtc(...many), ...many.map((_, i) => https(`https://o${i}.example`))]), NOW);
   eq('per-beacon caps', book.snapshot(NOW), {
     origins: ['https://o0.example', 'https://o1.example', 'https://o2.example', 'https://o3.example'],
+    originSources: [0, 1, 2, 3].map((i) => ({ url: `https://o${i}.example` })),
     trackers: ['wss://t0.example', 'wss://t1.example', 'wss://t2.example', 'wss://t3.example'],
     stunServers: [],
     seeders: 1,
+    availability: allOf(1),
   });
   for (let i = 2; i <= 12; i++) book.add(beacon(S(i), NOW, [webrtc(`wss://u${i}.example`), https(`https://p${i}.example`)]), NOW);
   const snap = book.snapshot(NOW);
@@ -217,6 +252,101 @@ const webrtc = (...urls: unknown[]) => ({ t: 'webrtc', tracker_urls: urls, rendi
   eq('one seeder too many', book.add(beacon(S(1000), NOW, [https('https://late.example')]), NOW), false);
   eq('room after expiry', book.add(beacon(S(1000), NOW + 40, [https('https://late.example')]), NOW + 40), true);
   eq('seeders after expiry', book.snapshot(NOW + 40).seeders, MAX_SEEDERS - 10 + 1);
+}
+
+// ---- Rendition availability (NFX-03 §5) and what each origin serves -----------------------
+const bridge = (...ids: unknown[]) => ({ t: 'webrtc', tracker_urls: ['wss://bridge.example'], renditions: ids });
+const served = (url: string, ...ids: unknown[]) => ({ t: 'https', url, renditions: ids });
+const iroh = (...ids: string[]) => ({ t: 'iroh', node: 'n', tickets: Object.fromEntries(ids.map((id) => [id, `ticket-for-${id}`])) });
+const held = (book: EndpointBook, now: number) => book.snapshot(now).availability;
+{
+  // Mixed holders: each endpoint type by name, a seeder holds the union, counted once per key.
+  const book = new EndpointBook();
+  book.add(beacon(S(1), NOW, [iroh('meta', '720p', '360p')]), NOW); // tickets; `meta` is no rendition
+  book.add(beacon(S(2), NOW, [bridge('360p')]), NOW);
+  book.add(beacon(S(3), NOW, [served('https://o3.example', '360p'), bridge('1080p', '360p')]), NOW);
+  book.add(beacon(S(4), NOW, [{ t: 'stun', addrs: ['203.0.113.1:3478'] }]), NOW); // holds nothing
+  book.add(beacon(S(5), NOW, [{ t: 'iroh', node: 'n' }, { t: 'hyper', drive: 'd' }]), NOW); // no tickets, hyper: nothing
+  eq('mixed holders', held(book, NOW), {
+    seeders: 3,
+    all: 0,
+    renditions: [
+      { id: '360p', seeders: 3 },
+      { id: '720p', seeders: 1 },
+      { id: '1080p', seeders: 1 },
+    ],
+  });
+  eq('every seeder still counts in seeders', book.snapshot(NOW).seeders, 5);
+  eq('an origin with the renditions it serves', book.snapshot(NOW).originSources, [{ url: 'https://o3.example', renditions: ['360p'] }]);
+  // Absent = all: an https endpoint without `renditions` holds every rendition, and so does a
+  // bridge without one; each counts for every id, named or not.
+  book.add(beacon(S(6), NOW, [https('https://all.example')]), NOW);
+  book.add(beacon(S(7), NOW, [{ t: 'webrtc', tracker_urls: ['wss://b.example'] }, served('https://o7.example', '720p')]), NOW);
+  eq('absent = all', held(book, NOW), {
+    seeders: 5,
+    all: 2,
+    renditions: [
+      { id: '360p', seeders: 5 },
+      { id: '720p', seeders: 3 },
+      { id: '1080p', seeders: 3 },
+    ],
+  });
+  eq('origins: absent serves all, a list serves those', book.snapshot(NOW).originSources, [
+    { url: 'https://o3.example', renditions: ['360p'] },
+    { url: 'https://all.example' },
+    { url: 'https://o7.example', renditions: ['720p'] },
+  ]);
+  // Stale: an older beacon from a key already held changes nothing; a newer one replaces it.
+  eq('stale beacon refused', book.add(beacon(S(2), NOW - 5, [bridge('2160p')]), NOW), false);
+  eq('stale changes nothing', held(book, NOW).renditions[0], { id: '360p', seeders: 5 });
+  eq('newer beacon taken', book.add(beacon(S(2), NOW + 1, [bridge('720p')]), NOW + 1), true);
+  // Ties keep first-heard order: S(1)'s tickets named 720p first.
+  eq('the seeder now holds 720p, not 360p', held(book, NOW + 1).renditions, [
+    { id: '720p', seeders: 4 },
+    { id: '360p', seeders: 4 },
+    { id: '1080p', seeders: 3 },
+  ]);
+  // Expired: S(1)…S(7) were sent at NOW with a 120 s TTL; S(2)'s newer one lasts a second more.
+  eq('expired beacons do not count', held(book, NOW + 120), { seeders: 1, all: 0, renditions: [{ id: '720p', seeders: 1 }] });
+  eq('none left', held(book, NOW + 121), { seeders: 0, all: 0, renditions: [] });
+}
+{
+  // Bounds: ids a beacon may name, at most MAX_RENDITIONS per seeder and in all, ranked first.
+  const book = new EndpointBook();
+  const junk = Array.from({ length: 40 }, (_, i) => `junk-${i}`);
+  book.add(beacon(S(1), NOW, [bridge(...junk, '', 'meta', 'x'.repeat(65), 7)]), NOW);
+  eq('a non-string id: the endpoint holds nothing', held(book, NOW), { seeders: 0, all: 0, renditions: [] });
+  book.add(beacon(S(1), NOW + 1, [bridge(...junk, '', 'meta', 'x'.repeat(65), 'x'.repeat(64))]), NOW + 1);
+  const one = held(book, NOW + 1);
+  eq('one seeder: its first 32 valid ids', [one.renditions.length, one.renditions[0]?.id, one.renditions[31]?.id], [32, 'junk-0', 'junk-31']);
+  for (let i = 2; i <= 4; i++) book.add(beacon(S(i), NOW + 1, [bridge('720p'), iroh('1080p')]), NOW + 1);
+  const many = held(book, NOW + 1);
+  eq('ids many seeders hold outrank a flood', many.renditions.slice(0, 3), [
+    { id: '720p', seeders: 3 },
+    { id: '1080p', seeders: 3 },
+    { id: 'junk-0', seeders: 1 },
+  ]);
+  eq('at most 32 ids in all', many.renditions.length, 32);
+  eq('a 65-character id is not counted', many.renditions.some((r) => r.id.length > 64), false);
+}
+{
+  // What an origin serves: several claims leave only what all of them say; a malformed list
+  // makes the endpoint serve nothing (nfx-proto refuses such a beacon outright).
+  const book = new EndpointBook();
+  book.add(beacon(S(1), NOW, [served('https://x.example', '720p', '360p')]), NOW);
+  book.add(beacon(S(2), NOW, [served('https://x.example/', '360p', '1080p')]), NOW);
+  book.add(beacon(S(3), NOW, [https('https://x.example')]), NOW);
+  eq('claims narrow, never widen', book.snapshot(NOW).originSources, [{ url: 'https://x.example', renditions: ['360p'] }]);
+  book.add(beacon(S(4), NOW, [served('https://x.example', '1080p')]), NOW);
+  eq('conflicting claims: it serves none', book.snapshot(NOW).originSources, [{ url: 'https://x.example', renditions: [] }]);
+  book.add(beacon(S(5), NOW, [served('https://y.example', '720p'), served('https://y.example', '720p', '360p')]), NOW);
+  eq('one beacon naming an origin twice', book.snapshot(NOW).originSources[1], { url: 'https://y.example', renditions: ['720p'] });
+  const bad = new EndpointBook();
+  bad.add(beacon(S(1), NOW, [{ t: 'https', url: 'https://z.example', renditions: '720p' }, { ...bridge(), renditions: null }]), NOW);
+  eq('malformed renditions', [bad.snapshot(NOW).originSources, bad.snapshot(NOW).trackers, held(bad, NOW)], [[], ['wss://bridge.example'], { seeders: 0, all: 0, renditions: [] }]);
+  const empty = new EndpointBook();
+  empty.add(beacon(S(1), NOW, [{ t: 'iroh', node: 'n', tickets: ['720p'] }, { t: 'iroh', node: 'n', tickets: { meta: 'ticket' } }]), NOW);
+  eq('iroh: tickets must be an object; meta alone holds nothing', held(empty, NOW), { seeders: 0, all: 0, renditions: [] });
 }
 
 // ---- open()'s option checks --------------------------------------------------------------
@@ -247,6 +377,133 @@ throws('five ICE servers', () => checkIceServers(Array.from({ length: 5 }, () =>
 eq('origins normalised', checkOrigins(['https://o.example/nfx/', 'http://127.0.0.1:1']), ['https://o.example/nfx', 'http://127.0.0.1:1']);
 throws('no origin', () => checkOrigins([]));
 throws('an origin with a query', () => checkOrigins(['https://o.example/?x']));
+
+// ---- open()'s levels: `renditions`, what each origin serves, the master playlist cut --------
+/** `f` must throw a `type` whose message matches `re`. */
+function refuses(what: string, f: () => unknown, type: ErrorConstructor, re: RegExp): void {
+  ran += 1;
+  try {
+    f();
+  } catch (e) {
+    if (e instanceof type && re.test((e as Error).message)) return;
+    bad += 1;
+    console.error(`${what}: threw ${String(e)}, want a ${type.name} matching ${re}`);
+    return;
+  }
+  bad += 1;
+  console.error(`${what}: did not throw`);
+}
+eq('renditions absent: every one', checkRenditions(undefined), null);
+eq('renditions in the caller order', checkRenditions(['360p', '1080p']), ['360p', '1080p']);
+refuses('renditions empty', () => checkRenditions([]), TypeError, /at least one rendition/);
+refuses('renditions not a list', () => checkRenditions('720p'), TypeError, /must be a list/);
+refuses('renditions null', () => checkRenditions(null), TypeError, /must be a list/);
+refuses('an empty id', () => checkRenditions(['720p', '']), TypeError, /"" is not a rendition id/);
+refuses('meta', () => checkRenditions(['meta']), TypeError, /"meta" is not a rendition id/);
+refuses('a number', () => checkRenditions([720]), TypeError, /720 is not a rendition id/);
+refuses('an id twice', () => checkRenditions(['720p', '720p']), TypeError, /"720p" is named twice/);
+refuses('33 ids', () => checkRenditions(Array.from({ length: MAX_RENDITIONS + 1 }, (_, i) => `r${i}`)), TypeError, /at most 32/);
+eq('32 ids', checkRenditions(Array.from({ length: MAX_RENDITIONS }, (_, i) => `r${i}`))?.length, 32);
+refuses('a long id is cut short in the message', () => checkRenditions(['x'.repeat(5000), 'x'.repeat(5000)]), TypeError, /^nfx: renditions: "x{64}…" is named twice$/);
+
+eq('origin sources: strings and objects', checkOriginSources(['https://a.example/', { url: 'https://b.example' }, { url: 'http://127.0.0.1:9/', renditions: ['360p', '360p', '720p'] }]), [
+  { url: 'https://a.example', renditions: null },
+  { url: 'https://b.example', renditions: null },
+  { url: 'http://127.0.0.1:9', renditions: ['360p', '720p'] },
+]);
+eq('an origin serving none', checkOriginSources([{ url: 'https://a.example', renditions: [] }]), [{ url: 'https://a.example', renditions: [] }]);
+eq('an origin given twice: first wins', checkOriginSources([{ url: 'https://a.example', renditions: ['720p'] }, 'https://a.example/']), [
+  { url: 'https://a.example', renditions: ['720p'] },
+]);
+refuses('origin renditions not a list', () => checkOriginSources([{ url: 'https://a.example', renditions: '720p' as never }]), TypeError, /renditions of https:\/\/a.example/);
+refuses('origin renditions null', () => checkOriginSources([{ url: 'https://a.example', renditions: null as never }]), TypeError, /renditions of/);
+refuses('origin renditions with an empty id', () => checkOriginSources([{ url: 'https://a.example', renditions: [''] }]), TypeError, /renditions of/);
+refuses('origin renditions, 33', () => checkOriginSources([{ url: 'https://a.example', renditions: Array.from({ length: 33 }, (_, i) => `r${i}`) }]), TypeError, /at most 32/);
+refuses('an origin object without a url', () => checkOriginSources([{ renditions: ['720p'] } as never]), TypeError, /not an origin base/);
+refuses('a null origin', () => checkOriginSources([null as never]), TypeError, /not an origin base/);
+refuses('origins not a list', () => checkOriginSources('https://a.example' as never), TypeError, /must be a list/);
+refuses('too many origins', () => checkOriginSources(Array.from({ length: 17 }, (_, i) => `https://o${i}.example`)), TypeError, /at most 16/);
+
+eq('mayServe: an origin serving all', mayServe(['720p'], null), true);
+eq('mayServe: overlap', mayServe(['720p', '360p'], ['360p']), true);
+eq('mayServe: disjoint', mayServe(['720p'], ['360p']), false);
+eq('mayServe: serves none', mayServe(null, []), false);
+eq('mayServe: some, every rendition asked for', mayServe(null, ['360p']), true);
+
+const ladder = ['1080p', '720p', '360p'];
+eq('every rendition, every one served', sessionRenditions(ladder, null, null), ladder);
+eq('the caller order', sessionRenditions(ladder, ['360p', '1080p'], null), ['360p', '1080p']);
+eq('cut to what the origin serves', sessionRenditions(ladder, ['360p', '1080p'], ['1080p', '720p']), ['1080p']);
+eq('an origin naming ids the list lacks', sessionRenditions(ladder, null, ['720p', '4320p']), ['720p']);
+eq('none of the allowed served', sessionRenditions(ladder, ['720p'], ['360p']), []);
+refuses('an id the hash list lacks', () => sessionRenditions(ladder, ['360p', '2160p'], null), RangeError, /"2160p" is not a rendition of this video \(it has "1080p", "720p", "360p"\)/);
+refuses('checked even when the origin serves none', () => sessionRenditions(ladder, ['2160p'], []), RangeError, /"2160p"/);
+
+const H = (n: number): string => n.toString(16).padStart(64, `${n % 10}`);
+eq('content hash', contentHash(`https://o.example/nfx/${'a'.repeat(64)}/${H(1)}.m3u8`), H(1));
+eq('content hash, relative', contentHash(`${H(2)}.m3u8`, `https://o.example/${'a'.repeat(64)}/master.m3u8`), H(2));
+eq('content hash: no extension', contentHash(`https://o.example/${H(1)}`), null);
+eq('content hash: empty extension', contentHash(`https://o.example/${H(1)}.`), null);
+eq('content hash: upper case', contentHash(`https://o.example/${H(10).toUpperCase()}.m3u8`), null);
+eq('content hash: a trailing slash', contentHash(`https://o.example/${H(1)}.m3u8/`), H(1));
+eq('content hash: not a URL', contentHash('http://[::1'), null);
+
+{
+  const list = {
+    v: 1,
+    video: 'nfx:testnet:1:x',
+    files: [
+      { name: 'master.m3u8', role: 'playlist-master', sha256: H(9), size: 1 },
+      { name: 'r1080.m3u8', role: 'playlist', sha256: H(1), size: 1 },
+      { name: 'r720.m3u8', role: 'playlist', sha256: H(2), size: 1 },
+      { name: 'r360.m3u8', role: 'playlist', sha256: H(3), size: 1 },
+      { name: 'seg', role: 'segment', sha256: H(4), size: 1 },
+    ],
+    renditions: [
+      { id: '1080p', playlist: 'r1080.m3u8', bandwidth: 5 },
+      { id: '720p', playlist: 'r720.m3u8', bandwidth: 3 },
+      { id: '360p', playlist: 'r360.m3u8', bandwidth: 1 },
+      { id: 'ghost', playlist: 'seg', bandwidth: 1 },
+    ],
+  };
+  eq('hash list levels', hashListLevels(JSON.stringify(list)), {
+    renditions: [
+      { id: '1080p', playlist: H(1) },
+      { id: '720p', playlist: H(2) },
+      { id: '360p', playlist: H(3) },
+    ],
+    master: H(9),
+  });
+}
+{
+  const base = `https://o.example/nfx/${'a'.repeat(64)}/master.m3u8`;
+  const variant = (bw: number, h: number): string => `#EXT-X-STREAM-INF:BANDWIDTH=${bw},RESOLUTION=${h * 2}x${h},CODECS="avc1.64001f,mp4a.40.2"\n${H(bw)}.m3u8\n`;
+  const head = '#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n';
+  const master = head + variant(1, 1080) + variant(2, 720) + variant(3, 360);
+  eq('every variant kept: the text unchanged', cutMaster(master, base, new Set([H(1), H(2), H(3)])), { text: master, kept: 3 });
+  eq('one variant kept', cutMaster(master, base, new Set([H(3)])), { text: `${head}\n\n${variant(3, 360)}`, kept: 1 });
+  eq('two kept', cutMaster(master, base, new Set([H(1), H(3)])).text, `${head}${variant(1, 1080)}\n${variant(3, 360)}`);
+  eq('none kept', cutMaster(master, base, new Set()).kept, 0);
+  eq('none kept: no variant left', cutMaster(master, base, new Set()).text.includes('STREAM-INF'), false);
+  const crlf = master.replace(/\n/g, '\r\n');
+  const c = cutMaster(crlf, base, new Set([H(2)]));
+  eq('CRLF', [c.kept, c.text.includes(H(1)), c.text.includes(H(3)), c.text.includes(`${H(2)}.m3u8`)], [1, false, false, true]);
+  // As hls.js reads it, tag and blank lines between a STREAM-INF and its URI belong to it,
+  // even another STREAM-INF: the variant is one, and goes as one.
+  const odd = `${head}#EXT-X-STREAM-INF:BANDWIDTH=1\n\n#EXT-X-STREAM-INF:BANDWIDTH=9\n# a comment\n${H(1)}.m3u8\n${variant(2, 720)}`;
+  eq('a STREAM-INF block with tag lines', cutMaster(odd, base, new Set([H(2)])), { text: `${head}\n${variant(2, 720)}`, kept: 1 });
+  eq('the block kept whole', cutMaster(odd, base, new Set([H(1), H(2)])), { text: odd, kept: 2 });
+  // hls.js matches a STREAM-INF anywhere on a line; so does the cut.
+  const midLine = `${head}#EXT-X-UNKNOWN:#EXT-X-STREAM-INF:BANDWIDTH=1\n${H(1)}.m3u8\n${variant(2, 720)}`;
+  eq('a STREAM-INF inside another line', cutMaster(midLine, base, new Set([H(2)])), { text: `${head}#EXT-X-UNKNOWN:\n${variant(2, 720)}`, kept: 1 });
+  // A URI that is not a content name maps to no rendition: cut whatever `keep` holds.
+  const notNamed = `${head}#EXT-X-STREAM-INF:BANDWIDTH=1\nhttps://elsewhere.example/${H(1)}.m3u8?x\n#EXT-X-STREAM-INF:BANDWIDTH=2\nplain.m3u8\n${variant(2, 720)}`;
+  eq('a URI maps by its last path element, as a level does', cutMaster(notNamed, base, new Set([H(1), H(2)])).kept, 2);
+  eq('a URI that is no content name is cut', cutMaster(notNamed, base, new Set([H(2)])).text.includes('plain.m3u8'), false);
+  // I-frame playlists are not levels hls.js plays; they are left as they are.
+  const iframes = `${master}#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=1,URI="${H(7)}.m3u8"\n`;
+  eq('I-frame variants untouched', cutMaster(iframes, base, new Set([H(2)])).text.endsWith(`URI="${H(7)}.m3u8"\n`), true);
+}
 
 // ---- Nostr signaling: the option, and the signaler's bookkeeping --------------------------
 const relayCases: [string, string | null][] = [
@@ -368,12 +625,58 @@ const verified = JSON.parse(verifyBeacon(JSON.stringify(vector.event), vector.no
   eq('vector beacon taken', book.add(verified, vector.now), true);
   eq('vector endpoints', book.snapshot(vector.now), {
     origins: ['https://seed.example/nfx'],
+    originSources: [{ url: 'https://seed.example/nfx' }],
     trackers: ['wss://tracker.example/announce'],
     stunServers: [],
     seeders: 1,
+    availability: allOf(1),
   });
 }
 throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(vector.event), verified.expiration + 1));
+{
+  // NFX-03 §4's `renditions` vectors, as nfx-wasm returns them, into the book.
+  const v = JSON.parse(readFileSync(join(here, '../../spec/test-vectors/beacon-renditions.json'), 'utf8')) as {
+    now: number;
+    valid: { name: string; event: unknown }[];
+    invalid: { name: string; event: unknown }[];
+  };
+  const want: Record<string, [OriginSource[], unknown]> = {
+    'https-names-one-rendition': [[{ url: 'https://seed.example/nfx', renditions: ['720p'] }], { seeders: 1, all: 0, renditions: [{ id: '720p', seeders: 1 }] }],
+    'iroh-https-and-webrtc-name-the-same-rendition': [[{ url: 'https://seed.example/nfx', renditions: ['720p'] }], { seeders: 1, all: 0, renditions: [{ id: '720p', seeders: 1 }] }],
+    'https-names-two-of-several': [
+      [{ url: 'https://seed.example/nfx', renditions: ['1080p', '360p'] }],
+      { seeders: 1, all: 0, renditions: [{ id: '1080p', seeders: 1 }, { id: '360p', seeders: 1 }] },
+    ],
+    'https-without-renditions-serves-every-rendition': [[{ url: 'https://seed.example/nfx' }], { seeders: 1, all: 1, renditions: [] }],
+  };
+  eq('renditions vectors covered', v.valid.map((c) => c.name).sort(), Object.keys(want).sort());
+  for (const c of v.valid) {
+    const book = new EndpointBook();
+    book.add(JSON.parse(verifyBeacon(JSON.stringify(c.event), v.now)) as VerifiedBeacon, v.now);
+    const snap = book.snapshot(v.now);
+    eq(`vector ${c.name}`, [snap.originSources, snap.availability], want[c.name]);
+  }
+  for (const c of v.invalid) throws(`invalid vector ${c.name}`, () => verifyBeacon(JSON.stringify(c.event), v.now));
+}
+{
+  // The hash list vector through nfx-wasm: what open() reads of it, and its master cut.
+  const v = JSON.parse(readFileSync(join(here, '../../spec/test-vectors/hashlist.json'), 'utf8')) as {
+    rendered_bytes_sha256: string;
+    hashlist: { files: { name: string; sha256: string }[] };
+    playlists: Record<string, string>;
+  };
+  const bytes = new TextEncoder().encode(`${JSON.stringify(v.hashlist, null, 2)}\n`);
+  eq('hash list vector bytes', sha256Hex(bytes), v.rendered_bytes_sha256);
+  const list = VerifiedHashList.fromRoot(bytes, v.rendered_bytes_sha256);
+  const levels = hashListLevels(list.toJSON());
+  const sha = (name: string): string | undefined => v.hashlist.files.find((f) => f.name === name)?.sha256;
+  eq('hash list vector levels', levels, { renditions: [{ id: '720p', playlist: sha('r720.m3u8') }], master: sha('master.m3u8') });
+  const master = v.playlists['master.m3u8'] ?? '';
+  const base = `https://seed.example/nfx/${v.rendered_bytes_sha256}/master.m3u8`;
+  eq('vector master, its rendition kept', cutMaster(master, base, new Set(levels.renditions.map((r) => r.playlist))), { text: master, kept: 1 });
+  eq('vector master, none kept', cutMaster(master, base, new Set()).kept, 0);
+  list.free();
+}
 
 // ---- the NFX-10 §6 vectors, through nfx-wasm's MeshSession --------------------------------
 {

@@ -72,8 +72,9 @@ export async function resolveManifest(a: string, relays: string[], timeoutMs = 8
 
 /**
  * Watch seeders' live beacons for `a` (in `namespace`) and report what they name together
- * (`Endpoints`) each time that changes: `https` origins and `webrtc` trackers, from the
- * newest unexpired beacon of each seeder (./endpoints.ts). Beacons are ephemeral, so a
+ * (`Endpoints`) each time that changes: `https` origins (with the renditions each serves),
+ * `webrtc` trackers, `stun` servers, and which renditions the seeders hold, from the newest
+ * unexpired beacon of each seeder (./endpoints.ts). Beacons are ephemeral, so a
  * fresh subscription hears each seeder at its next republish (≤ TTL/2). Returns `stop`.
  */
 export function watchEndpoints(
