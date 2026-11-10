@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use crate::ladder::{
-    Codec, Container, GOP_SECONDS, RenditionSpec, StoryboardGeometry, fit_to_height,
+    Codec, Container, GOP_SECONDS, RenditionSpec, StoryboardGeometry, fit_short_side,
 };
 use crate::probe::{MediaProbe, display_dimensions};
 use crate::{MediaError, Result};
@@ -58,13 +58,14 @@ pub fn gop_frames(fps: f64) -> u32 {
     g.max(1)
 }
 
-/// The exact output dimensions a rendition will have (even, aspect-preserving).
+/// The exact output dimensions a rendition will have (even, aspect-preserving): its size
+/// on the short side, the height of a landscape source, the width of a portrait one.
 pub fn rendition_dimensions(source: &MediaProbe, spec: &RenditionSpec) -> Result<(u32, u32)> {
     let video = source
         .video
         .as_ref()
         .ok_or_else(|| MediaError::NoVideoStream("source has no video".into()))?;
-    Ok(fit_to_height(display_dimensions(video), spec.height))
+    Ok(fit_short_side(display_dimensions(video), spec.short_side))
 }
 
 fn video_codec_args(spec: &RenditionSpec, g: u32, preset: &str) -> Vec<String> {

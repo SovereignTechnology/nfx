@@ -1,4 +1,5 @@
-//! Package a source file as NFX-05 content: L8's ladder encoded to CMAF by ffmpeg, every
+//! Package a source file as NFX-05 content: the renditions asked for ([`Renditions`]; by
+//! default one, 720p or the source's own size) encoded to CMAF by ffmpeg, every
 //! output file content-addressed into a store directory, playlists rewritten to content
 //! names (NFX-05 §3), and the hash list assembled and self-verified with `nfx-proto`.
 
@@ -11,7 +12,7 @@ use nfx_proto::namespace::VideoAddr;
 use nfx_proto::sha256;
 
 use crate::argv::{THUMBNAIL_WIDTH, rendition_cmaf_argv, rendition_dimensions, thumbnail_argv};
-use crate::ladder::{Codec, GOP_SECONDS, LadderPlan, RenditionSpec, plan_ladder};
+use crate::ladder::{Codec, GOP_SECONDS, LadderPlan, RenditionSpec, Renditions, plan};
 use crate::mp4::init_codecs;
 use crate::probe::{ffprobe_argv, parse_ffprobe_json};
 use crate::{MediaError, Result};
@@ -78,6 +79,10 @@ impl Runner for SystemRunner {
 #[derive(Debug, Clone)]
 pub struct PackageOptions {
     pub video: VideoAddr,
+    /// Which renditions to make: by default one, 720p or the source's own size (its short
+    /// side as displayed).
+    pub renditions: Renditions,
+    /// Treat the source's short side as at most this many lines: no rendition is larger.
     pub max_height: Option<u32>,
     /// x264 preset (L8 default `medium`).
     pub preset: Option<String>,
@@ -278,7 +283,7 @@ pub fn package(
     let probe = parse_ffprobe_json(&String::from_utf8_lossy(
         &runner.run(Tool::Ffprobe, &ffprobe_argv(&input_arg))?,
     ))?;
-    let plan = plan_ladder(&probe, opts.max_height, Codec::H264)?;
+    let plan = plan(&probe, &opts.renditions, opts.max_height, Codec::H264)?;
     let preset = opts.preset.as_deref();
 
     let mut encoded = Vec::new();

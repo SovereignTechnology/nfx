@@ -7,6 +7,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use nfx_media::MediaError;
+use nfx_media::ladder::Renditions;
 use nfx_media::package::{PackageOptions, SystemRunner, package};
 use nfx_proto::hashlist::Role;
 use nfx_proto::namespace::VideoAddr;
@@ -57,8 +59,10 @@ fn packages_a_720p_clip_into_verified_nfx05_content() {
     assert!(status.success(), "could not make the source clip");
 
     let video = VideoAddr::parse("nfx:regtest:1:media-it-clip").unwrap();
+    // No sizes named: one rendition, 720p.
     let opts = PackageOptions {
         video: video.clone(),
+        renditions: Renditions::Default,
         max_height: None,
         // Not ultrafast: x264 then drops CABAC/8x8dct and signals the lowest profile the
         // stream fits (Constrained Baseline, avc1.42c01f) even with `-profile:v high`.
@@ -81,7 +85,7 @@ fn packages_a_720p_clip_into_verified_nfx05_content() {
             .iter()
             .map(|r| r.id.as_str())
             .collect::<Vec<_>>(),
-        ["720p", "360p"]
+        ["720p"]
     );
     for r in &p.hash_list.renditions {
         let codecs = r.codecs.as_deref().unwrap();
@@ -103,7 +107,7 @@ fn packages_a_720p_clip_into_verified_nfx05_content() {
             count(Role::Segment),
             count(Role::Thumb)
         ),
-        (1, 2, 2, 6, 1)
+        (1, 1, 1, 3, 1)
     );
     assert!(
         p.hash_list
@@ -115,6 +119,111 @@ fn packages_a_720p_clip_into_verified_nfx05_content() {
     // The store holds every listed file plus the hash list, all named by sha256.
     let stored = std::fs::read_dir(tmp.join("store")).unwrap().count();
     assert_eq!(stored, p.hash_list.files.len() + 1);
+
+    // The creator names two sizes: both are made, on one segment grid, tallest first.
+    let two = PackageOptions {
+        renditions: Renditions::parse("360p,720p").unwrap(),
+        ..opts.clone()
+    };
+    let p2 = package(
+        &src,
+        &tmp.join("store-two"),
+        &tmp.join("work-two"),
+        &runner(),
+        &two,
+    )
+    .expect("package two sizes");
+    let ids: Vec<&str> = p2
+        .hash_list
+        .renditions
+        .iter()
+        .map(|r| r.id.as_str())
+        .collect();
+    assert_eq!(ids, ["720p", "360p"]);
+    assert_eq!(
+        p2.hash_list.renditions[1].resolution.as_deref(),
+        Some("640x360")
+    );
+    assert_eq!(
+        p2.hash_list
+            .files
+            .iter()
+            .filter(|f| f.role == Role::Segment)
+            .count(),
+        6
+    );
+    // A size taller than the source is refused before anything is encoded.
+    let upscale = PackageOptions {
+        renditions: Renditions::parse("1080p").unwrap(),
+        ..opts.clone()
+    };
+    match package(
+        &src,
+        &tmp.join("store-up"),
+        &tmp.join("work-up"),
+        &runner(),
+        &upscale,
+    ) {
+        Err(MediaError::Renditions(why)) => {
+            assert!(why.ends_with("offered 720p, 480p, 360p"), "{why}");
+        }
+        other => panic!("1080p from a 720p clip: {other:?}"),
+    }
+    assert!(
+        std::fs::read_dir(tmp.join("work-up"))
+            .unwrap()
+            .next()
+            .is_none(),
+        "nothing encoded"
+    );
+
+    // A portrait clip: its size is its short side, so the default 720p is 720 wide.
+    let tall = tmp.join("portrait.mp4");
+    let status = Command::new(&runner().ffmpeg)
+        .args([
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=1080x1920:rate=30:duration=4",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=4",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+        ])
+        .arg(&tall)
+        .status()
+        .unwrap();
+    assert!(status.success(), "could not make the portrait clip");
+    let portrait = package(
+        &tall,
+        &tmp.join("store-tall"),
+        &tmp.join("work-tall"),
+        &runner(),
+        &PackageOptions {
+            video: VideoAddr::parse("nfx:regtest:1:media-it-portrait").unwrap(),
+            ..opts.clone()
+        },
+    )
+    .expect("package a portrait clip");
+    let r = &portrait.hash_list.renditions;
+    assert_eq!(
+        (r.len(), r[0].id.as_str(), r[0].resolution.as_deref()),
+        (1, "720p", Some("720x1280"))
+    );
 
     // A playlist posing as a video would make ffmpeg read other local files into the
     // output; the input guard refuses the HLS demuxer outright.
