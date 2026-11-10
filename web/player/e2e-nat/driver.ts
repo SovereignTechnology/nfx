@@ -6,8 +6,8 @@
  * e2e-nat/run.sh builds the network (network namespaces and nftables routers, as root),
  * starts strfry and nfxd in its "public" namespace, and runs this driver there once per
  * cell. The driver:
- *   - fronts strfry with TLS (wss://<public>:7443 → strfry on the namespace's 127.0.0.1:7777,
- *     the way a relay is deployed: the library takes `ws:` only on loopback);
+ *   - fronts strfry with TLS (wss://<public>:7443 → strfry's plain ws on <public>:7777, the
+ *     way a relay is deployed: the library takes `ws:` only on loopback);
  *   - subscribes to strfry for every kind, to record what it carried;
  *   - starts one headless Chromium in each LAN namespace (a fresh, non-persistent context;
  *     never a real profile), through e2e-nat/chromium-netns.sh as Playwright's executable,
@@ -28,6 +28,12 @@
  *             connected, within NAT_FAIL_BOUND_MS of its creation; B must take no mesh bytes
  *             and keep playing from the origin.
  *   record    The same, judged only on playback continuing; the outcome is recorded.
+ *   nfxd      No browser A: run.sh started an nfxd with the mesh endpoint behind router A
+ *             (#71 phase 2). B plays, and once it has a peer router B cuts the origin; B must
+ *             play 15 s past the cut on mesh bytes alone, router B must have taken at least
+ *             those as UDP from router A, the selected pair must be srflx ↔ srflx, and nfxd's
+ *             last `mesh:` line (NAT_NFXD_LOG) must count a connection opened and a segment
+ *             served. nfxd to browser only: the endpoint never takes bytes from a peer.
  * Every cell: strfry carried only kind-25050 `nfx-mesh/1` events, offers and answers as
  * NIP-44 v2 ciphertext naming no SDP, candidate or address in clear; no page opened a socket
  * to anything but the relay.
@@ -55,7 +61,7 @@ function need(name: string): string {
   return v;
 }
 const CELL = need('NAT_CELL');
-const EXPECT = need('NAT_EXPECT') as 'punch' | 'no-punch' | 'record';
+const EXPECT = need('NAT_EXPECT') as 'punch' | 'no-punch' | 'record' | 'nfxd';
 const NAT_A = need('NAT_A');
 const NAT_B = need('NAT_B');
 const PUB = need('NAT_PUB_IP');
@@ -76,7 +82,9 @@ const TLS_KEY = readFileSync(need('NAT_TLS_KEY'));
 const TLS_CERT = readFileSync(need('NAT_TLS_CERT'));
 const TLS_SPKI = need('NAT_TLS_SPKI');
 const WRAPPER = join(here, 'chromium-netns.sh');
-if (!['punch', 'no-punch', 'record'].includes(EXPECT)) throw new Error(`NAT_EXPECT ${EXPECT}`);
+if (!['punch', 'no-punch', 'record', 'nfxd'].includes(EXPECT)) throw new Error(`NAT_EXPECT ${EXPECT}`);
+/** The NAT'd nfxd's stderr, in the nfxd cell. */
+const NFXD_LOG = need('NAT_NFXD_LOG');
 if (!/^[0-9a-f]{64}$/.test(ROOT)) throw new Error('NAT_ROOT is not 64 hex');
 if (!/^[A-Za-z0-9+/]{43}=$/.test(TLS_SPKI)) throw new Error('NAT_TLS_SPKI is not a base64 sha256');
 
@@ -118,11 +126,11 @@ function delta(from: Meter, to: Meter): Meter {
 
 // ---- the relay: TLS in front of strfry, and a subscriber of every kind ------------------------
 
-/** wss://PUB:RELAY_TLS_PORT → strfry on this namespace's loopback, byte for byte. */
+/** wss://PUB:RELAY_TLS_PORT → strfry's plain ws on PUB:STRFRY_PORT, byte for byte. */
 function tlsFront(): Promise<() => void> {
   const open = new Set<Socket>();
   const server = createTlsServer({ key: TLS_KEY, cert: TLS_CERT, minVersion: 'TLSv1.2' }, (client) => {
-    const up = tcpConnect(STRFRY_PORT, '127.0.0.1');
+    const up = tcpConnect(STRFRY_PORT, PUB);
     open.add(client);
     open.add(up);
     const end = (): void => {
@@ -450,24 +458,64 @@ function outcome(r: RtcRec, now: number): { kind: 'connected' | 'ended' | 'open'
   return { kind: 'open', ms: now - r.created, reason: 'open' };
 }
 
+/** The NAT'd nfxd's last `mesh:` status line, parsed (nfxd prints one whenever it changes). */
+interface NfxdMesh {
+  line: string;
+  rooms: number;
+  candidates: string[];
+  opened: number;
+  failed: number;
+  served: number;
+}
+function nfxdMesh(): NfxdMesh | null {
+  let text: string;
+  try {
+    text = readFileSync(NFXD_LOG, 'utf8');
+  } catch {
+    return null;
+  }
+  const line = text.split('\n').filter((l) => /^mesh: \d+ room\(s\), /.test(l)).at(-1);
+  if (line === undefined) return null;
+  const n = (re: RegExp): number => Number(re.exec(line)?.[1] ?? NaN);
+  return {
+    line,
+    rooms: n(/^mesh: (\d+) room/),
+    candidates: (/candidates \[([^\]]*)\]/.exec(line)?.[1] ?? '').split(', ').filter(Boolean),
+    opened: n(/opened (\d+)/),
+    failed: n(/failed (\d+)/),
+    served: n(/segments served (\d+)/),
+  };
+}
+
+/** As `mappings`, from nfxd's own candidates (`host <ip>:<port>`, `srflx <ip>:<port>`). */
+function nfxdMapping(m: NfxdMesh | null): ('kept' | 'changed')[] {
+  const port = (type: string): string | undefined => m?.candidates.find((c) => c.startsWith(`${type} `))?.split(':').at(-1);
+  const host = port('host');
+  const srflx = port('srflx');
+  return host === undefined || srflx === undefined ? [] : [host === srflx ? 'kept' : 'changed'];
+}
+
 /** A server-reflexive candidate on this router's public address (getStats names it). */
 const srflxOn = (c: Candidate | null, ip: string): boolean => c !== null && c.type === 'srflx' && c.address === ip;
 
 async function main(): Promise<number> {
   const result: Record<string, unknown> = { cell: CELL, nat_a: NAT_A, nat_b: NAT_B, expect: EXPECT, judged: true };
   const problems: string[] = [];
-  const watch = await watchRelay(`ws://127.0.0.1:${STRFRY_PORT}`);
+  const watch = await watchRelay(`ws://${PUB}:${STRFRY_PORT}`);
   const closeFront = await tlsFront();
   const viewers: Viewer[] = [];
   const diag: Record<string, unknown> = {};
   try {
-    // ---- A: plays from the origin first, and fetches far ahead over HTTP ----
-    const a = await viewer('A', NS_A, 120);
-    viewers.push(a);
-    if (!(await until(a.page, (s) => s.playing || s.errors.length > 0, 90_000)) || !(await state(a.page)).playing) {
-      throw new Error(`A did not play: ${JSON.stringify((await state(a.page)).errors)}`);
+    // ---- A: plays from the origin first, and fetches far ahead over HTTP. In the nfxd
+    // cell A is run.sh's nfxd, seeding already. ----
+    const a = EXPECT === 'nfxd' ? null : await viewer('A', NS_A, 120);
+    if (a !== null) {
+      viewers.push(a);
+      if (!(await until(a.page, (s) => s.playing || s.errors.length > 0, 90_000)) || !(await state(a.page)).playing) {
+        throw new Error(`A did not play: ${JSON.stringify((await state(a.page)).errors)}`);
+      }
+      await sleep(10_000);
     }
-    await sleep(10_000);
 
     // ---- B: a 2 s HTTP window, so the rest is the mesh's to bring ----
     const m0 = meters();
@@ -480,7 +528,7 @@ async function main(): Promise<number> {
     let pairsB: SelectedPair[] = [];
     let pairsA: SelectedPair[] = [];
 
-    if (EXPECT === 'punch') {
+    if (EXPECT === 'punch' || EXPECT === 'nfxd') {
       const meshed = await until(b.page, (s) => s.errors.length > 0 || (s.playing && s.t > 3 && (s.mesh?.peers ?? 0) > 0), 120_000);
       if (!meshed) problems.push('B never played with a peer (120 s)');
       // The cut: router B refuses B's path to the origin (resets B's connections to it, drops
@@ -490,7 +538,7 @@ async function main(): Promise<number> {
       m1 = meters();
       atCut = await state(b.page);
       pairsB = await selectedPairs(b.page);
-      pairsA = await selectedPairs(a.page);
+      pairsA = a === null ? [] : await selectedPairs(a.page);
       const t0 = atCut.t;
       result.cut_at_video_s = Math.round(t0 * 10) / 10;
       if (!(await until(b.page, (s) => s.errors.length > 0 || s.t > t0 + 15, 120_000))) problems.push('B stopped playing after the cut');
@@ -511,17 +559,19 @@ async function main(): Promise<number> {
       }
       if (!(await until(b.page, (s) => s.errors.length > 0 || s.t >= 30, 120_000))) problems.push('B did not play to 30 s');
       pairsB = await selectedPairs(b.page);
-      pairsA = await selectedPairs(a.page);
+      pairsA = a === null ? [] : await selectedPairs(a.page);
     }
 
     const m2 = meters();
     const now = Date.now();
     const bEnd = await state(b.page);
-    const aEnd = await state(a.page);
+    const aEnd = a === null ? null : await state(a.page);
     const recsB = await rtc(b.page);
-    const recsA = await rtc(a.page);
-    if (EXPECT === 'punch' && pairsB.length === 0) pairsB = await selectedPairs(b.page);
-    if (EXPECT === 'punch' && pairsA.length === 0) pairsA = await selectedPairs(a.page);
+    const recsA = a === null ? [] : await rtc(a.page);
+    const cutCell = EXPECT === 'punch' || EXPECT === 'nfxd';
+    if (cutCell && pairsB.length === 0) pairsB = await selectedPairs(b.page);
+    if (EXPECT === 'punch' && a !== null && pairsA.length === 0) pairsA = await selectedPairs(a.page);
+    const nfxd = EXPECT === 'nfxd' ? nfxdMesh() : null;
     const session = { a: delta(m0.a, m2.a), b: delta(m0.b, m2.b) };
     const afterCut = m1 === null ? null : { a: delta(m1.a, m2.a), b: delta(m1.b, m2.b) };
     const outB = recsB.map((r) => outcome(r, now));
@@ -551,21 +601,18 @@ async function main(): Promise<number> {
     result.pairs_a = pairsA;
     result.local_types_b = [...new Set(recsB.flatMap((r) => r.local.map((c) => c.type)))];
     result.remote_types_b = [...new Set(recsB.flatMap((r) => r.remote))];
-    const mapA = mappings(recsA);
+    const mapA = a === null ? nfxdMapping(nfxd) : mappings(recsA);
     const mapB = mappings(recsB);
     result.mapping = { a: mapA, b: mapB };
     result.viewer = { t: bEnd.t, errors: bEnd.errors, mesh: bEnd.mesh, at_cut: atCut, played_ms: now - bStart };
-    result.seeder = { t: aEnd.t, errors: aEnd.errors, mesh: aEnd.mesh };
+    result.seeder = aEnd === null ? { nfxd } : { t: aEnd.t, errors: aEnd.errors, mesh: aEnd.mesh };
     result.fail_bound_ms = FAIL_BOUND_MS;
     diag.rtc = { A: recsA, B: recsB };
 
     // ---- what every cell holds ----
     if (bEnd.errors.length > 0) problems.push(`B errors ${JSON.stringify(bEnd.errors)}`);
-    if (aEnd.errors.length > 0) problems.push(`A errors ${JSON.stringify(aEnd.errors)}`);
-    for (const [n, s] of [
-      ['A', aEnd],
-      ['B', bEnd],
-    ] as const) {
+    if (aEnd !== null && aEnd.errors.length > 0) problems.push(`A errors ${JSON.stringify(aEnd.errors)}`);
+    for (const [n, s] of aEnd === null ? ([['B', bEnd]] as const) : ([['A', aEnd], ['B', bEnd]] as const)) {
       if (s.mesh?.signaling !== 'nostr' || JSON.stringify(s.mesh?.relays) !== JSON.stringify([RELAY])) {
         problems.push(`${n} signaling ${s.mesh?.signaling} ${JSON.stringify(s.mesh?.relays)}`);
       }
@@ -579,8 +626,8 @@ async function main(): Promise<number> {
     for (const [r, m] of Object.entries(session)) {
       if ((m.other_in ?? 0) !== 0 || (m.other_out ?? 0) !== 0) problems.push(`router ${r} carried other traffic: ${m.other_in} in, ${m.other_out} out`);
     }
-    // The routers behave as named: a consistent one kept the browser's port in the mapping
-    // nfxd's STUN saw, a symmetric one changed it.
+    // The routers behave as named: a consistent one kept the browser's (or the NAT'd nfxd's)
+    // port in the mapping the public nfxd's STUN saw, a symmetric one changed it.
     for (const [n, nat, m] of [
       ['A', NAT_A, mapA],
       ['B', NAT_B, mapB],
@@ -591,18 +638,28 @@ async function main(): Promise<number> {
     }
 
     // ---- per cell ----
-    if (EXPECT === 'punch') {
+    if (EXPECT === 'punch' || EXPECT === 'nfxd') {
       const ms = bEnd.mesh;
       if (atCut !== null && !(bEnd.t > atCut.t + 15)) problems.push(`B played only to ${bEnd.t} s (cut at ${atCut.t} s)`);
       if (!((ms?.peers ?? 0) > 0)) problems.push('B has no peer');
       if (!((ms?.bytes.p2p ?? 0) > 0)) problems.push('no bytes over the mesh');
-      if (!((aEnd.mesh?.uploaded ?? 0) > 0)) problems.push('A uploaded nothing');
       // The mesh bytes came straight from router A's public address, as UDP.
       if (!((session.b.peer_in ?? 0) >= (ms?.bytes.p2p ?? Infinity))) {
         problems.push(`router B took ${session.b.peer_in} B of UDP from router A, fewer than B's ${ms?.bytes.p2p} mesh bytes`);
       }
-      if (!((session.a.peer_out ?? 0) >= (aEnd.mesh?.uploaded ?? Infinity))) {
-        problems.push(`router A sent ${session.a.peer_out} B of UDP to router B, fewer than A's ${aEnd.mesh?.uploaded} uploaded`);
+      if (aEnd !== null) {
+        if (!((aEnd.mesh?.uploaded ?? 0) > 0)) problems.push('A uploaded nothing');
+        if (!((session.a.peer_out ?? 0) >= (aEnd.mesh?.uploaded ?? Infinity))) {
+          problems.push(`router A sent ${session.a.peer_out} B of UDP to router B, fewer than A's ${aEnd.mesh?.uploaded} uploaded`);
+        }
+      } else {
+        // The NAT'd nfxd: its last status line counts a connection opened and a segment
+        // served, and both routers delivered UDP from the other (the punch, both ways).
+        if (nfxd === null) problems.push(`nfxd printed no mesh status line (${NFXD_LOG})`);
+        else if (!(nfxd.opened >= 1 && nfxd.served >= 1)) problems.push(`nfxd: ${nfxd.line}`);
+        if (!((session.a.peer_in ?? 0) > 0 && (session.b.peer_in ?? 0) > 0)) {
+          problems.push(`UDP delivered: ${session.b.peer_in} B nfxd → B, ${session.a.peer_in} B B → nfxd`);
+        }
       }
       // After the cut, nothing from the origin reached B (only the relay and STUN from the
       // public namespace), and B took no byte over HTTP: what it played after the cut came
@@ -613,7 +670,7 @@ async function main(): Promise<number> {
       }
       // srflx ↔ srflx, on the routers' public addresses, on both sides.
       if (pairsB.length === 0) problems.push('B has no connected peer connection to read a candidate pair from');
-      if (pairsA.length === 0) problems.push('A has no connected peer connection to read a candidate pair from');
+      if (a !== null && pairsA.length === 0) problems.push('A has no connected peer connection to read a candidate pair from');
       for (const p of pairsB) {
         if (!srflxOn(p.local, ROUTER_B) || !srflxOn(p.remote, ROUTER_A)) problems.push(`B's selected pair is not srflx ↔ srflx: ${JSON.stringify(p)}`);
       }

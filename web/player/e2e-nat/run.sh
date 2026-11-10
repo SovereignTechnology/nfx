@@ -8,13 +8,16 @@
 # (spikes/iroh/nat/run.sh), itself lifted from this repository's spike S5′
 # (crates/spikes/s5-hyperdht/nat/run.sh); the public segment is TEST-NET-3:
 #
-#   nfxpub  203.0.113.1/24 on a bridge: the "internet". strfry (its own default strfry.conf:
-#           127.0.0.1:7777, only its database and open-files limit changed) behind TLS on
-#           :7443 (the driver's front, as a relay is deployed), and one nfxd: the origin
-#           (:8080) and STUN (udp :3478) for a small generated video it seeds
+#   nfxpub  203.0.113.1/24 on a bridge: the "internet". strfry (its own default strfry.conf,
+#           only its database, bind address and open-files limit changed) on :7777, plain
+#           ws, which nfxd's mesh endpoint signals through (it trusts only web PKI roots, so
+#           never a test CA); browsers reach the same strfry over TLS on :7443 (the driver's
+#           front, as a relay is deployed: the web library takes ws: only on loopback). And
+#           one nfxd: the origin (:8080) and STUN (udp :3478) for a small generated video
 #   nfxra   router A: 203.0.113.11 up, 192.168.10.1 down
 #   nfxrb   router B: 203.0.113.12 up, 192.168.20.1 down
-#   nfxha   192.168.10.2 behind A: browser A (headless Chromium), the seeder
+#   nfxha   192.168.10.2 behind A: browser A (headless Chromium), the seeder; in the nfxd cell
+#           an nfxd with the mesh endpoint (--mesh-relay, --mesh-stun) instead
 #   nfxhb   192.168.20.2 behind B: browser B, the viewer
 #
 # A "consistent" router masquerades keeping the source port (endpoint-independent mapping);
@@ -23,8 +26,8 @@
 #
 # Each router counts what it forwards between its LAN and the internet (table nfxmeter,
 # after its own filter, so only what it delivers): peer_* is UDP to or from the other
-# router's public address (the direct path), relay_* the wss relay, stun_* nfxd's STUN,
-# origin_* nfxd's origin, other_* anything else. peer_refused counts UDP from the other
+# router's public address (the direct path), relay_* the wss relay, relayws_* the same relay
+# over plain ws, stun_* nfxd's STUN, origin_* nfxd's origin, other_* anything else. peer_refused counts UDP from the other
 # router that it dropped as unsolicited: punch attempts that died at the NAT.
 #
 # The cells (e2e-nat/driver.ts judges each, one fresh network, relay and nfxd per cell):
@@ -34,7 +37,12 @@
 #   symmetric-symmetric    no-punch  every peer connection ends unconnected within
 #                                    FAIL_BOUND_MS; B plays on from the origin
 #   consistent-symmetric   record    whatever happens; B plays on
-#   browser-nfxd-behind-nat          PLACEHOLDER (phase 2 of #71: nfxd's full ICE agent)
+#   nfxd-browser           nfxd      an nfxd behind router A (consistent) serves browser B
+#                                    (behind router B, consistent) over its mesh endpoint;
+#                                    B plays on from it with the origin cut. nfxd to browser
+#                                    only: the endpoint never takes bytes from a peer. SKIP
+#                                    (a placeholder) when the nfxd under test has no
+#                                    --mesh-relay (#71 phase 2)
 #
 # The fail bound (FAIL_BOUND_MS, 30 s): the library gives a punch that cannot work at most its
 # ICE gathering (5 s, DEFAULT_ICE_GATHERING_TIMEOUT_MS in src/signal-nostr.ts) before the offer
@@ -63,7 +71,7 @@ RB_IP=203.0.113.12
 ORIGIN_PORT=8080
 STUN_PORT=3478
 RELAY_TLS_PORT=7443
-STRFRY_PORT=7777 # strfry.conf's own default, on the public namespace's loopback
+STRFRY_PORT=7777 # strfry.conf's own default port, bound on the public address
 NAMESPACES="nfxpub nfxra nfxrb nfxha nfxhb"
 FAIL_BOUND_MS=${FAIL_BOUND_MS:-30000}
 
@@ -110,6 +118,8 @@ table inet nfxmeter {
   counter peer_out {}
   counter relay_in {}
   counter relay_out {}
+  counter relayws_in {}
+  counter relayws_out {}
   counter stun_in {}
   counter stun_out {}
   counter origin_in {}
@@ -123,6 +133,8 @@ table inet nfxmeter {
     oifname "up-$r" ip daddr $peer meta l4proto udp counter name peer_out accept
     iifname "up-$r" ip saddr $PUB_IP tcp sport $RELAY_TLS_PORT counter name relay_in accept
     oifname "up-$r" ip daddr $PUB_IP tcp dport $RELAY_TLS_PORT counter name relay_out accept
+    iifname "up-$r" ip saddr $PUB_IP tcp sport $STRFRY_PORT counter name relayws_in accept
+    oifname "up-$r" ip daddr $PUB_IP tcp dport $STRFRY_PORT counter name relayws_out accept
     iifname "up-$r" ip saddr $PUB_IP udp sport $STUN_PORT counter name stun_in accept
     oifname "up-$r" ip daddr $PUB_IP udp dport $STUN_PORT counter name stun_out accept
     iifname "up-$r" ip saddr $PUB_IP tcp sport $ORIGIN_PORT counter name origin_in accept
@@ -260,17 +272,19 @@ topology() { # mode-a mode-b
   meter_install b
 }
 
-# strfry's own default strfry.conf with only the database and the open-files limit changed
-# (as e2e-nostr.ts); it fails unless each was found once and the defaults bind 127.0.0.1:7777.
+# strfry's own default strfry.conf with only the database, the bind address (the public one)
+# and the open-files limit changed (e2e-nostr.ts changes the same but the bind); it fails
+# unless each was found and changed once, on the default port.
 strfry_conf() { # dir
   local conf=$1/strfry.conf
   sed -e "s|^db = \"\./strfry-db/\"\$|db = \"$1/strfry-db/\"|" \
+    -e "s|^\( *\)bind = \"127\.0\.0\.1\"\$|\1bind = \"$PUB_IP\"|" \
     -e 's|^\( *\)nofiles = [0-9][0-9]*$|\1nofiles = 0|' "$STRFRY_CONF" > "$conf"
   [ "$(grep -cxF "db = \"$1/strfry-db/\"" "$conf")" = 1 ] &&
     [ "$(grep -cE '^ *nofiles = 0$' "$conf")" = 1 ] &&
-    [ "$(grep -cE '^ *bind = "127\.0\.0\.1"$' "$conf")" = 1 ] &&
+    [ "$(grep -cE "^ *bind = \"$PUB_IP\"\$" "$conf")" = 1 ] &&
     [ "$(grep -cE "^ *port = $STRFRY_PORT\$" "$conf")" = 1 ] ||
-    { echo "strfry.conf: db or nofiles not found once, or not bound to 127.0.0.1:$STRFRY_PORT" >&2; return 1; }
+    { echo "strfry.conf: db, bind or nofiles not found once, or not on port $STRFRY_PORT" >&2; return 1; }
 }
 
 # The public side of a cell: a fresh strfry and a fresh nfxd seeding the video (origin and
@@ -281,7 +295,7 @@ public_up() { # dir name
   mkdir -p "$d/strfry-db"
   strfry_conf "$d" || return 1
   start "$name-strfry" nfxpub "$STRFRY" --config="$d/strfry.conf" relay
-  wait_port nfxpub 127.0.0.1 "$STRFRY_PORT" 30 || { echo "strfry is not listening" >&2; return 1; }
+  wait_port nfxpub "$PUB_IP" "$STRFRY_PORT" 30 || { echo "strfry is not listening" >&2; return 1; }
   pubkey=$("$NFXD" key new "$d/node.key" | head -1)
   A_ADDR="38504:$pubkey:$VIDEO"
   cp -r "$work/pkg/store" "$d/store"
@@ -313,7 +327,7 @@ cell() { # NAME MODE-A MODE-B EXPECT
   echo "== $name: router A $2, router B $3, expect $4"
   topology "$2" "$3"
   for i in a b; do ip netns exec "nfxr$i" nft list ruleset > "$out/$name-router-$i.nft"; done
-  if ! public_up "$d" "$name" 2> "$out/$name-harness.err"; then
+  if ! { public_up "$d" "$name" && { [ "$4" != nfxd ] || nat_nfxd_up "$d" "$name"; }; } 2> "$out/$name-harness.err"; then
     record "$(json 'import json,sys; print(json.dumps({"cell":sys.argv[1],"judged":True,"passed":False,"problems":["harness: "+open(sys.argv[2]).read().strip()[-400:]]}))' "$name" "$out/$name-harness.err")"
   else
     rm -f "$out/$name.json"
@@ -323,7 +337,7 @@ cell() { # NAME MODE-A MODE-B EXPECT
       NAT_ORIGIN_PORT="$ORIGIN_PORT" NAT_STUN_PORT="$STUN_PORT" NAT_RELAY_TLS_PORT="$RELAY_TLS_PORT" \
       NAT_STRFRY_PORT="$STRFRY_PORT" NAT_ROOT="$ROOT" NAT_CTL="$here/run.sh" NAT_OUT="$out" \
       NAT_FAIL_BOUND_MS="$FAIL_BOUND_MS" NAT_TLS_KEY="$work/tls/relay.key" NAT_TLS_CERT="$work/tls/relay.crt" \
-      NAT_TLS_SPKI="$SPKI" "$TSX" "$here/driver.ts" > "$out/$name-driver.out" 2> "$out/$name-driver.err" || rc=$?
+      NAT_TLS_SPKI="$SPKI" NAT_NFXD_LOG="$out/$name-nfxd-a.err" "$TSX" "$here/driver.ts" > "$out/$name-driver.out" 2> "$out/$name-driver.err" || rc=$?
     if [ -s "$out/$name.json" ]; then
       record "$(json 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$out/$name.json")"
     else
@@ -334,15 +348,42 @@ cell() { # NAME MODE-A MODE-B EXPECT
   pids=("${pids[@]}")
 }
 
-# The cell phase 2 of #71 adds: a browser and an nfxd, each behind a consistent NAT, exchanging
-# segments in both directions, signaled over the same relay. It needs nfxd's full ICE agent
-# (str0m with its own candidates from the portmapper or STUN, and the Nostr signaler); today
-# nfxd speaks WebRTC only as an ICE-lite bridge on a public address. Recorded as skipped, never
-# as a pass, until then.
-cell_browser_nfxd_placeholder() {
-  local why="PLACEHOLDER: phase 2 of #71 (nfxd's full ICE agent with Nostr signaling) is not built; nfxd answers browsers only as a public ICE-lite bridge"
-  record "$(json 'import json,sys; print(json.dumps({"cell":"browser-nfxd-behind-nat","nat_a":"consistent","nat_b":"consistent","expect":"punch, both directions","skipped":True,"judged":False,"reason":sys.argv[1]}))' "$why")"
-  echo "::notice title=NAT browsers: browser-nfxd-behind-nat skipped::$why"
+# The nfxd cell's seeder: an nfxd in LAN A (behind router A) with the mesh endpoint (#71 phase
+# 2), in place of browser A. Its own key and a copy of the package store; it publishes the
+# manifest to its own embedded relay, so it resolves it there, and signals only through strfry
+# over plain ws (--mesh-relay), with STUN from the public nfxd (--mesh-stun). Rooms are the
+# renditions' stream swarms (NFX-10 §2), so it meets browser B whatever key signed the
+# manifest B plays. Ready once it seeds and its mesh line names a srflx candidate on router
+# A's address, gathering done.
+nat_nfxd_up() { # dir name
+  local d=$1 name=$2 pubkey a nodeRelay
+  pubkey=$("$NFXD" key new "$d/nat-node.key" | head -1)
+  a="38504:$pubkey:$VIDEO"
+  cp -r "$work/pkg/store" "$d/nat-store"
+  start "$name-nfxd-a" nfxha "$NFXD" run --key "$d/nat-node.key" --store "$d/nat-store" --state "$d/nat-state" \
+    --seed "$a" --embed-relay 127.0.0.1:0 --mesh-relay "ws://$PUB_IP:$STRFRY_PORT" --mesh-stun "$PUB_IP:$STUN_PORT"
+  wait_for "$out/$name-nfxd-a.err" 'embedded relay: ws://' 30 || { echo "nfxd A: no embedded relay" >&2; return 1; }
+  nodeRelay=$(grep -oE 'embedded relay: ws://[^ ]+' "$out/$name-nfxd-a.err" | head -1 | cut -d' ' -f3)
+  ip netns exec nfxha "$NFXD" publish --key "$d/nat-node.key" --relay "$nodeRelay" --package "$work/pkg" \
+    --title "NAT browsers" > /dev/null 2>> "$out/$name-publish-a.err" || { echo "nfxd A: publish failed" >&2; return 1; }
+  wait_for "$out/$name-nfxd-a.err" "$a: Seeding" 60 || { echo "nfxd A: never seeding" >&2; return 1; }
+  wait_for "$out/$name-nfxd-a.err" '^mesh: udp .*, session ' 30 || { echo "nfxd A: no mesh endpoint" >&2; return 1; }
+  wait_for "$out/$name-nfxd-a.err" "^mesh: [1-9][0-9]* room\\(s\\), candidates \\[[^]]*srflx ${RA_IP//./\\.}:[0-9]+[^]]*\\], " 30 ||
+    { echo "nfxd A: no room joined with a srflx candidate on $RA_IP" >&2; tail -5 "$out/$name-nfxd-a.err" >&2; return 1; }
+}
+
+# The nfxd cell needs the mesh endpoint (#71 phase 2). Whether the nfxd under test has it is
+# read from its usage text (nfxd alone prints it and exits 2), never guessed; without it the
+# cell is recorded as skipped, never as a pass.
+cell_nfxd() {
+  local usage why="PLACEHOLDER: the nfxd under test has no --mesh-relay: the mesh endpoint (#71 phase 2, a full ICE agent with Nostr signaling) is not in it"
+  usage=$("$NFXD" 2>&1 || true)
+  if [[ $usage == *--mesh-relay* && $usage == *--mesh-stun* ]]; then
+    cell nfxd-browser consistent consistent nfxd
+  else
+    record "$(json 'import json,sys; print(json.dumps({"cell":"nfxd-browser","nat_a":"consistent","nat_b":"consistent","expect":"nfxd","skipped":True,"judged":False,"reason":sys.argv[1]}))' "$why")"
+    echo "::notice title=NAT browsers: nfxd-browser skipped::$why"
+  fi
 }
 
 # --- the content: one clip, packaged once ---------------------------------------------------
@@ -373,7 +414,7 @@ echo "content: root $ROOT; relay key sha256/$SPKI"
 cell consistent-consistent consistent consistent punch
 cell symmetric-symmetric symmetric symmetric no-punch
 cell consistent-symmetric consistent symmetric record
-cell_browser_nfxd_placeholder
+cell_nfxd
 
 # --- the table --------------------------------------------------------------------------------
 json 'import json,sys
