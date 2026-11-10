@@ -1,0 +1,11 @@
+{
+  "package": "p2p-media-loader-core",
+  "version": "4.0.0",
+  "tarball": "https://registry.npmjs.org/p2p-media-loader-core/-/p2p-media-loader-core-4.0.0.tgz",
+  "integrity": "sha512-aG+FcS3INFrqA/R2r+9mk1jdr1WOydstY1YYITirrsZbiLOA2AOrhjtI+kBB+nQufKY7SFOWraWTGJiKT9/9zQ==",
+  "tarball_sha256": "9ec157999f2b68cb5099e4d0d19a0b7d0530cb476e986bc530bad79bb57ff793",
+  "src_sha256": "e1f35bac191674bf786ad827630d093bfb510d9d1c99ea8d50514fc6a870437b",
+  "patch": "p2p-media-loader-core-4.0.0.patch",
+  "patch_sha256": "48f93dabf7f312c73250ada1f34da9dfe1b08eaff393e74985b74cffe027310c",
+  "out_sha256": "a348f854b0aa4aadc68636eefe0b2294ab55fb17dd958ee5d9aff3dd8eb47ed4"
+}

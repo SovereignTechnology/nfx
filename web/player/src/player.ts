@@ -15,8 +15,10 @@
  *
  * With `&tracker=<wss URL>` (repeatable), or trackers from beacons, the player also joins
  * the NFX-10 browser mesh: segments may then come from other viewers, checked by the same
- * verifier. `&stun=<stun: URL>` adds an ICE server; there is none by default, so no third
- * party learns who watches. Test knobs, which change where bytes come from and never
+ * verifier. With `&signal=nostr`, the mesh signals over Nostr instead (NFX-10 §6): through
+ * the page's `&relay=` URLs (up to 8), with no tracker at all, and beacon-named trackers
+ * are not used. `&stun=<stun: URL>` adds an ICE server; there is none by default, so no
+ * third party learns who watches. Test knobs, which change where bytes come from and never
  * whether they are checked: `&httpWindow=<s>` (seconds ahead fetched over HTTP) and
  * `&level=<n>` (pin a rendition).
  *
@@ -26,6 +28,7 @@ import {
   type Endpoints,
   type Level,
   MAX_ICE_SERVERS,
+  MAX_RELAYS,
   MAX_TRACKERS,
   type MeshStats,
   type OpenCommon,
@@ -34,6 +37,7 @@ import {
   type Signaling,
   init,
   open,
+  relayUrl,
   resolveManifest,
   trackerUrl,
   watchEndpoints,
@@ -84,8 +88,13 @@ const st: State = {
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const logEl = $<HTMLPreElement>('log');
+/** The last lines logged; what relays and peers make the page log is theirs to choose, so it is capped. */
+const LOG_LINES = 400;
+const logLines: string[] = [];
 const log = (m: string): void => {
-  logEl.textContent += `${new Date().toISOString().slice(11, 19)} ${m}\n`;
+  logLines.push(`${new Date().toISOString().slice(11, 19)} ${m.slice(0, 500)}`);
+  if (logLines.length > LOG_LINES) logLines.splice(0, logLines.length - LOG_LINES);
+  logEl.textContent = `${logLines.join('\n')}\n`;
 };
 
 const onEvent = (e: PlayerEvent): void => {
@@ -129,9 +138,18 @@ const iceServers: RTCIceServer[] = params
   .filter((u) => /^stuns?:(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:\d{1,5})?$/.test(u))
   .slice(0, 2)
   .map((urls) => ({ urls }));
-/** The mesh through these trackers, or no mesh. */
+/** `&signal=nostr`: the mesh signals through the page's relays, and no tracker. */
+const nostrRelays =
+  params.get('signal') === 'nostr'
+    ? [...new Set(relays.map(relayUrl).filter((r): r is string => r !== null))].slice(0, MAX_RELAYS)
+    : [];
+/** The mesh over Nostr, or through these trackers, or no mesh. */
 const trackerSignaling = (urls: string[]): Signaling | undefined =>
-  urls.length > 0 ? { kind: 'trackers', urls } : undefined;
+  nostrRelays.length > 0
+    ? { kind: 'nostr', relays: nostrRelays }
+    : urls.length > 0
+      ? { kind: 'trackers', urls }
+      : undefined;
 const whole = (v: string | null, max: number): number | undefined => {
   const n = Number(v);
   return v !== null && Number.isSafeInteger(n) && n >= 0 && n <= max ? n : undefined;

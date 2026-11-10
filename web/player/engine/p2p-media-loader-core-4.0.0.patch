@@ -1,0 +1,400 @@
+--- a/src/core.ts
++++ b/src/core.ts
+@@ -82,6 +82,7 @@
+     httpRequestSetup: undefined,
+     swarmId: undefined,
+     streamSwarmIdBuilder: undefined,
++    signalingClientFactory: undefined,
+     p2pMaxPeers: 50,
+     p2pChurnMaxPeersMultiplier: 1.5,
+     p2pChurnCleanupIntervalMs: 30000,
+@@ -718,8 +719,12 @@
+ 
+   private stripStaticOnlyProps<T extends object>(
+     config: T,
+-  ): Omit<T, "swarmId" | "streamSwarmIdBuilder"> {
+-    if (!("swarmId" in config) && !("streamSwarmIdBuilder" in config)) {
++  ): Omit<T, "swarmId" | "streamSwarmIdBuilder" | "signalingClientFactory"> {
++    if (
++      !("swarmId" in config) &&
++      !("streamSwarmIdBuilder" in config) &&
++      !("signalingClientFactory" in config)
++    ) {
+       return config;
+     }
+ 
+@@ -727,15 +732,17 @@
+     // plain-JS callers can still pass them — signal instead of silently
+     // ignoring the update.
+     this.logger(
+-      "swarmId and streamSwarmIdBuilder cannot be changed at runtime; ignoring them in the dynamic configuration update",
++      "swarmId, streamSwarmIdBuilder and signalingClientFactory cannot be changed at runtime; ignoring them in the dynamic configuration update",
+     );
+ 
+     const sanitized = { ...config } as T & {
+       swarmId?: unknown;
+       streamSwarmIdBuilder?: unknown;
++      signalingClientFactory?: unknown;
+     };
+     delete sanitized.swarmId;
+     delete sanitized.streamSwarmIdBuilder;
++    delete sanitized.signalingClientFactory;
+     return sanitized;
+   }
+ 
+--- a/src/p2p/loader.ts
++++ b/src/p2p/loader.ts
+@@ -68,8 +68,10 @@
+ 
+     this.#webtorrentManager = new WebTorrentManager({
+       infoHash: this.#stream.infoHash,
++      streamSwarmId: this.#stream.streamSwarmId,
+       peerId,
+       trackerUrls: this.#config.announceTrackers,
++      signalingClientFactory: this.#config.signalingClientFactory,
+       rtcConfig: () => this.#config.rtcConfig,
+       socketPool: this.#webTorrentSocketPool,
+       maxPeers: () => this.#config.p2pMaxPeers,
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -510,6 +510,27 @@
+   ) => string | undefined;
+ 
+   /**
++   * An optional factory for a stream's signaling client, used instead of the
++   * WebTorrent tracker clients: when it is set, `announceTrackers` is not used.
++   *
++   * It is called once for each stream swarm the P2P loader joins, and the client it
++   * returns finds peers and negotiates their WebRTC connections, reporting each one
++   * through the events a tracker client reports (`SignalingClientEventMap`). The
++   * swarm's peer de-duplication and limits stay with the core: a client calls
++   * `context.claimPeer` before it negotiates with a peer and generates offers only
++   * while `context.shouldGenerateOffers()` allows it. The core starts the client,
++   * and destroys it with the stream.
++   *
++   * This property cannot be changed at runtime.
++   *
++   * @default
++   * ```typescript
++   * signalingClientFactory: undefined
++   * ```
++   */
++  signalingClientFactory?: SignalingClientFactory;
++
++  /**
+    * An optional function to validate a P2P segment before fully integrating it into the playback buffer.
+    * @param url The URL of the segment to validate.
+    * @param byteRange The optional byte range of the segment.
+@@ -654,6 +675,88 @@
+   webRtcConnectionTimeoutMs: number;
+ };
+ 
++/** What a `signalingClientFactory` is given for one stream swarm. */
++export type SignalingClientContext = {
++  /** The swarm's infohash, as trackers would be told. */
++  infoHash: string;
++
++  /** The stream swarm ID the infohash is computed from. */
++  streamSwarmId: string;
++
++  /** This peer's ID, as trackers would be told. */
++  peerId: string;
++
++  /** The RTC configuration to create peer connections with (read it for each). */
++  rtcConfig: () => RTCConfiguration | undefined;
++
++  /** The data channel configuration, if any. */
++  channelConfig?: RTCDataChannelInit;
++
++  /**
++   * Claim a remote peer before negotiating with it: false when that peer is already
++   * connecting or connected, or the swarm is full. A claim ends with the client's
++   * `peerConnected` or `peerConnectFailed` event for that peer.
++   */
++  claimPeer: (peerId: string) => boolean;
++
++  /** Whether the swarm wants more peers (offers are made only while it does). */
++  shouldGenerateOffers: () => boolean;
++
++  /** How long an offer waits for its answer, in milliseconds. */
++  offerTimeout?: () => number;
++
++  /** How long ICE gathering may take, in milliseconds. */
++  iceGatheringTimeout?: () => number;
++
++  /** How long the data channel may take to open after signaling, in milliseconds. */
++  connectionTimeout?: () => number;
++};
++
++/** The events a signaling client reports, as a WebTorrent tracker client does. */
++export type SignalingClientEventMap = {
++  peerConnected: (event: {
++    peerId: string;
++    connection: RTCPeerConnection;
++    channel: RTCDataChannel;
++  }) => void;
++  peerConnectFailed: (event: {
++    peerId: string;
++    error: PeerConnectError;
++  }) => void;
++  warning: (warning: TrackerWarning) => void;
++  error: (error: TrackerError) => void;
++};
++
++/** A stream swarm's signaling client (see `signalingClientFactory`). */
++export interface SignalingClient {
++  /** Names the signaling service where events would name a tracker URL. */
++  readonly url: string;
++
++  addEventListener<K extends keyof SignalingClientEventMap>(
++    eventName: K,
++    listener: SignalingClientEventMap[K],
++  ): void;
++
++  removeEventListener<K extends keyof SignalingClientEventMap>(
++    eventName: K,
++    listener: SignalingClientEventMap[K],
++  ): void;
++
++  /** Start finding peers. Called once. */
++  start(): void;
++
++  /**
++   * Stop: close every connection still negotiating and send no further events.
++   * Connections already reported by `peerConnected` belong to the core.
++   */
++  destroy(): void;
++}
++
++/** Makes the signaling client of one stream swarm. */
++export type SignalingClientFactory = (
++  context: SignalingClientContext,
++) => SignalingClient;
++
+ /** The stream identity data passed to a custom `streamSwarmIdBuilder`. */
+ export type StreamSwarmIdBuilderContext = {
+   /** The swarm ID of the stream: the configured `swarmId` or the manifest response URL. */
+--- a/src/webtorrent/webtorrent-manager/index.ts
++++ b/src/webtorrent/webtorrent-manager/index.ts
+@@ -3,6 +3,8 @@
+   TrackerError,
+   TrackerWarning,
+   PeerConnectError,
++  SignalingClient,
++  SignalingClientFactory,
+ } from "../../types.js";
+ import { EventTarget } from "../../utils/event-target.js";
+ import { getRTCErrorMessage, isTerminalConnectionState } from "../utils.js";
+@@ -11,8 +13,11 @@
+ 
+ export interface WebTorrentManagerConfig {
+   infoHash: string;
++  streamSwarmId?: string;
+   peerId: string;
+   trackerUrls: string[];
++  /** When set, one client from it replaces the tracker clients (`StreamConfig`). */
++  signalingClientFactory?: SignalingClientFactory;
+   rtcConfig?: () => RTCConfiguration | undefined;
+   channelConfig?: RTCDataChannelInit;
+   socketPool: WebTorrentSocketPool;
+@@ -73,7 +78,7 @@
+   readonly #connectedPeers = new Map<string, ConnectedPeer>();
+ 
+   readonly #clients = new Set<{
+-    client: WebTorrentClient;
++    client: SignalingClient | WebTorrentClient;
+     releaseSocket: () => void;
+     cleanupListeners: () => void;
+   }>();
+@@ -134,7 +139,36 @@
+     if (this.#destroyed || this.#started) return;
+     this.#started = true;
+ 
++    // shouldGenerateOffers is used to proactively INITIATE connections.
++    // We stop actively hunting for peers once we hit the soft limit (maxPeers).
++    // This prevents artificial hyper-churn where a stable swarm constantly
++    // cycles connections to reach the hard limit unnecessarily.
++    const shouldGenerateOffers = () =>
++      this.#connectingPeers.size + this.#connectedPeers.size <
++      this.#config.maxPeers();
++
+     try {
++      const factory = this.#config.signalingClientFactory;
++      if (factory) {
++        const client = factory({
++          infoHash: this.#config.infoHash,
++          streamSwarmId: this.#config.streamSwarmId ?? this.#config.infoHash,
++          peerId: this.#config.peerId,
++          rtcConfig: this.#config.rtcConfig ?? (() => undefined),
++          channelConfig: this.#config.channelConfig,
++          claimPeer: this.#claimPeer,
++          shouldGenerateOffers,
++          offerTimeout: this.#config.offerTimeout,
++          iceGatheringTimeout: this.#config.iceGatheringTimeout,
++          connectionTimeout: this.#config.connectionTimeout,
++        });
++        this.#addClient(client, client.url, () => {
++          // no socket from the pool to release
++        });
++        client.start();
++        return;
++      }
++
+       for (const url of this.#config.trackerUrls) {
+         const { client: wsClient, release } =
+           this.#config.socketPool.acquire(url);
+@@ -152,77 +186,9 @@
+             offerTimeout: this.#config.offerTimeout,
+             iceGatheringTimeout: this.#config.iceGatheringTimeout,
+             connectionTimeout: this.#config.connectionTimeout,
+-            // shouldGenerateOffers is used to proactively INITIATE connections.
+-            // We stop actively hunting for peers once we hit the soft limit (maxPeers).
+-            // This prevents artificial hyper-churn where a stable swarm constantly
+-            // cycles connections to reach the hard limit unnecessarily.
+-            shouldGenerateOffers: () =>
+-              this.#connectingPeers.size + this.#connectedPeers.size <
+-              this.#config.maxPeers(),
+-          });
+-
+-          const onPeerConnected = (event: {
+-            peerId: string;
+-            connection: RTCPeerConnection;
+-            channel: RTCDataChannel;
+-          }) => {
+-            this.#connectingPeers.delete(event.peerId);
+-            this.#addConnectedPeer(
+-              event.peerId,
+-              event.connection,
+-              event.channel,
+-              url,
+-            );
+-          };
+-
+-          const onPeerConnectFailed = (event: {
+-            peerId: string;
+-            error: PeerConnectError;
+-          }) => {
+-            if (this.#connectingPeers.has(event.peerId)) {
+-              this.#connectingPeers.delete(event.peerId);
+-              this.#eventTarget.dispatchEvent("peerConnectFailed", {
+-                peerId: event.peerId,
+-                trackerUrl: url,
+-                error: event.error,
+-              });
+-            }
+-          };
+-
+-          const onWarning = (warning: TrackerWarning) => {
+-            this.#eventTarget.dispatchEvent("warning", {
+-              trackerUrl: url,
+-              warning,
+-            });
+-          };
+-
+-          const onError = (error: TrackerError) => {
+-            this.#eventTarget.dispatchEvent("error", {
+-              trackerUrl: url,
+-              error,
+-            });
+-          };
+-
+-          client.addEventListener("peerConnected", onPeerConnected);
+-          client.addEventListener("peerConnectFailed", onPeerConnectFailed);
+-          client.addEventListener("warning", onWarning);
+-          client.addEventListener("error", onError);
+-
+-          const cleanupListeners = () => {
+-            client.removeEventListener("peerConnected", onPeerConnected);
+-            client.removeEventListener(
+-              "peerConnectFailed",
+-              onPeerConnectFailed,
+-            );
+-            client.removeEventListener("warning", onWarning);
+-            client.removeEventListener("error", onError);
+-          };
+-
+-          this.#clients.add({
+-            client,
+-            releaseSocket: release,
+-            cleanupListeners,
++            shouldGenerateOffers,
+           });
++          this.#addClient(client, url, release);
+           addedToClients = true;
+ 
+           client.start();
+@@ -239,6 +205,74 @@
+     }
+   }
+ 
++  // Wires a client's events to this manager and keeps it for destroy(); the
++  // caller starts it.
++  #addClient(
++    client: SignalingClient | WebTorrentClient,
++    url: string,
++    release: () => void,
++  ): void {
++    const onPeerConnected = (event: {
++      peerId: string;
++      connection: RTCPeerConnection;
++      channel: RTCDataChannel;
++    }) => {
++      this.#connectingPeers.delete(event.peerId);
++      this.#addConnectedPeer(
++        event.peerId,
++        event.connection,
++        event.channel,
++        url,
++      );
++    };
++
++    const onPeerConnectFailed = (event: {
++      peerId: string;
++      error: PeerConnectError;
++    }) => {
++      if (this.#connectingPeers.has(event.peerId)) {
++        this.#connectingPeers.delete(event.peerId);
++        this.#eventTarget.dispatchEvent("peerConnectFailed", {
++          peerId: event.peerId,
++          trackerUrl: url,
++          error: event.error,
++        });
++      }
++    };
++
++    const onWarning = (warning: TrackerWarning) => {
++      this.#eventTarget.dispatchEvent("warning", {
++        trackerUrl: url,
++        warning,
++      });
++    };
++
++    const onError = (error: TrackerError) => {
++      this.#eventTarget.dispatchEvent("error", {
++        trackerUrl: url,
++        error,
++      });
++    };
++
++    client.addEventListener("peerConnected", onPeerConnected);
++    client.addEventListener("peerConnectFailed", onPeerConnectFailed);
++    client.addEventListener("warning", onWarning);
++    client.addEventListener("error", onError);
++
++    const cleanupListeners = () => {
++      client.removeEventListener("peerConnected", onPeerConnected);
++      client.removeEventListener("peerConnectFailed", onPeerConnectFailed);
++      client.removeEventListener("warning", onWarning);
++      client.removeEventListener("error", onError);
++    };
++
++    this.#clients.add({
++      client,
++      releaseSocket: release,
++      cleanupListeners,
++    });
++  }
++
+   public destroy(): void {
+     if (this.#destroyed) return;
+     this.#destroyed = true;

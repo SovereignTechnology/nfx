@@ -3,8 +3,8 @@
 A library (`src/lib.ts`) and the test player page over it (`index.html`, `src/player.ts`):
 hls.js over an NFX-05 §6 origin, with every playlist, init and segment checked against the
 signed anchor by nfx-proto, compiled to WASM (`crates/nfx-wasm`), before hls.js sees a byte.
-With trackers, the NFX-10 browser mesh (p2p-media-loader 4) joins in, and segments from
-peers are checked the same way. nutflix-pear's web client consumes the library (ADR 0101,
+With trackers or Nostr relays, the NFX-10 browser mesh (p2p-media-loader 4) joins in, and
+segments from peers are checked the same way. nutflix-pear's web client consumes the library (ADR 0101,
 amended 2026-11-09); nfx imports nothing from it.
 
 ## The library
@@ -21,7 +21,8 @@ const stop = watchEndpoints(a, m.namespace, relays, (e) => {
 const session = await open(videoElement, {
   manifestJson: m.event,                        // verified again in WASM
   origins: ['https://origin.example/nfx'],      // tried in order
-  signaling: { kind: 'trackers', urls: ['wss://tracker.example'] }, // optional; none = no mesh
+  signaling: { kind: 'nostr', relays: ['wss://relay.example'] }, // optional; none = no mesh
+  // or: signaling: { kind: 'trackers', urls: ['wss://tracker.example'] },
   iceServers: [{ urls: 'stun:stun.example:3478' }], // optional, STUN only
   onEvent: (ev) => {},                          // log, origin, verified, rejected, levels, playing, error
   signal,                                       // optional: aborts open(), or ends the session
@@ -34,12 +35,23 @@ The types are in `src/api.ts`. `open()` also takes a bare `root` (with `video` a
 bind the hash list) instead of `manifestJson`.
 
 `signaling` is how mesh peers find each other and exchange offers, answers and ICE
-candidates. This build has one kind, WebTorrent trackers (1 to 4, `wss://`). It is a seam:
-the planned Nostr kind (ephemeral NIP-44 events, per-session keys, no tracker; nfx #71) will
-be another member of the `Signaling` union, wired in `src/mesh.ts` `engineSignaling`, and
-callers passing `{ kind: 'trackers' }` will not change. p2p-media-loader 4.0.0 opens its
-tracker sockets itself, so that kind needs an engine that lets the library carry the
-exchange. Trackers and origins named by beacons are hints:
+candidates, wired into the engine in one place (`src/mesh.ts` `engineSignaling`). Two kinds:
+
+- `{ kind: 'nostr', relays }` (1 to 8, `wss://`; NFX-10 §6, `src/signal-nostr.ts`): no
+  tracker at all. Each session draws a fresh random key (never a user's) and joins one room
+  per stream swarm, its key derived from the swarm ID. Presence (`connect` every 30 s,
+  `disconnect` on destroy) and offers and answers travel as ephemeral kind-25050 events
+  through ordinary relays, each signed when it is sent; offers and answers carry the complete
+  SDP NIP-44 encrypted to the receiver's session key, and the lower session key offers.
+  Every event is built and checked by nfx-proto in WASM, the same code native peers run.
+  Relays see room and session keys, who signals whom and when, and the viewer's IP address,
+  but not the SDP; peers see each other's addresses once they connect. A scoped relay
+  (NFX-04) refuses kind 25050: give general relays. `relayUrl()`, `checkSignaling()`,
+  `MAX_RELAYS`, `NOSTR_SIGNAL_KIND` and `NOSTR_SIGNAL_PROTOCOL` let a page check its
+  settings first.
+- `{ kind: 'trackers', urls }` (1 to 4, `wss://`): WebTorrent trackers, as before.
+
+Trackers and origins named by beacons are hints:
 `watchEndpoints` keeps only `wss://` trackers and `https://` origins, ranked by how many
 seeders name them. With any tracker, the viewer uploads verified segments to other viewers,
 and the trackers and those peers see the viewer's IP address.
@@ -54,10 +66,30 @@ npm run typecheck
 npm run unit           # sanitisers, the beacon endpoint book, open()'s option checks
 npm run e2e            # the test page end to end (cargo, ffmpeg, openssl, Chromium)
 npm run e2e:mesh       # the mesh, the bridge, the library's lifecycle, trackers from a beacon
+eval "$(bash e2e-strfry.sh /var/tmp/strfry)"   # the stock relay, strfry at a pinned commit
+npm run e2e:nostr      # two browsers over Nostr only (strfry, no tracker), the origin cut
 ```
 
 The suites build `nfxd` and `nfx-package` and run headless Chromium in fresh contexts, on
 loopback only.
+
+## The mesh engine
+
+The library bundles p2p-media-loader-core 4.0.0 from its own TypeScript source with one
+patch, `engine/p2p-media-loader-core-4.0.0.patch`: `signalingClientFactory`, a stream
+configuration hook through which a swarm takes a signaling client the page supplies (here
+the Nostr one) instead of WebTorrent tracker clients. The engine keeps its peer
+de-duplication and limits (`claimPeer`, `shouldGenerateOffers`), its `peerConnected`
+contract and its teardown; with no factory it behaves as published. It is written to go
+upstream as it is.
+
+`npm run engine` (part of every build) runs `engine/patch.mjs`, which checks before it
+writes anything: that `package-lock.json` pins the npm tarball at the integrity
+`engine/pin.json` records (what `npm ci` verified), that the installed `src/` is file for
+file the pinned tree (`src_sha256`), and that the patch has its pinned sha256. It applies
+the patch in memory, strictly (every hunk at its stated line, no fuzz), checks the result
+against `out_sha256`, and only then writes it to `out-engine/`, where esbuild resolves
+`p2p-media-loader-core` (`--alias`).
 
 ## The library tar
 
@@ -79,4 +111,4 @@ To serve it, extract the tar into one directory: `player.js` loads
 `wasm/nfx_wasm_bg.wasm` from beside itself unless `init({ wasmUrl })` says otherwise. A page
 under a CSP needs `'wasm-unsafe-eval'` in `script-src` (the WASM verifier), `blob:` in
 `media-src` (the MediaSource) and in `worker-src` (hls.js's transmuxing worker), and its
-origins, relays and trackers in `connect-src`.
+origins, relays (the Nostr signaling relays included) and trackers in `connect-src`.

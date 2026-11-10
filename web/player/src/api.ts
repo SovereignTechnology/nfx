@@ -83,6 +83,8 @@ export interface MeshStats {
   signaling: Signaling['kind'];
   /** Its trackers, for the `trackers` kind. */
   trackers: string[];
+  /** Its relays, for the `nostr` kind. */
+  relays: string[];
   swarms: { rendition: string | null; swarm: string }[];
   bytes: { http: number; p2p: number };
   uploaded: number;
@@ -93,22 +95,35 @@ export interface MeshStats {
 
 /**
  * How the viewers of a swarm find each other and exchange WebRTC offers, answers and ICE
- * candidates (NFX-10 §1): peer discovery plus the exchange, kept apart from playback so
- * that another way can be added without changing `open()`'s callers.
+ * candidates (NFX-10 §1): peer discovery plus the exchange, kept apart from playback.
  *
- * This build has one kind, WebTorrent trackers. The planned other is Nostr: ephemeral,
- * NIP-44 encrypted events with per-session keys, signed at send time, with no tracker at
- * all (nfx #71). It will be another member of this union, and a caller that passes
- * `{ kind: 'trackers' }` keeps working as it is. `open()` refuses a kind it does not
- * implement.
+ * Two kinds: WebTorrent trackers, and Nostr (NFX-10 §6), which needs no tracker at all.
+ * `open()` refuses a kind it does not implement.
  */
-export type Signaling = TrackerSignaling;
+export type Signaling = TrackerSignaling | NostrSignaling;
 
 /** Signaling through WebTorrent trackers (NFX-10 §1), which relay SDP only, never segments. */
 export interface TrackerSignaling {
   kind: 'trackers';
   /** `wss://`, or `ws://` on a loopback host; 1 to 4. */
   urls: string[];
+}
+
+/**
+ * Signaling over Nostr (NFX-10 §6): ephemeral kind-25050 events through ordinary relays,
+ * with no tracker. Each session has a fresh random key, never a user's, and signs every
+ * event when it sends it; offers and answers are NIP-44 encrypted to their receiver, so
+ * relays see room and session keys and timing, not the SDP. Peers still see each other's
+ * IP addresses once they connect, as with trackers.
+ */
+export interface NostrSignaling {
+  kind: 'nostr';
+  /**
+   * `wss://`, or `ws://` on a loopback host; 1 to 8. Every event goes to all of them,
+   * and each event is taken once whichever relays deliver it. A scoped relay (NFX-04)
+   * refuses kind 25050: name general relays.
+   */
+  relays: string[];
 }
 
 /** What `onEvent` hears. Nothing is delivered after `destroy()`. */
@@ -192,7 +207,8 @@ export interface Session {
   stats(): Stats;
   /**
    * Stop everything this session started: hls.js and its worker, the p2p loader, its
-   * tracker sockets and peer connections, and the element's media source. Idempotent.
+   * tracker or relay sockets and peer connections, and the element's media source.
+   * Idempotent.
    */
   destroy(): void;
 }

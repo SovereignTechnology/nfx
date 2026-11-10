@@ -1,10 +1,10 @@
 /**
  * The NFX-10 free browser mesh (M1): p2p-media-loader 4.0.0 on hls.js, one swarm per
  * rendition (NFX-10 §2). How peers find each other is a `Signaling` (./api.ts), turned into
- * the engine's configuration in one place, `engineSignaling` below. p2p-media-loader 4.0.0
- * signals only through WebTorrent trackers, whose sockets it opens itself; another kind
- * (Nostr, nfx #71) needs an engine that lets this module carry the offer/answer/candidate
- * exchange, and goes in there.
+ * the engine's configuration in one place, `engineSignaling` below: WebTorrent trackers,
+ * whose sockets the engine opens itself, or Nostr (NFX-10 §6, ./signal-nostr.ts), whose
+ * client the engine takes through `signalingClientFactory`, the hook web/player/engine adds
+ * to p2p-media-loader-core.
  *
  * Every segment, whether it came from a peer or over HTTP, is checked by the same WASM
  * verifier as the rest of the player before hls.js sees it (the library validates before
@@ -13,12 +13,15 @@
  * loader.
  */
 import type { MeshStats, Signaling } from './api';
+import type { NostrSignaler } from './signal-nostr';
 import type { Anchor } from './verify';
 
 export type { MeshStats };
 
 /** At most this many trackers are used. */
 export const MAX_TRACKERS = 4;
+/** At most this many relays carry a session's Nostr signaling. */
+export const MAX_RELAYS = 8;
 
 /**
  * A tracker URL this page may use, reduced to scheme, host, port and path: `wss:`, or
@@ -37,15 +40,33 @@ export function trackerUrl(raw: string): string | null {
   return `${u.protocol}//${u.host}${u.pathname === '/' ? '' : u.pathname}`;
 }
 
-/** The engine's configuration for `signaling`: the one place a new kind is wired in. */
-function engineSignaling(signaling: Signaling): { announceTrackers: string[] } {
+/**
+ * A relay URL a session may signal through (NFX-10 §6), reduced to scheme, host, port and
+ * path: `wss:`, or `ws:` on a loopback host (tests). No credentials, query or fragment.
+ * `null` otherwise.
+ */
+export function relayUrl(raw: string): string | null {
+  return trackerUrl(raw);
+}
+
+/**
+ * The engine's configuration for `signaling`: the one place a kind is wired in. The Nostr
+ * kind needs the session's signaler, which makes one client per stream swarm.
+ */
+function engineSignaling(
+  signaling: Signaling,
+  nostr: NostrSignaler | undefined,
+): { announceTrackers: string[]; signalingClientFactory?: NostrSignaler['factory'] } {
   switch (signaling.kind) {
     case 'trackers':
       return { announceTrackers: [...signaling.urls] };
+    case 'nostr':
+      if (nostr === undefined) throw new TypeError('nfx: nostr signaling needs its signaler');
+      return { announceTrackers: [], signalingClientFactory: nostr.factory };
     default: {
       // A kind added to `Signaling` and not wired here fails the typecheck.
-      const unknown: never = signaling.kind;
-      throw new TypeError(`nfx: signaling of kind ${String(unknown)} is not in this build`);
+      const unknown: never = signaling;
+      throw new TypeError(`nfx: signaling of kind ${String((unknown as { kind: unknown }).kind)} is not in this build`);
     }
   }
 }
@@ -71,6 +92,7 @@ export function meshConfig(
   stats: MeshStats,
   log: (m: string) => void,
   tuning: MeshTuning = {},
+  nostr?: NostrSignaler,
 ) {
   const windows =
     tuning.httpWindow === undefined
@@ -99,10 +121,11 @@ export function meshConfig(
     };
   stats.signaling = signaling.kind;
   stats.trackers = signaling.kind === 'trackers' ? [...signaling.urls] : [];
+  stats.relays = signaling.kind === 'nostr' ? [...signaling.relays] : [];
   return {
     p2p: {
       core: {
-        ...engineSignaling(signaling),
+        ...engineSignaling(signaling, nostr),
         rtcConfig: { iceServers },
         ...windows,
         streamSwarmIdBuilder: ({ runtimeId }: { runtimeId: string }) => {
