@@ -19,7 +19,7 @@
     "e2e:nostr-node": "tsx e2e-nostr-node.ts"
   },
   "devDependencies": {
-    "@types/node": "22.18.0",
+    "@types/node": "26.6.5",
     "esbuild": "0.25.10",
     "hls.js": "1.7.3",
     "p2p-media-loader-core": "4.0.0",
