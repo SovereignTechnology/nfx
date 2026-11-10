@@ -21,7 +21,7 @@
   "devDependencies": {
     "@types/node": "22.18.0",
     "esbuild": "0.25.10",
-    "hls.js": "1.7.3",
+    "hls.js": "1.7.4",
     "p2p-media-loader-core": "4.0.0",
     "p2p-media-loader-hlsjs": "4.0.0",
     "playwright": "1.63.0",
