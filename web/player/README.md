@@ -82,6 +82,7 @@ npm run e2e            # the test page end to end (cargo, ffmpeg, openssl, Chrom
 npm run e2e:mesh       # the mesh, the bridge, the library's lifecycle, trackers from a beacon
 eval "$(bash e2e-strfry.sh /var/tmp/strfry)"   # the stock relay, strfry at a pinned commit
 npm run e2e:nostr      # two browsers over Nostr only (strfry, no tracker), the origin cut
+npm run e2e:nostr-node # a browser and nfxd's mesh endpoint (full ICE) over strfry, the origin cut
 ```
 
 The suites build `nfxd` and `nfx-package` and run headless Chromium in fresh contexts, on
