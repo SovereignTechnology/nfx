@@ -15,7 +15,8 @@
     "e2e": "tsx e2e.ts",
     "unit": "tsx unit.ts",
     "e2e:mesh": "npm run --silent engine && esbuild e2e-peer.ts --bundle --format=esm --target=es2022 --alias:p2p-media-loader-core=./out-engine/p2p-media-loader-core/src/index.ts --outfile=out-e2e/e2e-peer.js && esbuild e2e-lib.ts --bundle --format=esm --target=es2022 --outfile=out-e2e/e2e-lib.js && tsx e2e-mesh.ts",
-    "e2e:nostr": "npm run --silent engine && esbuild e2e-lib.ts --bundle --format=esm --target=es2022 --outfile=out-e2e/e2e-lib.js && tsx e2e-nostr.ts"
+    "e2e:nostr": "npm run --silent engine && esbuild e2e-lib.ts --bundle --format=esm --target=es2022 --outfile=out-e2e/e2e-lib.js && tsx e2e-nostr.ts",
+    "e2e:nostr-node": "tsx e2e-nostr-node.ts"
   },
   "devDependencies": {
     "@types/node": "22.18.0",
