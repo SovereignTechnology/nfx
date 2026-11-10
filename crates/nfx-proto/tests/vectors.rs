@@ -16,6 +16,11 @@ use nfx_proto::gossip::{Envelope, Op};
 use nfx_proto::hashlist::{HashList, Role, verify_file};
 use nfx_proto::manifest::{License, Manifest};
 use nfx_proto::namespace::{Namespace, VideoAddr, validate_video_id};
+use nfx_proto::nip44;
+use nfx_proto::signal::{
+    self, Parsed, Received, Room, Session, Signal, challenge, is_valid_scalar, read, room_h0,
+    roomproof_id,
+};
 use nfx_proto::voucher::Voucher;
 use nfx_proto::{KIND_BEACON, KIND_MANIFEST, sha256};
 use serde_json::Value;
@@ -608,4 +613,313 @@ fn deletions_withdraw_their_own_addresses_only() {
             "{name} must be rejected"
         );
     }
+}
+
+/// NFX-10 §1: nfx-proto implements the `stun` endpoint, so it accepts every valid beacon with
+/// its addresses, and rejects every invalid one whole.
+#[test]
+fn stun_beacons_parse_and_malformed_ones_are_rejected_whole() {
+    let v = vector!("beacon-stun.json");
+    let now = v["now"].as_u64().unwrap();
+    let mut valid = 0;
+    for case in v["valid"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        let ev = event(&case["event"]);
+        let b = Beacon::from_event(&ev, now).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let content: Value = serde_json::from_str(&ev.content).unwrap();
+        let stun = content["endpoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["t"] == "stun")
+            .unwrap();
+        let addrs: Vec<String> = serde_json::from_value(stun["addrs"].clone()).unwrap();
+        assert!(
+            b.content.endpoints.contains(&Endpoint::Stun { addrs }),
+            "{name}"
+        );
+        assert!(b.content.skipped.is_empty(), "{name}");
+        assert_eq!(b.content.to_content(), ev.content, "{name}: renders back");
+        assert_eq!(resign(&ev, &secret(&v, "seeder")), ev, "{name}");
+        valid += 1;
+    }
+    let mut invalid = 0;
+    for case in v["invalid"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        let ev = event(&case["event"]);
+        ev.verify()
+            .unwrap_or_else(|e| panic!("{name}: signature should be valid, got {e}"));
+        assert!(
+            Beacon::from_event(&ev, now).is_err(),
+            "{name} must be rejected"
+        );
+        invalid += 1;
+    }
+    assert_eq!((valid, invalid), (3, 18));
+}
+
+fn hex32(v: &Value) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    hex::decode_to_slice(v.as_str().unwrap(), &mut out).unwrap();
+    out
+}
+
+fn session(v: &Value, role: &str) -> Session {
+    let mut id = [0u8; 16];
+    hex::decode_to_slice(str_of(&v["sessions"][role], "session_id"), &mut id).unwrap();
+    let s = Session::new(secret(v, role), id).unwrap();
+    assert_eq!(s.pubkey(), str_of(&v["sessions"][role], "pubkey"));
+    s
+}
+
+fn ours(p: Parsed) -> Received {
+    match p {
+        Parsed::Ours(r) => r,
+        Parsed::Ignored(why) => panic!("ignored: {why}"),
+    }
+}
+
+#[test]
+fn rooms_derive_from_stream_swarm_ids() {
+    let v = vector!("mesh-signal.json");
+    for r in v["rooms"].as_array().unwrap() {
+        let id = str_of(r, "stream_swarm_id");
+        assert_eq!(hex::encode(room_h0(id)), str_of(r, "h0"));
+        let room = Room::derive(id);
+        assert_eq!(hex::encode(room.secret()), str_of(r, "secret"));
+        assert_eq!(room.pubkey(), str_of(r, "pubkey"));
+    }
+    for step in v["rehash"].as_array().unwrap() {
+        let h = hex32(&step["h"]);
+        assert_eq!(is_valid_scalar(&h), step["valid"].as_bool().unwrap());
+        let next = sha256(&h);
+        assert_eq!(hex::encode(next), str_of(step, "next"));
+        assert_eq!(
+            is_valid_scalar(&next),
+            step["next_valid"].as_bool().unwrap()
+        );
+    }
+    let room = Room::derive(str_of(&v["room"], "stream_swarm_id"));
+    assert_eq!(room.pubkey(), str_of(&v["room"], "pubkey"));
+    assert_eq!(room.secret(), &secret(&v, "room"));
+}
+
+#[test]
+fn events_are_reproduced_read_and_opened() {
+    let v = vector!("mesh-signal.json");
+    let now = v["now"].as_u64().unwrap();
+    assert_eq!(now, 1_790_000_010);
+    assert_eq!(
+        (
+            signal::MAX_AGE,
+            signal::MAX_FUTURE,
+            signal::PRESENCE_TTL,
+            signal::MAX_CONTENT as u64
+        ),
+        (
+            v["max_age"].as_u64().unwrap(),
+            v["max_future"].as_u64().unwrap(),
+            v["presence_ttl"].as_u64().unwrap(),
+            v["max_content"].as_u64().unwrap()
+        )
+    );
+    let room = Room::derive(str_of(&v["room"], "stream_swarm_id"));
+    let off = session(&v, "offerer");
+    let ans = session(&v, "answerer");
+    assert!(signal::offers_to(off.pubkey(), ans.pubkey()));
+    assert!(!signal::offers_to(ans.pubkey(), off.pubkey()));
+    let evs = &v["events"];
+    let created_at = evs["connect"]["created_at"].as_u64().unwrap();
+    let offer_sdp = str_of(&v["sdp"], "offer");
+    let answer_sdp = str_of(&v["sdp"], "answer");
+
+    // Builders reproduce every event byte for byte.
+    let ck = nip44::conversation_key(&secret(&v, "offerer"), ans.pubkey()).unwrap();
+    assert_eq!(hex::encode(ck), str_of(&v["nip44"], "conversation_key"));
+    assert_eq!(
+        ck,
+        nip44::conversation_key(&secret(&v, "answerer"), off.pubkey()).unwrap()
+    );
+    let connect = off.connect(&room, created_at).unwrap();
+    assert_eq!(connect, event(&evs["connect"]));
+    assert_eq!(
+        off.disconnect(&room, created_at).unwrap(),
+        event(&evs["disconnect"])
+    );
+    assert_eq!(
+        ans.connect(&room, created_at).unwrap(),
+        event(&evs["answerer_connect"])
+    );
+    let offer = off
+        .offer(
+            &room,
+            ans.pubkey(),
+            offer_sdp,
+            &hex32(&v["nip44"]["offer_nonce"]),
+            created_at,
+        )
+        .unwrap();
+    assert_eq!(offer, event(&evs["offer"]));
+    let answer = ans
+        .answer(
+            &room,
+            off.pubkey(),
+            &offer.id,
+            answer_sdp,
+            &hex32(&v["nip44"]["answer_nonce"]),
+            created_at,
+        )
+        .unwrap();
+    assert_eq!(answer, event(&evs["answer"]));
+
+    // Each room proof's challenge, preimage and id.
+    for name in ["connect", "disconnect", "offer", "answer"] {
+        let ev = event(&evs[name]);
+        let proof = &v["roomproof"][name];
+        let t = ev.tags[0][1].clone();
+        let ch = challenge(&t, &ev.tags, &ev.content).unwrap();
+        assert_eq!(ch, str_of(proof, "challenge"), "{name}");
+        let pre = serde_json::to_string(&(
+            0u8,
+            room.pubkey(),
+            ev.created_at,
+            ev.kind,
+            &ev.pubkey,
+            &ch,
+            "",
+        ))
+        .unwrap();
+        assert_eq!(pre, str_of(proof, "preimage"), "{name}");
+        let id = roomproof_id(room.pubkey(), ev.created_at, ev.kind, &ev.pubkey, &ch);
+        assert_eq!(hex::encode(id), str_of(proof, "id"), "{name}");
+    }
+
+    // Readers: presence by anyone in the room, directed events by their receiver.
+    let r = ours(read(&connect, room.pubkey(), ans.pubkey(), now).unwrap());
+    assert_eq!(
+        r.signal,
+        Signal::Connect {
+            expiration: created_at + 90
+        }
+    );
+    assert_eq!(
+        (r.sender.as_str(), r.session.as_str()),
+        (off.pubkey(), off.id())
+    );
+    let r = ours(read(&event(&evs["disconnect"]), room.pubkey(), ans.pubkey(), now).unwrap());
+    assert_eq!(r.signal, Signal::Disconnect);
+    let r = ours(read(&offer, room.pubkey(), ans.pubkey(), now).unwrap());
+    assert_eq!(ans.open(&r).unwrap(), offer_sdp);
+    assert_eq!(nip44::decrypt(&ck, &offer.content).unwrap(), offer_sdp);
+    let r = ours(read(&answer, room.pubkey(), off.pubkey(), now).unwrap());
+    assert_eq!(
+        r.signal,
+        Signal::Answer {
+            offer: offer.id.clone(),
+            content: answer.content.clone()
+        }
+    );
+    assert_eq!(off.open(&r).unwrap(), answer_sdp);
+    assert_eq!(
+        nip44::calc_padded_len(offer_sdp.len()) as u64,
+        v["nip44"]["offer_padded_len"].as_u64().unwrap()
+    );
+    ours(
+        read(
+            &event(&v["connect_with_unknown_tag"]),
+            room.pubkey(),
+            ans.pubkey(),
+            now,
+        )
+        .unwrap(),
+    );
+}
+
+#[test]
+fn nip44_matches_the_official_vectors() {
+    let r = &vector!("mesh-signal.json")["nip44_reference"];
+    for c in r["get_conversation_key"].as_array().unwrap() {
+        let ck = nip44::conversation_key(&hex32(&c["sec1"]), str_of(c, "pub2")).unwrap();
+        assert_eq!(hex::encode(ck), str_of(c, "conversation_key"));
+    }
+    let mk = &r["get_message_keys"];
+    for k in mk["keys"].as_array().unwrap() {
+        let (key, nonce, hmac) =
+            nip44::message_keys(&hex32(&mk["conversation_key"]), &hex32(&k["nonce"]));
+        assert_eq!(hex::encode(key), str_of(k, "chacha_key"));
+        assert_eq!(hex::encode(nonce), str_of(k, "chacha_nonce"));
+        assert_eq!(hex::encode(hmac), str_of(k, "hmac_key"));
+    }
+    for pair in r["calc_padded_len"].as_array().unwrap() {
+        let n = usize::try_from(pair[0].as_u64().unwrap()).unwrap();
+        assert_eq!(
+            nip44::calc_padded_len(n) as u64,
+            pair[1].as_u64().unwrap(),
+            "{n}"
+        );
+    }
+    for c in r["encrypt_decrypt"].as_array().unwrap() {
+        let s2 = hex32(&c["sec2"]);
+        let ck =
+            nip44::conversation_key(&hex32(&c["sec1"]), &public_key_hex(&s2).unwrap()).unwrap();
+        assert_eq!(hex::encode(ck), str_of(c, "conversation_key"));
+        let p = nip44::encrypt(&ck, str_of(c, "plaintext"), &hex32(&c["nonce"])).unwrap();
+        assert_eq!(p, str_of(c, "payload"));
+        assert_eq!(nip44::decrypt(&ck, &p).unwrap(), str_of(c, "plaintext"));
+    }
+    for c in r["invalid_decrypt"].as_array().unwrap() {
+        assert!(
+            nip44::decrypt(&hex32(&c["conversation_key"]), str_of(c, "payload")).is_err(),
+            "{}",
+            str_of(c, "note")
+        );
+    }
+}
+
+#[test]
+fn every_invalid_signal_is_rejected_and_foreign_ones_ignored() {
+    let v = vector!("mesh-signal-invalid.json");
+    let now = v["now"].as_u64().unwrap();
+    let room = str_of(&v, "room");
+    let off = Session::new(secret(&v, "offerer"), [0; 16]).unwrap();
+    let ans = Session::new(secret(&v, "answerer"), [0; 16]).unwrap();
+    assert_eq!(
+        (off.pubkey(), ans.pubkey()),
+        (str_of(&v, "offerer"), str_of(&v, "answerer"))
+    );
+    let mut rejected = 0;
+    for case in v["rejected"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        let ev = event(&case["event"]);
+        if !matches!(name, "bad-signature" | "id-mismatch") {
+            ev.verify()
+                .unwrap_or_else(|e| panic!("{name}: signature should be valid, got {e}"));
+        }
+        let reader = if name.starts_with("answer-") {
+            &off
+        } else {
+            &ans
+        };
+        let outcome = read(&ev, room, reader.pubkey(), now).and_then(|p| match p {
+            Parsed::Ours(r) if matches!(r.signal, Signal::Offer { .. } | Signal::Answer { .. }) => {
+                reader.open(&r).map(|_| ())
+            }
+            Parsed::Ours(_) => Ok(()),
+            Parsed::Ignored(why) => panic!("{name}: ignored ({why}), but it must be rejected"),
+        });
+        assert!(outcome.is_err(), "{name} must be rejected");
+        rejected += 1;
+    }
+    let mut ignored = 0;
+    for case in v["ignored"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        let ev = event(&case["event"]);
+        ev.verify().unwrap();
+        assert!(
+            matches!(read(&ev, room, ans.pubkey(), now), Ok(Parsed::Ignored(_))),
+            "{name} must be ignored"
+        );
+        ignored += 1;
+    }
+    assert_eq!((rejected, ignored), (36, 7));
 }
