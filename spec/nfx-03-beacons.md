@@ -57,7 +57,7 @@ ignore tags they do not know (NFX-01 §4). No payments, no media.
       "addrs": ["host:port", "…"],
       "tickets": { "720p": "<iroh BlobTicket for that rendition's HashSeq>", "meta": "<… the meta collection's>" }
     },
-    { "t": "https", "url": "https://seed.example/nfx" }
+    { "t": "https", "url": "https://seed.example/nfx", "renditions": ["720p"] }
   ],
   "chunks": "all",
   "price_hint": 1,
@@ -75,8 +75,22 @@ ignore tags they do not know (NFX-01 §4). No payments, no media.
   one MUST be. New endpoint types are non-breaking additions (NFX-01 §4): a client MUST
   skip endpoints whose `t` it does not implement, and MUST NOT reject the beacon because
   of them. The registry of `t` values is NFX-11 §3.
-- `chunks`: `"all"` or an integer count of hash-list entries currently held. Partial
-  seeders are legal; clients prefer `"all"` but MAY fetch from partials.
+- **Which renditions an endpoint serves.** A seeder may hold only some renditions of a
+  video. It then holds the hash list, every playlist (the master's too), thumb and
+  subtitle file (NFX-06 §2's meta collection), and every `init` and `segment` file of each
+  rendition it holds, and each endpoint says which renditions it serves:
+  - an `iroh` endpoint carries one ticket per held rendition, and `meta` (NFX-06 §2);
+  - a `webrtc` endpoint's `renditions` lists the swarms its bridge joins (NFX-10 §2);
+  - an `https` endpoint MAY carry `renditions`, the ids of the renditions whose `init` and
+    `segment` files its origin serves. Absent, the origin serves every rendition. Present,
+    it is a non-empty array of distinct rendition ids, none `meta`; a reader that
+    implements it rejects a malformed one as it rejects any malformed known endpoint, and
+    a reader that does not ignores it (NFX-01 §4) and reads the origin as serving every
+    rendition. Such an origin still serves the hash list and every meta file, so a player
+    can read the master playlist, and answers `404` for another rendition's files.
+- `chunks`: `"all"` or an integer count of hash-list entries currently held (a seeder of
+  some renditions counts the files above). Partial seeders are legal; clients prefer
+  `"all"` but MAY fetch from partials.
 - `tickets` key **`meta` is reserved** (the metadata collection, NFX-06 §2) and MUST
   NOT be a rendition id in the hash list; a hash list containing a rendition id
   `meta` is invalid.
@@ -98,6 +112,19 @@ ignore tags they do not know (NFX-01 §4). No payments, no media.
    untrusted data) — endpoints come from it, trust never does.
 3. Prefer iroh endpoints when a ticket for the wanted rendition exists; fall back to
    https; fall back to waiting (re-REQ) — beacons are hints, not promises.
+4. **Choosing a rendition.** A beacon *holds* a rendition when one of its endpoints serves
+   it (§4): an `iroh` endpoint with a ticket for it, or a `webrtc` or `https` endpoint
+   whose `renditions` names it or is absent. A source the client is configured with
+   outside beacons, such as a page's own origin, holds every rendition unless the client
+   knows otherwise.
+   - A client MUST NOT select a rendition that no reachable source holds.
+   - Among the renditions its bandwidth allows, it SHOULD prefer the one held by the most
+     seeders. It counts seeders by distinct beacon key (`pubkey`), each by its newest live
+     beacon only (§2), and bounds the count: it keeps a fixed number of keys per video (the
+     reference player keeps 64).
+   - Keys are cheap: one operator can announce under any number of them. The count is a
+     hint about where the swarm is, not proof of how many hosts hold the bytes, and never
+     a reason to trust a source (§7).
 
 ## 6. Relay set discovery
 
@@ -142,3 +169,13 @@ edit in this spec is ever required to grow the relay set.
 - 2026-11-09 (registry pointer, no behaviour change; issue #71): §4's list names `stun`, the
   endpoint type NFX-10 §1 defines. A reader that does not implement it skips it, as before;
   the registry stays NFX-11 §3.
+- 2026-11-09 (addition, no `specver` bump: a new optional content field, NFX-01 §4;
+  nutflix-pear#97, a video is now packaged in one rendition by default and seeders choose
+  which they hold). §4: an `https` endpoint may name the renditions its origin serves
+  (`renditions`; absent, every one), and a seeder of some renditions holds the hash list
+  and every meta file, says per endpoint which renditions it serves, and counts `chunks`.
+  §5: a client never selects a rendition no reachable source holds, and prefers, among
+  those its bandwidth allows, the one most seeders hold, counted by distinct key, newest
+  beacon per key, bounded. A reader without the field reads such an origin as serving every
+  rendition and may then meet `404` for one it does not; the `iroh` and `webrtc` endpoints
+  already said which renditions they serve. Vectors: `beacon-renditions.json`.

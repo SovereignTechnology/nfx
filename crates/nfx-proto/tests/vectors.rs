@@ -213,6 +213,66 @@ fn every_invalid_beacon_is_rejected_and_unknown_endpoints_are_skipped() {
     assert!(Beacon::from_event(&good, good.created_at - 901).is_err());
 }
 
+/// NFX-03 §4: an `https` endpoint may name the renditions its origin serves. nfx-proto
+/// implements the field: it accepts every valid beacon with the ids as given (none for
+/// every rendition) and rejects every invalid one whole.
+#[test]
+fn https_endpoints_name_their_renditions_and_malformed_lists_are_rejected() {
+    let v = vector!("beacon-renditions.json");
+    let now = v["now"].as_u64().unwrap();
+    let https = |b: &Beacon| -> Vec<Vec<String>> {
+        b.content
+            .endpoints
+            .iter()
+            .filter_map(|e| match e {
+                Endpoint::Https { renditions, .. } => Some(renditions.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut seen = Vec::new();
+    for case in v["valid"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        let ev = event(&case["event"]);
+        let b = Beacon::from_event(&ev, now).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // The publisher side renders the same content back.
+        assert_eq!(b.content.to_content(), ev.content, "{name}");
+        seen.push((name.to_owned(), https(&b)));
+    }
+    let ids = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
+    assert_eq!(
+        seen,
+        [
+            ("https-names-one-rendition".to_owned(), vec![ids(&["720p"])]),
+            (
+                "iroh-https-and-webrtc-name-the-same-rendition".to_owned(),
+                vec![ids(&["720p"])]
+            ),
+            (
+                "https-names-two-of-several".to_owned(),
+                vec![ids(&["1080p", "360p"])]
+            ),
+            (
+                "https-without-renditions-serves-every-rendition".to_owned(),
+                vec![vec![]]
+            ),
+        ]
+    );
+    let mut rejected = 0;
+    for case in v["invalid"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        let ev = event(&case["event"]);
+        ev.verify()
+            .unwrap_or_else(|e| panic!("{name}: signature should be valid, got {e}"));
+        assert!(
+            Beacon::from_event(&ev, now).is_err(),
+            "{name} must be rejected"
+        );
+        rejected += 1;
+    }
+    assert_eq!(rejected, 7);
+}
+
 /// nfx-proto does not implement NFX-12 yet, so it is a reader that skips `hyperdht` (NFX-03 §4):
 /// every beacon in the vector parses, the endpoint skipped. When `Endpoint::Hyperdht` lands, the
 /// valid beacons keep parsing with it and every invalid one is rejected whole (NFX-12 §2).

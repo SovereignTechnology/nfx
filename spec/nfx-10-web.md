@@ -43,6 +43,17 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   zone; an IPv4 address is never written inside IPv6), with a port that is not 0. A
   reader that implements it parses it strictly, as every known endpoint type (NFX-03
   §4), and one that does not skips it.
+- **Levels a page offers.** The master playlist lists every rendition of the hash list,
+  but a source may hold only some (NFX-03 §4). A page offers hls.js only the levels of
+  renditions a source it can reach holds (NFX-03 §5): an origin's `https` endpoint names
+  its renditions and a bridge's `webrtc` endpoint its swarms, and an origin the page is
+  configured with holds every rendition unless the page knows otherwise. Levels map to
+  renditions by playlist content name (§2). A page MAY narrow them further, to renditions
+  of its choosing in its order of preference, but never to a level no source holds, and
+  ABR then picks freely among the levels left: a rendition no source the page can reach
+  holds would only fail. When it ranks renditions by how many seeders hold them (NFX-03
+  §5), it MAY count `iroh` tickets as well, since those seeders feed bridges and
+  pull-through origins.
 - **Using beacon-named STUN servers.** A page MAY add the STUN servers live beacons name
   to `iceServers` as `stun:<ip>:<port>`, after its own, and SHOULD then take at most a
   few (the reference player takes 4 in all), most-named first, and none whose address is
@@ -87,7 +98,8 @@ with an extra endpoint:
 ```
 
 `renditions` lists the rendition ids whose swarms the bridge joins. Absent means every
-rendition in the hash list. Swarm IDs and infohashes are always derived and never
+rendition in the hash list. A bridge that holds only some renditions lists them and joins
+no other swarm. Swarm IDs and infohashes are always derived and never
 carried. Native↔web chunk accounting happens on the bridge's own books: it acts as a
 normal seeder upstream and a normal p2p-media-loader peer downstream.
 
@@ -646,3 +658,7 @@ with full ICE, and a NAT test.
   s); the lower session key offers; what relays see; no TURN. §1's second plug-in, the
   scoped-relay signaling left "TBD", is now §6. Vectors `mesh-signal.json` and
   `mesh-signal-invalid.json`; the `stun` endpoint's in `beacon-stun.json`.
+- Draft 2026-11-09 (nutflix-pear#97): §1 says which levels a page offers: only renditions a
+  reachable source holds (NFX-03 §§4–5, which now let an `https` endpoint name its
+  renditions), narrowed further only by the page's own choice, ABR free among the rest.
+  §2: a bridge that holds only some renditions lists them and joins no other swarm.

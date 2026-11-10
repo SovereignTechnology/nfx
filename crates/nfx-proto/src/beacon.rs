@@ -29,8 +29,14 @@ pub enum Endpoint {
         addrs: Vec<String>,
         tickets: BTreeMap<String, String>,
     },
-    /// NFX-05 §6.
-    Https { url: String },
+    /// NFX-05 §6: an origin's base URL.
+    Https {
+        url: String,
+        /// The renditions whose files the origin serves (NFX-03 §4); empty means every
+        /// rendition, and is absent on the wire. Present, it names 1 or more distinct ids.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        renditions: Vec<String>,
+    },
     /// NFX-10 §2: a bridge. Swarm ids and infohashes are derived per rendition, never carried.
     Webrtc {
         tracker_urls: Vec<String>,
@@ -203,8 +209,24 @@ fn parse_endpoint(raw: &Value) -> Result<Parsed> {
             if !is_https_url(url) {
                 return Err(bad("https endpoint `url` must be an https URL"));
             }
+            // Optional (NFX-03 §4): absent means every rendition. Present, a non-empty list of
+            // distinct rendition ids, none of them the reserved `meta`.
+            let renditions = match obj.get("renditions") {
+                None => Vec::new(),
+                Some(v) => {
+                    let ids = strings(v, "renditions", is_rendition_id)?;
+                    if ids.is_empty() {
+                        return Err(bad("https `renditions` must name 1 or more renditions"));
+                    }
+                    if ids.iter().enumerate().any(|(i, r)| ids[..i].contains(r)) {
+                        return Err(bad("https `renditions` must not repeat a rendition"));
+                    }
+                    ids
+                }
+            };
             Endpoint::Https {
                 url: url.to_owned(),
+                renditions,
             }
         }
         "webrtc" => {
@@ -216,9 +238,7 @@ fn parse_endpoint(raw: &Value) -> Result<Parsed> {
             )?;
             let renditions = match obj.get("renditions") {
                 None => Vec::new(),
-                Some(v) => strings(v, "renditions", |r| {
-                    !r.is_empty() && r != crate::hashlist::RESERVED_RENDITION_ID
-                })?,
+                Some(v) => strings(v, "renditions", is_rendition_id)?,
             };
             Endpoint::Webrtc {
                 tracker_urls,
@@ -367,6 +387,11 @@ fn str_field<'a>(obj: &'a serde_json::Map<String, Value>, name: &str) -> Result<
         .ok_or_else(|| Error::Beacon(format!("`{name}` must be a string")))
 }
 
+/// A rendition id a beacon may name: non-empty and not the reserved `meta` (NFX-03 §4).
+fn is_rendition_id(id: &str) -> bool {
+    !id.is_empty() && id != crate::hashlist::RESERVED_RENDITION_ID
+}
+
 /// An `ip:port` in the canonical text form Rust and RFC 5952 give it (IPv6 in brackets, no
 /// zone), with a port that is not 0: one spelling per address. An IPv4 address is written
 /// as IPv4, never inside IPv6 (`::ffff:a.b.c.d`, or the deprecated `::a.b.c.d`).
@@ -470,6 +495,49 @@ mod tests {
             } else {
                 json!({ "t": "stun", "addrs": addrs })
             };
+            assert!(content(&json!([ep])).is_err(), "{ep}");
+        }
+    }
+
+    #[test]
+    fn an_https_endpoint_names_the_renditions_its_origin_serves_or_none_for_all() {
+        let raw = json!([
+            { "t": "https", "url": "https://seed.example/nfx", "renditions": ["720p"] },
+            { "t": "https", "url": "https://all.example" },
+        ]);
+        let c = content(&raw).unwrap();
+        assert_eq!(
+            c.endpoints,
+            [
+                Endpoint::Https {
+                    url: "https://seed.example/nfx".into(),
+                    renditions: vec!["720p".into()],
+                },
+                Endpoint::Https {
+                    url: "https://all.example".into(),
+                    renditions: vec![],
+                },
+            ]
+        );
+        // Every rendition is written as no `renditions` at all, as before the field existed.
+        let back: Value = serde_json::from_str(&c.to_content()).unwrap();
+        assert_eq!(back["endpoints"], raw);
+    }
+
+    #[test]
+    fn a_malformed_https_renditions_list_rejects_the_beacon() {
+        for renditions in [
+            json!([]),
+            json!("720p"),
+            json!(["meta"]),
+            json!([""]),
+            json!(["720p", "720p"]),
+            json!(["720p", 360]),
+            json!({ "720p": true }),
+            json!(null),
+        ] {
+            let ep =
+                json!({ "t": "https", "url": "https://seed.example", "renditions": renditions });
             assert!(content(&json!([ep])).is_err(), "{ep}");
         }
     }

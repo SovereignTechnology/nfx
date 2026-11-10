@@ -49,7 +49,7 @@ implement:
 | `t` | Document |
 |---|---|
 | `iroh` | NFX-06 |
-| `https` | NFX-05 §6 |
+| `https` | NFX-05 §6 (optional `renditions`: the renditions its origin serves, NFX-03 §4) |
 | `webrtc` | NFX-10 §2 |
 | `stun` | NFX-10 §1 (a STUN server for browsers' `iceServers`) |
 | `hyperdht` | NFX-12 §2 (optional) |
@@ -134,6 +134,7 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | `stun` beacon endpoints, valid and invalid (NFX-10 §1) | `test-vectors/beacon-stun.json` |
 | Mesh signaling: rooms, room proofs, presence, offer and answer, NIP-44 v2 (NFX-10 §6) | `test-vectors/mesh-signal.json` |
 | Mesh signaling events that MUST be rejected or ignored (NFX-10 §6.5) | `test-vectors/mesh-signal-invalid.json` |
+| `https` endpoints naming their renditions, valid and invalid (NFX-03 §4) | `test-vectors/beacon-renditions.json` |
 | `nfx/files/1` messages, valid and invalid (NFX-12 §4) | `test-vectors/files1.json` |
 | Seeder ratings, valid (NFX-16 §1) | `test-vectors/ratings.json` |
 | Invalid seeder ratings (every one MUST be rejected; NFX-16 §1) | `test-vectors/ratings-invalid.json` |
@@ -263,3 +264,6 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   NIP-DC draft's), with the protocol identifier `nfx-mesh/1`; the mesh room derivation and
   signaling rows. New vectors `mesh-signal.json` and `mesh-signal-invalid.json` (source
   `test-vectors/meshsig.py`), and `beacon-stun.json` for the `stun` endpoint.
+- 2026-11-09 (nutflix-pear#97) — the `https` endpoint gains an optional `renditions`
+  (NFX-03 §4): the renditions its origin serves, absent meaning every one. Readers that do
+  not implement it ignore it (NFX-01 §4). New vectors `beacon-renditions.json`.

@@ -74,6 +74,27 @@
               },
               "description": "stun (NFX-10 §1): 1 to 4 distinct ip:port addresses in canonical text form; the schema checks their shape only"
             }
+          },
+          {
+            "if": {
+              "properties": {
+                "t": {
+                  "const": "https"
+                }
+              },
+              "required": [
+                "t"
+              ]
+            },
+            "then": {
+              "properties": {
+                "renditions": {
+                  "minItems": 1,
+                  "uniqueItems": true
+                }
+              }
+            },
+            "description": "https (NFX-03 §4): optional renditions, the ids whose files the origin serves; absent means every rendition, present it names 1 or more distinct ids"
           }
         ],
         "properties": {

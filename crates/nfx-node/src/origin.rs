@@ -36,7 +36,7 @@ use crate::fetch::Anchor;
 use crate::limit::ConnLimits;
 use crate::node::Node;
 use crate::store::ContentStore;
-use crate::video::{meta_members, rendition_members};
+use crate::video::{check_held, held_files, meta_members, rendition_members};
 use crate::{NodeError, Result, unix_now};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -112,14 +112,44 @@ impl Origin {
     /// Serve `manifest`'s video; the type proves it passed NFX-02 §4. Its hash list is
     /// taken from the store, or pulled, and verified against `root`.
     pub async fn hold(&self, manifest: &Verified<Manifest>) -> Result<()> {
+        self.hold_renditions(manifest, None).await
+    }
+
+    /// [`Origin::hold`], serving of the renditions only those `only` names (every one when
+    /// `None`): the hash list and every file of the meta collection (every playlist, the
+    /// master included), and the inits and segments of the held renditions. Another
+    /// rendition's init or segment is not listed here, so it is answered `404` and never
+    /// pulled. A held rendition's playlist missing from the store is pulled first, to read
+    /// which files are the rendition's. An id the hash list does not have is an error.
+    pub async fn hold_renditions(
+        &self,
+        manifest: &Verified<Manifest>,
+        only: Option<&[String]>,
+    ) -> Result<()> {
         let root = manifest.root_hex();
         if !self.store.has(&root) {
             self.pull_into_store(manifest, &root).await?;
         }
         let list = HashList::verify_for(&self.store.get(&root)?, manifest)?;
+        let served = match only {
+            None => None,
+            Some(ids) => {
+                check_held(&list, ids)?;
+                for r in list.renditions.iter().filter(|r| ids.contains(&r.id)) {
+                    if let Some(playlist) = list.files.iter().find(|f| f.name == r.playlist)
+                        && !self.store.has(&playlist.sha256)
+                    {
+                        self.pull_into_store(manifest, &playlist.sha256).await?;
+                    }
+                }
+                Some(held_files(&list, &*self.store, Some(ids))?)
+            }
+        };
+        let serves = |sha: &str| served.as_ref().is_none_or(|s| s.contains(sha));
         let types = list
             .files
             .iter()
+            .filter(|f| serves(&f.sha256))
             .map(|f| (f.sha256.clone(), content_type(f.role, &f.sha256, manifest)))
             .collect();
         let master = list
@@ -128,7 +158,7 @@ impl Origin {
             .find(|f| f.role == Role::PlaylistMaster)
             .map(|f| f.sha256.clone());
         let mut index = self.index.write().unwrap_or_else(PoisonError::into_inner);
-        for f in &list.files {
+        for f in list.files.iter().filter(|f| serves(&f.sha256)) {
             index
                 .files
                 .entry(f.sha256.clone())
@@ -761,6 +791,19 @@ impl SwarmPull {
         manifest: &Manifest,
         store: &dyn ContentStore,
     ) -> Result<HashList> {
+        self.fetch_renditions(manifest, store, None).await
+    }
+
+    /// [`SwarmPull::fetch_video`], fetching of the renditions only those `only` names
+    /// (every one when `None`; none, for the meta collection alone): the meta collection
+    /// whole, then the named renditions, from the first live source with a ticket for each
+    /// of them. An id the hash list does not have is an error.
+    pub async fn fetch_renditions(
+        &self,
+        manifest: &Manifest,
+        store: &dyn ContentStore,
+        only: Option<&[String]>,
+    ) -> Result<HashList> {
         let a = manifest.a_tag();
         let root = manifest.root_hex();
         let anchor = Anchor {
@@ -780,9 +823,13 @@ impl SwarmPull {
             };
             let meta = ticket("meta")?;
             let list = self.node.fetch(anchor, &meta, &[], store).await?;
+            if let Some(ids) = only {
+                check_held(&list, ids)?;
+            }
             let renditions = list
                 .renditions
                 .iter()
+                .filter(|r| only.is_none_or(|ids| ids.contains(&r.id)))
                 .map(|r| Ok((r.id.clone(), ticket(&r.id)?)))
                 .collect::<Result<Vec<_>>>()?;
             self.node.fetch(anchor, &meta, &renditions, store).await

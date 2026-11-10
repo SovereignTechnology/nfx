@@ -15,6 +15,12 @@
 //! - **watch** (at runtime, [`Daemon::watch`]): what a viewer does. Hold the video on the
 //!   origin so playback can start from on-demand pulls, and fetch it whole in the
 //!   background to seed it.
+//! - **held renditions** ([`Config::renditions`]): a video may be held in only some of its
+//!   renditions. Its hash list and meta collection are still held whole (every playlist
+//!   included), and of the renditions only the named ones: fetched, seeded, served by the
+//!   origin and the bridge, and announced. Beacons say exactly that: an iroh ticket per held
+//!   rendition, the `webrtc` endpoint's `renditions`, the `https` endpoint's `renditions`
+//!   (NFX-03 §4) and `chunks` as the count of the hash list's files held.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -33,6 +39,7 @@ use nfx_node::seed::Seeded;
 use nfx_node::store::{ContentStore as _, FsStore};
 use nfx_node::tracker::Tracker;
 use nfx_node::unix_now;
+use nfx_node::video::held_renditions;
 use nfx_proto::Verified;
 use nfx_proto::beacon::{BeaconContent, Chunks, Endpoint, parse_a_tag};
 use nfx_proto::gossip::{Envelope, MAX_ENVELOPE_BYTES, Op};
@@ -88,6 +95,11 @@ pub struct Config {
     pub seed: Vec<String>,
     pub fetch: Vec<String>,
     pub pull: Vec<String>,
+    /// Per video (the `a` tag of a `seed`, `fetch` or `pull` item), the only renditions this
+    /// node holds of it, by hash-list id (`--seed <a>#720p`). A video not named holds every
+    /// rendition. Checked against the video's hash list once it is known; a list naming
+    /// every rendition is the same as none.
+    pub renditions: BTreeMap<String, Vec<String>>,
     /// Serve the origin here (HTTP; TLS belongs in front).
     pub origin: Option<SocketAddr>,
     /// An origin with no listener, reached through [`Daemon::origin`] (the desktop app's
@@ -226,6 +238,8 @@ struct Shared {
     stun_public: Option<SocketAddr>,
     /// Renditions the bridge serves, by `a` tag, for the `webrtc` beacon endpoint.
     bridged: Mutex<BTreeMap<String, Vec<String>>>,
+    /// The only renditions held, by `a` tag ([`Config::renditions`]).
+    renditions: BTreeMap<String, Vec<String>>,
     /// This node's own pubkey: its own beacons and envelopes are never learned.
     own: Option<String>,
     state: Arc<Mutex<BTreeMap<String, VideoState>>>,
@@ -294,16 +308,17 @@ async fn gossip_send(
 
 impl Shared {
     /// Open `manifest`'s browser-mesh swarms on the embedded tracker, from its hash list in
-    /// the store (verified against the manifest again here).
-    /// With a bridge, it also joins them.
-    async fn admit_swarms(&self, manifest: &Verified<Manifest>) {
+    /// the store (verified against the manifest again here). The tracker admits every
+    /// rendition's swarm (NFX-10 §1: those of a hash list it holds); with a bridge, it also
+    /// joins those of the renditions held (`only`; every one when `None`).
+    async fn admit_swarms(&self, manifest: &Verified<Manifest>, only: Option<&[String]>) {
         if let Some(tracker) = &self.tracker
             && let Ok(bytes) = self.store.get(&manifest.root_hex())
             && let Ok(list) = HashList::verify_for(&bytes, manifest)
         {
             let _ = tracker.admit(&list);
             if let Some(bridge) = &self.bridge
-                && let Ok(renditions) = bridge.serve(&list, &*self.store).await
+                && let Ok(renditions) = bridge.serve(&list, &*self.store, only).await
             {
                 self.bridged
                     .lock()
@@ -411,6 +426,47 @@ impl Shared {
         }
     }
 
+    /// The renditions of `a` this node holds ([`Config::renditions`]), checked against its
+    /// hash list: `None` for every one. With none named, nothing is read. Otherwise the hash
+    /// list is read from the store, or, with `pull`, fetched first (the meta collection,
+    /// retried until a seeder serves it). A named id the hash list lacks is a configuration
+    /// error, reported once rather than retried.
+    async fn held(
+        &self,
+        a: &str,
+        manifest: &Verified<Manifest>,
+        pull: bool,
+    ) -> Result<Option<Vec<String>>> {
+        let Some(ids) = self.renditions.get(a) else {
+            return Ok(None);
+        };
+        let root = manifest.root_hex();
+        while pull && !self.store.has(&root) {
+            if self
+                .pull
+                .fetch_renditions(manifest, &*self.store, Some(&[]))
+                .await
+                .is_err()
+            {
+                tokio::time::sleep(RETRY).await;
+            }
+        }
+        let list = HashList::verify_for(&self.store.get(&root)?, manifest)
+            .map_err(|e| Error::Config(format!("{a}: {e}")))?;
+        if let Some(id) = ids
+            .iter()
+            .find(|id| !list.renditions.iter().any(|r| &r.id == *id))
+        {
+            let has: Vec<&str> = list.renditions.iter().map(|r| r.id.as_str()).collect();
+            return Err(Error::Config(format!(
+                "{a}#{}: no rendition {id:?} in its hash list (it has {})",
+                ids.join(","),
+                has.join(", ")
+            )));
+        }
+        held_renditions(&list, ids).map_err(|e| Error::Config(format!("{a}: {e}")))
+    }
+
     /// Wait, at most [`RELAY_WAIT`] from start, until an iroh relay is reached, so that the
     /// first beacons name it. Meanwhile `a`'s state says why.
     async fn until_online(&self, a: &str) {
@@ -427,7 +483,12 @@ impl Shared {
         }
     }
 
-    async fn seed_and_announce(&self, a: &str, manifest: &Verified<Manifest>) -> Result<()> {
+    async fn seed_and_announce(
+        &self,
+        a: &str,
+        manifest: &Verified<Manifest>,
+        held: Option<Vec<String>>,
+    ) -> Result<()> {
         let keys = self
             .keys
             .clone()
@@ -435,17 +496,18 @@ impl Shared {
         self.until_online(a).await;
         let seeded = self
             .node
-            .seed(
+            .seed_renditions(
                 &*self.store,
                 &manifest.root_hex(),
                 &manifest.addr,
                 manifest.segs,
+                held.as_deref(),
             )
             .await?;
         if let Some(origin) = &self.origin {
-            origin.hold(manifest).await?;
+            origin.hold_renditions(manifest, held.as_deref()).await?;
         }
-        self.admit_swarms(manifest).await;
+        self.admit_swarms(manifest, held.as_deref()).await;
         self.set(a, VideoState::Seeding);
         // The video's gossip swarm, when on: announce into it, and learn from it.
         let secret = keys.secret_key().to_secret_bytes();
@@ -467,7 +529,7 @@ impl Shared {
         loop {
             tokio::select! {
                 _ = announce.tick() => {
-                    let content = self.beacon(&seeded, manifest);
+                    let content = self.beacon(&seeded, manifest, held.as_deref());
                     // The relay beacon first: gossip is optional and never holds it up. A
                     // refused or unreachable relay is retried at the next tick (beacons are
                     // hints), but it shows: a node that cannot announce is invisible.
@@ -484,7 +546,7 @@ impl Shared {
                     // manifest (a restart) is not one.
                     if matches!(self.relays.deleted(manifest, CONNECT_TIMEOUT).await, Ok(true)) {
                         if let Some(announcer) = &announcer {
-                            let content = self.beacon(&seeded, manifest);
+                            let content = self.beacon(&seeded, manifest, held.as_deref());
                             gossip_send(announcer, Op::Bye, &pubkey, content, &secret).await;
                         }
                         self.forget_swarms(manifest).await;
@@ -496,10 +558,23 @@ impl Shared {
         }
     }
 
-    fn beacon(&self, seeded: &Seeded, manifest: &Manifest) -> BeaconContent {
+    /// This node's beacon for a seeded video, held in the renditions `held` names (every
+    /// one when `None`). Every endpoint names only what it serves: the iroh tickets are the
+    /// held renditions' (and `meta`), the origin's `https` endpoint lists the held
+    /// renditions, the bridge's `webrtc` endpoint the swarms it joined, and `chunks` counts
+    /// the files held.
+    fn beacon(
+        &self,
+        seeded: &Seeded,
+        manifest: &Manifest,
+        held: Option<&[String]>,
+    ) -> BeaconContent {
         let mut endpoints = vec![self.node.beacon_endpoint(seeded)];
         if let Some(url) = &self.https_url {
-            endpoints.push(Endpoint::Https { url: url.clone() });
+            endpoints.push(Endpoint::Https {
+                url: url.clone(),
+                renditions: held.map(<[String]>::to_vec).unwrap_or_default(),
+            });
         }
         if let Some(url) = &self.tracker_public_url
             && self.bridge.as_ref().is_some_and(|b| b.is_running())
@@ -524,7 +599,7 @@ impl Shared {
             video: manifest.addr.clone(),
             endpoints,
             skipped: vec![],
-            chunks: Chunks::All,
+            chunks: seeded.chunks,
             price_hint: 0,
             accepts_mints: vec![],
             free: true,
@@ -533,21 +608,23 @@ impl Shared {
 
     async fn run_seed(self: Arc<Self>, a: String) -> Result<()> {
         let manifest = self.resolve(&a).await?;
-        self.seed_and_announce(&a, &manifest).await
+        let held = self.held(&a, &manifest, false).await?;
+        self.seed_and_announce(&a, &manifest, held).await
     }
 
     async fn run_fetch(self: Arc<Self>, a: String) -> Result<()> {
         let manifest = self.resolve(&a).await?;
         self.set(&a, VideoState::Fetching);
+        let held = self.held(&a, &manifest, true).await?;
         while self
             .pull
-            .fetch_video(&manifest, &*self.store)
+            .fetch_renditions(&manifest, &*self.store, held.as_deref())
             .await
             .is_err()
         {
             tokio::time::sleep(RETRY).await;
         }
-        self.seed_and_announce(&a, &manifest).await
+        self.seed_and_announce(&a, &manifest, held).await
     }
 
     async fn run_pull(self: Arc<Self>, a: String) -> Result<()> {
@@ -557,10 +634,15 @@ impl Shared {
             .ok_or_else(|| Error::Config("--pull needs --origin".into()))?;
         let manifest = self.resolve(&a).await?;
         self.set(&a, VideoState::Fetching);
-        while origin.hold(&manifest).await.is_err() {
+        let held = self.held(&a, &manifest, true).await?;
+        while origin
+            .hold_renditions(&manifest, held.as_deref())
+            .await
+            .is_err()
+        {
             tokio::time::sleep(RETRY).await;
         }
-        self.admit_swarms(&manifest).await;
+        self.admit_swarms(&manifest, held.as_deref()).await;
         self.set(&a, VideoState::Serving);
         // A deletion by its creator withdraws its mesh swarms too (NFX-02 §6).
         let mut check = tokio::time::interval(self.deletion_check_every);
@@ -594,6 +676,7 @@ impl Daemon {
                 watched.push(a.clone());
             }
         }
+        check_renditions(&cfg)?;
         if cfg.keys.is_none() && !(cfg.seed.is_empty() && cfg.fetch.is_empty()) {
             return Err(Error::Config("--seed and --fetch need --key".into()));
         }
@@ -707,7 +790,10 @@ impl Daemon {
             let probe = BeaconContent {
                 v: 1,
                 video: nfx_proto::namespace::VideoAddr::parse("nfx:mainnet:1:https-url-probe")?,
-                endpoints: vec![Endpoint::Https { url: url.clone() }],
+                endpoints: vec![Endpoint::Https {
+                    url: url.clone(),
+                    renditions: vec![],
+                }],
                 skipped: vec![],
                 chunks: Chunks::All,
                 price_hint: 0,
@@ -874,6 +960,7 @@ impl Daemon {
             tracker_public_url: cfg.tracker_public_url.clone(),
             stun_public,
             bridged: Mutex::new(BTreeMap::new()),
+            renditions: cfg.renditions.clone(),
             deletion_check_every: cfg
                 .deletion_check_every
                 .unwrap_or(Duration::from_secs(BEACON_TTL / 2))
@@ -1046,10 +1133,15 @@ impl Daemon {
         let shared = self.shared.clone();
         let hold = async {
             let manifest = shared.resolve(a).await?;
-            while origin.hold(&manifest).await.is_err() {
+            let held = shared.held(a, &manifest, true).await?;
+            while origin
+                .hold_renditions(&manifest, held.as_deref())
+                .await
+                .is_err()
+            {
                 tokio::time::sleep(RETRY).await;
             }
-            shared.admit_swarms(&manifest).await;
+            shared.admit_swarms(&manifest, held.as_deref()).await;
             Ok::<_, Error>(manifest)
         };
         let manifest = tokio::time::timeout(timeout, hold)
@@ -1114,6 +1206,37 @@ impl Daemon {
         self.relays.shutdown().await;
         let _ = self.node.close().await;
     }
+}
+
+/// [`Config::renditions`], checked before anything starts: each names a video given to seed,
+/// fetch or pull, and 1 or more distinct ids, none empty or the reserved `meta`. Whether the
+/// video's hash list has them is checked once the list is known.
+fn check_renditions(cfg: &Config) -> Result<()> {
+    for (a, ids) in &cfg.renditions {
+        if !cfg
+            .seed
+            .iter()
+            .chain(&cfg.fetch)
+            .chain(&cfg.pull)
+            .any(|x| x == a)
+        {
+            return Err(Error::Config(format!(
+                "renditions for {a}: not a video to seed, fetch or pull"
+            )));
+        }
+        if ids.is_empty() {
+            return Err(Error::Config(format!("{a}: no rendition named")));
+        }
+        for (i, id) in ids.iter().enumerate() {
+            if id.is_empty() || id == nfx_proto::hashlist::RESERVED_RENDITION_ID {
+                return Err(Error::Config(format!("{a}: {id:?} is not a rendition id")));
+            }
+            if ids[..i].contains(id) {
+                return Err(Error::Config(format!("{a}: rendition {id} named twice")));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `--iroh-bind` and `--iroh-external`, checked before anything binds.
