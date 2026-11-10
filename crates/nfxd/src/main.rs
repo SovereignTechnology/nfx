@@ -12,6 +12,7 @@
 //!          [--https-url <url>] [--embed-relay <addr:port>]
 //!          [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]…
 //!          [--stun <ip:port> [--stun-public <ip:port>]]
+//!          [--mesh-relay <wss url>… [--mesh-bind <ip:port>] [--mesh-stun <ip:port>]… [--mesh-max-peers <n>]]
 //!          [--allow-creator <hex>]… [--gossip [--gossip-peer <id>@<ip:port|relay-url>]…]
 //!          [--rating-root <npub|hex> --general-relay <url>… [--rating-trusted <npub|hex>]…]
 //! ```
@@ -88,6 +89,20 @@
 //! may not; on a host with several addresses, bind it to the one clients reach. Beacons
 //! announce it as a `stun` endpoint (NFX-10 §1) when the bound address is public; behind a
 //! DNAT, `--stun-public <ip:port>` names the public address to announce instead.
+//!
+//! `--mesh-relay <url>` (repeatable, 1 to 8) runs the mesh endpoint (NFX-10 §6): browsers find
+//! this node in the rooms of the renditions it holds and fetch verified segments from it over
+//! WebRTC, signaling only through those Nostr relays (general ones, `wss://`, or `ws://`, which
+//! shows room keys and timing to the path; a scoped relay refuses kind 25050), with no tracker
+//! and no TURN. Its ICE agent is a full one, so it works behind a NAT: `--mesh-stun <ip:port>`
+//! (repeatable, at most 4; a public node's `--stun`, say) names STUN servers that tell it its
+//! public mapping, and the gateway is asked for a port when it can map one. `--mesh-bind`
+//! fixes its UDP address (default: an ephemeral port, the host address the one the route out
+//! leaves from); `--mesh-max-peers` caps its connections (default 16, at most 1024). Its
+//! session key is fresh every run, never `--key`. Off by default. **Privacy:** joining a room
+//! tells anyone who announces presence there this node's candidate addresses, its host
+//! address and public mappings included, as a tracker's swarm would; relays see the room keys
+//! (which the catalog maps back to videos) and who signals whom, never the SDP.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -106,7 +121,13 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]]";
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port>] [--mesh-stun <ip:port>]... [--mesh-max-peers <n>]]
+
+  --mesh-relay runs the mesh endpoint (NFX-10 §6): browsers meet this node in the rooms of
+  the renditions it holds, signaling only through those Nostr relays, and fetch verified
+  segments over WebRTC with full ICE, through NATs (--mesh-stun: STUN servers for the public
+  mapping). Off by default. Privacy: joining a room tells anyone who announces presence there
+  this node's candidate addresses, public ones included.";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -275,6 +296,10 @@ async fn run(args: &[String]) -> Result<()> {
             "tracker-url",
             "stun",
             "stun-public",
+            "mesh-relay",
+            "mesh-bind",
+            "mesh-stun",
+            "mesh-max-peers",
             "namespace",
             "allow-creator",
             "gossip-peer",
@@ -325,6 +350,16 @@ async fn run(args: &[String]) -> Result<()> {
         tracker_public_url: one(&f, "tracker-url")?,
         stun: addr("stun")?,
         stun_public: addr("stun-public")?,
+        mesh_relays: all(&f, "mesh-relay"),
+        mesh_bind: addr("mesh-bind")?,
+        mesh_stun: all(&f, "mesh-stun")
+            .iter()
+            .map(|v| {
+                v.parse()
+                    .map_err(|_| Error::Config(format!("--mesh-stun {v}: not an ip:port")))
+            })
+            .collect::<Result<_>>()?,
+        mesh_max_peers: count(&f, "mesh-max-peers")?,
         namespaces: all(&f, "namespace")
             .iter()
             .map(|n| Namespace::parse(n).map_err(Error::from))
@@ -372,6 +407,9 @@ async fn run(args: &[String]) -> Result<()> {
             ),
         }
     }
+    if let (Some(addr), Some(session)) = (daemon.mesh_addr, &daemon.mesh_session) {
+        eprintln!("mesh: udp {addr}, session {session}");
+    }
     if gossip {
         let me = daemon.node().addr();
         for t in &me.addrs {
@@ -383,10 +421,15 @@ async fn run(args: &[String]) -> Result<()> {
         }
     }
     let mut last = std::collections::BTreeMap::new();
+    let mut last_mesh = None;
     let mut tick = tokio::time::interval(Duration::from_secs(2));
+    // SIGTERM (a service manager's stop) ends the run as SIGINT does: the mesh's rooms hear a
+    // `disconnect`, and the relays and the node close.
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
+            _ = term.recv() => break,
             _ = tick.tick() => {
                 let now = daemon.state();
                 for (a, s) in &now {
@@ -395,6 +438,13 @@ async fn run(args: &[String]) -> Result<()> {
                     }
                 }
                 last = now;
+                let mesh = daemon.mesh_status().map(|s| mesh_line(&s));
+                if mesh != last_mesh {
+                    if let Some(line) = &mesh {
+                        eprintln!("{line}");
+                    }
+                    last_mesh = mesh;
+                }
             }
         }
     }
@@ -513,14 +563,36 @@ fn iroh_addrs(
     Ok((bind, external))
 }
 
-/// `--bridge-max-peers N`, a count; `Daemon::start` checks its range.
-fn bridge_max_peers(f: &[(String, String)]) -> Result<Option<usize>> {
-    one(f, "bridge-max-peers")?
+/// One line of what the mesh endpoint is doing, printed when it changes.
+fn mesh_line(s: &nfx_node::mesh::MeshStatus) -> String {
+    format!(
+        "mesh: {} room(s), candidates [{}]{}, {} open, {} connecting; offers {}, answers {}, opened {}, failed {}, segments served {}",
+        s.rooms,
+        s.candidates.join(", "),
+        if s.gathered { "" } else { " (gathering)" },
+        s.open,
+        s.connecting,
+        s.offers,
+        s.answers,
+        s.opened,
+        s.failed,
+        s.served,
+    )
+}
+
+/// `--NAME N`, a count; `Daemon::start` checks its range.
+fn count(f: &[(String, String)], name: &str) -> Result<Option<usize>> {
+    one(f, name)?
         .map(|v| {
             v.parse()
-                .map_err(|_| Error::Config(format!("--bridge-max-peers {v}: not a number")))
+                .map_err(|_| Error::Config(format!("--{name} {v}: not a number")))
         })
         .transpose()
+}
+
+/// `--bridge-max-peers N`, a count; `Daemon::start` checks its range.
+fn bridge_max_peers(f: &[(String, String)]) -> Result<Option<usize>> {
+    count(f, "bridge-max-peers")
 }
 
 /// A public key given as an npub or 64 hex digits, as 64 lowercase hex. The error never

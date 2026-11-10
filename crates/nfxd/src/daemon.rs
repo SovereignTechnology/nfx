@@ -18,9 +18,14 @@
 //! - **held renditions** ([`Config::renditions`]): a video may be held in only some of its
 //!   renditions. Its hash list and meta collection are still held whole (every playlist
 //!   included), and of the renditions only the named ones: fetched, seeded, served by the
-//!   origin and the bridge, and announced. Beacons say exactly that: an iroh ticket per held
-//!   rendition, the `webrtc` endpoint's `renditions`, the `https` endpoint's `renditions`
-//!   (NFX-03 §4) and `chunks` as the count of the hash list's files held.
+//!   origin, the bridge and the mesh endpoint, and announced. Beacons say exactly that: an
+//!   iroh ticket per held rendition, the `webrtc` endpoint's `renditions`, the `https`
+//!   endpoint's `renditions` (NFX-03 §4) and `chunks` as the count of the hash list's files
+//!   held.
+//! - **mesh** ([`Config::mesh_relays`]): browsers meet the node in the rooms of the held
+//!   renditions, signaling over Nostr (NFX-10 §6), and fetch verified segments from it over
+//!   WebRTC with full ICE, through NATs ([`nfx_node::mesh`]). Discovery is by room alone, so
+//!   beacons carry nothing for it.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -31,6 +36,7 @@ use std::time::Duration;
 use iroh::RelayUrl;
 use nfx_node::bridge::{Bridge, BridgeConfig, MAX_PEERS_LIMIT, dialable};
 use nfx_node::gossip::{Announcer, Listener, envelope_wire};
+use nfx_node::mesh::{Mesh, MeshConfig, MeshStatus};
 use nfx_node::node::{Node, NodeConfig};
 use nfx_node::nostr::{BEACON_TTL, ManifestQuery, Relays};
 use nfx_node::origin::{Origin, SwarmPull, serve};
@@ -139,6 +145,24 @@ pub struct Config {
     /// `stun` itself: the public address of a DNAT that forwards to it. Needs `stun`. With
     /// neither a dialable `stun` nor this, nothing is announced.
     pub stun_public: Option<SocketAddr>,
+    /// Run the mesh endpoint (NFX-10 §6; `--mesh-relay`, 1 to 8): a full-ICE WebRTC peer
+    /// that meets browsers in the rooms of the renditions this node holds, signaling through
+    /// these general Nostr relays (`wss://`, or `ws://`; NFX-04's scoped relays refuse kind
+    /// 25050) with no tracker and no TURN, and serves them verified segments, behind a NAT
+    /// too. Empty (the default): off. Joining a room tells anyone who announces presence
+    /// there this node's candidate addresses, its public mappings included.
+    pub mesh_relays: Vec<String>,
+    /// The mesh endpoint's UDP address (`--mesh-bind`). Default: an ephemeral port on every
+    /// IPv4 interface, its host candidate the address the route out leaves from. Needs
+    /// `mesh_relays`.
+    pub mesh_bind: Option<SocketAddr>,
+    /// STUN servers (Binding only) from which it learns its public mapping (`--mesh-stun`, at
+    /// most 4, of `mesh_bind`'s family), such as a public node's `--stun`. Needs
+    /// `mesh_relays`.
+    pub mesh_stun: Vec<SocketAddr>,
+    /// Connections it holds at once (`--mesh-max-peers`, 1 to 1024; each may queue 16 MiB).
+    /// Default: `nfx_node::mesh::MAX_PEERS` (16). Needs `mesh_relays`.
+    pub mesh_max_peers: Option<usize>,
     /// Namespaces the embedded relay serves; by default those of the videos above.
     pub namespaces: Vec<Namespace>,
     /// When non-empty, the embedded relay admits only these creators (x-only pubkey, 64
@@ -207,6 +231,10 @@ pub struct Daemon {
     pub stun_addr: Option<SocketAddr>,
     /// The STUN address beacons announce (`stun_public`, or a dialable `stun_addr`).
     pub stun_public: Option<SocketAddr>,
+    /// The mesh endpoint's UDP address.
+    pub mesh_addr: Option<SocketAddr>,
+    /// The mesh endpoint's session key for this run (what relays and peers see).
+    pub mesh_session: Option<String>,
     pub origin_addr: Option<SocketAddr>,
     state: Arc<Mutex<BTreeMap<String, VideoState>>>,
     shared: Arc<Shared>,
@@ -233,6 +261,8 @@ struct Shared {
     gossip_peers: Vec<iroh::EndpointAddr>,
     tracker: Option<Arc<Tracker>>,
     bridge: Option<Arc<Bridge>>,
+    /// The mesh endpoint, signaled over Nostr (`mesh_relays`).
+    mesh: Option<Arc<Mesh>>,
     tracker_public_url: Option<String>,
     /// The STUN address announced as a `stun` beacon endpoint.
     stun_public: Option<SocketAddr>,
@@ -312,10 +342,16 @@ impl Shared {
     /// rendition's swarm (NFX-10 §1: those of a hash list it holds); with a bridge, it also
     /// joins those of the renditions held (`only`; every one when `None`).
     async fn admit_swarms(&self, manifest: &Verified<Manifest>, only: Option<&[String]>) {
-        if let Some(tracker) = &self.tracker
-            && let Ok(bytes) = self.store.get(&manifest.root_hex())
-            && let Ok(list) = HashList::verify_for(&bytes, manifest)
-        {
+        if self.tracker.is_none() && self.mesh.is_none() {
+            return;
+        }
+        let Ok(bytes) = self.store.get(&manifest.root_hex()) else {
+            return;
+        };
+        let Ok(list) = HashList::verify_for(&bytes, manifest) else {
+            return;
+        };
+        if let Some(tracker) = &self.tracker {
             let _ = tracker.admit(&list);
             if let Some(bridge) = &self.bridge
                 && let Ok(renditions) = bridge.serve(&list, &*self.store, only).await
@@ -326,14 +362,24 @@ impl Shared {
                     .insert(manifest.a_tag(), renditions);
             }
         }
+        // The mesh joins the rooms of the renditions held, as the bridge their swarms.
+        if let Some(mesh) = &self.mesh {
+            let _ = mesh.serve(&list, &*self.store, only).await;
+        }
     }
 
     /// Close them again (the creator deleted the video, NFX-02 §6).
     async fn forget_swarms(&self, manifest: &Verified<Manifest>) {
-        if let Some(tracker) = &self.tracker
-            && let Ok(bytes) = self.store.get(&manifest.root_hex())
-            && let Ok(list) = HashList::verify_for(&bytes, manifest)
-        {
+        let Ok(bytes) = self.store.get(&manifest.root_hex()) else {
+            return;
+        };
+        let Ok(list) = HashList::verify_for(&bytes, manifest) else {
+            return;
+        };
+        if let Some(mesh) = &self.mesh {
+            let _ = mesh.forget(&list).await;
+        }
+        if let Some(tracker) = &self.tracker {
             if let Some(bridge) = &self.bridge {
                 let _ = bridge.forget(&list).await;
                 self.bridged
@@ -746,6 +792,7 @@ impl Daemon {
                 )));
             }
         }
+        check_mesh(&cfg)?;
         if !cfg.gossip && !cfg.gossip_peers.is_empty() {
             return Err(Error::Config("--gossip-peer needs --gossip".into()));
         }
@@ -931,6 +978,25 @@ impl Daemon {
         };
         let bridge_addr = bridge.as_ref().map(|b| b.local_addr());
         let bridge_public = bridge.as_ref().map(|b| b.public_addr());
+        let mesh = if cfg.mesh_relays.is_empty() {
+            None
+        } else {
+            let mesh_cfg = MeshConfig {
+                stun: cfg.mesh_stun.clone(),
+                max_peers: cfg.mesh_max_peers.unwrap_or(nfx_node::mesh::MAX_PEERS),
+                // As iroh's: a node that may ask the gateway for a port asks for this one too.
+                portmapper: !cfg.no_portmapper,
+                bind: cfg.mesh_bind.unwrap_or(MeshConfig::new(vec![]).bind),
+                ..MeshConfig::new(cfg.mesh_relays.clone())
+            };
+            Some(Arc::new(
+                Mesh::start(store.clone(), mesh_cfg)
+                    .await
+                    .map_err(|e| Error::Config(format!("the mesh endpoint: {e}")))?,
+            ))
+        };
+        let mesh_addr = mesh.as_ref().map(|m| m.local_addr());
+        let mesh_session = mesh.as_ref().map(|m| m.session_key().to_owned());
 
         let (origin, origin_addr) = match cfg.origin {
             None if cfg.internal_origin => (
@@ -957,6 +1023,7 @@ impl Daemon {
             origin,
             https_url: cfg.https_url.clone(),
             bridge,
+            mesh,
             tracker_public_url: cfg.tracker_public_url.clone(),
             stun_public,
             bridged: Mutex::new(BTreeMap::new()),
@@ -1046,6 +1113,8 @@ impl Daemon {
             bridge_public,
             stun_addr,
             stun_public,
+            mesh_addr,
+            mesh_session,
             origin_addr,
             state,
             shared,
@@ -1189,6 +1258,12 @@ impl Daemon {
         &self.node
     }
 
+    /// What the mesh endpoint is doing, when it runs.
+    #[must_use]
+    pub fn mesh_status(&self) -> Option<MeshStatus> {
+        self.shared.mesh.as_ref().map(|m| m.status())
+    }
+
     /// Stop everything: tasks, the embedded relay, the relay clients and the node, whose
     /// blobs store is released even while a pending call still holds this daemon, so a
     /// new daemon can open the same store at once.
@@ -1199,6 +1274,10 @@ impl Daemon {
         }
         for task in tasks {
             let _ = task.await;
+        }
+        // Leave the mesh's rooms first: a `disconnect` to its relays, best effort, 2 s at most.
+        if let Some(mesh) = &self.shared.mesh {
+            mesh.shutdown().await;
         }
         if let Some(relay) = &self.embedded {
             relay.shutdown();
@@ -1235,6 +1314,55 @@ fn check_renditions(cfg: &Config) -> Result<()> {
                 return Err(Error::Config(format!("{a}: rendition {id} named twice")));
             }
         }
+    }
+    Ok(())
+}
+
+/// The mesh endpoint's settings (`--mesh-*`), checked before anything binds.
+fn check_mesh(cfg: &Config) -> Result<()> {
+    use nfx_node::mesh::{MAX_PEERS_LIMIT as MESH_PEERS_LIMIT, MAX_RELAYS, MAX_STUN};
+    if cfg.mesh_relays.is_empty() {
+        for (set, flag) in [
+            (cfg.mesh_bind.is_some(), "--mesh-bind"),
+            (!cfg.mesh_stun.is_empty(), "--mesh-stun"),
+            (cfg.mesh_max_peers.is_some(), "--mesh-max-peers"),
+        ] {
+            if set {
+                return Err(Error::Config(format!("{flag} needs --mesh-relay")));
+            }
+        }
+        return Ok(());
+    }
+    if cfg.relay_only {
+        return Err(Error::Config(
+            "--mesh-relay: a relay-only node opens no direct UDP".into(),
+        ));
+    }
+    if cfg.mesh_relays.len() > MAX_RELAYS {
+        return Err(Error::Config(format!("--mesh-relay: at most {MAX_RELAYS}")));
+    }
+    for url in &cfg.mesh_relays {
+        if let Some(why) = nfx_node::mesh::relay_url_problem(url) {
+            return Err(Error::Config(format!("--mesh-relay {url}: {why}")));
+        }
+    }
+    if cfg.mesh_stun.len() > MAX_STUN {
+        return Err(Error::Config(format!("--mesh-stun: at most {MAX_STUN}")));
+    }
+    let v4 = cfg.mesh_bind.is_none_or(|b| b.is_ipv4());
+    if let Some(s) = cfg.mesh_stun.iter().find(|s| {
+        s.port() == 0 || s.ip().is_unspecified() || s.ip().is_multicast() || s.is_ipv4() != v4
+    }) {
+        return Err(Error::Config(format!(
+            "--mesh-stun {s}: not a unicast address of --mesh-bind's family"
+        )));
+    }
+    if let Some(n) = cfg.mesh_max_peers
+        && !(1..=MESH_PEERS_LIMIT).contains(&n)
+    {
+        return Err(Error::Config(format!(
+            "--mesh-max-peers {n}: not 1 to {MESH_PEERS_LIMIT}"
+        )));
     }
     Ok(())
 }

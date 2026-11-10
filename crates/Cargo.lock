@@ -3047,6 +3047,7 @@ version = "0.1.1"
 dependencies = [
  "base64 0.23.1",
  "bytes",
+ "getrandom 0.4.3",
  "hex",
  "http-body-util",
  "hyper",
@@ -3061,6 +3062,7 @@ dependencies = [
  "nostr-database",
  "nostr-memory",
  "nostr-sdk",
+ "portmapper",
  "rustls-pki-types",
  "serde_json",
  "str0m",
@@ -3133,6 +3135,7 @@ dependencies = [
  "hyper-util",
  "iroh",
  "iroh-relay",
+ "n0-future",
  "nfx-node",
  "nfx-proto",
  "nostr-sdk",

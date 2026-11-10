@@ -16,23 +16,37 @@ await init();                                   // or init({ wasmUrl }) if the W
 const m = await resolveManifest(a, relays);     // NFX-02 over Nostr, deletions applied
 const stop = watchEndpoints(a, m.namespace, relays, (e) => {
   // e.origins: https bases, e.trackers: wss trackers, e.stunServers: stun: URLs,
-  // from the newest live beacon per seeder
+  // from the newest live beacon per seeder; e.originSources: the origins with the
+  // renditions each serves; e.availability: how many seeders hold each rendition
 });
 const session = await open(videoElement, {
   manifestJson: m.event,                        // verified again in WASM
-  origins: ['https://origin.example/nfx'],      // tried in order
+  origins: ['https://origin.example/nfx'],      // tried in order; or e.originSources
+  renditions: ['720p', '360p'],                 // optional: allowed ids, preferred first
   signaling: { kind: 'nostr', relays: ['wss://relay.example'] }, // optional; none = no mesh
   // or: signaling: { kind: 'trackers', urls: ['wss://tracker.example'] },
   iceServers: [{ urls: 'stun:stun.example:3478' }], // optional, STUN only
   onEvent: (ev) => {},                          // log, origin, verified, rejected, levels, playing, error
   signal,                                       // optional: aborts open(), or ends the session
 });
-session.levels; session.setLevel(-1); session.stats();
+session.levels; session.setLevel(-1); session.stats(); // each level has its rendition `id`
 session.destroy();                              // hls.js, its worker, the p2p loader, sockets, peers
 ```
 
 The types are in `src/api.ts`. `open()` also takes a bare `root` (with `video` and `segs` to
 bind the hash list) instead of `manifestJson`.
+
+A seeder may hold only some renditions of a video (NFX-03 §4), so a session offers only
+levels some source it uses can deliver (NFX-10 §1, `src/levels.ts`). It takes every file
+from one origin: the first that serves a hash list that verifies and holds an allowed
+rendition. Its levels are the allowed renditions (`renditions`, or all) that this origin
+serves (an `OriginSource`'s `renditions`, from its beacon's `https` endpoint; a bare URL
+serves all). The mesh adds none, since a segment peers do not deliver comes from that
+origin. hls.js reads a master playlist cut to those variants, matched by playlist content
+name, so it never learns of another level, and ABR picks freely among the rest, starting on
+the first of `renditions`. `availability` (who holds which rendition, by distinct seeder key,
+newest beacon each, at most 64) lets a page rank them; the test page passes them most-held
+first when no seeder holds every rendition.
 
 `signaling` is how mesh peers find each other and exchange offers, answers and ICE
 candidates, wired into the engine in one place (`src/mesh.ts` `engineSignaling`). Two kinds:
@@ -63,8 +77,8 @@ npm ci
 npm run build          # the WASM (wasm-pack) and the test page, out/
 npm run build:lib      # the library: out-lib/player.js (minified) and its declarations
 npm run typecheck
-npm run unit           # sanitisers, the beacon endpoint book, open()'s option checks
-npm run e2e            # the test page end to end (cargo, ffmpeg, openssl, Chromium)
+npm run unit           # sanitisers, the beacon endpoint book and availability, open()'s option checks and levels
+npm run e2e            # the test page end to end (cargo, ffmpeg, openssl, Chromium), held renditions included
 npm run e2e:mesh       # the mesh, the bridge, the library's lifecycle, trackers from a beacon
 eval "$(bash e2e-strfry.sh /var/tmp/strfry)"   # the stock relay, strfry at a pinned commit
 npm run e2e:nostr      # two browsers over Nostr only (strfry, no tracker), the origin cut
