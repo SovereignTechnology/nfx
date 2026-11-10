@@ -39,6 +39,7 @@ MAX_SAFE_INT = 2**53 - 1
 
 from pay1 import pay1_vectors  # noqa: E402  (pinned with the money code: crates/ci/check-locked.sh)
 from ratings import ratings_vectors  # noqa: E402  (NFX-16)
+from meshsig import meshsig_vectors  # noqa: E402  (NFX-10 §6)
 
 
 def uvarint(n: int) -> bytes:
@@ -655,6 +656,43 @@ def main() -> int:
                 bind=bind_sig(peer_sk, bind_message(schnorr_id_pubkey(creator), NAMESPACE))),
     ]
 
+    # ---- 8b. NFX-10 §1: the stun endpoint ----
+    stun_ep = {"t": "stun", "addrs": ["203.0.113.10:3478", "[2001:db8::1]:3478"]}
+    stun_valid = [
+        {"name": "paid-stun-and-https", "event": hd_beacon([https_ep, stun_ep])},
+        {"name": "free-stun-ipv4-only", "event": hd_beacon([https_ep, {"t": "stun", "addrs": ["198.51.100.7:3478"]}],
+                                                           free=True, accepts_mints=None, price_hint=0)},
+        {"name": "four-addresses", "event": hd_beacon([https_ep, {"t": "stun", "addrs": [
+            "203.0.113.10:3478", "198.51.100.7:19302", "[2001:db8::1]:3478", "[2001:db8:1::a]:3479"]}])},
+    ]
+
+    def stun_case(name, reason, **endpoint):
+        ep = {k: v for k, v in dict(stun_ep, **endpoint).items() if v is not None}
+        return {"name": name, "reason": reason, "event": hd_beacon([https_ep, ep])}
+
+    stun_invalid = [
+        stun_case("addrs-missing", "a stun endpoint has addrs", addrs=None),
+        stun_case("addrs-not-an-array", "addrs is an array", addrs="203.0.113.10:3478"),
+        stun_case("addrs-empty", "1 to 4 addresses", addrs=[]),
+        stun_case("five-addresses", "1 to 4 addresses", addrs=[
+            "203.0.113.10:3478", "203.0.113.11:3478", "203.0.113.12:3478", "203.0.113.13:3478", "203.0.113.14:3478"]),
+        stun_case("repeated-address", "distinct addresses", addrs=["203.0.113.10:3478", "203.0.113.10:3478"]),
+        stun_case("not-a-string", "addresses are strings", addrs=[3478]),
+        stun_case("no-port", "ip:port", addrs=["203.0.113.10"]),
+        stun_case("port-zero", "the port is not 0", addrs=["203.0.113.10:0"]),
+        stun_case("port-leading-zero", "canonical text form", addrs=["203.0.113.10:03478"]),
+        stun_case("ipv4-leading-zero", "canonical text form", addrs=["203.0.113.010:3478"]),
+        stun_case("hostname", "an IP address, not a name", addrs=["stun.example:3478"]),
+        stun_case("url", "an address, not a stun: URL", addrs=["stun:203.0.113.10:3478"]),
+        stun_case("ipv6-unbracketed", "IPv6 in brackets", addrs=["2001:db8::1:3478"]),
+        stun_case("ipv6-uppercase", "RFC 5952: lowercase", addrs=["[2001:DB8::1]:3478"]),
+        stun_case("ipv6-not-compressed", "RFC 5952: longest zero run compressed", addrs=["[2001:db8:0::1]:3478"]),
+        stun_case("ipv6-zone", "no zone", addrs=["[fe80::1%2]:3478"]),
+        stun_case("ipv4-mapped", "IPv4 is never written inside IPv6", addrs=["[::ffff:203.0.113.10]:3478"]),
+        stun_case("ipv4-compatible", "IPv4 is never written inside IPv6 (deprecated ::a.b.c.d)",
+                  addrs=["[::203.0.113.10]:3478"]),
+    ]
+
     # How many renditions' iroh tickets fit in a gossip envelope beside a hyperdht endpoint
     # (NFX-06 §4: 4 KiB on the wire; nfxd sends nothing above 4096 - 64). Every rendition's
     # ticket has the 720p ticket's length, which is what a ticket for the same endpoint has.
@@ -899,6 +937,21 @@ def main() -> int:
             "invalid": hd_invalid,
             "gossip_budget": gossip_budget,
         },
+        "beacon-stun.json": {
+            "description": "NFX-10 §1 stun endpoints in correctly signed kind-20464 beacons, checked at "
+                           "'now'. Each address is ip:port in canonical text form (an IPv4 address, or "
+                           "a bracketed RFC 5952 IPv6 address with no zone, never IPv4 written inside "
+                           "IPv6), with a port that is not 0; 1 to 4 distinct addresses. A reader that "
+                           "implements the endpoint MUST accept 'valid' and MUST reject every 'invalid' "
+                           "beacon whole; a reader that does not skips the endpoint and accepts them all "
+                           "(NFX-03 §4). Whether an address is global unicast is a page's choice when it "
+                           "uses one (NFX-10 §1), not a parsing rule.",
+            "secret_keys_DO_NOT_USE": {"seeder": secrets["seeder"]},
+            "now": now,
+            "valid": stun_valid,
+            "invalid": stun_invalid,
+        },
+        **meshsig_vectors(keypair, schnorr_id_pubkey, nostr_event),
         "files1.json": files1,
         "canon.json": {
             "description": "NFX-11 §9 canonical JSON. 'input' is received JSON text; 'canon' "

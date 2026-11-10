@@ -25,6 +25,8 @@ SCHEMA_REJECTS_BEACONS = {
 }
 # The schema checks a bind's shape, never its signature (NFX-12 §2).
 SCHEMA_ACCEPTS_HYPERDHT = {"bind-by-another-key", "bind-for-another-network", "bind-for-another-seeder"}
+# The schema checks a stun address's shape, not its canonical form (NFX-10 §1).
+SCHEMA_ACCEPTS_STUN = {"ipv4-leading-zero", "ipv6-not-compressed"}
 
 
 def load(name: str):
@@ -77,6 +79,13 @@ def main() -> int:
         got = conforms(json.loads(case["event"]["content"]), beacon_schema)
         expect(f"beacon-hyperdht/invalid/{case['name']}", got, case["name"] in SCHEMA_ACCEPTS_HYPERDHT)
 
+    stun = json.loads((VECTORS / "beacon-stun.json").read_text())
+    for case in stun["valid"]:
+        got = conforms(json.loads(case["event"]["content"]), beacon_schema)
+        expect(f"beacon-stun/valid/{case['name']}", got, True)
+    for case in stun["invalid"]:
+        got = conforms(json.loads(case["event"]["content"]), beacon_schema)
+        expect(f"beacon-stun/invalid/{case['name']}", got, case["name"] in SCHEMA_ACCEPTS_STUN)
     held = json.loads((VECTORS / "beacon-renditions.json").read_text())
     for case in held["valid"]:
         got = conforms(json.loads(case["event"]["content"]), beacon_schema)
