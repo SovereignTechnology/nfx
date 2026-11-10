@@ -6,6 +6,7 @@
  * WebCrypto and therefore without a secure context (spike S3).
  */
 import init, { VerifiedHashList } from '../out/wasm/nfx_wasm.js';
+import { type HashListRendition, contentHash, hashListLevels } from './levels';
 
 /** The largest hash list fetched, as native peers cap it (nfx-node `MAX_HASH_LIST_BYTES`). */
 export const MAX_HASH_LIST_BYTES = 16 * 1024 * 1024;
@@ -70,11 +71,20 @@ export interface ManifestBinding {
 
 /** A hash list fetched by `root` and verified against it. */
 export class Anchor {
+  /** The rendition of each playlist sha256 (NFX-10 §2). */
+  private readonly byPlaylist: Map<string, string>;
+
   private constructor(
     readonly origin: string,
     readonly root: string,
     private readonly list: VerifiedHashList,
-  ) {}
+    /** Its renditions, in its order, each with its playlist's sha256. */
+    readonly renditions: readonly HashListRendition[],
+    /** The sha256 of its master playlist. */
+    readonly master: string | null,
+  ) {
+    this.byPlaylist = new Map(renditions.map((r) => [r.playlist, r.id]));
+  }
 
   static async load(origin: string, root: string, manifest?: ManifestBinding, signal?: AbortSignal): Promise<Anchor> {
     if (!/^[0-9a-f]{64}$/.test(root)) throw new Error('root must be 64 lowercase hex');
@@ -85,7 +95,15 @@ export class Anchor {
     const list = manifest
       ? new VerifiedHashList(bytes, root, manifest.video, manifest.segs)
       : VerifiedHashList.fromRoot(bytes, root);
-    return new Anchor(origin, root, list);
+    // Read from nfx-proto's own rendering of the list it verified, never the bytes as sent.
+    const { renditions, master } = hashListLevels(list.toJSON());
+    return new Anchor(origin, root, list, renditions, master);
+  }
+
+  /** The rendition id of the playlist at `url` (by its content name, NFX-10 §2), or null. */
+  renditionOf(url: string): string | null {
+    const hash = contentHash(url, location.href);
+    return hash === null ? null : (this.byPlaylist.get(hash) ?? null);
   }
 
   get size(): number {

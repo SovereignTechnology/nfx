@@ -4,7 +4,8 @@
  * still untrusted. A beacon names where to fetch, never what is right: every byte is
  * checked against the signed anchor whatever its source.
  */
-import type { Endpoints, Signaling } from './api';
+import type { Endpoints, OriginSource, RenditionAvailability, Signaling } from './api';
+import { MAX_RENDITIONS, beaconRenditionId } from './levels';
 import { MAX_RELAYS, MAX_TRACKERS, relayUrl, trackerUrl } from './mesh';
 
 /** Most distinct origins reported. */
@@ -123,19 +124,49 @@ export interface VerifiedBeacon {
   content: { endpoints?: unknown };
 }
 
+/** An origin as one beacon names it: what it serves, null for every rendition. */
+interface NamedOrigin {
+  url: string;
+  renditions: string[] | null;
+}
+
 interface Entry {
   created_at: number;
   expiration: number;
-  origins: string[];
+  origins: NamedOrigin[];
   trackers: string[];
   stun: string[];
+  /** The renditions the seeder holds (NFX-03 §5): every one, or these (perhaps none). */
+  holds: 'all' | string[];
+}
+
+/**
+ * An endpoint's `renditions` (NFX-03 §4): `all` when absent, else the ids this player
+ * counts (`beaconRenditionId`), at most `MAX_RENDITIONS`; null when it is not a list of
+ * strings, which nfx-proto never passes (the endpoint then serves nothing here).
+ */
+function endpointRenditions(raw: unknown): 'all' | string[] | null {
+  if (raw === undefined) return 'all';
+  if (!Array.isArray(raw)) return null;
+  const out: string[] = [];
+  for (const id of raw as unknown[]) {
+    if (typeof id !== 'string') return null;
+    if (beaconRenditionId(id) && !out.includes(id) && out.length < MAX_RENDITIONS) out.push(id);
+  }
+  return out;
+}
+
+/** What two claims about one origin leave: only what both say it serves (null: every rendition). */
+function narrow(a: string[] | null, b: string[] | null): string[] | null {
+  if (a === null) return b === null ? null : [...b];
+  return b === null ? a : a.filter((id) => b.includes(id));
 }
 
 /**
  * The newest unexpired beacon of each seeder, and what they name together. An older or
  * equal beacon from a seeder already held changes nothing (a relay replaying an old one,
  * or the same one from a second relay), and a seeder's newer beacon replaces what it said
- * before, so a seeder can withdraw an endpoint.
+ * before, so a seeder can withdraw an endpoint, or stop holding a rendition.
  */
 export class EndpointBook {
   readonly #seeders = new Map<string, Entry>();
@@ -152,26 +183,45 @@ export class EndpointBook {
       this.#prune(now);
       if (this.#seeders.size >= MAX_SEEDERS) return false;
     }
-    const origins: string[] = [];
+    const origins: NamedOrigin[] = [];
     const trackers: string[] = [];
     const stun: string[] = [];
+    let all = false;
+    const ids: string[] = [];
+    const hold = (r: 'all' | string[]): void => {
+      if (r === 'all') all = true;
+      else for (const id of r) if (!ids.includes(id) && ids.length < MAX_RENDITIONS) ids.push(id);
+    };
     const endpoints = Array.isArray(b.content?.endpoints) ? (b.content.endpoints as unknown[]) : [];
     for (const e of endpoints) {
       if (e === null || typeof e !== 'object') continue;
-      const { t, url, tracker_urls: urls, addrs } = e as {
+      const { t, url, tracker_urls: urls, addrs, renditions, tickets } = e as {
         t?: unknown;
         url?: unknown;
         tracker_urls?: unknown;
         addrs?: unknown;
+        renditions?: unknown;
+        tickets?: unknown;
       };
       if (t === 'https' && typeof url === 'string') {
+        const r = endpointRenditions(renditions);
+        if (r === null) continue;
+        hold(r);
         const o = originBase(url);
-        if (o !== null && !origins.includes(o) && origins.length < PER_BEACON) origins.push(o);
+        const served = r === 'all' ? null : r;
+        const named = origins.find((x) => x.url === o);
+        if (named) named.renditions = narrow(named.renditions, served);
+        else if (o !== null && origins.length < PER_BEACON) origins.push({ url: o, renditions: served });
       } else if (t === 'webrtc' && Array.isArray(urls)) {
+        const r = endpointRenditions(renditions);
+        if (r !== null) hold(r);
         for (const raw of urls) {
           const tr = typeof raw === 'string' ? beaconTracker(raw) : null;
           if (tr !== null && !trackers.includes(tr) && trackers.length < PER_BEACON) trackers.push(tr);
         }
+      } else if (t === 'iroh' && tickets !== null && typeof tickets === 'object' && !Array.isArray(tickets)) {
+        // One ticket per held rendition, and `meta` (NFX-03 §4), which beaconRenditionId refuses.
+        hold(Object.keys(tickets).filter(beaconRenditionId));
       } else if (t === 'stun' && Array.isArray(addrs)) {
         for (const raw of addrs) {
           const s = typeof raw === 'string' ? beaconStun(raw) : null;
@@ -179,34 +229,62 @@ export class EndpointBook {
         }
       }
     }
+    const holds = all ? 'all' : ids;
     // Map#set on a held key keeps its place: seeders stay in first-heard order.
-    this.#seeders.set(b.seeder, { created_at: b.created_at, expiration: b.expiration, origins, trackers, stun });
+    this.#seeders.set(b.seeder, { created_at: b.created_at, expiration: b.expiration, origins, trackers, stun, holds });
     return true;
   }
 
   /**
    * What the unexpired beacons name at `now`, each list ranked by how many seeders name
-   * an entry, ties in the order first heard.
+   * an entry, ties in the order first heard; and who holds which renditions.
    */
   snapshot(now: number): Endpoints {
-    const origins = new Map<string, number>();
+    const origins = new Map<string, { n: number; renditions: string[] | null }>();
     const trackers = new Map<string, number>();
     const stun = new Map<string, number>();
+    const named = new Map<string, number>();
     let seeders = 0;
+    let holders = 0;
+    let all = 0;
     for (const e of this.#seeders.values()) {
       if (e.expiration <= now) continue;
       seeders += 1;
-      for (const o of e.origins) origins.set(o, (origins.get(o) ?? 0) + 1);
+      for (const o of e.origins) {
+        const c = origins.get(o.url);
+        if (c) {
+          c.n += 1;
+          c.renditions = narrow(c.renditions, o.renditions);
+        } else origins.set(o.url, { n: 1, renditions: o.renditions === null ? null : [...o.renditions] });
+      }
       for (const t of e.trackers) trackers.set(t, (trackers.get(t) ?? 0) + 1);
       for (const s of e.stun) stun.set(s, (stun.get(s) ?? 0) + 1);
+      if (e.holds === 'all') {
+        holders += 1;
+        all += 1;
+      } else if (e.holds.length > 0) {
+        holders += 1;
+        for (const id of e.holds) named.set(id, (named.get(id) ?? 0) + 1);
+      }
     }
     // Array#sort is stable, so equal counts keep first-heard order.
     const ranked = (m: Map<string, number>): string[] => [...m].sort((x, y) => y[1] - x[1]).map(([u]) => u);
+    const originsRanked = [...origins].sort((x, y) => y[1].n - x[1].n).slice(0, MAX_ORIGINS);
+    const availability: RenditionAvailability = {
+      seeders: holders,
+      all,
+      renditions: [...named]
+        .sort((x, y) => y[1] - x[1])
+        .slice(0, MAX_RENDITIONS)
+        .map(([id, n]) => ({ id, seeders: n + all })),
+    };
     return {
-      origins: ranked(origins).slice(0, MAX_ORIGINS),
+      origins: originsRanked.map(([u]) => u),
+      originSources: originsRanked.map(([url, c]): OriginSource => (c.renditions === null ? { url } : { url, renditions: c.renditions })),
       trackers: ranked(trackers).slice(0, MAX_TRACKERS),
       stunServers: ranked(stun).slice(0, MAX_ICE_SERVERS),
       seeders,
+      availability,
     };
   }
 
@@ -270,15 +348,41 @@ export function checkIceServers(list: readonly RTCIceServer[]): RTCIceServer[] {
   });
 }
 
-/** The origins a session may try, normalised; throws on any it may not. */
-export function checkOrigins(list: readonly string[]): string[] {
-  const out: string[] = [];
-  for (const raw of list) {
-    const o = typeof raw === 'string' ? pageOrigin(raw) : null;
-    if (o === null) throw new TypeError(`nfx: not an origin base: ${String(raw)}`);
-    if (!out.includes(o)) out.push(o);
+/** An origin a session may try, and the renditions it serves (null: every one). */
+export interface CheckedOrigin {
+  url: string;
+  renditions: string[] | null;
+}
+
+/**
+ * The origins a session may try (bare bases, or `OriginSource`s), normalised: URLs reduced,
+ * repeated ids dropped, an origin given twice taken as first given. Throws a `TypeError` on
+ * any it may not: a URL `pageOrigin` refuses, or `renditions` that is not a list of at most
+ * `MAX_RENDITIONS` non-empty strings.
+ */
+export function checkOriginSources(list: readonly (string | OriginSource)[]): CheckedOrigin[] {
+  if (!Array.isArray(list)) throw new TypeError('nfx: origins must be a list');
+  const out: CheckedOrigin[] = [];
+  for (const raw of list as unknown[]) {
+    const src = (typeof raw === 'string' ? { url: raw } : raw) as Partial<OriginSource> | null;
+    const url = typeof src?.url === 'string' ? pageOrigin(src.url) : null;
+    if (url === null) throw new TypeError(`nfx: not an origin base: ${String(typeof raw === 'string' ? raw : src?.url)}`);
+    const r: unknown = src?.renditions;
+    let renditions: string[] | null = null;
+    if (r !== undefined) {
+      if (!Array.isArray(r) || r.length > MAX_RENDITIONS || !r.every((id) => typeof id === 'string' && id !== '')) {
+        throw new TypeError(`nfx: the renditions of ${url} must be a list of at most ${MAX_RENDITIONS} rendition ids`);
+      }
+      renditions = [...new Set(r as string[])];
+    }
+    if (!out.some((o) => o.url === url)) out.push({ url, renditions });
+    if (out.length > MAX_ORIGINS + 8) throw new TypeError(`nfx: at most ${MAX_ORIGINS + 8} origins`);
   }
   if (out.length === 0) throw new TypeError('nfx: no origin to try');
-  if (out.length > MAX_ORIGINS + 8) throw new TypeError(`nfx: at most ${MAX_ORIGINS + 8} origins`);
   return out;
+}
+
+/** The origins a session may try, as bare bases, normalised; throws on any it may not. */
+export function checkOrigins(list: readonly string[]): string[] {
+  return checkOriginSources(list).map((o) => o.url);
 }
