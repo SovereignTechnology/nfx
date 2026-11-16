@@ -24,7 +24,8 @@
 //!   held.
 //! - **mesh** ([`Config::mesh_relays`]): browsers meet the node in the rooms of the held
 //!   renditions, signaling over Nostr (NFX-10 §6), and fetch verified segments from it over
-//!   WebRTC with full ICE, through NATs ([`nfx_node::mesh`]). Discovery is by room alone, so
+//!   WebRTC with full ICE, through NATs ([`nfx_node::mesh`]), or behind a DNAT through the
+//!   public address it is told ([`Config::mesh_public`]). Discovery is by room alone, so
 //!   beacons carry nothing for it.
 
 use std::collections::BTreeMap;
@@ -163,6 +164,13 @@ pub struct Config {
     /// Connections it holds at once (`--mesh-max-peers`, 1 to 1024; each may queue 16 MiB).
     /// Default: `nfx_node::mesh::MAX_PEERS` (16). Needs `mesh_relays`.
     pub mesh_max_peers: Option<usize>,
+    /// The public address of a DNAT that forwards to `mesh_bind`'s port (`--mesh-public`),
+    /// for a node whose public address STUN cannot report: offered as a host candidate, what
+    /// arrives is taken as sent to it, and no candidate address that is not public is offered
+    /// (`nfx_node::mesh::MeshConfig::public`). A public unicast address
+    /// (`nfx_node::node::is_public`) of `mesh_bind`'s family with a port. Needs `mesh_relays`
+    /// and a `mesh_bind` with a fixed port, the one the DNAT forwards to.
+    pub mesh_public: Option<SocketAddr>,
     /// Namespaces the embedded relay serves; by default those of the videos above.
     pub namespaces: Vec<Namespace>,
     /// When non-empty, the embedded relay admits only these creators (x-only pubkey, 64
@@ -233,6 +241,8 @@ pub struct Daemon {
     pub stun_public: Option<SocketAddr>,
     /// The mesh endpoint's UDP address.
     pub mesh_addr: Option<SocketAddr>,
+    /// The public address the mesh endpoint offers in front of it (`mesh_public`).
+    pub mesh_public: Option<SocketAddr>,
     /// The mesh endpoint's session key for this run (what relays and peers see).
     pub mesh_session: Option<String>,
     pub origin_addr: Option<SocketAddr>,
@@ -987,6 +997,7 @@ impl Daemon {
                 // As iroh's: a node that may ask the gateway for a port asks for this one too.
                 portmapper: !cfg.no_portmapper,
                 bind: cfg.mesh_bind.unwrap_or(MeshConfig::new(vec![]).bind),
+                public: cfg.mesh_public,
                 ..MeshConfig::new(cfg.mesh_relays.clone())
             };
             Some(Arc::new(
@@ -996,6 +1007,7 @@ impl Daemon {
             ))
         };
         let mesh_addr = mesh.as_ref().map(|m| m.local_addr());
+        let mesh_public = mesh.as_ref().and_then(|m| m.public_addr());
         let mesh_session = mesh.as_ref().map(|m| m.session_key().to_owned());
 
         let (origin, origin_addr) = match cfg.origin {
@@ -1114,6 +1126,7 @@ impl Daemon {
             stun_addr,
             stun_public,
             mesh_addr,
+            mesh_public,
             mesh_session,
             origin_addr,
             state,
@@ -1326,6 +1339,7 @@ fn check_mesh(cfg: &Config) -> Result<()> {
             (cfg.mesh_bind.is_some(), "--mesh-bind"),
             (!cfg.mesh_stun.is_empty(), "--mesh-stun"),
             (cfg.mesh_max_peers.is_some(), "--mesh-max-peers"),
+            (cfg.mesh_public.is_some(), "--mesh-public"),
         ] {
             if set {
                 return Err(Error::Config(format!("{flag} needs --mesh-relay")));
@@ -1363,6 +1377,31 @@ fn check_mesh(cfg: &Config) -> Result<()> {
         return Err(Error::Config(format!(
             "--mesh-max-peers {n}: not 1 to {MESH_PEERS_LIMIT}"
         )));
+    }
+    if let Some(public) = cfg.mesh_public {
+        // A DNAT forwards to a port it knows: an ephemeral one changes every run, and the
+        // address offered would then lead nowhere.
+        let Some(bind) = cfg.mesh_bind else {
+            return Err(Error::Config(
+                "--mesh-public needs --mesh-bind, the address and port the DNAT forwards to".into(),
+            ));
+        };
+        if bind.port() == 0 {
+            return Err(Error::Config(format!(
+                "--mesh-bind {bind}: port 0 is not a fixed port a DNAT can forward to"
+            )));
+        }
+        // Every peer is told it: one that is not public would only tell them about the host.
+        if !nfx_node::node::is_public(&public) {
+            return Err(Error::Config(format!(
+                "--mesh-public {public}: not a public unicast address with a port"
+            )));
+        }
+        if public.is_ipv4() != bind.is_ipv4() {
+            return Err(Error::Config(format!(
+                "--mesh-public {public}: not of --mesh-bind's family"
+            )));
+        }
     }
     Ok(())
 }

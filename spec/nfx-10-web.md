@@ -376,7 +376,9 @@ tracker, no TURN, no relay plugin. Any relay that carries ephemeral events (NIP-
 do. A scoped relay (NFX-04 §1) admits only NFX's catalog kinds and refuses kind 25050,
 so a page names general relays for signaling. Once two peers hold each other's complete
 SDP, ICE runs its connectivity checks from both ends, which is the hole punch; STUN (§1)
-gives each its public mapping.
+gives each its public mapping. (A native peer behind a DNAT, whose public address STUN cannot
+give it, may offer that address as a host candidate and take what arrives as sent to it, as a
+bridge does; nothing on the wire changes.)
 
 The wire is **signaling-compatible with the NIP-DC draft §§2, 4–6** (nostr4j's
 `NIP-DC.md`, 2026-11-02, commit `3a9def15`): its kind, tags, room proof, presence, offer
@@ -662,3 +664,5 @@ with full ICE, and a NAT test.
   reachable source holds (NFX-03 §§4–5, which now let an `https` endpoint name its
   renditions), narrowed further only by the page's own choice, ABR free among the rest.
   §2: a bridge that holds only some renditions lists them and joins no other swarm.
+- Draft 2026-11-16 (issue #71, editorial): §6 notes that a native peer behind a DNAT may
+  offer its public address as a host candidate. Nothing on the wire changes.

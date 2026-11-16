@@ -39,7 +39,7 @@ async fn state(max_peers: usize) -> State {
         client: nostr_sdk::prelude::Client::default(),
         uploader: Uploader::new(socket, store, now),
         base,
-        host: Candidate::host(base, "udp").unwrap(),
+        public: None,
         stun: Stun::new(vec![], now),
         portmapped: None,
         gathered: true,
@@ -316,14 +316,33 @@ async fn gathering_offers_the_mapping_a_stun_server_reports() {
 /// One side of the simulated punch: an ICE agent behind a NAT that maps its one socket to one
 /// public address for every destination (endpoint-independent mapping) and lets in only what
 /// comes from an address the side has sent to (address- and port-dependent filtering): the
-/// NAT test's "consistent" router.
+/// NAT test's "consistent" router. Or, `forwarded`, behind a DNAT that forwards its public
+/// address to the socket and lets in what comes from anywhere.
 struct Natted {
     rtc: Rtc,
-    local: SocketAddr,
     public: SocketAddr,
+    /// Where the side takes every datagram as sent: its socket's address, or for a node told
+    /// its public address, that address ([`State::arrival`]). Its ICE agent sends from it.
+    arrives_as: SocketAddr,
+    /// A DNAT's forwarded port: no filtering.
+    forwarded: bool,
     /// Destinations this side has sent to, as its NAT remembers them.
     sent_to: Vec<SocketAddr>,
     open: bool,
+}
+
+impl Natted {
+    /// A side whose socket is at `local`, behind a NAT that maps it to `public`.
+    fn new(rtc: Rtc, local: SocketAddr, public: SocketAddr) -> Self {
+        Self {
+            rtc,
+            public,
+            arrives_as: local,
+            forwarded: false,
+            sent_to: vec![],
+            open: false,
+        }
+    }
 }
 
 /// Run both sides until each sees the data channel open (true) or 30 simulated seconds pass.
@@ -344,13 +363,17 @@ fn punch(a: &mut Natted, b: &mut Natted) -> bool {
             while let Ok(out) = src.rtc.poll_output() {
                 match out {
                     Output::Transmit(t) => {
-                        assert_eq!(t.source, src.local, "every packet leaves the one socket");
+                        assert_eq!(
+                            t.source, src.arrives_as,
+                            "every packet leaves the one socket"
+                        );
                         if t.destination != dst.public {
                             continue;
                         }
                         src.sent_to.push(t.destination);
-                        // The other NAT lets it in only if its side has sent to src's mapping.
-                        if !dst.sent_to.contains(&src.public) {
+                        // The other NAT lets it in only if its side has sent to src's mapping
+                        // (a DNAT's forwarded port lets in everything).
+                        if !dst.forwarded && !dst.sent_to.contains(&src.public) {
                             continue;
                         }
                         let input = Input::Receive(
@@ -358,7 +381,7 @@ fn punch(a: &mut Natted, b: &mut Natted) -> bool {
                             Receive {
                                 proto: Protocol::Udp,
                                 source: src.public,
-                                destination: dst.local,
+                                destination: dst.arrives_as,
                                 contents: (&t.contents[..]).try_into().unwrap(),
                             },
                         );
@@ -394,7 +417,6 @@ async fn full_ice_punches_through_two_consistent_nats_where_ice_lite_cannot() {
     let (web_local, web_public) = (sa("192.168.20.2:6000"), sa("203.0.113.12:6000"));
     let mut s = state(16).await;
     s.base = node_local;
-    s.host = Candidate::host(node_local, "udp").unwrap();
     s.stun.servers = vec![sa("203.0.113.1:3478")];
     s.stun.mapped.insert(sa("203.0.113.1:3478"), node_public);
     let browser_rtc = || {
@@ -426,20 +448,8 @@ async fn full_ice_punches_through_two_consistent_nats_where_ice_lite_cannot() {
                 .unwrap(),
         )
         .unwrap();
-    let mut a = Natted {
-        rtc: node,
-        local: node_local,
-        public: node_public,
-        sent_to: vec![],
-        open: false,
-    };
-    let mut b = Natted {
-        rtc: web,
-        local: web_local,
-        public: web_public,
-        sent_to: vec![],
-        open: false,
-    };
+    let mut a = Natted::new(node, node_local, node_public);
+    let mut b = Natted::new(web, web_local, web_public);
     assert!(punch(&mut a, &mut b), "both ends check, so both NATs open");
 
     // Control: an ICE-lite agent (the bridge's), told as the NAT's public address the way
@@ -455,19 +465,187 @@ async fn full_ice_punches_through_two_consistent_nats_where_ice_lite_cannot() {
         .accept_offer(SdpOffer::from_sdp_string(&offer.to_sdp_string()).unwrap())
         .unwrap();
     web.sdp_api().accept_answer(pending, answer).unwrap();
-    let mut a = Natted {
-        rtc: lite,
-        local: node_public,
-        public: node_public,
-        sent_to: vec![],
-        open: false,
+    let mut a = Natted::new(lite, node_public, node_public);
+    let mut b = Natted::new(web, web_local, web_public);
+    assert!(!punch(&mut a, &mut b));
+}
+
+/// What a candidate set comes to, as the status line shows it.
+fn kinds(s: &State) -> Vec<String> {
+    s.candidates()
+        .iter()
+        .map(|c| format!("{} {}", c.kind(), c.addr()))
+        .collect()
+}
+
+/// The `a=candidate` lines of an SDP.
+fn candidate_lines(sdp: &str) -> Vec<&str> {
+    sdp.lines()
+        .filter(|l| l.starts_with("a=candidate:"))
+        .collect()
+}
+
+#[tokio::test]
+async fn with_a_public_address_it_is_offered_first_and_no_address_that_is_not_public() {
+    let sa = |s: &str| -> SocketAddr { s.parse().unwrap() };
+    // Bound behind a DNAT on a private address. The public address is offered as given
+    // (nfxd refuses one that is not public; a documentation address stands in for it here).
+    let mut s = state(16).await;
+    s.base = sa("10.0.0.28:7845");
+    assert_eq!(kinds(&s), ["host 10.0.0.28:7845"], "without one, as before");
+    s.public = Some(sa("203.0.113.7:7845"));
+    assert_eq!(s.arrival(), sa("203.0.113.7:7845"));
+    assert_eq!(
+        kinds(&s),
+        ["host 203.0.113.7:7845"],
+        "the bound address is left out"
+    );
+
+    // STUN beside it: a mapping equal to the public address is offered once, a private one
+    // (a STUN server inside the DNAT) not at all, and another public one is kept. So is a
+    // public one the gateway maps.
+    let servers = [
+        sa("198.51.100.1:3478"),
+        sa("198.51.100.2:3478"),
+        sa("198.51.100.3:3478"),
+    ];
+    s.stun.servers = servers.to_vec();
+    s.stun.mapped.insert(servers[0], sa("203.0.113.7:7845"));
+    s.stun.mapped.insert(servers[1], sa("192.168.1.2:40000"));
+    s.stun.mapped.insert(servers[2], sa("8.8.8.8:41000"));
+    s.portmapped = Some(sa("198.18.0.9:7845"));
+    assert_eq!(
+        kinds(&s),
+        ["host 203.0.113.7:7845", "srflx 8.8.8.8:41000"],
+        "a benchmarking-range mapping is not public either"
+    );
+    s.portmapped = Some(sa("8.8.4.4:7845"));
+    assert_eq!(
+        kinds(&s),
+        [
+            "host 203.0.113.7:7845",
+            "srflx 8.8.8.8:41000",
+            "srflx 8.8.4.4:7845"
+        ]
+    );
+
+    // Every SDP the node sends, offer or answer, names those and nothing derived from the
+    // addresses left out: str0m writes no raddr of ours, and its foundations hash the base,
+    // which is the public address.
+    let mut rtc = s.new_rtc(Instant::now());
+    let mut api = rtc.sdp_api();
+    api.add_channel("nfx".into());
+    let (offer, _) = api.apply().unwrap();
+    let offer = offer.to_sdp_string();
+    let (_, _, browser) = browser_offer();
+    let answer = s
+        .new_rtc(Instant::now())
+        .sdp_api()
+        .accept_offer(SdpOffer::from_sdp_string(&browser).unwrap())
+        .unwrap()
+        .to_sdp_string();
+    for sdp in [&offer, &answer] {
+        let lines = candidate_lines(sdp);
+        assert_eq!(lines.len(), 3, "{sdp}");
+        assert!(lines[0].contains("203.0.113.7 7845 typ host"), "{sdp}");
+        assert!(
+            lines[1].contains("8.8.8.8 41000 typ srflx raddr 0.0.0.0"),
+            "{sdp}"
+        );
+        assert!(
+            lines[2].contains("8.8.4.4 7845 typ srflx raddr 0.0.0.0"),
+            "{sdp}"
+        );
+        for private in ["10.0.0.28", "192.168.1.2", "198.18.0.9"] {
+            assert!(!sdp.contains(private), "{private} in {sdp}");
+        }
+    }
+    // The srflx candidates' base is the public address, as every datagram's arrival is
+    // (Candidate's equality takes in the base).
+    let srflx = |base: &str| Candidate::server_reflexive(sa("8.8.8.8:41000"), sa(base), "udp");
+    assert_eq!(s.candidates()[1], srflx("203.0.113.7:7845").unwrap());
+    assert_ne!(s.candidates()[1], srflx("10.0.0.28:7845").unwrap());
+
+    // A host on a public address keeps it, beside the public address (as iroh's external
+    // addresses keep a node's public direct ones).
+    s.stun.servers.clear();
+    s.portmapped = None;
+    s.base = sa("8.8.4.4:7845");
+    assert_eq!(kinds(&s), ["host 203.0.113.7:7845", "host 8.8.4.4:7845"]);
+    s.base = sa("203.0.113.7:7845");
+    assert_eq!(
+        kinds(&s),
+        ["host 203.0.113.7:7845"],
+        "the same address once"
+    );
+}
+
+#[tokio::test]
+async fn behind_a_dnat_full_ice_connects_through_the_public_address_it_is_told() {
+    use str0m::change::SdpAnswer;
+    let sa = |s: &str| -> SocketAddr { s.parse().unwrap() };
+    // This node in a guest behind a DNAT: no STUN mapping (its STUN server would be itself,
+    // through a hairpin) and no gateway to map a port. A browser behind a consistent NAT.
+    let (node_local, node_public) = (sa("10.0.0.28:7845"), sa("203.0.113.11:7845"));
+    let (web_local, web_public) = (sa("192.168.20.2:6000"), sa("203.0.113.12:6000"));
+    let browser_rtc = || {
+        let mut rtc = Rtc::builder().build(Instant::now());
+        rtc.add_local_candidate(Candidate::host(web_local, "udp").unwrap());
+        rtc.add_local_candidate(Candidate::server_reflexive(web_public, web_local, "udp").unwrap());
+        rtc
     };
-    let mut b = Natted {
-        rtc: web,
-        local: web_local,
-        public: web_public,
-        sent_to: vec![],
-        open: false,
+    // Negotiate as the node offers, both sides filtering what they check.
+    let negotiate = |s: &State| {
+        let mut node = s.new_rtc(Instant::now());
+        let mut api = node.sdp_api();
+        api.add_channel("nfx".into());
+        let (offer, pending) = api.apply().unwrap();
+        let offer = offer.to_sdp_string();
+        let mut web = browser_rtc();
+        let answer = web
+            .sdp_api()
+            .accept_offer(
+                SdpOffer::from_sdp_string(&super::sdp::filter_candidates(&offer, web_local))
+                    .unwrap(),
+            )
+            .unwrap()
+            .to_sdp_string();
+        node.sdp_api()
+            .accept_answer(
+                pending,
+                SdpAnswer::from_sdp_string(&super::sdp::filter_candidates(&answer, s.base))
+                    .unwrap(),
+            )
+            .unwrap();
+        (node, web, offer)
     };
+    let dnat = |rtc: Rtc, s: &State| Natted {
+        arrives_as: s.arrival(),
+        forwarded: true,
+        ..Natted::new(rtc, node_local, node_public)
+    };
+
+    let mut s = state(16).await;
+    s.base = node_local;
+    s.public = Some(node_public);
+    let (node, web, offer) = negotiate(&s);
+    assert_eq!(candidate_lines(&offer).len(), 1, "{offer}");
+    assert!(offer.contains("203.0.113.11 7845 typ host"), "{offer}");
+    assert!(!offer.contains("10.0.0.28"), "{offer}");
+    let mut a = dnat(node, &s);
+    let mut b = Natted::new(web, web_local, web_public);
+    assert!(
+        punch(&mut a, &mut b),
+        "the browser checks the public address, the DNAT forwards it, and the node answers"
+    );
+
+    // Control: the same node not told its public address offers only the bound one, which
+    // the browser cannot reach; the node's own checks reach the browser's NAT from an address
+    // its side never sent to, so they are dropped. No connection.
+    s.public = None;
+    let (node, web, offer) = negotiate(&s);
+    assert!(offer.contains("10.0.0.28 7845 typ host"), "{offer}");
+    let mut a = dnat(node, &s);
+    let mut b = Natted::new(web, web_local, web_public);
     assert!(!punch(&mut a, &mut b));
 }

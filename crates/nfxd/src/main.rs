@@ -12,7 +12,7 @@
 //!          [--https-url <url>] [--embed-relay <addr:port>]
 //!          [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]…
 //!          [--stun <ip:port> [--stun-public <ip:port>]]
-//!          [--mesh-relay <wss url>… [--mesh-bind <ip:port>] [--mesh-stun <ip:port>]… [--mesh-max-peers <n>]]
+//!          [--mesh-relay <wss url>… [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]… [--mesh-max-peers <n>]]
 //!          [--allow-creator <hex>]… [--gossip [--gossip-peer <id>@<ip:port|relay-url>]…]
 //!          [--rating-root <npub|hex> --general-relay <url>… [--rating-trusted <npub|hex>]…]
 //! ```
@@ -103,6 +103,15 @@
 //! tells anyone who announces presence there this node's candidate addresses, its host
 //! address and public mappings included, as a tracker's swarm would; relays see the room keys
 //! (which the catalog maps back to videos) and who signals whom, never the SDP.
+//!
+//! Behind a DNAT, where STUN cannot report the public address (the STUN server is the node's
+//! own, which a UDP hairpin would need) and no gateway maps a port, `--mesh-public <ip:port>`
+//! names the DNAT's public address and port, forwarded to `--mesh-bind`'s port, which must
+//! then be fixed. It is offered as a host candidate and what arrives is taken as sent to it,
+//! as with `--bridge-public`; then no candidate address that is not public is offered, so the
+//! host's address behind the DNAT never reaches a peer. It must be a public unicast address of
+//! `--mesh-bind`'s family. `--mesh-stun` stays optional beside it: a mapping that equals it is
+//! offered once, one that is not public not at all.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -121,13 +130,15 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port>] [--mesh-stun <ip:port>]... [--mesh-max-peers <n>]]
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]... [--mesh-max-peers <n>]]
 
   --mesh-relay runs the mesh endpoint (NFX-10 §6): browsers meet this node in the rooms of
   the renditions it holds, signaling only through those Nostr relays, and fetch verified
   segments over WebRTC with full ICE, through NATs (--mesh-stun: STUN servers for the public
-  mapping). Off by default. Privacy: joining a room tells anyone who announces presence there
-  this node's candidate addresses, public ones included.";
+  mapping; --mesh-public: behind a DNAT, its public address, forwarded to --mesh-bind's fixed
+  port, offered instead of any address that is not public). Off by default. Privacy: joining
+  a room tells anyone who announces presence there this node's candidate addresses, public
+  ones included.";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -300,6 +311,7 @@ async fn run(args: &[String]) -> Result<()> {
             "mesh-bind",
             "mesh-stun",
             "mesh-max-peers",
+            "mesh-public",
             "namespace",
             "allow-creator",
             "gossip-peer",
@@ -360,6 +372,7 @@ async fn run(args: &[String]) -> Result<()> {
             })
             .collect::<Result<_>>()?,
         mesh_max_peers: count(&f, "mesh-max-peers")?,
+        mesh_public: ip_port(&f, "mesh-public")?,
         namespaces: all(&f, "namespace")
             .iter()
             .map(|n| Namespace::parse(n).map_err(Error::from))
@@ -409,6 +422,9 @@ async fn run(args: &[String]) -> Result<()> {
     }
     if let (Some(addr), Some(session)) = (daemon.mesh_addr, &daemon.mesh_session) {
         eprintln!("mesh: udp {addr}, session {session}");
+        if let Some(public) = daemon.mesh_public {
+            eprintln!("mesh public: udp {public} (offered as a host candidate)");
+        }
     }
     if gossip {
         let me = daemon.node().addr();
@@ -590,6 +606,17 @@ fn count(f: &[(String, String)], name: &str) -> Result<Option<usize>> {
         .transpose()
 }
 
+/// `--NAME ip:port`, given at most once. Only the form is checked here; `Daemon::start`
+/// checks that the daemon can use it.
+fn ip_port(f: &[(String, String)], name: &str) -> Result<Option<std::net::SocketAddr>> {
+    one(f, name)?
+        .map(|v| {
+            v.parse()
+                .map_err(|_| Error::Config(format!("--{name} {v}: not an ip:port")))
+        })
+        .transpose()
+}
+
 /// `--bridge-max-peers N`, a count; `Daemon::start` checks its range.
 fn bridge_max_peers(f: &[(String, String)]) -> Result<Option<usize>> {
     count(f, "bridge-max-peers")
@@ -628,7 +655,9 @@ fn gossip_peers(values: &[String]) -> Result<Vec<iroh::EndpointAddr>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bridge_max_peers, flags, gossip_peers, iroh_addrs, items, pubkey_hex, relay_cas};
+    use super::{
+        bridge_max_peers, flags, gossip_peers, ip_port, iroh_addrs, items, pubkey_hex, relay_cas,
+    };
 
     fn ca_pem() -> String {
         use base64::Engine as _;
@@ -884,5 +913,43 @@ mod tests {
         let err = bridge_max_peers(&f).unwrap_err().to_string();
         assert!(err.contains("given twice"), "{err}");
         assert!(flags(&args(&["--bridge-max-peers"]), &known).is_err());
+    }
+
+    #[test]
+    fn mesh_public_is_one_ip_and_port() {
+        let args = |s: &[&str]| s.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let known = ["mesh-public"];
+        let sa = |s: &str| s.parse::<std::net::SocketAddr>().unwrap();
+        for v in ["203.0.113.7:7845", "[2001:db8::7]:7845"] {
+            let f = flags(&args(&["--mesh-public", v]), &known).unwrap();
+            assert_eq!(ip_port(&f, "mesh-public").unwrap(), Some(sa(v)));
+        }
+        assert_eq!(ip_port(&[], "mesh-public").unwrap(), None);
+        // Only the form here: whether the daemon can use it is `Daemon::start`'s to check.
+        for bad in [
+            "203.0.113.7",
+            ":7845",
+            "relay.example:7845",
+            "2001:db8::7:7845",
+            "203.0.113.7:65536",
+            "udp://203.0.113.7:7845",
+        ] {
+            let f = flags(&args(&["--mesh-public", bad]), &known).unwrap();
+            let err = ip_port(&f, "mesh-public").unwrap_err().to_string();
+            assert_eq!(err, format!("--mesh-public {bad}: not an ip:port"));
+        }
+        let f = flags(
+            &args(&[
+                "--mesh-public",
+                "203.0.113.7:1",
+                "--mesh-public",
+                "203.0.113.7:2",
+            ]),
+            &known,
+        )
+        .unwrap();
+        let err = ip_port(&f, "mesh-public").unwrap_err().to_string();
+        assert!(err.contains("--mesh-public given twice"), "{err}");
+        assert!(flags(&args(&["--mesh-public"]), &known).is_err());
     }
 }
