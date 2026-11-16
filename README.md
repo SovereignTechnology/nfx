@@ -12,11 +12,13 @@ mesh (browsers) and an HTTP origin, which a public deployment puts behind TLS an
 The optional Hypercore profile (NFX-12) and payments (Cashu ecash, per delivered chunk)
 are specified as drafts.
 
-**Status (2026-11-07):** NFX 0.1.1 is the latest release (0.1.0 was the first): `nfxd` and
-`nfx-package` for linux-x64 on the [Releases page](https://github.com/SovereignTechnology/nfx/releases),
-free video only ([release notes](docs/nfx/releases/v0.1.1.md); [0.1.0](docs/nfx/releases/v0.1.0.md)).
-0.1.1's relay also searches a video's title. It is tested against the nutflix-pear desktop
-app in both directions, behind NATs and over TLS relays. The public services on `nfx:testnet:1` are an iroh
+**Status (2026-11-16):** NFX 0.1.2 is the latest release: `nfxd` and `nfx-package` for
+linux-x64 on the [Releases page](https://github.com/SovereignTechnology/nfx/releases), free video
+only ([release notes](docs/nfx/releases/v0.1.2.md); earlier: [0.1.1](docs/nfx/releases/v0.1.1.md),
+[0.1.0](docs/nfx/releases/v0.1.0.md)). 0.1.2's `nfxd` also serves browsers directly, through NATs,
+signaling only over Nostr relays (its mesh endpoint, NFX-10 §6), and a video gets one rendition
+by default. It is tested against the nutflix-pear desktop app in both directions, behind NATs and
+over TLS relays, and against browsers behind NATs. The public services on `nfx:testnet:1` are an iroh
 relay, `https://iroh.nutflix.xyz/`, and a scoped Nostr relay, `wss://relay.nutflix.xyz` ([testnet](docs/nfx/testnet.md)). The free end-to-end slice (milestone M1: publish, seed, fetch,
 play; no payments) is built and passed its exit run. That run and the Phase A exit run before it used two
 hosts on a private network with plain HTTP and WebSocket endpoints; they did not cover
