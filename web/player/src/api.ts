@@ -41,16 +41,22 @@ export interface ResolveOptions {
 }
 
 /**
- * An origin `open()` may play from, and the renditions it serves (NFX-03 §4).
+ * An origin `open()` may play from, and the renditions it is said to serve (NFX-03 §4).
  * `watchEndpoints` reports them (`Endpoints.originSources`); a page may also write its own.
  */
 export interface OriginSource {
   /** `http(s)://host[:port][/prefix]`, as `OpenCommon.origins` takes a bare string. */
   url: string;
   /**
-   * The ids of the renditions whose `init` and `segment` files it serves (the hash list's
-   * `renditions[].id`): its `https` endpoint's `renditions`. Absent: every rendition. Empty:
-   * none, so `open()` skips it. Ids the hash list does not name are ignored. At most 32.
+   * **A hint, never a constraint** (it was a constraint until nfx #85): the ids of the
+   * renditions whose `init` and `segment` files it is said to serve (the hash list's
+   * `renditions[].id`), as its `https` endpoint's `renditions` claim them. Beacons come from
+   * any key, so `open()` uses this only to order: an origin whose hint names an allowed
+   * rendition is tried before one whose hint does not, and the renditions it names are asked
+   * for first. It never skips an origin, and never adds or removes a level: which levels a
+   * session offers is what the origin itself answers for (`OpenCommon`). Absent: no claim
+   * (every rendition). Empty: a claim of none, so the origin is tried after the others.
+   * Ids the hash list does not name are ignored. At most 32.
    */
   renditions?: string[];
 }
@@ -88,16 +94,18 @@ export interface RenditionAvailability {
 export interface Endpoints {
   /**
    * `https://host[:port][/prefix]` origin bases (NFX-05 §6), at most 8, most-named first.
-   * Give `open()` `originSources` instead: a bare URL is taken to serve every rendition, so
-   * a session could offer a level that origin answers with `404`.
+   * `originSources` is the same list with what beacons claim each origin serves; give
+   * `open()` either (it asks each origin what it holds).
    */
   origins: string[];
   /**
-   * `origins` again, in the same order, each with the renditions it serves, as `open()`'s
-   * `origins` takes them. When several seeders name one origin, it serves only what every
-   * one of them says it does: a beacon can narrow what an origin is taken to serve, never
-   * widen it, so the worst a lying beacon does is have `open()` skip that origin, rather
-   * than offer a level whose segments it answers with `404`.
+   * `origins` again, in the same order, each with the renditions beacons claim it serves,
+   * as `open()`'s `origins` takes them. When several seeders name one origin, the claim is
+   * only what every one of them says it serves. That is a hint (`OriginSource.renditions`):
+   * since nfx #85 `open()` asks the origin itself which renditions it holds, so a beacon
+   * from any key, narrowing or lying, can change the order in which origins are tried but
+   * can neither make `open()` skip an origin that serves the allowed renditions nor make
+   * it offer a level the origin does not serve.
    */
   originSources: OriginSource[];
   /** `wss://` trackers from `webrtc` endpoints (NFX-10 §2), at most 4, most-named first. */
@@ -189,8 +197,9 @@ export interface NostrSignaling {
 export type PlayerEvent =
   | { type: 'log'; message: string }
   /**
-   * An origin served a hash list that verified and is used (`ok`), or was not (`why`: no
-   * hash list that verifies, or none of the allowed renditions held).
+   * An origin served a hash list that verified and answered for at least one allowed
+   * rendition, and is used (`ok`); or it was not (`why`: no hash list that verifies, or no
+   * allowed rendition's init answered, with each rendition's answer).
    */
   | { type: 'origin'; origin: string; ok: boolean; why?: string }
   | { type: 'verified'; sha256: string; url: string }
@@ -203,22 +212,36 @@ export type PlayerEvent =
 /**
  * What `open()` plays, from where, and how.
  *
- * **Which levels a session offers** (NFX-10 §1, NFX-03 §5). The session takes every file
- * from one origin: the first of `origins`, in order, that serves a hash list that verifies
- * and holds at least one allowed rendition (an origin that cannot is skipped, with an
- * `origin` event saying why). The session's levels are then the allowed renditions
- * (`renditions`, or every rendition of the hash list) that this origin serves (its
- * `OriginSource.renditions`, or every one). The mesh never adds a level: a segment peers do
- * not deliver in time comes over HTTP from that origin, so a rendition it does not serve
- * would only fail. hls.js is told of no other level: the master playlist it reads is cut to
- * those renditions' variants, matched by playlist content name (NFX-10 §2), and a level
- * outside them stops the session with an `error` event before any segment is fetched.
+ * **Which levels a session offers** (NFX-10 §1, NFX-03 §5; nfx #85). The session takes
+ * every file from one origin. `open()` tries `origins` in order, except that an origin
+ * whose `OriginSource.renditions` hint names none of the allowed renditions is tried after
+ * the others. On each, once its hash list has verified, it **asks the origin** which of
+ * the allowed renditions (`renditions`, or every rendition of the hash list; at most 32,
+ * those the hint names first) it holds: for each, it fetches the rendition's media
+ * playlist, verifies it, and sends a `GET` for the init it names (NFX-05 §3), reading at
+ * most 64 KiB of the answer. These run in parallel, 6 at a time, and all of one origin's
+ * together get 8 s. A rendition is held when its init answers `200` (or `206`); anything
+ * else, or no answer in time, and it is not. The first origin that holds at least one
+ * allowed rendition is used (one that holds none, or whose hash list does not verify, is
+ * skipped, with an `origin` event saying why), and the session's levels are the allowed
+ * renditions it holds. So the cost is a playlist and an init per allowed rendition per
+ * session, both of which hls.js would fetch anyway for the level it plays (they are
+ * immutable, so the HTTP cache usually answers the second time).
+ *
+ * Beacon claims never remove an origin or a level: a beacon from any key can only change
+ * the order above. And a level is never offered whose segments no source can deliver: the
+ * mesh never adds a level, since a segment peers do not deliver in time comes over HTTP
+ * from that origin, so a rendition it does not hold would only fail. hls.js is told of no
+ * other level: the master playlist it reads is cut to those renditions' variants, matched
+ * by playlist content name (NFX-10 §2), and a level outside them stops the session with an
+ * `error` event before any segment is fetched.
  */
 export interface OpenCommon {
   /**
    * Origin bases (NFX-05 §6) to try in order (above): `http(s)://host[:port][/prefix]`, no
-   * query, fragment or credentials. A bare string serves every rendition; an
-   * `OriginSource` names those it serves (`Endpoints.originSources` are such).
+   * query, fragment or credentials. A bare string makes no claim; an `OriginSource` names
+   * the renditions it is said to serve, as a hint (`Endpoints.originSources` are such).
+   * Either way `open()` asks the origin what it holds.
    */
   origins: (string | OriginSource)[];
   /**
@@ -227,9 +250,10 @@ export interface OpenCommon {
    * Default: every rendition. `open()` refuses an empty or malformed list with a
    * `TypeError` before it fetches anything, and an id the hash list lacks with a
    * `RangeError` once the hash list has verified, leaving nothing running either way.
-   * Levels are cut to these (and to what the origin serves, above); hls.js's ABR then picks
-   * freely among them, starting on the first of them the origin serves unless `level` says
-   * otherwise.
+   * Levels are cut to these (and to what the origin answers that it holds, above); hls.js's
+   * ABR then picks freely among them, starting on the first of them the origin holds unless
+   * `level` says otherwise. Only these are asked for, so naming one rendition costs one
+   * probe.
    */
   renditions?: string[];
   /**
@@ -251,9 +275,9 @@ export interface OpenCommon {
   autoplay?: boolean;
   /**
    * Pin this level once the master playlist is parsed (test knob): an index into the
-   * session's levels (`Session.levels`, after `renditions` and the origin have cut them, in
-   * hls.js's order), not into the master playlist. It turns ABR off and overrides the start
-   * `renditions` would give; past the last level it is ignored.
+   * session's levels (`Session.levels`, after `renditions` and the origin's answers have
+   * cut them, in hls.js's order), not into the master playlist. It turns ABR off and
+   * overrides the start `renditions` would give; past the last level it is ignored.
    */
   level?: number;
   /** Seconds ahead of the playhead fetched over HTTP; the rest may come from peers (test knob). */
@@ -292,8 +316,8 @@ export interface Stats {
 /** One video playing in one element. */
 export interface Session {
   /**
-   * The session's levels (`OpenCommon`: only renditions allowed and served by its origin),
-   * once hls.js has parsed the master playlist (empty before).
+   * The session's levels (`OpenCommon`: only renditions allowed and held by its origin, by
+   * its own answers), once hls.js has parsed the master playlist (empty before).
    */
   readonly levels: Level[];
   /** Play `index` from now on, or -1 to let hls.js pick. */

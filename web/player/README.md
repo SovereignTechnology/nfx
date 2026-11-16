@@ -17,7 +17,8 @@ const m = await resolveManifest(a, relays);     // NFX-02 over Nostr, deletions 
 const stop = watchEndpoints(a, m.namespace, relays, (e) => {
   // e.origins: https bases, e.trackers: wss trackers, e.stunServers: stun: URLs,
   // from the newest live beacon per seeder; e.originSources: the origins with the
-  // renditions each serves; e.availability: how many seeders hold each rendition
+  // renditions beacons claim each serves (hints); e.availability: how many seeders
+  // hold each rendition
 });
 const session = await open(videoElement, {
   manifestJson: m.event,                        // verified again in WASM
@@ -37,16 +38,26 @@ The types are in `src/api.ts`. `open()` also takes a bare `root` (with `video` a
 bind the hash list) instead of `manifestJson`.
 
 A seeder may hold only some renditions of a video (NFX-03 §4), so a session offers only
-levels some source it uses can deliver (NFX-10 §1, `src/levels.ts`). It takes every file
-from one origin: the first that serves a hash list that verifies and holds an allowed
-rendition. Its levels are the allowed renditions (`renditions`, or all) that this origin
-serves (an `OriginSource`'s `renditions`, from its beacon's `https` endpoint; a bare URL
-serves all). The mesh adds none, since a segment peers do not deliver comes from that
-origin. hls.js reads a master playlist cut to those variants, matched by playlist content
-name, so it never learns of another level, and ABR picks freely among the rest, starting on
-the first of `renditions`. `availability` (who holds which rendition, by distinct seeder key,
-newest beacon each, at most 64) lets a page rank them; the test page passes them most-held
-first when no seeder holds every rendition.
+levels some source it uses can deliver (NFX-10 §1, `src/levels.ts`, `src/probe.ts`). It
+takes every file from one origin, and **asks the origin** what it holds (nfx #85): once the
+hash list verifies, `open()` fetches each allowed rendition's media playlist (verified) and
+sends a `GET` for the init it names, reading at most 64 KiB; in parallel (6 at a time, at
+most 32 renditions) and within 8 s per origin in all. A rendition is held when its init
+answers `200` (or `206`). The first origin that holds an allowed rendition is used, and its
+levels are the allowed renditions (`renditions`, or all) it holds; an origin that holds
+none is skipped, with an `origin` event giving each rendition's answer. The mesh adds no
+level, since a segment peers do not deliver comes from that origin. hls.js reads a master
+playlist cut to those variants, matched by playlist content name, so it never learns of
+another level, and ABR picks freely among the rest, starting on the first of `renditions`.
+
+What beacons say an origin serves (an `OriginSource`'s `renditions`, from its beacon's
+`https` endpoint) is **a hint, not a constraint**: beacons come from any key, so a stranger
+could otherwise deny an origin by naming it with a list that leaves out what the viewer
+needs. The hint orders the work (an origin whose hint names an allowed rendition is tried
+first, and the renditions it names are asked for first), and never removes an origin or a
+level. `availability` (who holds which rendition, by distinct seeder key, newest beacon
+each, at most 64) lets a page rank renditions; the test page shows it and leaves the levels
+to `open()`.
 
 `signaling` is how mesh peers find each other and exchange offers, answers and ICE
 candidates, wired into the engine in one place (`src/mesh.ts` `engineSignaling`). Two kinds:
@@ -77,8 +88,8 @@ npm ci
 npm run build          # the WASM (wasm-pack) and the test page, out/
 npm run build:lib      # the library: out-lib/player.js (minified) and its declarations
 npm run typecheck
-npm run unit           # sanitisers, the beacon endpoint book and availability, open()'s option checks and levels
-npm run e2e            # the test page end to end (cargo, ffmpeg, openssl, Chromium), held renditions included
+npm run unit           # sanitisers, the beacon endpoint book and availability, open()'s option checks, levels and probes
+npm run e2e            # the test page end to end (cargo, ffmpeg, openssl, Chromium), held renditions and a hostile beacon included
 npm run e2e:mesh       # the mesh, the bridge, the library's lifecycle, trackers from a beacon
 eval "$(bash e2e-strfry.sh /var/tmp/strfry)"   # the stock relay, strfry at a pinned commit
 npm run e2e:nostr      # two browsers over Nostr only (strfry, no tracker), the origin cut

@@ -8,11 +8,12 @@
  * - `watchEndpoints(a, namespace, relays, onChange)`: origins and trackers named by
  *   seeders' live beacons (NFX-03), validated and capped;
  * - `open(videoElement, options)`: verify the manifest again, fetch the hash list from the
- *   first origin whose copy verifies, and play with hls.js behind a loader that checks
- *   every playlist, init and segment against it before hls.js sees a byte. With a
- *   `signaling` (WebTorrent trackers, or Nostr relays with no tracker: NFX-10 §6), the
- *   NFX-10 browser mesh (p2p-media-loader) joins in, its segments checked the same way.
- *   `destroy()` stops all of it.
+ *   first origin whose copy verifies and that answers for an allowed rendition's init (the
+ *   origin is asked; beacons' claims only order the asking), and play with hls.js behind a
+ *   loader that checks every playlist, init and segment against it before hls.js sees a
+ *   byte. With a `signaling` (WebTorrent trackers, or Nostr relays with no tracker: NFX-10
+ *   §6), the NFX-10 browser mesh (p2p-media-loader) joins in, its segments checked the same
+ *   way. `destroy()` stops all of it.
  *
  * Nothing here reads the page's URL or DOM beyond the element it is given, and nothing
  * here keeps state between sessions but the loaded WASM module.
@@ -50,7 +51,7 @@ import {
   checkSignaling as checkSignalingOption,
   originBase as beaconOrigin,
 } from './endpoints';
-import { MAX_RENDITIONS as LEVELS_MAX_RENDITIONS, checkRenditions, cutMaster, mayServe, sessionRenditions } from './levels';
+import { MAX_RENDITIONS as LEVELS_MAX_RENDITIONS, checkRenditions, cutMaster, originOrder } from './levels';
 import {
   MAX_RELAYS as MESH_MAX_RELAYS,
   MAX_TRACKERS as MESH_MAX_TRACKERS,
@@ -58,9 +59,10 @@ import {
   relayUrl as meshRelayUrl,
   trackerUrl as meshTrackerUrl,
 } from './mesh';
+import { type Probe, type Selection, describe as describeProbes, initUrl, probeStatus, selectRenditions } from './probe';
 import { NostrSignaler } from './signal-nostr';
 import { resolveManifest as resolveOverRelays, watchEndpoints as watchBeacons } from './resolve';
-import { Anchor, type ManifestBinding, loadWasm } from './verify';
+import { Anchor, MAX_HASH_LIST_BYTES, type ManifestBinding, loadWasm } from './verify';
 
 // Everything public is declared here or in ./api.ts, so the declaration file built from
 // this one needs nothing but api.d.ts beside it.
@@ -127,8 +129,9 @@ export function resolveManifest(a: string, relays: string[], options: ResolveOpt
  * Report the origins, trackers and STUN servers seeders' live beacons for `a` name, and
  * which renditions they hold, each time that changes (the newest unexpired beacon per
  * seeder counts, at most 64 seeders; `https://` origins only, at most 8, with the
- * renditions each serves; `wss://` trackers only, at most 4; global unicast STUN addresses
- * only, at most 4; `availability`). Returns `stop`, which closes the subscriptions.
+ * renditions beacons claim each serves, a hint for `open()`; `wss://` trackers only, at
+ * most 4; global unicast STUN addresses only, at most 4; `availability`). Returns `stop`,
+ * which closes the subscriptions.
  */
 export function watchEndpoints(
   a: string,
@@ -148,12 +151,13 @@ function abortError(signal: AbortSignal): unknown {
 }
 
 /**
- * Play a video in `el`. Resolves once a hash list has verified and hls.js has started;
- * levels follow (`levels` event). Rejects if the manifest fails NFX-02, if no origin
- * serves a hash list that verifies and holds an allowed rendition (`OpenCommon` has the
- * rule), if `renditions` names one the hash list lacks, if MediaSource is missing (native
- * HLS would play unverified bytes), or if `signal` aborts first. A rejected `open()` leaves
- * nothing running.
+ * Play a video in `el`. Resolves once a hash list has verified, the origin has answered
+ * which allowed renditions it holds, and hls.js has started; levels follow (`levels`
+ * event). Rejects if the manifest fails NFX-02, if no origin serves a hash list that
+ * verifies and answers for an allowed rendition's init (`OpenCommon` has the rule), if
+ * `renditions` names one the hash list lacks, if MediaSource is missing (native HLS would
+ * play unverified bytes), or if `signal` aborts first. A rejected `open()` leaves nothing
+ * running.
  */
 export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<Session> {
   const { signal } = options;
@@ -203,12 +207,10 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
     failures.push(`${origin}: ${why}`);
     emit({ type: 'origin', origin, ok: false, why });
   };
-  for (const { url: origin, renditions: serves } of origins) {
-    // Known before any fetch: it serves none of the renditions asked for.
-    if (!mayServe(wanted, serves)) {
-      skip(origin, 'it serves none of the allowed renditions');
-      continue;
-    }
+  // What beacons say an origin serves (`hint`) only orders: origins whose hint names an
+  // allowed rendition are tried first, and those renditions are asked for first. Which
+  // renditions the session offers is what the origin answers for (nfx #85).
+  for (const { url: origin, renditions: hint } of originOrder(origins, wanted)) {
     let loaded: Anchor;
     try {
       loaded = await Anchor.load(origin, root, binding, signal);
@@ -217,27 +219,71 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
       skip(origin, message(e));
       continue;
     }
-    // A RangeError (an id the hash list lacks) ends open(): every origin serves the same list.
-    renditions = sessionRenditions(
-      loaded.renditions.map((r) => r.id),
-      wanted,
-      serves,
-    );
+    let picked: Selection;
+    try {
+      // A RangeError (an id the hash list lacks) ends open(), before any probe: every
+      // origin serves the same list.
+      picked = await selectRenditions(
+        loaded.renditions.map((r) => r.id),
+        wanted,
+        hint,
+        initProbe(loaded),
+        { signal },
+      );
+    } catch (e) {
+      if (signal?.aborted) throw abortError(signal);
+      throw e;
+    }
+    renditions = picked.renditions;
+    const summary = describeProbes(picked.outcomes) + (picked.unasked > 0 ? `; ${picked.unasked} more not asked for (at most ${MAX_RENDITIONS})` : '');
     if (renditions.length === 0) {
-      skip(origin, 'it serves none of the allowed renditions');
+      skip(origin, `it holds none of the allowed renditions (${summary})`);
       continue;
     }
+    log(`${origin} holds ${renditions.join(', ')} of the allowed renditions (${summary})`);
     anchor = loaded;
     emit({ type: 'origin', origin, ok: true });
     break;
   }
-  if (anchor === null) throw new Error(`no origin served a hash list that verifies and an allowed rendition (${failures.join('; ')})`);
+  if (anchor === null) throw new Error(`no origin served a hash list that verifies and held an allowed rendition (${failures.join('; ')})`);
   if (signal?.aborted) throw abortError(signal);
   log(`hash list verified: ${anchor.size} files of ${anchor.video}${binding ? ' (bound to the manifest)' : ''}`);
   const levelRule = { renditions, preferStart: wanted !== null };
   return start(el, anchor, { signaling, iceServers, autoplay, level, httpWindow, signal, ...levelRule }, emit, log, () => {
     dead = true;
   });
+}
+
+/**
+ * How to ask the origin `anchor` came from whether it holds a rendition (./probe.ts): its
+ * media playlist, fetched and verified against the hash list, names its init (NFX-05 §3),
+ * and a GET of that init must answer 200 or 206. Every URL is one the hash list names,
+ * under `<origin>/<root>/`: the playlist's content name, and the init's, read from bytes
+ * that verified.
+ */
+/** `<sha256>.<ext>`: a content name (NFX-05 §3), with no path, query or fragment. */
+const CONTENT_NAME = /^[0-9a-f]{64}\.[0-9A-Za-z]{1,8}$/;
+
+function initProbe(anchor: Anchor): Probe {
+  const base = `${anchor.origin}/${anchor.root}/`;
+  return async (id, signal) => {
+    const r = anchor.renditions.find((x) => x.id === id);
+    if (r === undefined) throw new Error('not a rendition of the hash list');
+    const playlistUrl = `${base}${r.playlist}.m3u8`;
+    let text: string;
+    try {
+      const bytes = await anchor.fetchChecked(playlistUrl, Math.min(r.playlistSize ?? MAX_HASH_LIST_BYTES, MAX_HASH_LIST_BYTES), signal);
+      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch (e) {
+      throw new Error(`playlist: ${message(e)}`);
+    }
+    // A content name right under `<origin>/<root>/` (NFX-05 §3), and one the hash list names:
+    // nothing else is ever requested, whatever the playlist holds.
+    const init = initUrl(text, playlistUrl);
+    if (init === null || !init.startsWith(base) || !CONTENT_NAME.test(init.slice(base.length))) throw new Error('its playlist names no init');
+    anchor.expected(init); // throws for a file the hash list does not name
+    return probeStatus((url, req) => fetch(url, req), init, signal);
+  };
 }
 
 interface StartOptions {

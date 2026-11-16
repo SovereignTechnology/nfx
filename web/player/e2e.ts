@@ -15,13 +15,22 @@
  *
  *   Held renditions (NFX-03 §§4–5, NFX-10 §1): a second video in two renditions, 720p and
  *   360p, which the node holds in 360p only (`--seed <a>#360p`): its origin answers 404 for
- *   720p's files and its beacon's `https` endpoint names `renditions: ["360p"]`. By address,
- *   the player must offer 360p alone, play it, and never request one 720p file (playlist,
- *   init or segment), both when it takes its renditions from the beacons' availability and
- *   when the page asks for 720p first (`&renditions=720p,360p`: the origin's list cuts it).
- *   By origin and root, `&renditions=` cuts the levels the same way and is refused when it
- *   names a rendition the video lacks, or is malformed; without it both levels are listed,
- *   each with its rendition id.
+ *   720p's init and segments, and its beacon's `https` endpoint names `renditions: ["360p"]`.
+ *   The library asks the origin which renditions it holds (nfx #85): for 720p it reads the
+ *   playlist (verified, to learn the init's content name) and asks for the init once, which
+ *   answers 404. So by address, with no renditions asked for and with 720p asked for first
+ *   (`&renditions=720p,360p`), and by origin and root without `&renditions=`, the player must
+ *   offer 360p alone, play it, and send exactly one request for 720p's playlist and one for
+ *   its init per session, and none for a 720p segment. By origin and root, `&renditions=360p`
+ *   asks for nothing of 720p; `&renditions=` is refused when it names a rendition the video
+ *   lacks (before any probe), or is malformed.
+ *
+ *   A hostile beacon (nfx #85): a third video in 720p and 360p, served whole by an honest
+ *   origin (a plain NFX-05 §6 server over the store, behind TLS) that no honest beacon names.
+ *   A second nfxd, under a stranger's key, seeds it in 360p only and names that origin in its
+ *   `https` endpoint with `renditions: ["360p"]`, a narrowing claim. By address, the page
+ *   must still offer 720p and 360p (each with its rendition id) and play; asked for 720p alone
+ *   (`&renditions=720p`), it must play 720p from that origin rather than skip it.
  *
  * Usage: npm run build && npm run e2e
  * Needs `cargo` (builds nfxd and nfx-package) and ffmpeg (`NFX_FFMPEG`, else PATH).
@@ -132,15 +141,24 @@ async function liar(upstream: string, segments: Set<string>): Promise<string> {
   return `http://127.0.0.1:${port}`;
 }
 
-/** An https front for the origin, with a throwaway self-signed certificate (deleted with the
- * work dir); the upstream is set once nfxd has printed its origin. */
+/** A throwaway self-signed certificate for 127.0.0.1, made once (deleted with the work dir). */
+let selfSignedPair: { key: Buffer; cert: Buffer } | null = null;
+function selfSigned(): { key: Buffer; cert: Buffer } {
+  if (selfSignedPair === null) {
+    const key = join(work, 'tls.key');
+    const cert = join(work, 'tls.crt');
+    run('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1']);
+    selfSignedPair = { key: readFileSync(key), cert: readFileSync(cert) };
+  }
+  return selfSignedPair;
+}
+
+/** An https front for the origin, with the throwaway certificate; the upstream is set once
+ * nfxd has printed its origin. */
 async function tlsProxy(): Promise<{ url: string; setUpstream: (u: string) => void; requests: string[] }> {
-  const key = join(work, 'tls.key');
-  const cert = join(work, 'tls.crt');
-  run('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1']);
   let upstream = '';
   const requests: string[] = [];
-  const server = createHttpsServer({ key: readFileSync(key), cert: readFileSync(cert) }, (req, res) => {
+  const server = createHttpsServer(selfSigned(), (req, res) => {
     requests.push(new URL(req.url ?? '/', 'http://x').pathname);
     const up = httpRequest(`${upstream}${req.url}`, { method: req.method }, (r) => {
       res.writeHead(r.statusCode ?? 502, r.headers);
@@ -152,6 +170,46 @@ async function tlsProxy(): Promise<{ url: string; setUpstream: (u: string) => vo
   servers.push(server as unknown as Server);
   const port = await new Promise<number>((ok) => server.listen(0, '127.0.0.1', () => ok((server.address() as AddressInfo).port)));
   return { url: `https://127.0.0.1:${port}`, setUpstream: (u) => (upstream = u), requests };
+}
+
+/**
+ * An honest origin (NFX-05 §6) by hand, behind TLS: for each of `roots`, its hash list at
+ * `/<root>`, its master playlist at `/<root>/master.m3u8`, and every file it lists at
+ * `/<root>/<sha256>.<ext>`, from `store`; anything else `404` (`no-store`). It serves every
+ * rendition, and records each request's path.
+ */
+async function staticOrigin(store: string, roots: string[]): Promise<{ url: string; requests: string[] }> {
+  const videos = new Map<string, { files: Set<string>; master: string }>();
+  for (const root of roots) {
+    const list = JSON.parse(readFileSync(join(store, root), 'utf8')) as HashListFile;
+    const master = list.files.find((f) => f.role === 'playlist-master')?.sha256;
+    if (master === undefined) throw new Error(`hash list ${root} has no master playlist`);
+    videos.set(root, { files: new Set(list.files.map((f) => f.sha256)), master });
+  }
+  const types: Record<string, string> = { m3u8: 'application/vnd.apple.mpegurl', mp4: 'video/mp4', m4s: 'video/iso.segment' };
+  const requests: string[] = [];
+  const server = createHttpsServer(selfSigned(), (req, res) => {
+    const path = new URL(req.url ?? '/', 'http://x').pathname;
+    requests.push(path);
+    const [, root = '', name, ...more] = path.split('/');
+    const video = videos.get(root);
+    let file: string | undefined;
+    let type = 'application/json';
+    if (video !== undefined && more.length === 0 && (req.method === 'GET' || req.method === 'HEAD')) {
+      if (name === undefined) file = root;
+      else if (name === 'master.m3u8') [file, type] = [video.master, types.m3u8!];
+      else {
+        const [sha = '', ext = ''] = name.split('.');
+        if (video.files.has(sha)) [file, type] = [sha, types[ext] ?? 'application/octet-stream'];
+      }
+    }
+    const cors = { 'access-control-allow-origin': '*' };
+    if (file === undefined) return res.writeHead(404, { ...cors, 'cache-control': 'no-store' }).end();
+    res.writeHead(200, { ...cors, 'content-type': type, 'cache-control': 'public, max-age=31536000, immutable' }).end(readFileSync(join(store, file)));
+  });
+  servers.push(server as unknown as Server);
+  const port = await new Promise<number>((ok) => server.listen(0, '127.0.0.1', () => ok((server.address() as AddressInfo).port)));
+  return { url: `https://127.0.0.1:${port}`, requests };
 }
 
 /** Wait until the player plays past 2 s or reports an error; return its state. */
@@ -235,12 +293,24 @@ async function main(): Promise<void> {
   if (list2.renditions.map((r) => r.id).sort().join() !== '360p,720p') throw new Error(`video 2 renditions: ${JSON.stringify(list2.renditions)}`);
   const files720 = renditionFiles(join(pkg, 'store'), list2, '720p');
   const files360 = renditionFiles(join(pkg, 'store'), list2, '360p');
+  // A third video in the same two renditions, from a third clip, in a store of its own: an
+  // honest origin serves it whole, and only a stranger's beacon names that origin.
+  const clip3 = join(work, 'clip3.mp4');
+  run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=25', '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000', '-t', '8', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', clip3]);
+  const pkg3 = join(work, 'pkg3');
+  run(bin('nfx-package'), [clip3, '--video', 'nfx:mainnet:1:player-e2e-hostile', '--out', pkg3, '--renditions', '720p,360p', '--preset', 'veryfast']);
+  const meta3 = JSON.parse(readFileSync(join(pkg3, 'nfx.json'), 'utf8')) as { root: string; video: string };
+  const list3 = JSON.parse(readFileSync(join(pkg3, 'store', meta3.root), 'utf8')) as HashListFile;
+  if (list3.renditions.map((r) => r.id).sort().join() !== '360p,720p') throw new Error(`video 3 renditions: ${JSON.stringify(list3.renditions)}`);
+  const files720of3 = renditionFiles(join(pkg3, 'store'), list3, '720p');
 
   const key = join(work, 'node.key');
   const pubkey = run(bin('nfxd'), ['key', 'new', key]).split('\n')[0]!;
   const a = `38504:${pubkey}:${meta.video}`;
   const a2 = `38504:${pubkey}:${meta2.video}`;
+  const a3 = `38504:${pubkey}:${meta3.video}`;
   const tls = await tlsProxy();
+  const whole = await staticOrigin(join(pkg3, 'store'), [meta3.root]);
   const node = await start(
     bin('nfxd'),
     ['run', '--key', key, '--store', join(pkg, 'store'), '--seed', a, '--seed', `${a2}#360p`, '--embed-relay', '127.0.0.1:0', '--origin', '127.0.0.1:0', '--https-url', tls.url],
@@ -253,6 +323,18 @@ async function main(): Promise<void> {
   if (published !== a) throw new Error(`published ${published}, expected ${a}`);
   const published2 = run(bin('nfxd'), ['publish', '--key', key, '--relay', relay, '--package', pkg2, '--title', 'Player e2e, held renditions']).trim();
   if (published2 !== a2) throw new Error(`published ${published2}, expected ${a2}`);
+  const published3 = run(bin('nfxd'), ['publish', '--key', key, '--relay', relay, '--package', pkg3, '--title', 'Player e2e, a hostile beacon']).trim();
+  if (published3 !== a3) throw new Error(`published ${published3}, expected ${a3}`);
+  // The stranger: another key, its own copy of the store and state, the creator's relay. It
+  // seeds video 3 in 360p only and names the honest origin, which it does not run, as
+  // serving 360p alone.
+  const strangerKey = join(work, 'stranger.key');
+  run(bin('nfxd'), ['key', 'new', strangerKey]);
+  const strangerStore = join(work, 'stranger-store');
+  cpSync(join(pkg3, 'store'), strangerStore, { recursive: true });
+  const seeding3 = new RegExp(`${a3.replace(/[^0-9A-Za-z]/g, (c) => `\\${c}`)}: Seeding`);
+  const stranger = start(bin('nfxd'), ['run', '--key', strangerKey, '--store', strangerStore, '--relay', relay, '--seed', `${a3}#360p`, '--https-url', whole.url], [seeding3]);
+  stranger.catch(() => {}); // awaited below; a failure before then must not go unhandled
   await new Promise<void>((ok, fail) => {
     const timer = setTimeout(() => fail(new Error('never seeding')), 60_000);
     let text = '';
@@ -276,6 +358,7 @@ async function main(): Promise<void> {
   if (served.playlist720 !== 200 || served.init720 !== 404 || served.segment720 !== 404 || served.segment360 !== 200) {
     throw new Error(`node origin for video 2: ${JSON.stringify(served)}`);
   }
+  await stranger;
 
   const list = JSON.parse(readFileSync(join(pkg, 'store', meta.root), 'utf8')) as { files: { role: string; sha256: string }[] };
   const segments = new Set(list.files.filter((f) => f.role === 'segment').map((f) => f.sha256));
@@ -350,44 +433,77 @@ async function main(): Promise<void> {
     }
     await tlsContext.close();
 
-    // Held renditions: video 2, which the node holds in 360p only. By address, the origin
-    // comes from the beacon with the renditions it serves; once with the renditions the
-    // page takes from the beacons' availability, once asking for 720p first.
-    const heldContext = await browser.newContext({ ignoreHTTPSErrors: true }); // self-signed, test only
+    // Held renditions: video 2, which the node holds in 360p only, and the hostile beacon:
+    // video 3, which only the stranger's beacon names, on the honest origin. By address,
+    // each page in a context of its own (no shared HTTP cache, so each request count is one
+    // session's); all four wait for the next beacons together.
+    const fresh = async (): Promise<import('playwright').Page> => (await browser.newContext({ ignoreHTTPSErrors: true })).newPage(); // self-signed, test only
     const q2 = (extra: string): string => `${player}/?a=${encodeURIComponent(a2)}&relay=${encodeURIComponent(relay)}${extra}`;
-    const fromBeacons = await heldContext.newPage();
-    const askedFirst = await heldContext.newPage();
-    await Promise.all([fromBeacons.goto(q2('')), askedFirst.goto(q2('&renditions=720p,360p'))]);
-    const [beaconHeld, originCut] = await Promise.all([settle(fromBeacons, 150_000), settle(askedFirst, 150_000)]);
+    const q3 = (extra: string): string => `${player}/?a=${encodeURIComponent(a3)}&relay=${encodeURIComponent(relay)}${extra}`;
+    const [fromBeacons, askedFirst, hostileAll, hostile720] = await Promise.all([fresh(), fresh(), fresh(), fresh()]);
+    await Promise.all([fromBeacons.goto(q2('')), askedFirst.goto(q2('&renditions=720p,360p')), hostileAll.goto(q3('')), hostile720.goto(q3('&renditions=720p'))]);
+    const [beaconHeld, originCut, narrowed, wanted720] = await Promise.all([
+      settle(fromBeacons, 150_000),
+      settle(askedFirst, 150_000),
+      settle(hostileAll, 150_000),
+      settle(hostile720, 150_000),
+    ]);
     results.heldFromBeacons = beaconHeld;
     results.heldAskedFirst = originCut;
+    results.hostileBeacon = narrowed;
+    results.hostileBeacon720 = wanted720;
     const only360 = (s: { levels: { id: string; height: number }[] }): boolean =>
       s.levels.length === 1 && s.levels[0]?.id === '360p' && s.levels[0]?.height === 360;
-    const healthy = (s: { resolved: { root: string } | null; origin: string; playing: boolean; rejected: number; errors: string[] }): boolean =>
-      s.resolved?.root === meta2.root && s.origin === tls.url && s.playing && s.rejected === 0 && s.errors.length === 0;
+    const levelIds = (s: { levels: { id: string; height: number }[] }): string => s.levels.map((l) => `${l.id}@${l.height}`).join();
+    type Settled = { resolved: { root: string } | null; origin: string; playing: boolean; rejected: number; errors: string[] };
+    const healthy = (s: Settled, root: string, from: string): boolean =>
+      s.resolved?.root === root && s.origin === from && s.playing && s.rejected === 0 && s.errors.length === 0;
     const wantAvailability = { seeders: 1, all: 0, renditions: [{ id: '360p', seeders: 1 }] };
-    const wantSources = [{ url: tls.url, renditions: ['360p'] }];
     if (
-      !healthy(beaconHeld) ||
+      !healthy(beaconHeld, meta2.root, tls.url) ||
       !only360(beaconHeld) ||
-      JSON.stringify(beaconHeld.renditions) !== '["360p"]' ||
+      beaconHeld.renditions !== null ||
       JSON.stringify(beaconHeld.availability) !== JSON.stringify(wantAvailability) ||
-      JSON.stringify(beaconHeld.originSources) !== JSON.stringify(wantSources)
+      JSON.stringify(beaconHeld.originSources) !== JSON.stringify([{ url: tls.url, renditions: ['360p'] }])
     ) {
       throw new Error(`held renditions, from beacons: ${JSON.stringify(beaconHeld)}`);
     }
-    if (!healthy(originCut) || !only360(originCut) || JSON.stringify(originCut.renditions) !== '["720p","360p"]') {
+    if (!healthy(originCut, meta2.root, tls.url) || !only360(originCut) || JSON.stringify(originCut.renditions) !== '["720p","360p"]') {
       throw new Error(`held renditions, 720p asked for first: ${JSON.stringify(originCut)}`);
     }
+    // 720p of video 2 through the TLS front: per session, its playlist once and its init
+    // once (the probe, answered 404), and never a segment.
+    const count = (log: string[], root: string, names: string[]): number[] => names.map((n) => log.filter((p) => p === `/${root}/${n}`).length);
+    const [playlist720 = '', init720 = '', ...segments720] = files720.names;
     const tls720 = asked(tls.requests, meta2.root, files720.shas);
     const tls360 = asked(tls.requests, meta2.root, files360.shas);
-    results.heldRequests = { r720: tls720.length, r360: tls360.length };
-    if (tls720.length !== 0 || tls360.length < 3) throw new Error(`held renditions, requests: 720p ${JSON.stringify(tls720)}, 360p ${tls360.length}`);
-    await heldContext.close();
+    results.heldRequests = { r720: tls720, r360: tls360.length };
+    const [tlsPlaylist, tlsInit] = count(tls.requests, meta2.root, [playlist720, init720]);
+    if (tlsPlaylist !== 2 || tlsInit !== 2 || tls720.length !== 4 || count(tls.requests, meta2.root, segments720).some((n) => n !== 0) || tls360.length < 3) {
+      throw new Error(`held renditions, requests: 720p ${JSON.stringify(tls720)}, 360p ${tls360.length}`);
+    }
+    // The hostile beacon: its narrowing claim reached the library as the origin's hint, and
+    // was only a hint: both levels offered, and 720p played when asked for.
+    const wantHostileSources = JSON.stringify([{ url: whole.url, renditions: ['360p'] }]);
+    if (
+      !healthy(narrowed, meta3.root, whole.url) ||
+      levelIds(narrowed) !== '360p@360,720p@720' ||
+      narrowed.renditions !== null ||
+      JSON.stringify(narrowed.originSources) !== wantHostileSources ||
+      JSON.stringify(narrowed.availability) !== JSON.stringify(wantAvailability)
+    ) {
+      throw new Error(`a hostile beacon, every rendition: ${JSON.stringify(narrowed)}`);
+    }
+    const honest720 = asked(whole.requests, meta3.root, files720of3.shas).filter((p) => p.endsWith('.m4s'));
+    results.hostileRequests = { r720segments: honest720.length };
+    if (!healthy(wanted720, meta3.root, whole.url) || levelIds(wanted720) !== '720p@720' || JSON.stringify(wanted720.originSources) !== wantHostileSources || honest720.length === 0) {
+      throw new Error(`a hostile beacon, 720p asked for: ${JSON.stringify(wanted720)}, 720p segments ${honest720.length}`);
+    }
+    for (const p of [fromBeacons, askedFirst, hostileAll, hostile720]) await p.context().close();
 
-    // By origin and root (no beacon): `&renditions=` cuts the levels the same way.
+    // By origin and root (no beacon): `&renditions=360p` asks for nothing of 720p.
     const rec = await recorder(origin);
-    const byRoot = (o: string, extra: string): string => `${player}/?origin=${encodeURIComponent(o)}&root=${meta2.root}${extra}`;
+    const byRoot = (o: string, extra: string, r = meta2.root): string => `${player}/?origin=${encodeURIComponent(o)}&root=${r}${extra}`;
     const cutPage = await context.newPage();
     await cutPage.goto(byRoot(rec.url, '&renditions=360p'));
     const cut = await settle(cutPage, 60_000);
@@ -396,14 +512,28 @@ async function main(): Promise<void> {
     if (!cut.playing || !only360(cut) || cut.errors.length !== 0 || cut.rejected !== 0 || rec720.length !== 0) {
       throw new Error(`renditions by root: ${JSON.stringify(cut)}, 720p requests ${JSON.stringify(rec720)}`);
     }
-    // Without it, both levels are listed, each with its rendition id (by playlist content
-    // name, in hls.js's order); level 0, the 360p one, plays.
-    const both = await context.newPage();
-    await both.goto(byRoot(origin, '&level=0'));
+    // Without it, the library asks: 360p alone is offered, after one request for 720p's
+    // playlist and one for its init, and no 720p segment is requested.
+    const rec2 = await recorder(origin);
+    const askedPage = await (await browser.newContext()).newPage();
+    await askedPage.goto(byRoot(rec2.url, ''));
+    const probed = await settle(askedPage, 60_000);
+    const rec2of720 = asked(rec2.requests, meta2.root, files720.shas);
+    results.heldByRootAsked = { levels: probed.levels, r720: rec2of720 };
+    const [recPlaylist, recInit] = count(rec2.requests, meta2.root, [playlist720, init720]);
+    if (!probed.playing || !only360(probed) || probed.errors.length !== 0 || recPlaylist !== 1 || recInit !== 1 || rec2of720.length !== 2) {
+      throw new Error(`held renditions by root, asked: ${JSON.stringify(probed)}, 720p requests ${JSON.stringify(rec2of720)}`);
+    }
+    await askedPage.context().close();
+    // An origin that holds both: both levels are listed, each with its rendition id (by
+    // playlist content name, in hls.js's order); level 0, the 360p one, plays.
+    const bothContext = await browser.newContext({ ignoreHTTPSErrors: true }); // self-signed, test only
+    const both = await bothContext.newPage();
+    await both.goto(byRoot(whole.url, '&level=0', meta3.root));
     const listed = await settle(both, 60_000);
-    results.heldBothListed = listed.levels;
-    const ids = listed.levels.map((l: { id: string; height: number }) => `${l.id}@${l.height}`).join();
-    if (!listed.playing || listed.errors.length !== 0 || ids !== '360p@360,720p@720') throw new Error(`both levels: ${JSON.stringify(listed)}`);
+    results.bothListed = listed.levels;
+    if (!listed.playing || listed.errors.length !== 0 || levelIds(listed) !== '360p@360,720p@720') throw new Error(`both levels: ${JSON.stringify(listed)}`);
+    await bothContext.close();
     // Refused: a rendition the video lacks (once the hash list has verified, and before
     // anything plays), and malformed lists (before anything is fetched).
     const refusals: Record<string, unknown> = {};

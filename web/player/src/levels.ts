@@ -2,6 +2,11 @@
  * Which levels a session offers (NFX-10 §1, NFX-03 §§4–5), as plain data: no network, no
  * hls.js, no WASM. `open()` (./lib.ts) applies it; unit.ts tests it.
  *
+ * What beacons say an origin serves (`OriginSource.renditions`) is a hint, never a
+ * constraint (nfx #85): it orders which origin is tried first (`originOrder`) and which
+ * renditions are asked for first (`probeOrder`). Which levels a session offers is what the
+ * origin itself answers for (./probe.ts), cut by the caller's `renditions`.
+ *
  * A level is matched to its rendition by its playlist's content name (NFX-10 §2), never by
  * bitrate or size: the last element of the playlist URL's path is `<sha256>.<ext>`, and the
  * hash list's `renditions[].playlist` names the playlist file with that sha256. This is
@@ -27,10 +32,12 @@ function show(id: unknown): string {
   return JSON.stringify(typeof id === 'string' && id.length > 64 ? `${id.slice(0, 64)}…` : id) ?? String(id);
 }
 
-/** One rendition of a verified hash list: its id, and the sha256 of its playlist. */
+/** One rendition of a verified hash list: its id, and the sha256 and size of its playlist. */
 export interface HashListRendition {
   id: string;
   playlist: string;
+  /** The playlist's listed size in bytes, or null if the list gives none that is usable. */
+  playlistSize: number | null;
 }
 
 /** What `open()` reads from a verified hash list. */
@@ -48,19 +55,20 @@ export interface HashListLevels {
  */
 export function hashListLevels(json: string): HashListLevels {
   const list = JSON.parse(json) as { files?: unknown; renditions?: unknown };
-  const playlists = new Map<string, string>();
+  const playlists = new Map<string, { sha256: string; size: number | null }>();
   let master: string | null = null;
   for (const f of Array.isArray(list.files) ? (list.files as unknown[]) : []) {
-    const { name, role, sha256 } = (f ?? {}) as { name?: unknown; role?: unknown; sha256?: unknown };
+    const { name, role, sha256, size } = (f ?? {}) as { name?: unknown; role?: unknown; sha256?: unknown; size?: unknown };
     if (typeof name !== 'string' || typeof sha256 !== 'string') continue;
-    if (role === 'playlist' && !playlists.has(name)) playlists.set(name, sha256);
+    const bytes = typeof size === 'number' && Number.isSafeInteger(size) && size >= 0 ? size : null;
+    if (role === 'playlist' && !playlists.has(name)) playlists.set(name, { sha256, size: bytes });
     if (role === 'playlist-master' && master === null) master = sha256;
   }
   const renditions: HashListRendition[] = [];
   for (const r of Array.isArray(list.renditions) ? (list.renditions as unknown[]) : []) {
     const { id, playlist } = (r ?? {}) as { id?: unknown; playlist?: unknown };
-    const sha = typeof playlist === 'string' ? playlists.get(playlist) : undefined;
-    if (typeof id === 'string' && sha !== undefined) renditions.push({ id, playlist: sha });
+    const file = typeof playlist === 'string' ? playlists.get(playlist) : undefined;
+    if (typeof id === 'string' && file !== undefined) renditions.push({ id, playlist: file.sha256, playlistSize: file.size });
   }
   return { renditions, master };
 }
@@ -105,32 +113,55 @@ export function checkRenditions(list: unknown): string[] | null {
 }
 
 /**
- * Whether an origin that serves `serves` (null: every rendition) can serve any of `wanted`
- * (null: every rendition of the hash list), as far as is known before the hash list is
- * read. `open()` skips one that cannot without fetching from it.
+ * Whether an origin's hint (`hint`: what beacons say it serves; null: no claim, every
+ * rendition) names any of `wanted` (null: every rendition of the hash list). A hint only:
+ * `originOrder` tries an origin whose hint does not after those whose hint does, never
+ * skips it.
  */
-export function mayServe(wanted: readonly string[] | null, serves: readonly string[] | null): boolean {
-  if (serves === null) return true;
-  return wanted === null ? serves.length > 0 : wanted.some((id) => serves.includes(id));
+export function mayServe(wanted: readonly string[] | null, hint: readonly string[] | null): boolean {
+  if (hint === null) return true;
+  return wanted === null ? hint.length > 0 : wanted.some((id) => hint.includes(id));
+}
+
+/**
+ * `origins` in the order `open()` tries them: those whose hint names an allowed rendition
+ * (or makes no claim) first, then the rest, each group in the given order. Every origin is
+ * kept: a beacon from any key can demote an origin this way, never remove it, and an
+ * origin tried later is still asked what it holds.
+ */
+export function originOrder<T extends { renditions: readonly string[] | null }>(origins: readonly T[], wanted: readonly string[] | null): T[] {
+  return [...origins.filter((o) => mayServe(wanted, o.renditions)), ...origins.filter((o) => !mayServe(wanted, o.renditions))];
+}
+
+/**
+ * The renditions to ask an origin for, in order: those of `ids` (the allowed ones, in the
+ * caller's order) that its hint names first, then the rest, at most `MAX_RENDITIONS`. A hint
+ * orders, never removes; a rendition past the cap is not asked for, so it is not offered.
+ */
+export function probeOrder(ids: readonly string[], hint: readonly string[] | null): string[] {
+  const named = hint === null ? [...ids] : ids.filter((id) => hint.includes(id));
+  const rest = hint === null ? [] : ids.filter((id) => !hint.includes(id));
+  return [...named, ...rest].slice(0, MAX_RENDITIONS);
 }
 
 /**
  * A session's renditions on one origin: the allowed ones (`wanted`, or every id of the hash
- * list in its order) that the origin serves (`serves`, or every one), in `wanted`'s order.
- * Empty when it serves none of them. Throws a `RangeError` for an id of `wanted` the hash
- * list (`ids`) does not have: a caller's mistake, the same on every origin.
+ * list in its order) that the origin answered for (`held`, from its probes; null before
+ * they ran: every allowed one), in `wanted`'s order. Empty when it holds none of them.
+ * Throws a `RangeError` for an id of `wanted` the hash list (`ids`) does not have: a
+ * caller's mistake, the same on every origin, so `open()` checks it before any probe.
  */
 export function sessionRenditions(
   ids: readonly string[],
   wanted: readonly string[] | null,
-  serves: readonly string[] | null,
+  held: readonly string[] | null,
 ): string[] {
   const missing = wanted?.find((id) => !ids.includes(id));
   if (missing !== undefined) {
     const has = ids.slice(0, 16).map(show).join(', ') + (ids.length > 16 ? ', …' : '');
     throw new RangeError(`nfx: renditions: ${show(missing)} is not a rendition of this video (it has ${has})`);
   }
-  return (wanted ?? ids).filter((id) => serves === null || serves.includes(id));
+  return (wanted ?? ids).filter((id) => held === null || held.includes(id));
 }
 
 /**

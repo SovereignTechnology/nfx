@@ -1,8 +1,10 @@
 /**
  * Unit checks for the player's pure parts (`npm run unit`, after `npm run wasm`): the URL
  * sanitisers, the beacon endpoint book behind `watchEndpoints` (rendition availability and
- * what each origin serves included), `open()`'s option checks and the levels it offers
- * (`renditions`, origin sources, the master playlist cut), and the Nostr signaler's
+ * what beacons claim each origin serves included), `open()`'s option checks and the levels it
+ * offers (`renditions`, origin hints, asking the origin what it holds: the probe runner, its
+ * bounds, timeouts and aborts, the byte-capped GET, a hostile hint ignored; the master
+ * playlist cut), and the Nostr signaler's
  * bookkeeping (presence, glare, freshness, bounds). The spec's signed beacon vectors
  * (`beacon.json`, `beacon-renditions.json`) run through nfx-wasm into the book, so the shape
  * `verifyBeacon` returns is the shape the book reads, and the hash list vector through
@@ -38,9 +40,22 @@ import {
   cutMaster,
   hashListLevels,
   mayServe,
+  originOrder,
+  probeOrder,
   sessionRenditions,
 } from './src/levels';
 import { MAX_RELAYS, relayUrl } from './src/mesh';
+import {
+  PROBE_CONCURRENCY,
+  PROBE_MAX_BYTES,
+  PROBE_TIMEOUT_MS,
+  type Probe,
+  describe as describeProbes,
+  initUrl,
+  probeAll,
+  probeStatus,
+  selectRenditions,
+} from './src/probe';
 import {
   LIMITS,
   OfferBackoff,
@@ -424,18 +439,36 @@ refuses('a null origin', () => checkOriginSources([null as never]), TypeError, /
 refuses('origins not a list', () => checkOriginSources('https://a.example' as never), TypeError, /must be a list/);
 refuses('too many origins', () => checkOriginSources(Array.from({ length: 17 }, (_, i) => `https://o${i}.example`)), TypeError, /at most 16/);
 
-eq('mayServe: an origin serving all', mayServe(['720p'], null), true);
+// Hints (what beacons claim an origin serves): they order, never remove (nfx #85).
+eq('mayServe: no claim', mayServe(['720p'], null), true);
 eq('mayServe: overlap', mayServe(['720p', '360p'], ['360p']), true);
 eq('mayServe: disjoint', mayServe(['720p'], ['360p']), false);
-eq('mayServe: serves none', mayServe(null, []), false);
+eq('mayServe: a claim of none', mayServe(null, []), false);
 eq('mayServe: some, every rendition asked for', mayServe(null, ['360p']), true);
-
+{
+  const o = (url: string, renditions: string[] | null) => ({ url, renditions });
+  const list = [o('a', ['360p']), o('b', null), o('c', ['720p']), o('d', [])];
+  eq('originOrder: a hint naming none of the allowed goes last, kept', originOrder(list, ['720p']).map((x) => x.url), ['b', 'c', 'a', 'd']);
+  eq('originOrder: every rendition allowed', originOrder(list, null).map((x) => x.url), ['a', 'b', 'c', 'd']);
+  eq('originOrder: nothing removed', originOrder(list, ['4320p']).length, 4);
+  eq('originOrder: stable within each group', originOrder([o('x', ['1']), o('y', ['2']), o('z', ['1'])], ['2']).map((x) => x.url), ['y', 'x', 'z']);
+}
 const ladder = ['1080p', '720p', '360p'];
-eq('every rendition, every one served', sessionRenditions(ladder, null, null), ladder);
+eq('probeOrder: no hint', probeOrder(ladder, null), ladder);
+eq('probeOrder: named first, the rest kept', probeOrder(ladder, ['360p']), ['360p', '1080p', '720p']);
+eq('probeOrder: a claim of none removes nothing', probeOrder(ladder, []), ladder);
+eq('probeOrder: ids the list lacks are ignored', probeOrder(['720p'], ['4320p', '720p']), ['720p']);
+{
+  const many = Array.from({ length: 40 }, (_, i) => `r${i}`);
+  eq('probeOrder: at most MAX_RENDITIONS', probeOrder(many, null).length, MAX_RENDITIONS);
+  eq('probeOrder: the hinted ones survive the cap, in the caller order', probeOrder(many, ['r39', 'r38']).slice(0, 3), ['r38', 'r39', 'r0']);
+}
+
+eq('every rendition, every one held', sessionRenditions(ladder, null, null), ladder);
 eq('the caller order', sessionRenditions(ladder, ['360p', '1080p'], null), ['360p', '1080p']);
-eq('cut to what the origin serves', sessionRenditions(ladder, ['360p', '1080p'], ['1080p', '720p']), ['1080p']);
-eq('an origin naming ids the list lacks', sessionRenditions(ladder, null, ['720p', '4320p']), ['720p']);
-eq('none of the allowed served', sessionRenditions(ladder, ['720p'], ['360p']), []);
+eq('cut to what the origin holds', sessionRenditions(ladder, ['360p', '1080p'], ['1080p', '720p']), ['1080p']);
+eq('held ids the list lacks', sessionRenditions(ladder, null, ['720p', '4320p']), ['720p']);
+eq('none of the allowed held', sessionRenditions(ladder, ['720p'], ['360p']), []);
 refuses('an id the hash list lacks', () => sessionRenditions(ladder, ['360p', '2160p'], null), RangeError, /"2160p" is not a rendition of this video \(it has "1080p", "720p", "360p"\)/);
 refuses('checked even when the origin serves none', () => sessionRenditions(ladder, ['2160p'], []), RangeError, /"2160p"/);
 
@@ -468,12 +501,14 @@ eq('content hash: not a URL', contentHash('http://[::1'), null);
   };
   eq('hash list levels', hashListLevels(JSON.stringify(list)), {
     renditions: [
-      { id: '1080p', playlist: H(1) },
-      { id: '720p', playlist: H(2) },
-      { id: '360p', playlist: H(3) },
+      { id: '1080p', playlist: H(1), playlistSize: 1 },
+      { id: '720p', playlist: H(2), playlistSize: 1 },
+      { id: '360p', playlist: H(3), playlistSize: 1 },
     ],
     master: H(9),
   });
+  const sized = { ...list, files: list.files.map((f) => (f.name === 'r720.m3u8' ? { ...f, size: -1 } : f.name === 'r360.m3u8' ? { ...f, size: '7' } : f)) };
+  eq('an unusable size is null', hashListLevels(JSON.stringify(sized)).renditions.map((r) => r.playlistSize), [1, null, null]);
 }
 {
   const base = `https://o.example/nfx/${'a'.repeat(64)}/master.m3u8`;
@@ -504,6 +539,225 @@ eq('content hash: not a URL', contentHash('http://[::1'), null);
   const iframes = `${master}#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=1,URI="${H(7)}.m3u8"\n`;
   eq('I-frame variants untouched', cutMaster(iframes, base, new Set([H(2)])).text.endsWith(`URI="${H(7)}.m3u8"\n`), true);
 }
+
+// ---- Asking the origin what it holds (nfx #85): the probe runner, the GET, the init URI ---
+const unhandled: unknown[] = [];
+process.on('unhandledRejection', (e) => void unhandled.push(e));
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/** A probe answering from `table` (id → status, or an Error to throw), after `ms`. */
+const answers = (table: Record<string, number | Error>, ms = 1, log: string[] = []): Probe => async (id) => {
+  log.push(id);
+  await sleep(ms);
+  const a = table[id];
+  if (a instanceof Error) throw a;
+  return a ?? 404;
+};
+const outcomes = (m: Map<string, unknown>) => Object.fromEntries(m);
+eq('probe defaults', [PROBE_TIMEOUT_MS, PROBE_CONCURRENCY, PROBE_MAX_BYTES], [8000, 6, 65536]);
+{
+  const m = await probeAll(['720p', '360p', '1080p', '240p', 'x'], answers({ '720p': 200, '360p': 206, '1080p': 404, '240p': 500, x: new Error('network down') }));
+  eq('probeAll: 200 and 206 hold, nothing else does', outcomes(m), {
+    '720p': { held: true, status: 200 },
+    '360p': { held: true, status: 206 },
+    '1080p': { held: false, why: 'HTTP 404' },
+    '240p': { held: false, why: 'HTTP 500' },
+    x: { held: false, why: 'network down' },
+  });
+  eq('probeAll: in the order asked', [...m.keys()], ['720p', '360p', '1080p', '240p', 'x']);
+  eq('probeAll: nothing to ask', (await probeAll([], answers({}))).size, 0);
+  eq('probeAll: a concurrency that is no number', outcomes(await probeAll(['a'], answers({ a: 200 }), { concurrency: Number.NaN })), { a: { held: true, status: 200 } });
+  eq('probeAll: a deadline of 0 offers nothing', [...(await probeAll(['a'], answers({ a: 200 }, 5), { timeoutMs: 0 })).values()].some((o) => o.held), false);
+}
+{
+  // At most `concurrency` at once, started in the order given.
+  let now = 0;
+  let most = 0;
+  const started: string[] = [];
+  const probe: Probe = async (id) => {
+    started.push(id);
+    now += 1;
+    most = Math.max(most, now);
+    await sleep(5);
+    now -= 1;
+    return 200;
+  };
+  const ids = Array.from({ length: 9 }, (_, i) => `r${i}`);
+  const m = await probeAll(ids, probe, { concurrency: 2 });
+  eq('probeAll: bounded in parallel', [most, started, [...m.values()].every((o) => o.held)], [2, ids, true]);
+  most = 0;
+  await probeAll(ids, probe);
+  eq('probeAll: 6 at once by default', most, 6);
+}
+{
+  // One deadline for all: a probe that never answers, and ignores its signal, is cut off;
+  // the ids never reached are not held either, and probeAll still resolves on time.
+  const seen: AbortSignal[] = [];
+  const hang: Probe = (id, signal) => {
+    seen.push(signal);
+    return id === 'fast' ? Promise.resolve(200) : new Promise<number>(() => {});
+  };
+  const t0 = Date.now();
+  const m = await probeAll(['fast', 'stuck', 'never'], hang, { timeoutMs: 60, concurrency: 1 });
+  const took = Date.now() - t0;
+  eq('probeAll: the deadline', outcomes(m), {
+    fast: { held: true, status: 200 },
+    stuck: { held: false, why: 'no answer within 60 ms' },
+    never: { held: false, why: 'not probed within 60 ms' },
+  });
+  eq('probeAll: resolves at the deadline', took >= 55 && took < 2000, true);
+  eq('probeAll: the probes are told to stop', seen.every((s) => s.aborted), true);
+  // A probe that rejects after its deadline is not an unhandled rejection.
+  const late: Probe = (_, signal) => new Promise<number>((_, reject) => signal.addEventListener('abort', () => setTimeout(() => reject(new Error('late')), 5)));
+  eq('probeAll: a late rejection', outcomes(await probeAll(['a'], late, { timeoutMs: 20 })), { a: { held: false, why: 'no answer within 20 ms' } });
+}
+{
+  // The caller's signal: aborting rejects with its reason and stops every probe.
+  const ctl = new AbortController();
+  const seen: AbortSignal[] = [];
+  const p = probeAll(['a', 'b'], (_, signal) => {
+    seen.push(signal);
+    return new Promise<number>(() => {});
+  }, { signal: ctl.signal, timeoutMs: 60_000 });
+  await sleep(5);
+  ctl.abort(new Error('viewer left'));
+  let got = 'resolved';
+  try {
+    await p;
+  } catch (e) {
+    got = (e as Error).message;
+  }
+  eq('probeAll: aborted', [got, seen.length, seen.every((s) => s.aborted)], ['viewer left', 2, true]);
+  let called = 0;
+  let pre = 'resolved';
+  try {
+    await probeAll(['a'], async () => (called += 1), { signal: AbortSignal.abort(new Error('already')) });
+  } catch (e) {
+    pre = (e as Error).message;
+  }
+  eq('probeAll: aborted before it starts', [pre, called], ['already', 0]);
+  // Its timer and listeners go with it: no timeout left behind.
+  const timers = (): number => process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+  const before = timers();
+  await probeAll(['a', 'b'], answers({ a: 200, b: 200 }), { timeoutMs: 60_000, signal: new AbortController().signal });
+  await sleep(5);
+  eq('probeAll: leaves no timer', timers(), before);
+}
+{
+  // The GET: no Range header, credentials omitted, at most PROBE_MAX_BYTES of the body read,
+  // none of an error's; an origin without Range support answers 200 with the whole file.
+  const calls: { url: string; init: RequestInit }[] = [];
+  let pulled = 0;
+  let cancelled = 0;
+  const stream = (chunk: number, total: number): ReadableStream<Uint8Array> => {
+    let sent = 0;
+    return new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled += 1;
+        if (sent >= total) return c.close();
+        const n = Math.min(chunk, total - sent);
+        sent += n;
+        c.enqueue(new Uint8Array(n));
+      },
+      cancel() {
+        cancelled += 1;
+      },
+    });
+  };
+  const serve = (status: number, body: () => ReadableStream<Uint8Array> | null) => async (url: string, init: RequestInit) => {
+    calls.push({ url, init });
+    return new Response(body(), { status });
+  };
+  const sig = new AbortController().signal;
+  eq('probeStatus: a small init, read whole', await probeStatus(serve(200, () => stream(1000, 3000)), 'https://o.example/r/i.mp4', sig), 200);
+  eq('probeStatus: read to the end, nothing cancelled', [cancelled, calls[0]?.init.headers, calls[0]?.init.credentials, calls[0]?.init.cache, calls[0]?.init.signal === sig], [0, undefined, 'omit', 'no-cache', true]);
+  pulled = 0;
+  eq('probeStatus: an endless 200 (no Range)', await probeStatus(serve(200, () => stream(16 * 1024, Number.MAX_SAFE_INTEGER)), 'https://o.example/r/i.mp4', sig), 200);
+  await sleep(1);
+  eq('probeStatus: cut at the cap', [pulled <= PROBE_MAX_BYTES / (16 * 1024) + 2, cancelled], [true, 1]);
+  pulled = 0;
+  eq('probeStatus: a 404', await probeStatus(serve(404, () => stream(1000, 1_000_000)), 'https://o.example/r/i.mp4', sig), 404);
+  await sleep(1);
+  eq('probeStatus: an error body is not read', [pulled <= 1, cancelled], [true, 2]);
+  eq('probeStatus: a 206', await probeStatus(serve(206, () => stream(10, 10)), 'https://o.example/r/i.mp4', sig), 206);
+  eq('probeStatus: no body', await probeStatus(serve(200, () => null), 'https://o.example/r/i.mp4', sig), 200);
+  eq('probeStatus: a smaller cap', await probeStatus(serve(200, () => stream(100, 1_000_000)), 'https://o.example/r/i.mp4', sig, 250), 200);
+  let failed = '';
+  try {
+    await probeStatus(async () => {
+      throw new TypeError('Failed to fetch');
+    }, 'https://o.example/r/i.mp4', sig);
+  } catch (e) {
+    failed = (e as Error).message;
+  }
+  eq('probeStatus: a network failure rejects', failed, 'Failed to fetch');
+  // Aborted mid-body: the read rejects, so probeAll counts it as no answer.
+  const ctl = new AbortController();
+  const slow = async (_: string, init: RequestInit): Promise<Response> => {
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new Uint8Array(10));
+        init.signal?.addEventListener('abort', () => c.error(new DOMException('aborted', 'AbortError')));
+      },
+    });
+    return new Response(body, { status: 200 });
+  };
+  const pending = probeStatus(slow, 'https://o.example/r/i.mp4', ctl.signal);
+  await sleep(5);
+  ctl.abort();
+  let aborted = '';
+  try {
+    await pending;
+  } catch (e) {
+    aborted = (e as Error).name;
+  }
+  eq('probeStatus: aborted mid-body', aborted, 'AbortError');
+}
+{
+  const pl = 'https://o.example/nfx/root/aaaa.m3u8';
+  const seg = (n: number) => `${String(n).repeat(64)}.m4s`;
+  eq('initUrl: EXT-X-MAP, resolved against the playlist', initUrl(`#EXTM3U\n#EXT-X-MAP:URI="${'b'.repeat(64)}.mp4"\n#EXTINF:2,\n${seg(1)}\n`, pl), `https://o.example/nfx/root/${'b'.repeat(64)}.mp4`);
+  eq('initUrl: other attributes first, CRLF', initUrl(`#EXTM3U\r\n#EXT-X-MAP:BYTERANGE="9@0",URI="init.mp4"\r\n`, pl), 'https://o.example/nfx/root/init.mp4');
+  eq('initUrl: no map, the first segment', initUrl(`#EXTM3U\n# a comment\n\n#EXTINF:2,\n  ${seg(2)}  \n#EXTINF:2,\n${seg(3)}\n`, pl), `https://o.example/nfx/root/${seg(2)}`);
+  eq('initUrl: neither', initUrl('#EXTM3U\n#EXT-X-ENDLIST\n', pl), null);
+  eq('initUrl: an empty URI', initUrl('#EXTM3U\n#EXT-X-MAP:URI=""\n', pl), null);
+}
+{
+  const many = new Map(Array.from({ length: 10 }, (_, i): [string, { held: false; why: string }] => [i === 0 ? 'x'.repeat(100) : `r${i}`, { held: false, why: 'HTTP 404' }]));
+  const line = describeProbes(many);
+  eq('describe: capped', [line.startsWith(`${'x'.repeat(64)}…: HTTP 404; r1: HTTP 404`), line.endsWith('; and 2 more')], [true, true]);
+  eq('describe: held', describeProbes(new Map([['720p', { held: true, status: 200 }]])), '720p: HTTP 200');
+}
+{
+  // One origin's part of open(): a hint orders the asking and nothing else.
+  const ids = ['720p', '360p'];
+  const asked: string[] = [];
+  // A hostile beacon narrows an origin that holds both to 360p: both are still offered.
+  const both = await selectRenditions(ids, null, ['360p'], answers({ '720p': 200, '360p': 200 }, 1, asked));
+  eq('a hostile narrowing hint is ignored', [both.renditions, asked, [...both.outcomes.keys()], both.unasked], [['720p', '360p'], ['360p', '720p'], ['360p', '720p'], 0]);
+  // The viewer wants 720p, which the hint leaves out: the origin is still asked, and used.
+  asked.length = 0;
+  const wanted = await selectRenditions(ids, ['720p'], ['360p'], answers({ '720p': 200, '360p': 200 }, 1, asked));
+  eq('a hint cannot take away a wanted rendition', [wanted.renditions, asked], [['720p'], ['720p']]);
+  // A hint widening what the origin holds adds nothing: 720p's init answers 404.
+  const lying = await selectRenditions(ids, null, ['720p', '360p'], answers({ '720p': 404, '360p': 200 }));
+  eq('a hint cannot add a level', [lying.renditions, lying.outcomes.get('720p')], [['360p'], { held: false, why: 'HTTP 404' }]);
+  eq('a claim of none: still asked', (await selectRenditions(ids, null, [], answers({ '720p': 200, '360p': 200 }))).renditions, ['720p', '360p']);
+  eq('it holds none', (await selectRenditions(ids, ['720p'], null, answers({}))).renditions, []);
+  eq('the caller order, not the asking order', (await selectRenditions(ids, ['360p', '720p'], ['720p'], answers({ '720p': 200, '360p': 200 }))).renditions, ['360p', '720p']);
+  let range = '';
+  asked.length = 0;
+  try {
+    await selectRenditions(ids, ['4320p'], null, answers({}, 1, asked));
+  } catch (e) {
+    range = e instanceof RangeError ? 'RangeError' : String(e);
+  }
+  eq('an id the hash list lacks: refused before any probe', [range, asked.length], ['RangeError', 0]);
+  const forty = Array.from({ length: 40 }, (_, i) => `r${i}`);
+  const capped = await selectRenditions(forty, null, ['r39'], answers(Object.fromEntries(forty.map((id) => [id, 200]))));
+  eq('at most 32 asked; the rest are not offered', [capped.outcomes.size, capped.unasked, capped.renditions.length, capped.renditions.includes('r39'), capped.renditions.includes('r38')], [32, 8, 32, true, false]);
+}
+await sleep(20);
+eq('no unhandled rejection from any probe', unhandled.map(String), []);
 
 // ---- Nostr signaling: the option, and the signaler's bookkeeping --------------------------
 const relayCases: [string, string | null][] = [
@@ -662,7 +916,7 @@ throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(ve
   // The hash list vector through nfx-wasm: what open() reads of it, and its master cut.
   const v = JSON.parse(readFileSync(join(here, '../../spec/test-vectors/hashlist.json'), 'utf8')) as {
     rendered_bytes_sha256: string;
-    hashlist: { files: { name: string; sha256: string }[] };
+    hashlist: { files: { name: string; sha256: string; size: number }[] };
     playlists: Record<string, string>;
   };
   const bytes = new TextEncoder().encode(`${JSON.stringify(v.hashlist, null, 2)}\n`);
@@ -670,7 +924,14 @@ throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(ve
   const list = VerifiedHashList.fromRoot(bytes, v.rendered_bytes_sha256);
   const levels = hashListLevels(list.toJSON());
   const sha = (name: string): string | undefined => v.hashlist.files.find((f) => f.name === name)?.sha256;
-  eq('hash list vector levels', levels, { renditions: [{ id: '720p', playlist: sha('r720.m3u8') }], master: sha('master.m3u8') });
+  const size = (name: string): number | undefined => v.hashlist.files.find((f) => f.name === name)?.size;
+  eq('hash list vector levels', levels, { renditions: [{ id: '720p', playlist: sha('r720.m3u8'), playlistSize: size('r720.m3u8') }], master: sha('master.m3u8') });
+  // The vector's own playlist names its init by content name (NFX-05 §3).
+  const r720 = v.playlists['r720.m3u8'] ?? '';
+  const under = `https://seed.example/nfx/${v.rendered_bytes_sha256}/`;
+  eq('vector playlist: its init', initUrl(r720, `${under}${sha('r720.m3u8')}.m3u8`), `${under}${sha('init-720.mp4')}.mp4`);
+  // And the playlist verifies under that URL, so open() may read it.
+  eq('vector playlist verifies', list.check(`/nfx/${v.rendered_bytes_sha256}/${sha('r720.m3u8')}.m3u8`, new TextEncoder().encode(r720)), sha('r720.m3u8'));
   const master = v.playlists['master.m3u8'] ?? '';
   const base = `https://seed.example/nfx/${v.rendered_bytes_sha256}/master.m3u8`;
   eq('vector master, its rendition kept', cutMaster(master, base, new Set(levels.renditions.map((r) => r.playlist))), { text: master, kept: 1 });
