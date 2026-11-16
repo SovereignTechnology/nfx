@@ -36,10 +36,10 @@ export function loadWasm(url?: string | URL): Promise<unknown> {
   return ready;
 }
 
-/** `res`'s body, refused past `max` bytes without reading the rest. */
-async function cappedBody(res: Response, max: number): Promise<Uint8Array> {
+/** `res`'s body, refused past `max` bytes without reading the rest (`what` names it in the error). */
+async function cappedBody(res: Response, max: number, what: string): Promise<Uint8Array> {
   const declared = Number(res.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > max) throw new Error(`hash list: over ${max} bytes`);
+  if (Number.isFinite(declared) && declared > max) throw new Error(`${what}: over ${max} bytes`);
   if (!res.body) return new Uint8Array(await res.arrayBuffer());
   const reader = res.body.getReader();
   const parts: Uint8Array[] = [];
@@ -50,7 +50,7 @@ async function cappedBody(res: Response, max: number): Promise<Uint8Array> {
     size += value.byteLength;
     if (size > max) {
       await reader.cancel();
-      throw new Error(`hash list: over ${max} bytes`);
+      throw new Error(`${what}: over ${max} bytes`);
     }
     parts.push(value);
   }
@@ -91,7 +91,7 @@ export class Anchor {
     await loadWasm();
     const res = await fetch(`${origin}/${root}`, { signal, credentials: 'omit' });
     if (!res.ok) throw new Error(`hash list: HTTP ${res.status}`);
-    const bytes = await cappedBody(res, MAX_HASH_LIST_BYTES);
+    const bytes = await cappedBody(res, MAX_HASH_LIST_BYTES, 'hash list');
     const list = manifest
       ? new VerifiedHashList(bytes, root, manifest.video, manifest.segs)
       : VerifiedHashList.fromRoot(bytes, root);
@@ -125,7 +125,22 @@ export class Anchor {
   }
 
   /** The verified sha256 of `bytes` fetched from `url`; throws on any mismatch. */
-  check(url: string, bytes: ArrayBuffer): string {
-    return this.list.check(new URL(url, location.href).pathname, new Uint8Array(bytes));
+  check(url: string, bytes: ArrayBuffer | Uint8Array): string {
+    return this.list.check(new URL(url, location.href).pathname, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+  }
+
+  /**
+   * The file at `url` (one the hash list names), fetched and verified: at most `max` bytes
+   * are read. Throws on an HTTP error, a longer body, any mismatch, or when `signal` aborts.
+   */
+  async fetchChecked(url: string, max: number, signal: AbortSignal): Promise<Uint8Array> {
+    const res = await fetch(url, { signal, credentials: 'omit' });
+    if (!res.ok) {
+      void res.body?.cancel().catch(() => {});
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const bytes = await cappedBody(res, max, 'file');
+    this.check(url, bytes);
+    return bytes;
   }
 }

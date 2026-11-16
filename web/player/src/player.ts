@@ -23,12 +23,11 @@
  * `&level=<n>` (pin a level).
  *
  * Which renditions it offers (NFX-03 §5, NFX-10 §1): by address, each beacon-named origin
- * goes to the library with the renditions its `https` endpoint names, and the library offers
- * only what the origin it plays from serves. When every seeder that holds any rendition
- * names which (no endpoint holds them all), the page also passes those renditions, the
- * most-held first, so playback starts on the one most seeders hold and ABR picks among the
- * rest; if a beacon named one the video lacks, it plays again without that preference.
- * `&renditions=<id>[,<id>…]` (test knob) passes that list instead, as given.
+ * goes to the library with the renditions its `https` endpoint names, as a hint, and the
+ * library offers what the origin it plays from answers that it holds (nfx #85). The page
+ * never turns what beacons say (`availability`, `originSources`) into a list of allowed
+ * renditions: beacons come from any key, and such a list would let one cut the levels.
+ * `&renditions=<id>[,<id>…]` (test knob) passes a list, as given.
  *
  * `window.__nfx` exposes state for automation.
  */
@@ -182,15 +181,6 @@ const common = {
   level: whole(params.get('level'), 16),
 } satisfies Partial<OpenCommon>;
 
-/**
- * The renditions to offer, from what seeders hold (NFX-03 §5), the most-held first: only
- * when no seeder holds every rendition, since those ids are the hash list's, which this page
- * does not read. Otherwise none: the library offers every rendition the origin serves.
- */
-function fromAvailability(av: RenditionAvailability): string[] | undefined {
-  return av.all === 0 && av.renditions.length > 0 ? av.renditions.map((r) => r.id) : undefined;
-}
-
 /** Open a session, and show it in `__nfx`. */
 async function play(opts: Parameters<typeof open>[1]): Promise<void> {
   const s = await open($<HTMLVideoElement>('v'), opts);
@@ -253,26 +243,16 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
         const trackers = [...new Set([...urlTrackers, ...heard.trackers])].slice(0, MAX_TRACKERS);
         // Likewise its own STUN servers, then those seeders named (NFX-10 §1).
         const stun = [...iceServers, ...heard.stunServers.map((urls) => ({ urls }))].slice(0, MAX_ICE_SERVERS);
-        // Each beacon-named origin with the renditions it serves; the hint serves them all.
+        // Each beacon-named origin with the renditions beacons claim it serves (a hint the
+        // library only orders by); the page's own hint makes no claim.
         const origins = fresh.map((o): string | OriginSource => heard.originSources.find((s) => s.url === o) ?? o);
-        const preferred = urlRenditions === undefined ? fromAvailability(heard.availability) : undefined;
-        const opts = { ...common, iceServers: stun, manifestJson: m.event, origins, signaling: trackerSignaling(trackers) };
         try {
-          await play({ ...opts, renditions: urlRenditions ?? preferred });
+          await play({ ...common, iceServers: stun, manifestJson: m.event, origins, renditions: urlRenditions, signaling: trackerSignaling(trackers) });
           return;
         } catch (e) {
           log(e instanceof Error ? e.message : String(e));
-          // A beacon named a rendition this video lacks: play without the preference. Any
-          // other refusal of the page's own options holds for every origin: give up.
-          if (e instanceof RangeError && preferred !== undefined) log('again, without the renditions beacons named');
-          else if (e instanceof RangeError || e instanceof TypeError) throw e;
-          else continue;
-        }
-        try {
-          await play(opts);
-          return;
-        } catch (e) {
-          log(e instanceof Error ? e.message : String(e));
+          // A refusal of the page's own options holds for every origin: give up.
+          if (e instanceof RangeError || e instanceof TypeError) throw e;
           continue;
         }
       }
