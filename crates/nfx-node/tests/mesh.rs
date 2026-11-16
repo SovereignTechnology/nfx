@@ -3,8 +3,10 @@
 //! endpoint serving the test-vector video, and a browser-like peer built from str0m (full
 //! ICE), nfx-proto's signaling and nostr-sdk. The peer finds the endpoint by its room alone,
 //! negotiates through the relay (either side offering, by the glare rule), opens the data
-//! channel, asks for a segment with p2p-media-loader's protocol and checks its sha256. Then
-//! two endpoints in one room, which find and connect to each other the same way.
+//! channel, asks for a segment with p2p-media-loader's protocol and checks its sha256. The
+//! same behind a DNAT: the endpoint bound on loopback and told a public address, which the
+//! peer alone reaches, through a DNAT in the test. Then two endpoints in one room, which find
+//! and connect to each other the same way.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -102,6 +104,20 @@ struct Browser {
     notes: Pin<Box<dyn Stream<Item = ns::ClientNotification> + Send>>,
     socket: UdpSocket,
     addr: SocketAddr,
+    /// The DNAT in front of the endpoint, when there is one.
+    dnat: Option<Dnat>,
+}
+
+/// A DNAT in front of the endpoint, as the browser's datagrams meet it. What the browser
+/// sends to `public` reaches the endpoint's socket at `bind` with the browser's own source
+/// address (no SNAT), and what the endpoint sends the browser arrives as from `public`, as
+/// conntrack rewrites it. Nothing else crosses: the endpoint's bound address stands for a
+/// private one the browser cannot reach, and the browser's own NAT lets in only what comes
+/// from an address it has sent to (`opened`).
+struct Dnat {
+    public: SocketAddr,
+    bind: SocketAddr,
+    opened: bool,
 }
 
 impl Browser {
@@ -124,6 +140,7 @@ impl Browser {
             notes,
             socket,
             addr,
+            dnat: None,
         }
     }
 
@@ -166,7 +183,8 @@ impl Browser {
     }
 
     /// Negotiate with `mesh` through the relay, whichever side the glare rule makes offer.
-    async fn negotiate(&mut self, mesh: &str) -> Rtc {
+    /// Returns the connection and the endpoint's SDP (its answer or offer).
+    async fn negotiate(&mut self, mesh: &str) -> (Rtc, String) {
         if signal::offers_to(self.session.pubkey(), mesh) {
             let mut rtc = self.rtc();
             let mut api = rtc.sdp_api();
@@ -202,7 +220,7 @@ impl Browser {
                     rtc.sdp_api()
                         .accept_answer(pending, SdpAnswer::from_sdp_string(&sdp).unwrap())
                         .unwrap();
-                    return rtc;
+                    return (rtc, sdp);
                 }
             }
         } else {
@@ -228,15 +246,37 @@ impl Browser {
                         )
                         .unwrap();
                     self.send(&ev).await;
-                    return rtc;
+                    return (rtc, sdp);
                 }
             }
         }
     }
 
+    /// Where a datagram for `to` goes: there, or through the DNAT; `None` where it cannot.
+    fn route_out(&mut self, to: SocketAddr) -> Option<SocketAddr> {
+        match &mut self.dnat {
+            None => Some(to),
+            Some(d) if to == d.public => {
+                d.opened = true;
+                Some(d.bind)
+            }
+            Some(_) => None,
+        }
+    }
+
+    /// Where a datagram from `from` seems to come from: there, or through the DNAT; `None`
+    /// when it would not get in.
+    fn route_in(&self, from: SocketAddr) -> Option<SocketAddr> {
+        match &self.dnat {
+            None => Some(from),
+            Some(d) if from == d.bind && d.opened => Some(d.public),
+            Some(_) => None,
+        }
+    }
+
     /// Drive `rtc` over the socket until the data channel is open, then ask for segment 0
     /// and return its bytes once `Completed` arrives.
-    async fn fetch_segment_0(&self, rtc: &mut Rtc) -> Vec<u8> {
+    async fn fetch_segment_0(&mut self, rtc: &mut Rtc) -> Vec<u8> {
         let deadline = Instant::now() + WAIT;
         let mut channel: Option<ChannelId> = None;
         let mut asked = false;
@@ -250,10 +290,9 @@ impl Browser {
                 match rtc.poll_output().unwrap() {
                     Output::Timeout(t) => break t,
                     Output::Transmit(t) => {
-                        self.socket
-                            .send_to(&t.contents, t.destination)
-                            .await
-                            .unwrap();
+                        if let Some(to) = self.route_out(t.destination) {
+                            self.socket.send_to(&t.contents, to).await.unwrap();
+                        }
                     }
                     Output::Event(RtcEvent::ChannelOpen(id, _)) => channel = Some(id),
                     Output::Event(RtcEvent::ChannelData(d)) => {
@@ -290,8 +329,13 @@ impl Browser {
             let wait = wake
                 .saturating_duration_since(Instant::now())
                 .min(Duration::from_millis(100));
-            match tokio::time::timeout(wait, self.socket.recv_from(&mut buf)).await {
-                Ok(Ok((n, source))) => {
+            let got = tokio::time::timeout(wait, self.socket.recv_from(&mut buf)).await;
+            match got
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|(n, from)| self.route_in(from).map(|source| (n, source)))
+            {
+                Some((n, source)) => {
                     let input = Input::Receive(
                         Instant::now(),
                         Receive {
@@ -303,20 +347,35 @@ impl Browser {
                     );
                     rtc.handle_input(input).unwrap();
                 }
-                _ => rtc.handle_input(Input::Timeout(Instant::now())).unwrap(),
+                None => rtc.handle_input(Input::Timeout(Instant::now())).unwrap(),
             }
         }
     }
 }
 
 /// A browser offers (its key is the lower) or answers (the higher), and either way fetches a
-/// verified segment from the endpoint.
-async fn a_browser_fetches_a_segment(browser_offers: bool) {
+/// verified segment from the endpoint. With `public`, the endpoint is told that address and
+/// the browser reaches it only through a DNAT that maps it onto the endpoint's socket.
+async fn a_browser_fetches_a_segment(browser_offers: bool, public: Option<SocketAddr>) {
     let (_relay, url) = relay().await;
-    let d = dir(if browser_offers { "offers" } else { "answers" });
+    let d = dir(match (browser_offers, public.is_some()) {
+        (true, false) => "offers",
+        (false, false) => "answers",
+        (true, true) => "dnat-offers",
+        (false, true) => "dnat-answers",
+    });
     let (store, v) = common::vector_store(&d);
     let store = Arc::new(store);
-    let mesh = Mesh::start(store.clone(), config(&url)).await.unwrap();
+    let mesh = Mesh::start(
+        store.clone(),
+        MeshConfig {
+            public,
+            ..config(&url)
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(mesh.public_addr(), public);
     let ids = mesh.serve(&v.list, &*store, None).await.unwrap();
     assert_eq!(ids, vec!["720p".to_owned()]);
     until(&mesh, "the room is joined", |s| s.gathered && s.rooms == 1).await;
@@ -330,12 +389,36 @@ async fn a_browser_fetches_a_segment(browser_offers: bool) {
         }
     };
     let mut browser = Browser::join(&url, room, session).await;
-    let mut rtc = browser.negotiate(mesh.session_key()).await;
+    browser.dnat = public.map(|public| Dnat {
+        public,
+        bind: mesh.local_addr(),
+        opened: false,
+    });
+    let (mut rtc, sdp) = browser.negotiate(mesh.session_key()).await;
+    let candidates: Vec<&str> = sdp
+        .lines()
+        .filter(|l| l.starts_with("a=candidate:"))
+        .collect();
+    let bound = mesh.local_addr();
+    let told = public.unwrap_or(bound);
+    assert_eq!(candidates.len(), 1, "{sdp}");
+    assert!(
+        candidates[0].contains(&format!("{} {} typ host", told.ip(), told.port())),
+        "{sdp}"
+    );
+    if public.is_some() {
+        // The bound address never reaches the peer.
+        assert!(!sdp.contains(&bound.ip().to_string()), "{sdp}");
+    }
     let bytes = browser.fetch_segment_0(&mut rtc).await;
     let want = first_segment(&v.list, &*store, "720p");
     assert_eq!(hex::encode(nfx_proto::sha256(&bytes)), want);
     let s = until(&mesh, "served", |s| s.served >= 1 && s.open >= 1).await;
     assert_eq!(s.failed, 0);
+    assert_eq!(s.candidates, [format!("host {told}")]);
+    if let Some(d) = &browser.dnat {
+        assert!(d.opened, "the browser sent to the public address");
+    }
     if browser_offers {
         assert_eq!((s.offers, s.answers), (0, 1));
     } else {
@@ -354,12 +437,26 @@ fn rand_bytes<const N: usize>() -> [u8; N] {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_browser_whose_key_is_lower_offers_and_fetches_a_segment() {
-    a_browser_fetches_a_segment(true).await;
+    a_browser_fetches_a_segment(true, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_browser_whose_key_is_higher_answers_and_fetches_a_segment() {
-    a_browser_fetches_a_segment(false).await;
+    a_browser_fetches_a_segment(false, None).await;
+}
+
+/// The public address of the test's DNAT (a documentation address: nothing is ever sent to
+/// it, the DNAT maps it onto the endpoint's socket).
+const PUBLIC: &str = "203.0.113.7:7845";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn behind_a_dnat_a_browser_that_offers_reaches_the_endpoint_through_its_public_address() {
+    a_browser_fetches_a_segment(true, Some(PUBLIC.parse().unwrap())).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn behind_a_dnat_a_browser_that_answers_reaches_the_endpoint_through_its_public_address() {
+    a_browser_fetches_a_segment(false, Some(PUBLIC.parse().unwrap())).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -470,7 +567,27 @@ async fn a_stun_mapping_is_offered_and_settings_that_cannot_work_are_refused() {
             },
             "connection cap",
         ),
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        [
+            "[2001:db8::7]:7845",
+            "203.0.113.7:0",
+            "0.0.0.0:7845",
+            "224.0.0.1:7845",
+            "255.255.255.255:7845",
+            "169.254.1.1:7845",
+        ]
+        .map(|public| {
+            (
+                MeshConfig {
+                    public: Some(public.parse().unwrap()),
+                    ..config(&url)
+                },
+                "public address",
+            )
+        }),
+    ) {
         let err = Mesh::start(store.clone(), cfg.clone())
             .await
             .err()

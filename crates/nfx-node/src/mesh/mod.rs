@@ -22,6 +22,12 @@
 //!   [`GATHER_TIMEOUT`], and every 25 s after, which also keeps the NAT's mapping alive), and
 //!   a port the gateway maps by UPnP, PCP or NAT-PMP when [`MeshConfig::portmapper`] is on
 //!   and the gateway does. Every SDP sent carries every candidate (no trickle).
+//! - **Behind a DNAT** ([`MeshConfig::public`]), whose public address STUN cannot report (a
+//!   STUN server of the node's own needs a hairpin) and no gateway maps: that address is one
+//!   more host candidate, the first, and every datagram the socket receives is taken as sent
+//!   to it, as the bridge does (`--bridge-public`). Then no candidate whose address is not
+//!   public ([`crate::node::is_public`]) is offered, as with iroh's external addresses: not
+//!   the socket's own address behind the DNAT, nor a private mapping.
 //! - **Serving** is the bridge's ([`crate::rtc_serve`]): only verified segments of held
 //!   renditions, under the same per-peer caps. It never takes bytes from a peer.
 //! - **Discovery is by room alone** (§6): a page that plays a rendition joins its room and
@@ -40,10 +46,10 @@
 //!   sent; every other datagram goes to the connection that accepts it, or is dropped.
 //!
 //! **Privacy.** Joining a room tells anyone who announces presence there this node's
-//! candidate addresses (NFX-10 §6.7): its host address, which behind a NAT is a private one,
-//! and its public mappings. Relays see the room keys (which the catalog maps back to videos),
-//! the session key and who signals whom, never the SDP. The endpoint is off unless relays
-//! are configured.
+//! candidate addresses (NFX-10 §6.7): its host address, which behind a NAT is a private one
+//! (unless [`MeshConfig::public`] is set), and its public mappings. Relays see the room keys
+//! (which the catalog maps back to videos), the session key and who signals whom, never the
+//! SDP. The endpoint is off unless relays are configured.
 
 pub mod book;
 pub mod sdp;
@@ -72,6 +78,7 @@ use self::book::{
     NEGOTIATIONS_PER_ROOM, OfferBackoff, PENDING_OFFERS_PER_ROOM, PresenceBook, SeenIds,
     SenderLimiter,
 };
+use crate::node::is_public;
 use crate::nostr::{from_nostr, to_nostr};
 use crate::rtc_serve::{Conn, IDLE_TIMEOUT, Swarm, Uploader, announceable, queue, received};
 use crate::store::ContentStore;
@@ -114,8 +121,9 @@ const STUN_TRIES: u32 = 4;
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// On shutdown, how long the `disconnect`s get.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
-/// Local candidates offered, at most (host, and one per distinct mapping).
-const MAX_LOCAL_CANDIDATES: usize = 6;
+/// Local candidates offered, at most (the public address, host, and one per distinct
+/// mapping).
+const MAX_LOCAL_CANDIDATES: usize = 7;
 /// How often a room whose rendition is not all in the store is checked again, so peers hear
 /// of segments that arrived (a pulled or fetched video fills in), as the bridge does.
 const REFRESH_EVERY: Duration = Duration::from_secs(10);
@@ -141,11 +149,18 @@ pub struct MeshConfig {
     /// Ask the gateway for a port mapping (UPnP, PCP, NAT-PMP), offered as one more
     /// candidate when it gives one. IPv4 only.
     pub portmapper: bool,
+    /// The public address of a DNAT that forwards to `bind`'s port, when STUN cannot report
+    /// it: offered as the first host candidate, and every datagram the socket receives is
+    /// taken as sent to it. With it, no other candidate whose address is not public
+    /// ([`crate::node::is_public`]) is offered. An address peers can dial, of `bind`'s family;
+    /// whether it is public is the caller's to check (`nfxd` refuses one that is not).
+    /// `None`: none.
+    pub public: Option<SocketAddr>,
 }
 
 impl MeshConfig {
     /// Signal through `relays`, on an ephemeral IPv4 port, with no STUN server, [`MAX_PEERS`]
-    /// connections and no portmapper.
+    /// connections, no portmapper and no public address.
     #[must_use]
     pub fn new(relays: Vec<String>) -> Self {
         Self {
@@ -154,6 +169,7 @@ impl MeshConfig {
             stun: Vec::new(),
             max_peers: MAX_PEERS,
             portmapper: false,
+            public: None,
         }
     }
 }
@@ -181,7 +197,8 @@ pub fn relay_url_problem(url: &str) -> Option<String> {
 pub struct MeshStatus {
     /// Whether candidate gathering has ended (rooms are joined only after).
     pub gathered: bool,
-    /// The candidates every SDP carries, as `host <ip:port>` and `srflx <ip:port>`.
+    /// The candidates every SDP carries, as `host <ip:port>` and `srflx <ip:port>`; the
+    /// public address ([`MeshConfig::public`]) first, when there is one.
     pub candidates: Vec<String>,
     /// Rooms joined.
     pub rooms: usize,
@@ -216,6 +233,7 @@ pub struct Mesh {
     task: JoinHandle<()>,
     client: ns::Client,
     local: SocketAddr,
+    public: Option<SocketAddr>,
     session: String,
     status: Arc<Mutex<MeshStatus>>,
 }
@@ -305,14 +323,26 @@ impl Mesh {
         if cfg.bind.ip().is_multicast() {
             return bad(format!("{}: not an address to bind", cfg.bind));
         }
+        // Checked before anything binds. str0m refuses a host candidate on an IPv4
+        // link-local address too, which no DNAT forwards from.
+        if let Some(public) = cfg.public
+            && (!crate::bridge::dialable(public)
+                || public.is_ipv4() != cfg.bind.is_ipv4()
+                || Candidate::host(public, "udp").is_err())
+        {
+            return bad(format!(
+                "the mesh's public address {public}: not one peers can dial, of the bind's family"
+            ));
+        }
         let socket = Arc::new(
             UdpSocket::bind(cfg.bind)
                 .await
                 .map_err(NodeError::transport)?,
         );
         let local = socket.local_addr().map_err(NodeError::transport)?;
-        // The host candidate: the bound address, or for a wildcard the address the route out
-        // leaves from. Every datagram is taken as arriving there.
+        // The socket's own address, a host candidate (unless a public address is set and it is
+        // not public): the bound address, or for a wildcard the address the route out leaves
+        // from. Every datagram is taken as arriving there, or at the public address.
         let base = if local.ip().is_unspecified() {
             let probe = cfg.stun.first().copied().unwrap_or(if local.is_ipv4() {
                 SocketAddr::from(([192, 0, 2, 1], 9))
@@ -328,7 +358,7 @@ impl Mesh {
         } else {
             local
         };
-        let host = Candidate::host(base, "udp").map_err(NodeError::transport)?;
+        Candidate::host(base, "udp").map_err(NodeError::transport)?;
         let session = new_session()?;
         let limits = ns::RelayLimits {
             messages: ns::RelayMessageLimits {
@@ -366,7 +396,7 @@ impl Mesh {
             client: client.clone(),
             uploader: Uploader::new(socket.clone(), store, now),
             base,
-            host,
+            public: cfg.public,
             stun: Stun::new(cfg.stun.clone(), now),
             portmapped: None,
             gathered: false,
@@ -393,6 +423,7 @@ impl Mesh {
             task,
             client,
             local,
+            public: cfg.public,
             session: session_key,
             status,
         })
@@ -402,6 +433,12 @@ impl Mesh {
     #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
         self.local
+    }
+
+    /// The public address in front of it ([`MeshConfig::public`]), when there is one.
+    #[must_use]
+    pub fn public_addr(&self) -> Option<SocketAddr> {
+        self.public
     }
 
     /// This run's session key (64 lowercase hex): what relays and peers see, never the
@@ -534,9 +571,11 @@ struct State {
     session: Session,
     client: ns::Client,
     uploader: Uploader,
-    /// The host candidate; every datagram is taken as arriving here.
+    /// The socket's own address: a host candidate unless `public` is set and it is not
+    /// public; what a peer's candidates are judged from ([`sdp::filter_candidates`]).
     base: SocketAddr,
-    host: Candidate,
+    /// The public address of a DNAT in front of the socket ([`MeshConfig::public`]).
+    public: Option<SocketAddr>,
     stun: Stun,
     portmapped: Option<SocketAddr>,
     gathered: bool,
@@ -641,21 +680,50 @@ impl State {
         wake
     }
 
-    /// The local candidates every new connection gets: host, then each distinct mapping.
+    /// Where every datagram the socket receives is taken as sent: the public address of the
+    /// DNAT in front of it, or its own.
+    fn arrival(&self) -> SocketAddr {
+        self.public.unwrap_or(self.base)
+    }
+
+    /// The local candidates every new connection gets, each address once: the public address
+    /// (host) when there is one, the socket's own (host), then each distinct mapping a STUN
+    /// server or the gateway reported (server reflexive). With a public address, none but it
+    /// whose address is not public: neither the socket's address behind the DNAT nor a
+    /// private mapping. A server-reflexive candidate's base is [`State::arrival`] (str0m
+    /// writes no `raddr` of ours, but hashes the base into the foundation), so nothing in
+    /// the SDP is derived from an address left out.
     fn candidates(&self) -> Vec<Candidate> {
-        let mut out = vec![self.host.clone()];
-        let mut seen = vec![self.base];
+        let only_public = self.public.is_some();
+        let hosts = self
+            .public
+            .into_iter()
+            .chain([self.base])
+            .map(|a| (a, true));
         let mapped = self
             .stun
             .servers
             .iter()
-            .filter_map(|s| self.stun.mapped.get(s));
-        for addr in mapped.chain(self.portmapped.as_ref()) {
-            if out.len() >= MAX_LOCAL_CANDIDATES || seen.contains(addr) {
+            .filter_map(|s| self.stun.mapped.get(s))
+            .chain(self.portmapped.as_ref())
+            .map(|a| (*a, false));
+        let mut out = Vec::new();
+        let mut seen = Vec::new();
+        for (i, (addr, host)) in hosts.chain(mapped).enumerate() {
+            let given = i == 0 && only_public;
+            if out.len() >= MAX_LOCAL_CANDIDATES
+                || seen.contains(&addr)
+                || (only_public && !given && !is_public(&addr))
+            {
                 continue;
             }
-            if let Ok(c) = Candidate::server_reflexive(*addr, self.base, "udp") {
-                seen.push(*addr);
+            let c = if host {
+                Candidate::host(addr, "udp")
+            } else {
+                Candidate::server_reflexive(addr, self.arrival(), "udp")
+            };
+            if let Ok(c) = c {
+                seen.push(addr);
                 out.push(c);
             }
         }
@@ -932,7 +1000,7 @@ impl State {
             self.publish_status();
             return;
         }
-        let Some(input) = received(bytes, source, self.base, Instant::now()) else {
+        let Some(input) = received(bytes, source, self.arrival(), Instant::now()) else {
             return;
         };
         if let Some(l) = self

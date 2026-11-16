@@ -139,6 +139,21 @@ Joining a room tells anyone present there the node's candidate addresses, its pu
 included, as a tracker's swarm would. `--mesh-bind` fixes its UDP port and `--mesh-max-peers`
 (default 16) caps its connections.
 
+Behind a DNAT, a VM's say, STUN cannot tell the node its public address when the STUN server
+is its own (that would take a UDP hairpin), and no gateway maps a port. Name the address with
+`--mesh-public`, as `--bridge-public` does for the bridge:
+
+```sh
+nfxd run --key node.key --store pkg/store --seed "$A" --relay wss://relay.example \
+  --mesh-relay wss://general-relay.example --mesh-bind 0.0.0.0:7845 --mesh-public 203.0.113.7:7845
+```
+
+Here `203.0.113.7:7845` stands for the public address and port forwarded to the host's UDP
+port 7845; `--mesh-bind` must then be a fixed port. The node offers that address as a host
+candidate and takes what arrives as sent to it, and offers no candidate address that is not
+public, so its address behind the DNAT never reaches a peer. `--mesh-stun` stays optional
+beside it.
+
 ## Checks
 
 ```sh

@@ -1931,6 +1931,83 @@ async fn mesh_settings_that_cannot_work_are_refused_at_start() {
             },
             "a relay-only node opens no direct UDP",
         ),
+        (
+            "mesh-public-alone",
+            Config {
+                mesh_public: Some(sa("8.8.8.8:7845")),
+                ..Config::default()
+            },
+            "--mesh-public needs --mesh-relay",
+        ),
+        (
+            "mesh-public-no-bind",
+            Config {
+                mesh_relays: relay(),
+                mesh_public: Some(sa("8.8.8.8:7845")),
+                ..Config::default()
+            },
+            "--mesh-public needs --mesh-bind",
+        ),
+        (
+            "mesh-public-ephemeral-bind",
+            Config {
+                mesh_relays: relay(),
+                mesh_bind: Some(sa("127.0.0.1:0")),
+                mesh_public: Some(sa("8.8.8.8:7845")),
+                ..Config::default()
+            },
+            "--mesh-bind 127.0.0.1:0: port 0 is not a fixed port",
+        ),
+        (
+            "mesh-public-private",
+            Config {
+                mesh_relays: relay(),
+                mesh_bind: Some(sa("127.0.0.1:7845")),
+                mesh_public: Some(sa("10.0.0.28:7845")),
+                ..Config::default()
+            },
+            "--mesh-public 10.0.0.28:7845: not a public unicast address",
+        ),
+        (
+            "mesh-public-documentation",
+            Config {
+                mesh_relays: relay(),
+                mesh_bind: Some(sa("127.0.0.1:7845")),
+                mesh_public: Some(sa("203.0.113.7:7845")),
+                ..Config::default()
+            },
+            "not a public unicast address",
+        ),
+        (
+            "mesh-public-port-0",
+            Config {
+                mesh_relays: relay(),
+                mesh_bind: Some(sa("127.0.0.1:7845")),
+                mesh_public: Some(sa("8.8.8.8:0")),
+                ..Config::default()
+            },
+            "not a public unicast address with a port",
+        ),
+        (
+            "mesh-public-multicast",
+            Config {
+                mesh_relays: relay(),
+                mesh_bind: Some(sa("127.0.0.1:7845")),
+                mesh_public: Some(sa("224.0.0.1:7845")),
+                ..Config::default()
+            },
+            "not a public unicast address",
+        ),
+        (
+            "mesh-public-family",
+            Config {
+                mesh_relays: relay(),
+                mesh_bind: Some(sa("127.0.0.1:7845")),
+                mesh_public: Some(sa("[2001:4860:4860::8888]:7845")),
+                ..Config::default()
+            },
+            "not of --mesh-bind's family",
+        ),
     ] {
         let err = Daemon::start(Config {
             keys: Some(Keys::generate()),
@@ -2052,4 +2129,45 @@ async fn a_seeder_with_the_mesh_is_present_in_its_room_and_leaves_it_on_shutdown
     seeder.shutdown().await;
     next_signal(&mut notes, room.pubkey(), &session, "disconnect").await;
     listener.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_mesh_public_the_mesh_offers_that_address_and_not_the_bound_one() {
+    use nostr_sdk::prelude as ns;
+    let general = ns::LocalRelay::builder().build();
+    general.run().await.unwrap();
+    let general_url = general.url().await.to_string();
+    // A fixed port, as a DNAT forwards one. (Free a moment ago; the bind proves it.) The
+    // public address must be one the daemon takes as public; nothing is ever sent to it.
+    let port = std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let bind: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let public: SocketAddr = "8.8.8.8:7845".parse().unwrap();
+    let node = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("mesh-public"),
+        mesh_relays: vec![general_url],
+        mesh_bind: Some(bind),
+        mesh_public: Some(public),
+        no_portmapper: true,
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    assert_eq!(node.mesh_addr, Some(bind));
+    assert_eq!(node.mesh_public, Some(public));
+    let deadline = std::time::Instant::now() + WAIT;
+    let status = loop {
+        let s = node.mesh_status().unwrap();
+        if s.gathered {
+            break s;
+        }
+        assert!(std::time::Instant::now() < deadline, "{s:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(status.candidates, [format!("host {public}")]);
+    node.shutdown().await;
 }
