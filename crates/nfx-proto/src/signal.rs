@@ -418,11 +418,9 @@ fn required<'a>(ev: &'a Event, name: &str) -> Result<&'a str> {
     single(ev, name)?.ok_or_else(|| bad(format!("missing `{name}` tag")))
 }
 
-/// Check a kind-25050 event received on `room`'s subscription by the session `me` (its
-/// public key), at `now` (NFX-10 §6.5). Cheap checks come first; the signature and the
-/// room proof are verified only for events this reader would use; nothing is decrypted
-/// ([`Session::open`] does that).
-pub fn read(ev: &Event, room: &str, me: &str, now: u64) -> Result<Parsed> {
+/// The part of §6.5 step 1 that any reader shares: `Some(t)` for an nfx-mesh/1 event of
+/// one of its four types, `None` (with why) for anything else of kind 25050.
+fn ours(ev: &Event) -> Result<core::result::Result<Type, &'static str>> {
     if ev.kind != KIND_SIGNAL {
         return Err(bad("not kind 25050"));
     }
@@ -430,17 +428,30 @@ pub fn read(ev: &Event, room: &str, me: &str, now: u64) -> Result<Parsed> {
     let mut protocols = ev.tag_values("i");
     match (protocols.next(), protocols.next()) {
         (Some([i, ..]), None) if i == PROTOCOL => {}
-        _ => return Ok(Parsed::Ignored("not nfx-mesh/1")),
+        _ => return Ok(Err("not nfx-mesh/1")),
     }
-    let Some(t) = Type::parse(required(ev, "t")?) else {
-        return Ok(Parsed::Ignored("a type nfx-mesh/1 does not use"));
-    };
-    if required(ev, "y")? != APP {
-        return Err(bad("y is not nfx"));
-    }
-    if required(ev, "P")? != room {
-        return Err(bad("another room"));
-    }
+    Ok(Type::parse(required(ev, "t")?).ok_or("a type nfx-mesh/1 does not use"))
+}
+
+/// Whether `ev` says it is nfx-mesh/1: exactly one `i` tag, `nfx-mesh/1` (§6.5 step 1's
+/// first test, before anything is parsed). A relay refuses every other kind-25050 event.
+#[must_use]
+pub fn is_nfx_mesh(ev: &Event) -> bool {
+    let mut protocols = ev.tag_values("i");
+    matches!((protocols.next(), protocols.next()), (Some([i, ..]), None) if i == PROTOCOL)
+}
+
+/// What §6.5 step 2 and 3 found in an event of type `t`: its session id, the receiver of a
+/// directed event, and what it says.
+struct Fields<'a> {
+    session: &'a str,
+    to: Option<&'a str>,
+    signal: Signal,
+}
+
+/// §6.5 steps 2 and 3 after the room match: every tag of the type `t`, the content, and
+/// freshness at `now`. No cryptography.
+fn fields(ev: &Event, t: Type, now: u64) -> Result<Fields<'_>> {
     let session = required(ev, "d")?;
     if !is_lower_hex(session, 32) {
         return Err(bad("d is not 32 lowercase hex"));
@@ -453,7 +464,7 @@ pub fn read(ev: &Event, room: &str, me: &str, now: u64) -> Result<Parsed> {
     }
     let p = single(ev, "p")?;
     let expiration = single(ev, "expiration")?;
-    let signal = match t {
+    let (signal, to) = match t {
         Type::Connect | Type::Disconnect => {
             if p.is_some() {
                 return Err(bad("presence is not directed"));
@@ -465,7 +476,7 @@ pub fn read(ev: &Event, room: &str, me: &str, now: u64) -> Result<Parsed> {
                 if expiration.is_some() {
                     return Err(bad("a disconnect has no expiration"));
                 }
-                Signal::Disconnect
+                (Signal::Disconnect, None)
             } else {
                 let expiration = expiration
                     .and_then(parse_u64_strict)
@@ -476,7 +487,7 @@ pub fn read(ev: &Event, room: &str, me: &str, now: u64) -> Result<Parsed> {
                 if expiration <= now {
                     return Err(bad("expired presence"));
                 }
-                Signal::Connect { expiration }
+                (Signal::Connect { expiration }, None)
             }
         }
         Type::Offer | Type::Answer => {
@@ -509,12 +520,18 @@ pub fn read(ev: &Event, room: &str, me: &str, now: u64) -> Result<Parsed> {
                     content,
                 }
             };
-            if to != me {
-                return Ok(Parsed::Ignored("addressed to another session"));
-            }
-            signal
+            (signal, Some(to))
         }
     };
+    Ok(Fields {
+        session,
+        to,
+        signal,
+    })
+}
+
+/// §6.5 step 5: the event's NIP-01 id and signature, then its room proof against `room`.
+fn verified(ev: &Event, t: Type, room: &str) -> Result<()> {
     ev.verify()?;
     let proof = ev.tag_values("roomproof").collect::<Vec<_>>();
     let [[id, sig, ..]] = proof.as_slice() else {
@@ -525,14 +542,77 @@ pub fn read(ev: &Event, room: &str, me: &str, now: u64) -> Result<Parsed> {
     if decode::<32>(id) != Some(want) {
         return Err(bad("roomproof id does not match"));
     }
-    verify_digest(room, &want, sig).map_err(|_| bad("roomproof signature"))?;
+    verify_digest(room, &want, sig).map_err(|_| bad("roomproof signature"))
+}
+
+/// Check a kind-25050 event received on `room`'s subscription by the session `me` (its
+/// public key), at `now` (NFX-10 §6.5). Cheap checks come first; the signature and the
+/// room proof are verified only for events this reader would use; nothing is decrypted
+/// ([`Session::open`] does that).
+pub fn read(ev: &Event, room: &str, me: &str, now: u64) -> Result<Parsed> {
+    let t = match ours(ev)? {
+        Ok(t) => t,
+        Err(why) => return Ok(Parsed::Ignored(why)),
+    };
+    if required(ev, "y")? != APP {
+        return Err(bad("y is not nfx"));
+    }
+    if required(ev, "P")? != room {
+        return Err(bad("another room"));
+    }
+    let f = fields(ev, t, now)?;
+    if f.to.is_some_and(|to| to != me) {
+        return Ok(Parsed::Ignored("addressed to another session"));
+    }
+    verified(ev, t, room)?;
     Ok(Parsed::Ours(Received {
         id: ev.id.clone(),
         sender: ev.pubkey.clone(),
-        session: session.to_owned(),
+        session: f.session.to_owned(),
         created_at: ev.created_at,
-        signal,
+        signal: f.signal,
     }))
+}
+
+/// A signaling event a relay may carry (NFX-04 §1, amended 2026-11-18): its room and type,
+/// who sent it, and to whom (offers and answers).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relayable {
+    /// The room key `P` the event proves knowledge of.
+    pub room: String,
+    pub kind: Type,
+    /// The sender's session key.
+    pub sender: String,
+    /// The receiver's session key, for an offer or answer.
+    pub to: Option<String>,
+}
+
+/// A relay's check of a kind-25050 event at `now`: everything a reader checks (§6.5 steps
+/// 1–3 and 5) except the two that need a session, the room it subscribed to and whether
+/// an offer or answer is addressed to it. The room is the event's own `P`, which must be a
+/// room key (64 lowercase hex) and is what the room proof is verified against. A relay
+/// cannot check which network, video or application a room belongs to: kind 25050 carries
+/// no `n`, and the room key hides the swarm ID it was derived from.
+///
+/// Unlike [`read`], another protocol or type is an error here, not ignored: a relay that
+/// admits nfx-mesh/1 refuses everything else of kind 25050.
+pub fn relayable(ev: &Event, now: u64) -> Result<Relayable> {
+    let t = ours(ev)?.map_err(bad)?;
+    if required(ev, "y")? != APP {
+        return Err(bad("y is not nfx"));
+    }
+    let room = required(ev, "P")?;
+    if !is_lower_hex(room, 64) {
+        return Err(bad("P is not 64 lowercase hex"));
+    }
+    let f = fields(ev, t, now)?;
+    verified(ev, t, room)?;
+    Ok(Relayable {
+        room: room.to_owned(),
+        kind: t,
+        sender: ev.pubkey.clone(),
+        to: f.to.map(str::to_owned),
+    })
 }
 
 /// The glare rule (NFX-10 §6.6): whether `me` sends the offer to `peer` (the lower

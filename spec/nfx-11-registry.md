@@ -163,7 +163,13 @@ A claim of L2 or L3 through NFX-12 is made against its fixtures and the cross-im
 of NFX-12 §8.
 - **L4 — mint**: NFX-09 all four endpoints + NUT-03/08/11/12 interop + NUT-06
   advertisement per NFX-09 §1.
-- **L5 — scoped relay**: NFX-04 §§1–3 including NIP-40 and the rate-limit table.
+- **L5 — scoped relay**: NFX-04 §§1–3 including NIP-40 and the rate-limit table. A relay
+  that admits mesh signaling (NFX-04 §1, a MAY) also claims its checks and rate limits, and
+  is tested against the signaling vectors as a relay: every event of `mesh-signal.json`
+  admitted; of `mesh-signal-invalid.json`, every rejected case a reader rejects before
+  decrypting refused except `other-room`, the ones only the receiver can reject (it alone
+  decrypts) and `other-room` carried; `not-for-us` carried and every other ignored case
+  refused.
 
 A README badge that doesn't name a level is non-claim.
 
@@ -267,3 +273,6 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
 - 2026-11-09 (nutflix-pear#97) — the `https` endpoint gains an optional `renditions`
   (NFX-03 §4): the renditions its origin serves, absent meaning every one. Readers that do
   not implement it ignore it (NFX-01 §4). New vectors `beacon-renditions.json`.
+- 2026-11-18 (issue #96) — L5 covers a scoped relay that admits kind-25050 mesh signaling
+  (NFX-04 §1 as amended in place): it is tested against `mesh-signal-invalid.json` as a
+  relay. No vector changes.

@@ -9,7 +9,7 @@
 //! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--iroh-relay-ca <pem>]… [--relay-only]
 //!          [--iroh-bind <ip:port> [--iroh-external <ip:port>]…]
 //!          [--seed <a>[#<id>,…]]… [--fetch <a>[#<id>,…]]… [--pull <a>[#<id>,…]]… [--origin <addr:port>]
-//!          [--https-url <url>] [--embed-relay <addr:port>]
+//!          [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh]]
 //!          [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]…
 //!          [--stun <ip:port> [--stun-public <ip:port>]]
 //!          [--mesh-relay <wss url>… [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]… [--mesh-max-peers <n>]]
@@ -66,6 +66,13 @@
 //! ever order seeders, and never change what this node grants anyone. Reading your own
 //! lists tells those relays this node's address belongs to your key.
 //!
+//! `--embed-relay-mesh` lets the embedded relay carry NFX mesh signaling too (kind 25050 with
+//! `i` = `nfx-mesh/1`, NFX-04 §1 as amended 2026-11-18): ephemeral, never stored, admitted
+//! only after the checks a reader makes that need no session, the room proof included, and
+//! rate-limited per sender. Pages and `--mesh-relay` endpoints may then name this relay for
+//! signaling. A relay cannot tell which network or video a room is (kind 25050 carries no
+//! `n`), so `--allow-creator` does not narrow it. Off by default.
+//!
 //! `--embed-tracker` serves the NFX-10 browser mesh (plain `ws`), and `--bridge` joins it
 //! as a native WebRTC peer. In public, put the tracker behind a TLS proxy (browsers need
 //! `wss://`, and `--tracker-url` names that URL). A proxy on the same host must set
@@ -93,7 +100,8 @@
 //! `--mesh-relay <url>` (repeatable, 1 to 8) runs the mesh endpoint (NFX-10 §6): browsers find
 //! this node in the rooms of the renditions it holds and fetch verified segments from it over
 //! WebRTC, signaling only through those Nostr relays (general ones, `wss://`, or `ws://`, which
-//! shows room keys and timing to the path; a scoped relay refuses kind 25050), with no tracker
+//! shows room keys and timing to the path; a scoped relay refuses kind 25050 unless it admits it,
+//! NFX-04 §1, as `--embed-relay-mesh` makes nfxd's own), with no tracker
 //! and no TURN. Its ICE agent is a full one, so it works behind a NAT: `--mesh-stun <ip:port>`
 //! (repeatable, at most 4; a public node's `--stun`, say) names STUN servers that tell it its
 //! public mapping, and the gateway is asked for a port when it can map one. `--mesh-bind`
@@ -130,7 +138,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port>] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]... [--mesh-max-peers <n>]]
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh]] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]... [--mesh-max-peers <n>]]
 
   --mesh-relay runs the mesh endpoint (NFX-10 §6): browsers meet this node in the rooms of
   the renditions it holds, signaling only through those Nostr relays, and fetch verified
@@ -138,7 +146,10 @@ const USAGE: &str = "usage:
   mapping; --mesh-public: behind a DNAT, its public address, forwarded to --mesh-bind's fixed
   port, offered instead of any address that is not public). Off by default. Privacy: joining
   a room tells anyone who announces presence there this node's candidate addresses, public
-  ones included.";
+  ones included.
+
+  --embed-relay-mesh lets the embedded relay carry that signaling (kind 25050, nfx-mesh/1)
+  too: ephemeral, room proof checked, rate-limited per sender. Off by default.";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -277,9 +288,10 @@ async fn run(args: &[String]) -> Result<()> {
     // The flags without a value.
     let relay_only = args.iter().any(|a| a == "--relay-only");
     let gossip = args.iter().any(|a| a == "--gossip");
+    let embed_relay_mesh = args.iter().any(|a| a == "--embed-relay-mesh");
     let args: Vec<String> = args
         .iter()
-        .filter(|a| *a != "--relay-only" && *a != "--gossip")
+        .filter(|a| *a != "--relay-only" && *a != "--gossip" && *a != "--embed-relay-mesh")
         .cloned()
         .collect();
     let args = args.as_slice();
@@ -379,6 +391,7 @@ async fn run(args: &[String]) -> Result<()> {
             .collect::<Result<_>>()?,
         deletion_check_every: None,
         allow_creators: all(&f, "allow-creator"),
+        embed_relay_mesh,
         gossip,
         gossip_peers: gossip_peers(&all(&f, "gossip-peer"))?,
         rating_root: one(&f, "rating-root")?

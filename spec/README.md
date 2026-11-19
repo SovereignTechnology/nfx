@@ -28,7 +28,7 @@ desktop shell.
 | NFX-01 | Networks & versions | **Frozen** (re-frozen 2026-09-23) | M0 |
 | NFX-02 | Catalog manifest (kind 38504) | **Frozen** (2026-09-24) | M1 |
 | NFX-03 | Availability beacons (kind 20464) | **Frozen** (2026-09-24) | M1 |
-| NFX-04 | Scoped relay profile | **Frozen** (2026-09-24) | M1 |
+| NFX-04 | Scoped relay profile | **Frozen** (2026-09-24; amended in place 2026-11-18, #96) | M1 |
 | NFX-05 | Segments & content integrity | **Frozen** (2026-09-24) | M1 |
 | NFX-06 | iroh transport profile | **Frozen** (2026-09-24) | M1 |
 | NFX-07 | Payments — open mode | Draft | M2 |
@@ -96,3 +96,8 @@ the repository license. Rationale and full context: `docs/decisions/0006-*` (f).
 - 2026-11-04 — NFX-16 (seeder ratings) added as Draft, optional, after ADR 0104: the
   `nostr-social-memory` rating record (kind 7368) with scope `nfx.seeder`. Publishing is
   off by default. New vectors `ratings*.json`.
+- 2026-11-18 — **an exception to the freeze rule**: frozen NFX-04 is amended in place so a
+  scoped relay MAY carry kind-25050 mesh signaling (NFX-10 §6) as an ephemeral. Additive
+  and optional: no artifact or reader changes, and a relay that does not admit it is as
+  conformant as before. Decided by the maintainer (sovtech) over a `specver` bump, which would have changed
+  every room key and republished every manifest. Record: issue #96 and NFX-04's changelog.

@@ -9,6 +9,13 @@
 //! refused on write and skipped on read (NIP-40). The host's own events go through the
 //! same door as everyone else's (§7).
 //!
+//! With mesh signaling on ([`ScopedRelay::with_options`]), it also carries kind 25050 with `i` =
+//! `nfx-mesh/1` (NFX-04 §1 as amended 2026-11-18, NFX-10 §6): the checks a reader makes
+//! that need no session (`nfx_proto::signal::relayable`), the room proof included, then a
+//! presence floor per (sender, room, type) and a budget of offers and answers per sender.
+//! They are ephemeral like beacons. The network cannot be checked: kind 25050 carries no
+//! `n`, and the room key hides which video and network a room is.
+//!
 //! Stored manifests live in memory, capped at [`MAX_STORED_EVENTS`]: a restart forgets
 //! them, and publishers re-mirror (§4). TLS belongs in front, as for the origin.
 
@@ -26,6 +33,7 @@ use nfx_proto::beacon::Beacon;
 use nfx_proto::deletion::Deletion;
 use nfx_proto::manifest::Manifest;
 use nfx_proto::namespace::Namespace;
+use nfx_proto::signal::{self, KIND_SIGNAL};
 use nfx_proto::{KIND_BEACON, KIND_DELETION, KIND_MANIFEST, MAX_CLOCK_SKEW, Verified};
 use nostr_database::error::Error as DbError;
 use nostr_sdk::prelude as ns;
@@ -58,6 +66,16 @@ pub const MAX_STORED_EVENTS: usize = 20_000;
 const SWEEP_ABOVE: usize = 10_000;
 /// Sweeps are O(keys), so they run at most this often, never once per admission.
 const SWEEP_EVERY_SECS: u64 = 60;
+/// Mesh signaling (§1 as amended 2026-11-18, §2): the hard size of a kind-25050 event (its
+/// content is at most 32 KiB, NFX-10 §6.2, and its tags well under 4 KiB).
+pub const MAX_SIGNAL_BYTES: usize = 36 * 1024;
+/// At most one presence of a type (`connect` or `disconnect`) per (sender, room) per this
+/// many seconds. Senders repeat `connect` every 30 s (NFX-10 §6.6).
+pub const PRESENCE_FLOOR_SECS: u64 = 10;
+/// Offers and answers per sender per [`DIRECTED_WINDOW_SECS`]. A peer has at most 16
+/// negotiations in flight per room (NFX-10 §6.5); a seeder answers many rooms.
+pub const DIRECTED_PER_WINDOW: usize = 64;
+pub const DIRECTED_WINDOW_SECS: u64 = 30;
 /// Room for the `["EVENT", …]` framing around the largest admitted event.
 const MAX_MESSAGE_BYTES: usize = MAX_MANIFEST_BYTES + 1024;
 
@@ -69,6 +87,10 @@ struct Limits {
     beacons: HashMap<(String, String), u64>,
     /// pubkey → admission times within the last hour.
     manifests: HashMap<String, VecDeque<u64>>,
+    /// (sender, room, presence type) → when the last one was admitted.
+    presence: HashMap<(String, String, &'static str), u64>,
+    /// sender → offer and answer admission times within the last window.
+    directed: HashMap<String, VecDeque<u64>>,
     /// When stale keys were last swept (at most once per [`SWEEP_EVERY_SECS`]).
     swept_at: u64,
 }
@@ -81,6 +103,8 @@ struct Admission {
     /// videos, are admitted: an operator's content policy (NFX-04 §8), and the strongest
     /// answer to floods from freshly minted keys.
     creators: Option<BTreeSet<String>>,
+    /// Whether kind-25050 mesh signaling is carried (NFX-04 §1, a MAY).
+    mesh: bool,
     limits: Mutex<Limits>,
     /// The relay's own store, for applying NFX deletions (see [`Admission::apply`]).
     db: Arc<dyn ns::NostrDatabase>,
@@ -89,6 +113,7 @@ struct Admission {
 /// What passed the synchronous checks.
 enum Admitted {
     Beacon,
+    Signal,
     Manifest(Box<Verified<Manifest>>),
     Deletion(Deletion),
 }
@@ -99,6 +124,9 @@ impl Admission {
     fn admit(&self, event: &ns::Event, now: u64) -> Result<Admitted, Refusal> {
         use ns::MachineReadablePrefix::{Blocked, Invalid, RateLimited};
         let kind = event.kind.as_u16();
+        if kind == KIND_SIGNAL && self.mesh {
+            return self.admit_signal(event, now);
+        }
         if kind != KIND_MANIFEST && kind != KIND_BEACON && kind != KIND_DELETION {
             return Err((Blocked, "out of scope".into()));
         }
@@ -158,17 +186,7 @@ impl Admission {
         };
 
         let mut limits = self.limits.lock().unwrap_or_else(PoisonError::into_inner);
-        if now >= limits.swept_at.saturating_add(SWEEP_EVERY_SECS)
-            && limits.beacons.len() + limits.manifests.len() > SWEEP_ABOVE
-        {
-            limits.swept_at = now;
-            limits
-                .beacons
-                .retain(|_, last| now < *last + BEACON_FLOOR_SECS);
-            limits
-                .manifests
-                .retain(|_, times| times.back().is_some_and(|t| now < t + 3600));
-        }
+        limits.sweep(now);
         match beacon_key {
             None => {
                 let times = limits.manifests.entry(ev.pubkey.clone()).or_default();
@@ -199,6 +217,47 @@ impl Admission {
             (None, Some(d)) => Admitted::Deletion(d),
             (None, None) => Admitted::Beacon,
         })
+    }
+
+    /// A kind-25050 event (§1 as amended 2026-11-18): another protocol's is out of scope; an
+    /// nfx-mesh/1 one must pass every check a reader makes that needs no session, the room
+    /// proof included, then the presence floor or the offer-and-answer budget (§2).
+    fn admit_signal(&self, event: &ns::Event, now: u64) -> Result<Admitted, Refusal> {
+        use ns::MachineReadablePrefix::{Blocked, Invalid, RateLimited};
+        if event.as_json().len() > MAX_SIGNAL_BYTES {
+            return Err((Invalid, "signal over 36 KiB".into()));
+        }
+        let ev = from_nostr(event).map_err(|_| (Invalid, "unreadable event".to_owned()))?;
+        if !signal::is_nfx_mesh(&ev) {
+            return Err((Blocked, "out of scope".into()));
+        }
+        let r = signal::relayable(&ev, now).map_err(|e| (Invalid, e.to_string()))?;
+        let mut limits = self.limits.lock().unwrap_or_else(PoisonError::into_inner);
+        limits.sweep(now);
+        if r.to.is_some() {
+            let times = limits.directed.entry(r.sender).or_default();
+            while times
+                .front()
+                .is_some_and(|t| now >= t + DIRECTED_WINDOW_SECS)
+            {
+                times.pop_front();
+            }
+            if times.len() >= DIRECTED_PER_WINDOW {
+                return Err((RateLimited, "offers and answers per 30 s".into()));
+            }
+            times.push_back(now);
+        } else {
+            let key = (r.sender, r.room, r.kind.as_str());
+            if limits
+                .presence
+                .get(&key)
+                .is_some_and(|last| now < last + PRESENCE_FLOOR_SECS)
+            {
+                return Err((RateLimited, "one presence per 10 s per room".into()));
+            }
+            limits.presence.insert(key, now);
+        }
+        Ok(Admitted::Signal)
     }
 
     /// Remove the stored revisions a deletion withdraws. nostr-sdk's own NIP-09 handling
@@ -238,6 +297,27 @@ impl Admission {
     }
 }
 
+impl Limits {
+    /// Drop stale rate-limit keys, at most once per [`SWEEP_EVERY_SECS`] and only past
+    /// [`SWEEP_ABOVE`] keys: sweeps are O(keys).
+    fn sweep(&mut self, now: u64) {
+        let keys =
+            self.beacons.len() + self.manifests.len() + self.presence.len() + self.directed.len();
+        if now < self.swept_at.saturating_add(SWEEP_EVERY_SECS) || keys <= SWEEP_ABOVE {
+            return;
+        }
+        self.swept_at = now;
+        self.beacons
+            .retain(|_, last| now < *last + BEACON_FLOOR_SECS);
+        self.manifests
+            .retain(|_, times| times.back().is_some_and(|t| now < t + 3600));
+        self.presence
+            .retain(|_, last| now < *last + PRESENCE_FLOOR_SECS);
+        self.directed
+            .retain(|_, times| times.back().is_some_and(|t| now < t + DIRECTED_WINDOW_SECS));
+    }
+}
+
 impl ns::WritePolicy for Admission {
     fn admit_event<'a>(
         &'a self,
@@ -246,7 +326,7 @@ impl ns::WritePolicy for Admission {
     ) -> BoxFuture<'a, ns::WritePolicyResult> {
         Box::pin(async move {
             match self.admit(event, unix_now()) {
-                Ok(Admitted::Beacon) => ns::WritePolicyResult::Accept,
+                Ok(Admitted::Beacon | Admitted::Signal) => ns::WritePolicyResult::Accept,
                 Ok(Admitted::Manifest(m)) if self.withdrawn(&m).await => {
                     ns::WritePolicyResult::reject(
                         ns::MachineReadablePrefix::Invalid,
@@ -407,7 +487,7 @@ impl ScopedRelay {
     /// An open scoped relay: any creator's manifests in `namespaces`.
     #[must_use]
     pub fn new(namespaces: &[Namespace]) -> Self {
-        Self::build(namespaces, None)
+        Self::build(namespaces, None, false)
     }
 
     /// A scoped relay admitting only `creators` (x-only pubkey, 64 lowercase hex): their
@@ -418,6 +498,23 @@ impl ScopedRelay {
     /// An empty list, or a key in any other form, is an error: either would silently
     /// admit no one.
     pub fn with_creators(namespaces: &[Namespace], creators: &[String]) -> crate::Result<Self> {
+        Self::with_options(namespaces, Some(creators), false)
+    }
+
+    /// A scoped relay with an optional creator allow-list (as [`ScopedRelay::with_creators`])
+    /// that, with `mesh_signaling`, also carries kind-25050 mesh signaling (NFX-04 §1 as
+    /// amended 2026-11-18): ephemeral, nfx-mesh/1 only, every check a reader makes that needs
+    /// no session, room proof included, then the §2 presence floor and offer-and-answer
+    /// budget. The allow-list does not apply to signaling: a room key does not say whose
+    /// video it is.
+    pub fn with_options(
+        namespaces: &[Namespace],
+        creators: Option<&[String]>,
+        mesh_signaling: bool,
+    ) -> crate::Result<Self> {
+        let Some(creators) = creators else {
+            return Ok(Self::build(namespaces, None, mesh_signaling));
+        };
         if creators.is_empty() {
             return Err(crate::NodeError::Relay("empty creator allow-list".into()));
         }
@@ -434,10 +531,11 @@ impl ScopedRelay {
         Ok(Self::build(
             namespaces,
             Some(creators.iter().cloned().collect()),
+            mesh_signaling,
         ))
     }
 
-    fn build(namespaces: &[Namespace], creators: Option<BTreeSet<String>>) -> Self {
+    fn build(namespaces: &[Namespace], creators: Option<BTreeSet<String>>, mesh: bool) -> Self {
         let names: BTreeSet<String> = namespaces.iter().map(ToString::to_string).collect();
         let database: Arc<dyn ns::NostrDatabase> = Arc::new(TitleSearch {
             inner: nostr_memory::MemoryDatabase::bounded(
@@ -450,6 +548,7 @@ impl ScopedRelay {
             .write_policy(Admission {
                 namespaces: names.clone(),
                 creators,
+                mesh,
                 limits: Mutex::new(Limits::default()),
                 db: database,
             })
@@ -462,9 +561,22 @@ impl ScopedRelay {
             .max_websocket_message_size(MAX_MESSAGE_BYTES)
             .max_connections(crate::limit::MAX_CONNECTIONS)
             .build();
+        let (kinds, roles, description) = if mesh {
+            (
+                vec![KIND_MANIFEST, KIND_BEACON, KIND_DELETION, KIND_SIGNAL],
+                vec!["catalog", "availability", "signaling"],
+                "NFX-04 scoped relay: NFX manifests and beacons, and NFX mesh signaling (kind 25050, nfx-mesh/1)",
+            )
+        } else {
+            (
+                vec![KIND_MANIFEST, KIND_BEACON, KIND_DELETION],
+                vec!["catalog", "availability"],
+                "NFX-04 scoped relay: NFX manifests and beacons only",
+            )
+        };
         let nip11 = serde_json::json!({
             "name": "nfx scoped relay",
-            "description": "NFX-04 scoped relay: NFX manifests and beacons only",
+            "description": description,
             "software": "nfx-node",
             "version": env!("CARGO_PKG_VERSION"),
             "supported_nips": [1, 11, 40, 50],
@@ -476,8 +588,8 @@ impl ScopedRelay {
             },
             "nfx": {
                 "networks": names,
-                "kinds": [KIND_MANIFEST, KIND_BEACON, KIND_DELETION],
-                "roles": ["catalog", "availability"]
+                "kinds": kinds,
+                "roles": roles
             }
         });
         Self {
