@@ -7,7 +7,7 @@ money-build digest 0.11.3 block-api,default
 money-build hex 0.4.3 alloc,default,std
 money-build hybrid-array 0.4.15 -
 money-build itoa 1.0.18 -
-money-build libc 0.2.189 default,std
+money-build libc 0.2.191 default,std
 money-build memchr 2.8.3 alloc,std
 money-build mio 1.2.3 net,os-ext,os-poll
 money-build nfx-pay 0.1.0 -
@@ -25,7 +25,7 @@ money-build socket2 0.6.5 all
 money-build syn 3.0.6 clone-impls,default,derive,full,parsing,printing,proc-macro
 money-build thiserror 2.0.20 default,std
 money-build thiserror-impl 2.0.20 -
-money-build tokio 1.53.3 default,libc,macros,mio,net,rt,rt-multi-thread,socket2,sync,time,tokio-macros
+money-build tokio 1.54.1 default,libc,macros,mio,net,rt,rt-multi-thread,socket2,sync,time,tokio-macros
 money-build tokio-macros 2.7.2 -
 money-build typenum 1.20.1 const-generics
 money-build unicode-ident 1.0.26 -
@@ -58,7 +58,7 @@ money-dep hybrid-array 0.4.15 registry+https://github.com/rust-lang/crates.io-in
 money-dep itoa 1.0.18 registry+https://github.com/rust-lang/crates.io-index 8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682 -
 money-dep jobserver 0.1.35 registry+https://github.com/rust-lang/crates.io-index 1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3 -
 money-dep js-sys 0.3.105 registry+https://github.com/rust-lang/crates.io-index ce57d20d1ea864ce2ac172ab472d409214f4fd359f0b2a2775abdf522e2af99e default,std,unsafe-eval
-money-dep libc 0.2.189 registry+https://github.com/rust-lang/crates.io-index 3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2 default,std
+money-dep libc 0.2.191 registry+https://github.com/rust-lang/crates.io-index 65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a default,std
 money-dep libm 0.2.16 registry+https://github.com/rust-lang/crates.io-index b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981 arch,default
 money-dep memchr 2.8.3 registry+https://github.com/rust-lang/crates.io-index cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98 alloc,default,std
 money-dep minicov 0.3.8 registry+https://github.com/rust-lang/crates.io-index 4869b6a491569605d66d3952bcdf03df789e5b536e5f0cf7758a7f08a55ae24d alloc,default
@@ -89,7 +89,7 @@ money-dep syn 2.0.119 registry+https://github.com/rust-lang/crates.io-index 8728
 money-dep syn 3.0.6 registry+https://github.com/rust-lang/crates.io-index 8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee clone-impls,default,derive,extra-traits,fold,full,parsing,printing,proc-macro,visit,visit-mut
 money-dep thiserror 2.0.20 registry+https://github.com/rust-lang/crates.io-index ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f default,std
 money-dep thiserror-impl 2.0.20 registry+https://github.com/rust-lang/crates.io-index bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af -
-money-dep tokio 1.53.3 registry+https://github.com/rust-lang/crates.io-index ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e bytes,default,fs,io-std,io-util,libc,macros,mio,net,process,rt,rt-multi-thread,signal,signal-hook-registry,socket2,sync,test-util,time,tokio-macros,windows-sys
+money-dep tokio 1.54.1 registry+https://github.com/rust-lang/crates.io-index b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3 bytes,default,fs,io-std,io-util,libc,macros,mio,net,process,rt,rt-multi-thread,signal,signal-hook-registry,socket2,sync,test-util,time,tokio-macros,windows-sys
 money-dep tokio-macros 2.7.2 registry+https://github.com/rust-lang/crates.io-index 78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e -
 money-dep typenum 1.20.1 registry+https://github.com/rust-lang/crates.io-index b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20 const-generics
 money-dep unicode-ident 1.0.26 registry+https://github.com/rust-lang/crates.io-index d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954 -
