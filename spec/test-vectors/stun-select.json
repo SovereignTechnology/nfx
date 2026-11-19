@@ -1,5 +1,5 @@
 {
-  "description": "NFX-10 §1 STUN server selection. 'own' are the client's own servers; 'named' are [key, address] pairs, in the order heard, from live beacons' stun endpoints (the beacon's signer) and live announcements (the operator). 'selected' is what the client uses, in order: its own first, each once; then the named addresses that are global unicast in canonical form and not its own, ranked by the number of distinct keys naming each (most first, ties in the order first named); an address named by one key only when the client has none of its own and no named address has two or more keys; at most 'max' in all. 'global_unicast' lists addresses a client may and may not take from Nostr. Global unicast here also excludes the documentation blocks (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32), which route nowhere; beacons that name them in a stun endpoint stay valid beacons (beacon-stun.json), and only this selection refuses them. No traffic is ever sent to an address of a vector.",
+  "description": "NFX-10 §1 STUN server selection. 'own' are the client's own servers; 'named' are [key, address] pairs, in the order heard, from live beacons' stun endpoints (the beacon's signer) and live announcements (the operator). 'selected' is what the client uses, in order: its own first, each once; then the named addresses that are global unicast in canonical form and not its own, ranked by the number of distinct keys naming each (most first, ties in the order first named); an address named by one key only when the client has none of its own and no named address has two or more keys; at most 'max' in all. 'global_unicast' lists addresses a client may and may not take from Nostr. Global unicast here also excludes the documentation blocks (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32, 3fff::/20), which route nowhere; beacons that name them in a stun endpoint stay valid beacons (beacon-stun.json), and only this selection refuses them. No traffic is ever sent to an address of a vector.",
   "max": 4,
   "cases": [
     {
@@ -312,7 +312,7 @@
     },
     {
       "name": "documentation-refused",
-      "reason": "documentation addresses (RFC 5737, RFC 3849) route nowhere: never taken from Nostr, however many keys name them, and a lone key's routable server is taken instead",
+      "reason": "documentation addresses (RFC 5737, RFC 3849, RFC 9637) route nowhere: never taken from Nostr, however many keys name them, and a lone key's routable server is taken instead",
       "own": [],
       "named": [
         [
@@ -354,6 +354,22 @@
         [
           "k2",
           "[2001:db8:ffff::1]:3478"
+        ],
+        [
+          "k1",
+          "[3fff::1]:3478"
+        ],
+        [
+          "k2",
+          "[3fff::1]:3478"
+        ],
+        [
+          "k1",
+          "[3fff:fff:ffff::1]:3478"
+        ],
+        [
+          "k2",
+          "[3fff:fff:ffff::1]:3478"
         ],
         [
           "k3",
@@ -568,6 +584,22 @@
         [
           "k2",
           "[2001:db8:ffff::1]:3478"
+        ],
+        [
+          "k1",
+          "[3fff::1]:3478"
+        ],
+        [
+          "k2",
+          "[3fff::1]:3478"
+        ],
+        [
+          "k1",
+          "[3fff:fff:ffff::1]:3478"
+        ],
+        [
+          "k2",
+          "[3fff:fff:ffff::1]:3478"
         ]
       ],
       "selected": []
@@ -615,8 +647,7 @@
       "[2606:4700::1111]:3478",
       "[2001:db7:ffff::1]:3478",
       "[2001:db9::1]:3478",
-      "[2a01:4f8::1]:3478",
-      "[3fff:ffff::1]:3478"
+      "[2a01:4f8::1]:3478"
     ],
     "no": [
       "10.0.0.1:3478",
@@ -644,6 +675,8 @@
       "203.0.113.10:3478",
       "[2001:db8::1]:3478",
       "[2001:db8:ffff::1]:3478",
+      "[3fff::1]:3478",
+      "[3fff:fff:ffff::1]:3478",
       "[4000::1]:3478",
       "240.0.0.1:3478",
       "[::]:3478"

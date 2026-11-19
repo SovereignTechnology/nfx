@@ -80,10 +80,10 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   127/8, 169.254/16, 172.16/12, 192.0.0/24, 192.168/16, 198.18/15, 224/4 and 240/4 (the
   broadcast address included), nor in the documentation blocks 192.0.2.0/24,
   198.51.100.0/24 and 203.0.113.0/24 (RFC 5737); an IPv6 address in 2000::/3 and not in the
-  documentation block 2001:db8::/32 (RFC 3849). The first point a client at its own network;
-  the documentation blocks route nowhere. A beacon whose `stun` endpoint names a
-  documentation address is still a valid beacon (the endpoint's rule above is its form, not
-  its reach); only the selection below refuses the address.
+  documentation blocks 2001:db8::/32 (RFC 3849) and 3fff::/20 (RFC 9637). The first point a
+  client at its own network; the documentation blocks route nowhere. A beacon whose `stun`
+  endpoint names a documentation address is still a valid beacon (the endpoint's rule above
+  is its form, not its reach); only the selection below refuses the address.
 - **Using STUN servers named over Nostr.** A client, a page or a native peer, SHOULD use
   the STUN servers Nostr names, beside its own: those in the `stun` endpoints of the live
   beacons of the video it plays or serves, each named by the beacon's signer, and those of
@@ -728,7 +728,7 @@ with full ICE, and a NAT test.
   Nostr, by beacons and announcements, by one set of rules: their own first, global unicast
   only, ranked by distinct keys, a lone key only when nothing better exists, at most 4 in
   all; a native client offers a mapping from such a server only if it is global unicast.
-  "Global unicast" is defined, the documentation blocks (RFC 5737, RFC 3849) refused with the
-  rest. The privacy note now covers announcements. (Was: beacon-named servers only, "at
-  most a few", most-named first, documentation addresses allowed.) New vectors
-  `stun-announcement.json` and `stun-select.json`.
+  "Global unicast" is defined, the documentation blocks (RFC 5737, RFC 3849, RFC 9637)
+  refused with the rest. The privacy note now covers announcements. (Was: beacon-named
+  servers only, "at most a few", most-named first, documentation addresses allowed.) New
+  vectors `stun-announcement.json` and `stun-select.json`.

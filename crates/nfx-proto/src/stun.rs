@@ -152,8 +152,9 @@ pub fn tags(
 /// (127/8), link-local (169.254/16), IETF protocol assignments (192.0.0/24), benchmarking
 /// (198.18/15), documentation (192.0.2/24, 198.51.100/24, 203.0.113/24, RFC 5737), multicast
 /// (224/4) and reserved (240/4, the broadcast address included); for IPv6, inside 2000::/3
-/// and outside documentation (2001:db8::/32, RFC 3849). An address named over Nostr that is
-/// not must never be contacted: it would point a client at its own network, or nowhere.
+/// and outside documentation (2001:db8::/32, RFC 3849; 3fff::/20, RFC 9637). An address
+/// named over Nostr that is not must never be contacted: it would point a client at its own
+/// network, or nowhere.
 #[must_use]
 pub fn is_global_unicast(ip: IpAddr) -> bool {
     match ip {
@@ -174,7 +175,9 @@ pub fn is_global_unicast(ip: IpAddr) -> bool {
         }
         IpAddr::V6(v6) => {
             let [s0, s1, ..] = v6.segments();
-            (s0 & 0xe000) == 0x2000 && !(s0 == 0x2001 && s1 == 0x0db8)
+            (s0 & 0xe000) == 0x2000
+                && !(s0 == 0x2001 && s1 == 0x0db8)
+                && !(s0 == 0x3fff && s1 < 0x1000)
         }
     }
 }
@@ -381,7 +384,6 @@ mod tests {
             "2606:4700::1111",
             "2001:db9::1",
             "2a01:4f8::1",
-            "3fff:ffff::1",
         ] {
             assert!(is_global_unicast(yes.parse().unwrap()), "{yes}");
         }
@@ -411,6 +413,8 @@ mod tests {
             "203.0.113.10",
             "2001:db8::1",
             "2001:db8:ffff::1",
+            "3fff::1",
+            "3fff:fff:ffff::1",
         ] {
             assert!(!is_global_unicast(no.parse().unwrap()), "{no}");
         }

@@ -58,9 +58,11 @@ def canonical_addr(text: str):
 
 def global_unicast(ip) -> bool:
     """NFX-10 §1: an address that points a client nowhere local, and that routes somewhere:
-    the documentation blocks (RFC 5737, RFC 3849) are refused too."""
+    the documentation blocks (RFC 5737, RFC 3849, RFC 9637) are refused too."""
     if ip.version == 6:
-        return (int(ip) >> 125) == 1 and (int(ip) >> 96) != 0x20010DB8  # 2000::/3, not 2001:db8::/32
+        return ((int(ip) >> 125) == 1                 # 2000::/3
+                and (int(ip) >> 96) != 0x20010DB8     # not 2001:db8::/32
+                and (int(ip) >> 108) != 0x3FFF0)      # not 3fff::/20
     a, b, c, _ = ip.packed
     return not (a == 0 or a == 10 or a == 127 or a >= 224
                 or (a == 100 and 64 <= b <= 127)
@@ -227,10 +229,16 @@ def stunad_vectors(keypair, nostr_event) -> dict:
         ("d-broadcast", "global unicast only", event(with_tag("d", "255.255.255.255:3478"))),
         ("d-ipv6-unique-local", "global unicast only (2000::/3)", event(with_tag("d", "[fd00::1]:3478"))),
         ("d-ipv6-link-local", "global unicast only (2000::/3)", event(with_tag("d", "[fe80::1]:3478"))),
-        ("d-documentation-ipv4", "a documentation address routes nowhere (RFC 5737)",
+        ("d-documentation-192-0-2", "a documentation address routes nowhere (RFC 5737)",
+         event(with_tag("d", "192.0.2.1:3478"))),
+        ("d-documentation-198-51-100", "a documentation address routes nowhere (RFC 5737)",
+         event(with_tag("d", "198.51.100.7:3478"))),
+        ("d-documentation-203-0-113", "a documentation address routes nowhere (RFC 5737)",
          event(with_tag("d", "203.0.113.10:3478"))),
-        ("d-documentation-ipv6", "a documentation address routes nowhere (RFC 3849)",
+        ("d-documentation-2001-db8", "a documentation address routes nowhere (RFC 3849)",
          event(with_tag("d", "[2001:db8::1]:3478"))),
+        ("d-documentation-3fff", "a documentation address routes nowhere (RFC 9637)",
+         event(with_tag("d", "[3fff::1]:3478"))),
         ("d-hostname", "an IP address, not a name", event(with_tag("d", "stun.example:3478"))),
         ("d-url", "an address, not a stun: URL", event(with_tag("d", "stun:1.1.1.1:3478"))),
         ("d-no-port", "ip:port", event(with_tag("d", "1.1.1.1"))),
@@ -270,7 +278,8 @@ def stunad_vectors(keypair, nostr_event) -> dict:
     own_a = "9.9.9.9:3478"
     six = [f"1.1.1.{i}:3478" for i in range(11, 17)]
     documentation = ["192.0.2.1:3478", "198.51.100.7:3478", "203.0.113.10:3478",
-                     "[2001:db8::1]:3478", "[2001:db8:ffff::1]:3478"]
+                     "[2001:db8::1]:3478", "[2001:db8:ffff::1]:3478", "[3fff::1]:3478",
+                     "[3fff:fff:ffff::1]:3478"]
     refused = ["10.0.0.1:3478", "127.0.0.1:3478", "192.168.1.1:3478", "100.64.0.1:3478",
                "169.254.1.1:3478", "172.16.0.1:3478", "192.0.0.1:3478", "198.18.0.1:3478",
                "224.0.0.1:3478", "255.255.255.255:3478", "0.0.0.0:3478", "[::1]:3478",
@@ -302,7 +311,7 @@ def stunad_vectors(keypair, nostr_event) -> dict:
          [["k1", x], ["k2", x], ["k3", y], ["k4", y]], [x, y]),
         ("ipv6", "a global unicast IPv6 server", [],
          [["k1", "[2606:4700::1111]:3478"], ["k2", "[2606:4700::1111]:3478"]], ["[2606:4700::1111]:3478"]),
-        ("documentation-refused", "documentation addresses (RFC 5737, RFC 3849) route nowhere: never "
+        ("documentation-refused", "documentation addresses (RFC 5737, RFC 3849, RFC 9637) route nowhere: never "
          "taken from Nostr, however many keys name them, and a lone key's routable server is "
          "taken instead", [],
          [[k, a] for a in documentation for k in ("k1", "k2")] + [["k3", x]], [x]),
@@ -324,7 +333,7 @@ def stunad_vectors(keypair, nostr_event) -> dict:
            "198.17.255.255:3478", "198.20.0.0:3478", "198.51.99.255:3478", "198.51.101.0:3478",
            "203.0.112.255:3478", "203.0.114.0:3478", "223.255.255.255:3478",
            "[2606:4700::1111]:3478", "[2001:db7:ffff::1]:3478", "[2001:db9::1]:3478",
-           "[2a01:4f8::1]:3478", "[3fff:ffff::1]:3478"]
+           "[2a01:4f8::1]:3478"]
     no = refused + ["[4000::1]:3478", "240.0.0.1:3478", "[::]:3478"]
     for a in yes:
         assert usable(a), a
@@ -359,7 +368,7 @@ def stunad_vectors(keypair, nostr_event) -> dict:
                            "address has two or more keys; at most 'max' in all. 'global_unicast' lists "
                            "addresses a client may and may not take from Nostr. Global unicast here also "
                            "excludes the documentation blocks (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, "
-                           "2001:db8::/32), which route nowhere; beacons that name them in a stun endpoint "
+                           "2001:db8::/32, 3fff::/20), which route nowhere; beacons that name them in a stun endpoint "
                            "stay valid beacons (beacon-stun.json), and only this selection refuses them. "
                            "No traffic is ever sent to an address of a vector.",
             "max": MAX_SERVERS,

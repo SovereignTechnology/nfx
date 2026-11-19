@@ -539,7 +539,59 @@
       }
     },
     {
-      "name": "d-documentation-ipv4",
+      "name": "d-documentation-192-0-2",
+      "reason": "a documentation address routes nowhere (RFC 5737)",
+      "event": {
+        "id": "2bff12cf032b9e25403b35fbe6c4a519b58b3e5176bb0eb153b8b43ac4ddfe97",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "192.0.2.1:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "0a73b43efe95acba5d7162eb7782d85541358b9428929fe429f601a82180b4a7975649b4f5e2b8f2d9cde8047779f27e9d50eb9cdf72167f7675b53e97742973"
+      }
+    },
+    {
+      "name": "d-documentation-198-51-100",
+      "reason": "a documentation address routes nowhere (RFC 5737)",
+      "event": {
+        "id": "d2e7065ac60795bc03ea362a577e47bd3672ea8d3a9cb8c94208161ea6744856",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "198.51.100.7:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "6c28afa5a0b51adffee5165d767a23fc905a1a06af67e36428d040489748008ab98937b7731f001a6a6dbd1a23eea9381cac17fdd31897fe4d9893a277d632fe"
+      }
+    },
+    {
+      "name": "d-documentation-203-0-113",
       "reason": "a documentation address routes nowhere (RFC 5737)",
       "event": {
         "id": "ad994e9c19cadf27af5d9f0d3f883ebc9665ca128aa7877852de163333629ae0",
@@ -565,7 +617,7 @@
       }
     },
     {
-      "name": "d-documentation-ipv6",
+      "name": "d-documentation-2001-db8",
       "reason": "a documentation address routes nowhere (RFC 3849)",
       "event": {
         "id": "5ede7898b80d271bc4e46e6ce3ad285448ce5c4d179412e98444796e6d464bae",
@@ -588,6 +640,32 @@
         ],
         "content": "",
         "sig": "68e63e63885a2060645a9db32e3422e7d9a0978a70cb79fa4d295331ef0eb8159037cf3b529a82088e566a202294790c015fe9294a02155233a7e36cf37889e7"
+      }
+    },
+    {
+      "name": "d-documentation-3fff",
+      "reason": "a documentation address routes nowhere (RFC 9637)",
+      "event": {
+        "id": "8196a993d3af9ec724b2d698cdf758531646073ccd0c7d6170c69f30f6acd19e",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "[3fff::1]:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "9f66a53c4e1e4b8f8c53a04bf3afdb4f70281c88339780cf848e717ac6be2f253294ef88926e391685fcf0242ec1c2a3ae16f8fe329c13eaa91c6c28b94e3de7"
       }
     },
     {

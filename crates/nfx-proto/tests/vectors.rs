@@ -1104,7 +1104,7 @@ fn stun_announcements_read_strictly() {
         );
         invalid += 1;
     }
-    assert_eq!((valid, invalid), (5, 35));
+    assert_eq!((valid, invalid), (5, 38));
 }
 
 /// NFX-10 §1: the selection rules give exactly the vector's servers, and the addresses a

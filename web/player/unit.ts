@@ -138,6 +138,8 @@ const stuns: [string, string | null][] = [
   ['192.0.2.1:3478', null],
   ['[2001:db8::1]:3478', null], // documentation (RFC 3849)
   ['[2001:db9::1]:3478', 'stun:[2001:db9::1]:3478'], // just past it
+  ['[3fff::1]:3478', null], // documentation (RFC 9637)
+  ['[3fff:fff:ffff::1]:3478', null],
   ['127.0.0.1:3478', null], // loopback
   ['10.1.2.3:3478', null], // private
   ['172.20.0.1:3478', null],
@@ -1128,7 +1130,7 @@ throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(ve
     );
   }
   for (const c of v.invalid) throws(`announcement ${c.name}`, () => verifyStunAnnouncement(JSON.stringify(c.event), v.now));
-  eq('announcement vector counts', [v.valid.length, v.invalid.length], [5, 35]);
+  eq('announcement vector counts', [v.valid.length, v.invalid.length], [5, 38]);
   // One into the book, as the page takes it.
   const book = new EndpointBook();
   const a = JSON.parse(verifyStunAnnouncement(JSON.stringify(v.valid[0]?.event), v.now)) as VerifiedStunAnnouncement;

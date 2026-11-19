@@ -90,8 +90,9 @@ function globalV4(o: number[]): boolean {
 /**
  * A STUN address named over Nostr (NFX-10 §1: canonical `ip:port`, port not 0) as an
  * `iceServers` URL, or null: global unicast only (IPv4 above; IPv6 in 2000::/3 but not the
- * documentation block 2001:db8::/32, RFC 3849), so a beacon or announcement from anywhere
- * cannot point viewers at their own network, or at an address that routes nowhere.
+ * documentation blocks 2001:db8::/32 and 3fff::/20, RFC 3849 and RFC 9637), so a beacon or
+ * announcement from anywhere cannot point viewers at their own network, or at an address
+ * that routes nowhere.
  */
 export function beaconStun(addr: string): string | null {
   const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/.exec(addr);
@@ -119,8 +120,10 @@ export function beaconStun(addr: string): string | null {
     const groups = host.startsWith('::') ? [] : host.split(':');
     const first = host.startsWith('::') ? 0 : parseInt(groups[0] ?? '', 16);
     if (!(Number.isInteger(first) && (first & 0xe000) === 0x2000)) return null;
-    // 2001:db8::/32; the canonical form writes its second group as `db8` (none is `::` here).
-    if (first === 0x2001 && groups[1] === 'db8') return null;
+    // The documentation blocks 2001:db8::/32 (RFC 3849) and 3fff::/20 (RFC 9637). The
+    // canonical form writes a second group of 0x0db8 as `db8`, and an empty one is zeros.
+    const second = groups[1] === undefined || groups[1] === '' ? 0 : parseInt(groups[1], 16);
+    if ((first === 0x2001 && second === 0x0db8) || (first === 0x3fff && second < 0x1000)) return null;
     return `stun:[${host}]:${port}`;
   }
   return null;
