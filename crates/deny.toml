@@ -37,6 +37,14 @@ ignore = [
     # iroh-blobs, iroh > netwatch > wmi (Windows only) and tokio-rustls-acme. Remove when those drop it; revisit
     # at every iroh bump.
     { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 via iroh-blobs, iroh > netwatch > wmi (Windows) and tokio-rustls-acme; unmaintained notice only, no patched release; revisit by 2026-12-31" },
+    # Unsound, not a vulnerability (2026-11-19): heapless 0.8.0's IndexMap::insert can break its
+    # invariant on a map of u16::MAX entries whose last key hashes to u16::MAX. It comes in only via
+    # nostr 0.45 > faster-hex 0.10.1, which uses heapless only for `String` and `Vec` in encode.rs
+    # (read from the .crate whose sha256 equals the lock's checksum, 04839bdf…), never IndexMap, so
+    # the unsound path is not reachable. Fixed only in heapless >= 0.9.4, which no faster-hex release
+    # uses (0.10.1 and 1.0.0 both require ^0.8). heapless 0.7.17 (via postcard) is not affected.
+    # Remove at the first faster-hex (or nostr) release off heapless 0.8. Revisit by 2026-12-31.
+    { id = "RUSTSEC-2026-0582", reason = "heapless 0.8.0 IndexMap::insert unsound, via nostr > faster-hex 0.10.1, which uses only heapless String/Vec (never IndexMap); no faster-hex release on heapless >= 0.9.4; revisit by 2026-12-31" },
 ]
 
 [licenses]
