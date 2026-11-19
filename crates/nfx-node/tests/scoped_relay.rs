@@ -693,7 +693,7 @@ async fn a_relay_with_stun_announcements_admits_rate_limits_and_expires_them() {
     };
     assert_eq!(
         stored(c.clone()).await,
-        [ad.id.clone()],
+        vec![ad.id.clone()],
         "stored, as addressable"
     );
 
