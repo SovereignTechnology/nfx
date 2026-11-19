@@ -7,9 +7,11 @@
  *   stream swarm through `signalingClientFactory` (the hook web/player/engine adds).
  * - `RoomClient`, one per stream swarm: joins the swarm's room, announces presence every
  *   30 s, and negotiates peer connections: the lower session key offers (NFX-10 §6.6), each
- *   SDP complete (ICE gathering finished) and NIP-44 encrypted to its receiver. It claims a
- *   peer from the engine before negotiating and reports each peer connected or failed, so
- *   the engine keeps its peer de-duplication and limits.
+ *   SDP complete (ICE gathering finished) and NIP-44 encrypted to its receiver. A peer's
+ *   SDP reaches `setRemoteDescription` through the session's `remoteCandidates` filter
+ *   (./remote-sdp.ts; `all`, the default, passes it as it is). It claims a peer from the
+ *   engine before negotiating and reports each peer connected or failed, so the engine
+ *   keeps its peer de-duplication and limits.
  *
  * Every event is built, signed, checked and decrypted by nfx-proto in WASM (MeshSession,
  * MeshRoom), the same code native peers use. Every event is signed when it is sent: stock
@@ -22,6 +24,8 @@ import { PeerConnectError } from 'p2p-media-loader-core';
 
 import { MeshRoom, MeshSession } from '../out/wasm/nfx_wasm.js';
 
+import type { RemoteCandidates } from './api';
+import { filterRemoteSdpCounted } from './remote-sdp';
 import {
   LIMITS,
   OfferBackoff,
@@ -347,6 +351,8 @@ export class NostrSignaler {
   constructor(
     readonly relays: readonly string[],
     readonly log: (m: string) => void,
+    /** Which candidates of a peer's SDP reach `setRemoteDescription` (./remote-sdp.ts). */
+    readonly remoteCandidates: RemoteCandidates = 'all',
   ) {
     this.session = newSession();
     this.pool = new RelayPool(relays, log);
@@ -630,7 +636,7 @@ export class RoomClient {
       this.#s.log(`mesh: nostr offer to ${peer.slice(0, 12)}…`);
       const sdp = await answer;
       this.#check(n, peer);
-      await pc.setRemoteDescription({ type: 'answer', sdp });
+      await pc.setRemoteDescription({ type: 'answer', sdp: this.#remote(peer, sdp) });
       const open = await this.#connected(pc, channel, n.abort.signal);
       this.#check(n, peer);
       this.#negotiating.delete(peer);
@@ -649,7 +655,7 @@ export class RoomClient {
     const channelP = this.#connected(pc, null, n.abort.signal);
     channelP.catch(() => {}); // awaited below
     try {
-      await pc.setRemoteDescription({ type: 'offer', sdp: offerSdp });
+      await pc.setRemoteDescription({ type: 'offer', sdp: this.#remote(peer, offerSdp) });
       await pc.setLocalDescription(await pc.createAnswer());
       await this.#gathered(pc, n.abort.signal);
       this.#check(n, peer);
@@ -664,6 +670,20 @@ export class RoomClient {
     } catch (e) {
       this.#failed(n, peer, e);
     }
+  }
+
+  /**
+   * A peer's SDP as this session's ICE agent may take it (`remoteCandidates`). Under
+   * `global`, a line is logged when a candidate was dropped or none is left (counts only,
+   * never an address).
+   */
+  #remote(peer: string, sdp: string): string {
+    if (this.#s.remoteCandidates === 'all') return sdp;
+    const f = filterRemoteSdpCounted(sdp, this.#s.remoteCandidates);
+    if (f.dropped > 0 || f.kept === 0) {
+      this.#s.log(`mesh: nostr SDP from ${peer.slice(0, 12)}…: ${f.kept} candidate(s) kept, ${f.dropped} dropped (remoteCandidates: global)`);
+    }
+    return f.sdp;
   }
 
   /** Throws unless `n` is still this peer's live negotiation. */
