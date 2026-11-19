@@ -373,12 +373,15 @@ NFX-05 byte formats.
 Mesh peers MAY find each other, and exchange their WebRTC offers and answers, through
 ordinary Nostr relays instead of trackers. Nothing of NFX's own is in the path: no
 tracker, no TURN, no relay plugin. Any relay that carries ephemeral events (NIP-01) will
-do. A scoped relay (NFX-04 §1) admits only NFX's catalog kinds and refuses kind 25050,
-so a page names general relays for signaling. Once two peers hold each other's complete
-SDP, ICE runs its connectivity checks from both ends, which is the hole punch; STUN (§1)
-gives each its public mapping. (A native peer behind a DNAT, whose public address STUN cannot
-give it, may offer that address as a host candidate and take what arrives as sent to it, as a
-bridge does; nothing on the wire changes.)
+do. A scoped relay (NFX-04 §1) refuses kind 25050 unless it lists 25050 in its NIP-11
+`nfx.kinds` (NFX-04 §§1, 3, as amended 2026-11-18), so a page names general relays for
+signaling, and may name scoped relays that list it beside them. Such a relay checks what a
+reader checks without a session (§6.5 steps 1–3 and 5, against the event's own `P`) and
+carries the events as ephemerals; it cannot tell which network or video a room is. Once two
+peers hold each other's complete SDP, ICE runs its connectivity checks from both ends, which
+is the hole punch; STUN (§1) gives each its public mapping. (A native peer behind a DNAT,
+whose public address STUN cannot give it, may offer that address as a host candidate and
+take what arrives as sent to it, as a bridge does; nothing on the wire changes.)
 
 The wire is **signaling-compatible with the NIP-DC draft §§2, 4–6** (nostr4j's
 `NIP-DC.md`, 2026-11-02, commit `3a9def15`): its kind, tags, room proof, presence, offer
@@ -666,3 +669,7 @@ with full ICE, and a NAT test.
   §2: a bridge that holds only some renditions lists them and joins no other swarm.
 - Draft 2026-11-16 (issue #71, editorial): §6 notes that a native peer behind a DNAT may
   offer its public address as a host candidate. Nothing on the wire changes.
+- Draft 2026-11-18 (issue #96): §6 says a scoped relay may carry signaling, after NFX-04's
+  in-place amendment: one that lists 25050 in its NIP-11 `nfx.kinds` admits nfx-mesh/1
+  events that pass the checks a reader makes without a session. Nothing on the wire
+  changes.

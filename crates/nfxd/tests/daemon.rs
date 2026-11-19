@@ -184,6 +184,18 @@ async fn a_bad_https_url_is_refused_at_start_not_silently_every_minute() {
     .expect("refused");
     assert!(err.to_string().contains("--allow-creator"), "{err}");
 
+    // Mesh signaling is the embedded relay's: without one it would carry nothing.
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("relay-mesh-no-relay"),
+        embed_relay_mesh: true,
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(err.to_string().contains("--embed-relay-mesh"), "{err}");
+
     // Gossip peers: a relay-only node does not gossip, and a peer reachable only through a
     // relay this network does not run would be dropped at every join.
     let peer = |relay: &str| {
@@ -2063,7 +2075,8 @@ async fn next_signal(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_seeder_with_the_mesh_is_present_in_its_room_and_leaves_it_on_shutdown() {
     use nostr_sdk::prelude as ns;
-    // A general relay for the signaling: the embedded scoped relay refuses kind 25050.
+    // A general relay for the signaling: the embedded scoped relay refuses kind 25050 without
+    // --embed-relay-mesh.
     let general = ns::LocalRelay::builder().build();
     general.run().await.unwrap();
     let general_url = general.url().await.to_string();

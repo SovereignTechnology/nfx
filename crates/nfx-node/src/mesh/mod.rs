@@ -136,7 +136,8 @@ const REANNOUNCE_EVERY: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeshConfig {
     /// Nostr relays for signaling, 1 to [`MAX_RELAYS`]: `wss://` (or `ws://`) URLs of general
-    /// relays (NFX-04's scoped relays refuse kind 25050).
+    /// relays, or of scoped relays that admit kind 25050 (NFX-04 §1 as amended 2026-11-18;
+    /// most refuse it).
     pub relays: Vec<String>,
     /// The UDP address to bind. A wildcard is allowed: the host candidate is then the address
     /// the route out leaves from.

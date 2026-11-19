@@ -148,9 +148,9 @@ pub struct Config {
     pub stun_public: Option<SocketAddr>,
     /// Run the mesh endpoint (NFX-10 §6; `--mesh-relay`, 1 to 8): a full-ICE WebRTC peer
     /// that meets browsers in the rooms of the renditions this node holds, signaling through
-    /// these general Nostr relays (`wss://`, or `ws://`; NFX-04's scoped relays refuse kind
-    /// 25050) with no tracker and no TURN, and serves them verified segments, behind a NAT
-    /// too. Empty (the default): off. Joining a room tells anyone who announces presence
+    /// these Nostr relays (`wss://`, or `ws://`; general relays, or scoped relays that admit
+    /// kind 25050, NFX-04 §1) with no tracker and no TURN, and serves them verified segments,
+    /// behind a NAT too. Empty (the default): off. Joining a room tells anyone who announces presence
     /// there this node's candidate addresses, its public mappings included.
     pub mesh_relays: Vec<String>,
     /// The mesh endpoint's UDP address (`--mesh-bind`). Default: an ephemeral port on every
@@ -177,6 +177,10 @@ pub struct Config {
     /// lowercase hex): their manifests and deletions, and beacons for their videos. It
     /// limits which videos the relay carries, not who may seed them.
     pub allow_creators: Vec<String>,
+    /// The embedded relay also carries kind-25050 mesh signaling (NFX-04 §1 as amended
+    /// 2026-11-18, NFX-10 §6): nfx-mesh/1 only, ephemeral, room proof checked, rate-limited
+    /// (`nfx_node::relay::ScopedRelay::with_options`). Off by default. Needs `embed_relay`.
+    pub embed_relay_mesh: bool,
     /// Join each video's gossip swarm (NFX-06 §4). Off by default: joining lets any swarm
     /// member point this node's endpoint at hosts of its choosing, because iroh-gossip
     /// feeds members' advertised addresses to it unfiltered (independent audit M1, M3).
@@ -748,6 +752,11 @@ impl Daemon {
         if !cfg.allow_creators.is_empty() && cfg.embed_relay.is_none() {
             return Err(Error::Config("--allow-creator needs --embed-relay".into()));
         }
+        if cfg.embed_relay_mesh && cfg.embed_relay.is_none() {
+            return Err(Error::Config(
+                "--embed-relay-mesh needs --embed-relay".into(),
+            ));
+        }
         if cfg.relay_only && (cfg.gossip || !cfg.gossip_peers.is_empty()) {
             return Err(Error::Config(
                 "--gossip, --gossip-peer: a relay-only node does not gossip".into(),
@@ -914,12 +923,11 @@ impl Daemon {
                 if local.ip().is_unspecified() {
                     local.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
                 }
-                let relay = Arc::new(if cfg.allow_creators.is_empty() {
-                    ScopedRelay::new(&namespaces)
-                } else {
-                    ScopedRelay::with_creators(&namespaces, &cfg.allow_creators)
-                        .map_err(|e| Error::Config(format!("--allow-creator: {e}")))?
-                });
+                let creators = (!cfg.allow_creators.is_empty()).then_some(&cfg.allow_creators[..]);
+                let relay = Arc::new(
+                    ScopedRelay::with_options(&namespaces, creators, cfg.embed_relay_mesh)
+                        .map_err(|e| Error::Config(format!("--allow-creator: {e}")))?,
+                );
                 tasks.push(tokio::spawn(relay.clone().serve(listener)));
                 let url = format!("ws://{local}");
                 // The host speaks to its own relay through the same door (NFX-04 §7).

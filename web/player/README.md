@@ -94,9 +94,10 @@ candidates, wired into the engine in one place (`src/mesh.ts` `engineSignaling`)
   Every event is built and checked by nfx-proto in WASM, the same code native peers run.
   Relays see room and session keys, who signals whom and when, and the viewer's IP address,
   but not the SDP; peers see each other's addresses once they connect. A scoped relay
-  (NFX-04) refuses kind 25050: give general relays. `relayUrl()`, `checkSignaling()`,
-  `MAX_RELAYS`, `NOSTR_SIGNAL_KIND` and `NOSTR_SIGNAL_PROTOCOL` let a page check its
-  settings first.
+  (NFX-04) refuses kind 25050 unless its NIP-11 `nfx.kinds` lists it (NFX-04 §1 as amended
+  2026-11-18): give general relays, and such scoped relays beside them. `relayUrl()`,
+  `checkSignaling()`, `MAX_RELAYS`, `NOSTR_SIGNAL_KIND` and `NOSTR_SIGNAL_PROTOCOL` let a
+  page check its settings first.
 - `{ kind: 'trackers', urls }` (1 to 4, `wss://`): WebTorrent trackers, as before.
 
 Trackers and origins named by beacons are hints:
