@@ -153,11 +153,83 @@ export interface MeshStats {
   /** Its relays, for the `nostr` kind. */
   relays: string[];
   swarms: { rendition: string | null; swarm: string }[];
+  /** Segment bytes as they arrived, by where from: the origin over HTTP, or peers. */
   bytes: { http: number; p2p: number };
+  /** Segment bytes sent to peers. */
   uploaded: number;
+  /** Every peer connection made since the session started (never goes down: `connected` does). */
   peers: number;
   /** `<http|p2p>:<url>` of each segment a validator refused. */
   rejected: string[];
+  /** Peer connections open now, across the session's swarms. */
+  connected: number;
+  /** Segments loaded whole, by where from. */
+  segments: { http: number; p2p: number };
+  /**
+   * Each peer this session has exchanged a connection or bytes with (`MeshPeer`): open
+   * connections first, then most bytes. At most 64; a peer that closed is the first to go.
+   */
+  peerList: MeshPeer[];
+  /** The Nostr kind's signaling counters, and how many of its relay sockets are open; null for trackers. */
+  signal: { open: number; sent: number; received: number; offers: number; answers: number } | null;
+}
+
+/**
+ * One mesh peer, as the engine knows it. Its id and `via` come from the network (a peer or
+ * a tracker chose them): show them as text only.
+ */
+export interface MeshPeer {
+  /**
+   * The engine's id for it: for the Nostr kind, the peer's session key (64 hex, fresh each
+   * session, never a user's key); for trackers, its WebTorrent peer id (nfxd's bridge uses
+   * the prefix `-NX0100-`, which anyone can copy). Non-printable characters become `?`; at
+   * most 64 characters.
+   */
+  id: string;
+  /** Where it was found: the tracker's URL, or `nostr:` and the relays. At most 256 characters. */
+  via: string;
+  /** Segment bytes received from it, as they arrived. */
+  down: number;
+  /** Segment bytes sent to it. */
+  up: number;
+  /** Segments it delivered whole. */
+  segments: number;
+  /** Whether a connection to it is open now. */
+  connected: boolean;
+  /** When it last connected, and when bytes last moved either way (ms since the epoch; 0: never). */
+  since: number;
+  last: number;
+}
+
+/**
+ * Where an open mesh connection goes, by the browser's own statistics of its selected ICE
+ * candidate pair (`Session.addresses()`).
+ *
+ * **These are other viewers' IP addresses.** A page shows them only when its user asks,
+ * and never logs, stores or sends them.
+ */
+export interface PeerAddress {
+  /** `MeshPeer.id`. */
+  id: string;
+  /**
+   * The remote candidate's address as the browser reports it: an IP address, an mDNS
+   * `.local` name (a browser on the same network hiding its LAN address), or `''` when the
+   * browser does not reveal it (some report none for a peer-reflexive candidate).
+   */
+  address: string;
+  port: number | null;
+  /** The remote and local candidate types: `host`, `srflx`, `prflx` or `relay`; `''` unknown. */
+  remoteType: string;
+  localType: string;
+  /** `udp` or `tcp`; `''` unknown. */
+  protocol: string;
+  /**
+   * `relayed` when either candidate is a TURN relay, `direct` when a pair is selected and
+   * neither is, `unknown` when none is selected yet.
+   */
+  path: 'direct' | 'relayed' | 'unknown';
+  /** The pair's current round-trip time in milliseconds, when the browser has measured it. */
+  rttMs: number | null;
 }
 
 /**
@@ -312,6 +384,14 @@ export interface Stats {
   level: number;
   playing: boolean;
   mesh: MeshStats | null;
+  /**
+   * Bytes of the files the player's own loader took from `origin` and verified: playlists
+   * and inits, and segments too when there is no mesh. With a mesh, segments come through
+   * it: those fetched over HTTP are `mesh.bytes.http`.
+   */
+  originBytes: number;
+  /** hls.js's bandwidth estimate, in bits per second (its default until it has measured). */
+  bandwidthEstimate: number;
 }
 
 /** One video playing in one element. */
@@ -324,6 +404,13 @@ export interface Session {
   /** Play `index` from now on, or -1 to let hls.js pick. */
   setLevel(index: number): void;
   stats(): Stats;
+  /**
+   * Where each open mesh connection goes (`PeerAddress`), read from the browser's
+   * `getStats()` of each peer connection when called, and only then. Empty without a mesh,
+   * or once destroyed. At most 64. These are other viewers' IP addresses: call it only when
+   * the user asks to see them.
+   */
+  addresses(): Promise<PeerAddress[]>;
   /**
    * Stop everything this session started: hls.js and its worker, the p2p loader, its
    * tracker or relay sockets and peer connections, and the element's media source.

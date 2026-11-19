@@ -29,6 +29,9 @@
  * renditions: beacons come from any key, and such a list would let one cut the levels.
  * `&renditions=<id>[,<id>…]` (test knob) passes a list, as given.
  *
+ * "Stats for nerds" (./nerd.ts, nfx #99) shows where the bytes come from: right-click the
+ * video, the button, or `n`. Peers' addresses only behind its "Show addresses" switch.
+ *
  * `window.__nfx` exposes state for automation.
  */
 import {
@@ -51,6 +54,7 @@ import {
   trackerUrl,
   watchEndpoints,
 } from './lib';
+import { type NerdPanel, nerdPanel } from './nerd';
 
 /** How long to wait for a seeder's beacon to name an origin (beacons republish at TTL/2). */
 const ORIGIN_WAIT_MS = 90_000;
@@ -78,6 +82,8 @@ interface State {
   playing: boolean;
   errors: string[];
   readonly mesh: MeshStats | null;
+  /** The stats panel (nfx #99). */
+  readonly nerd: NerdPanel;
 }
 
 let session: Session | null = null;
@@ -101,10 +107,21 @@ const st: State = {
   get mesh(): MeshStats | null {
     return session?.stats().mesh ?? null;
   },
+  get nerd(): NerdPanel {
+    return nerd;
+  },
 };
 (window as unknown as { __nfx: State }).__nfx = st;
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
+const nerd = nerdPanel({
+  stage: $<HTMLDivElement>('stage'),
+  video: $<HTMLVideoElement>('v'),
+  button: $<HTMLButtonElement>('nerd-toggle'),
+  stats: () => session?.stats() ?? null,
+  addresses: () => session?.addresses() ?? Promise.resolve([]),
+  title: () => st.resolved?.title ?? null,
+});
 const logEl = $<HTMLPreElement>('log');
 /** The last lines logged; what relays and peers make the page log is theirs to choose, so it is capped. */
 const LOG_LINES = 400;

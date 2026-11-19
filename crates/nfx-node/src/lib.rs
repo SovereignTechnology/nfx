@@ -24,6 +24,7 @@ mod rtc_serve;
 pub mod seed;
 pub mod store;
 pub mod tracker;
+pub mod transfers;
 pub mod video;
 
 pub use error::{NodeError, Result};
