@@ -25,7 +25,8 @@ export interface NerdSource {
   via: string;
   down: number;
   up: number;
-  segments: number;
+  /** Whole segments it delivered; null when nothing counts them (the origin without a mesh). */
+  segments: number | null;
   connected: boolean;
 }
 
@@ -131,7 +132,7 @@ export function nerdView(s: Stats, e: ElementSample, title: string | null): Nerd
       via: '',
       down: s.originBytes + (mesh?.bytes.http ?? 0),
       up: 0,
-      segments: mesh === null ? 0 : mesh.segments.http,
+      segments: mesh === null ? null : mesh.segments.http,
       connected: true,
     },
   ];
@@ -272,7 +273,7 @@ export function nerdPanel(opts: {
           el('td', '', src.via || '–'),
           el('td', '', formatBytes(src.down)),
           el('td', '', formatBytes(src.up)),
-          el('td', '', String(src.segments)),
+          el('td', '', src.segments === null ? '–' : String(src.segments)),
         );
         if (withAddr) {
           const a = src.kind === 'origin' ? undefined : byId.get(src.key);

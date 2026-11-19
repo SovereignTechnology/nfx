@@ -89,6 +89,8 @@ export const MAX_PEERS_LISTED = 64;
 /** At most this many peers are remembered; past it, the one longest idle (closed first) goes. */
 const MAX_PEERS_KEPT = 256;
 const MAX_ID = 64;
+/** A peer is keyed by its id as the engine has it (cut to this, to bound memory), never by its shown form. */
+const MAX_KEY = 256;
 const MAX_VIA = 256;
 const MAX_ADDRESS = 64;
 
@@ -111,6 +113,9 @@ export interface StatsConnection {
 }
 
 interface PeerEntry {
+  /** The engine's id, cut to `MAX_KEY`: what the map is keyed by. */
+  key: string;
+  /** What is shown: `key` made printable and cut to `MAX_ID`. */
   id: string;
   via: string;
   down: number;
@@ -134,12 +139,17 @@ export class PeerBook {
     this.#now = now;
   }
 
+  /** The engine's id as a map key: distinct ids stay distinct even when they print the same. */
+  static #key(rawId: unknown): string {
+    return (typeof rawId === 'string' ? rawId : '').slice(0, MAX_KEY);
+  }
+
   #entry(rawId: unknown): PeerEntry {
-    const id = printable(rawId, MAX_ID);
-    let e = this.#peers.get(id);
+    const key = PeerBook.#key(rawId);
+    let e = this.#peers.get(key);
     if (e === undefined) {
-      e = { id, via: '', down: 0, up: 0, segments: 0, since: 0, last: 0, connections: new Map() };
-      this.#peers.set(id, e);
+      e = { key, id: printable(key, MAX_ID), via: '', down: 0, up: 0, segments: 0, since: 0, last: 0, connections: new Map() };
+      this.#peers.set(key, e);
       if (this.#peers.size > MAX_PEERS_KEPT) this.#evict(e);
     }
     return e;
@@ -157,7 +167,7 @@ export class PeerBook {
         if ((!open && worstOpen) || (open === worstOpen && e.last < worst.last)) worst = e;
       }
     }
-    if (worst !== undefined) this.#peers.delete(worst.id);
+    if (worst !== undefined) this.#peers.delete(worst.key);
   }
 
   #open(e: PeerEntry): number {
@@ -175,7 +185,7 @@ export class PeerBook {
   }
 
   close(d: { peerId?: unknown; infoHash?: unknown }): void {
-    const e = this.#peers.get(printable(d.peerId, MAX_ID));
+    const e = this.#peers.get(PeerBook.#key(d.peerId));
     e?.connections.delete(String(d.infoHash));
   }
 
@@ -202,13 +212,26 @@ export class PeerBook {
     return n;
   }
 
-  /** `MeshStats.peerList`: open first, then most bytes; at most `MAX_PEERS_LISTED`. */
-  list(): MeshPeer[] {
+  /** The entries `list()` shows, in its order. */
+  #ranked(): { e: PeerEntry; open: boolean }[] {
     return [...this.#peers.values()]
       .map((e) => ({ e, open: this.#open(e) > 0 }))
       .sort((a, b) => Number(b.open) - Number(a.open) || b.e.down + b.e.up - (a.e.down + a.e.up))
-      .slice(0, MAX_PEERS_LISTED)
-      .map(({ e, open }) => ({ id: e.id, via: e.via, down: e.down, up: e.up, segments: e.segments, connected: open, since: e.since, last: e.last }));
+      .slice(0, MAX_PEERS_LISTED);
+  }
+
+  /** `MeshStats.peerList`: open first, then most bytes; at most `MAX_PEERS_LISTED`. */
+  list(): MeshPeer[] {
+    return this.#ranked().map(({ e, open }) => ({
+      id: e.id,
+      via: e.via,
+      down: e.down,
+      up: e.up,
+      segments: e.segments,
+      connected: open,
+      since: e.since,
+      last: e.last,
+    }));
   }
 
   /** Forget every connection (the session ended): counters stay, connections are dropped. */
@@ -218,15 +241,15 @@ export class PeerBook {
 
   /** `Session.addresses()`: each open peer's first connection, asked now. */
   async addresses(): Promise<PeerAddress[]> {
-    const open = this.list().filter((p) => p.connected);
+    const open = this.#ranked().filter((r) => r.open);
     const out = await Promise.all(
-      open.map(async (p) => {
-        const c = this.#peers.get(p.id)?.connections.values().next().value;
+      open.map(async ({ e }) => {
+        const c = e.connections.values().next().value;
         if (c === undefined) return null;
         try {
-          return { id: p.id, ...selectedPair(await c.getStats()) };
+          return { id: e.id, ...selectedPair(await c.getStats()) };
         } catch {
-          return { id: p.id, ...UNKNOWN_PAIR };
+          return { id: e.id, ...UNKNOWN_PAIR };
         }
       }),
     );

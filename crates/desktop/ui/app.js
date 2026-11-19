@@ -76,7 +76,7 @@ async function watch(a) {
 // Seeders by a short id; their addresses only behind "Show addresses", which is off each
 // time the panel opens, is never remembered, and asks the node (nerd_addresses) only while
 // it is on. Everything is written with textContent.
-const nerd = { timer: null, addresses: [], asking: false, last: null };
+const nerd = { timer: null, addresses: [], asking: false, last: null, stats: null };
 
 function fmtBytes(n) {
   if (!Number.isFinite(n) || n < 0) return '–';
@@ -113,22 +113,42 @@ function addressText(r) {
   return r.address;
 }
 
+/** Fetch the node's numbers for the video playing, then draw. A reply for another video is dropped. */
 async function nerdRender() {
-  const status = $('nerd-status');
   if (!playing) {
+    nerd.stats = null;
+    nerdDraw();
+    return;
+  }
+  const asked = playing;
+  const s = await invoke('nerd_stats', { a: asked.a, root: asked.root });
+  if (playing !== asked) return;
+  nerd.stats = { video: asked, s };
+  nerdDraw();
+}
+
+/**
+ * Draw from what is held, at once: the switch turning off removes every address here, before
+ * any reply. `nerd.last` (what Copy takes) holds addresses only while the switch is on.
+ */
+function nerdDraw() {
+  const status = $('nerd-status');
+  const held = nerd.stats;
+  if (!held || held.video !== playing) {
     $('nerd-rows').replaceChildren();
     $('nerd-sources').replaceChildren();
-    status.textContent = 'Nothing playing yet.';
+    status.textContent = playing ? '' : 'Nothing playing yet.';
     nerd.last = null;
     return;
   }
-  const s = await invoke('nerd_stats', { a: playing.a, root: playing.root });
+  const v = held.video;
+  const s = held.s;
   const e = elementSample($('v'));
   const level = hls && hls.levels && hls.currentLevel >= 0 ? hls.levels[hls.currentLevel] : null;
   const total = s.peers.reduce((n, p) => n + p.bytes, 0);
   const rows = [
-    ['Video', playing.title],
-    ['Root', `${playing.root.slice(0, 16)}…`],
+    ['Video', v.title],
+    ['Root', `${v.root.slice(0, 16)}…`],
     ['On this node', s.state],
     ['Engine', `hls.js ${window.Hls ? Hls.version : '?'} over nfx:// (this node's verified origin)`],
     ['Resolution', e.width > 0 ? `${e.width}x${e.height}` : '–'],
@@ -140,7 +160,7 @@ async function nerdRender() {
   ];
   if (s.mesh) rows.push(['Serving browsers', `${s.mesh.open} open, ${s.mesh.opened} since start, ${s.mesh.served} segment requests`]);
   const withAddr = $('nerd-addresses').checked;
-  const byPeer = new Map(nerd.addresses.map((r) => [r.peer, r]));
+  const byPeer = new Map(withAddr ? nerd.addresses.map((r) => [r.peer, r]) : []);
   const head = document.createElement('tr');
   for (const h of ['Source', 'ID', 'Down', 'Blobs', ...(withAddr ? ['Address', 'Path'] : [])]) head.append(cell('th', h));
   const srcRows = s.peers.map((p) => {
@@ -154,9 +174,9 @@ async function nerdRender() {
     }
     return tr;
   });
-  $('nerd-rows').replaceChildren(...rows.map(([k, v]) => {
+  $('nerd-rows').replaceChildren(...rows.map(([k, val]) => {
     const tr = document.createElement('tr');
-    tr.append(cell('th', k), cell('td', v));
+    tr.append(cell('th', k), cell('td', val));
     return tr;
   }));
   $('nerd-sources').replaceChildren(head, ...srcRows);
@@ -165,19 +185,24 @@ async function nerdRender() {
     stats: Object.fromEntries(rows),
     sources: s.peers.map((p) => {
       const src = { kind: 'iroh', id: p.peer.slice(0, 8), down: p.bytes, blobs: p.blobs, open: p.open };
-      const r = withAddr ? byPeer.get(p.peer) : undefined;
+      const r = byPeer.get(p.peer);
       return r ? { ...src, address: addressText(r), path: r.path } : src;
     }),
   };
   report('nerd', { rows: rows.length, peers: s.peers.length, bytes: total, addresses: withAddr ? nerd.addresses.length : 0 });
 }
 
+/** Ask for the seeders' paths, only while the switch is on; a reply after it turned off, or for another video, is dropped. */
 function nerdAsk() {
   if (!$('nerd-addresses').checked || nerd.asking || !playing) return;
   nerd.asking = true;
-  invoke('nerd_addresses', { root: playing.root })
+  const asked = playing;
+  invoke('nerd_addresses', { root: asked.root })
     .then((a) => {
-      if ($('nerd-addresses').checked) nerd.addresses = a;
+      if ($('nerd-addresses').checked && playing === asked) {
+        nerd.addresses = a;
+        nerdDraw();
+      }
     })
     .catch(() => {
       nerd.addresses = [];
@@ -194,11 +219,17 @@ function nerdTick() {
   nerdAsk();
 }
 
-function nerdOpen() {
-  $('nerd-menu').hidden = true;
+/** Addresses off: forget them and redraw now, so neither the page nor Copy holds one. */
+function nerdForgetAddresses() {
   $('nerd-addresses').checked = false;
   nerd.addresses = [];
   $('nerd-banner').hidden = true;
+  nerdDraw();
+}
+
+function nerdOpen() {
+  $('nerd-menu').hidden = true;
+  nerdForgetAddresses();
   $('nerd').hidden = false;
   $('nerd-toggle').setAttribute('aria-pressed', 'true');
   nerdTick();
@@ -207,9 +238,7 @@ function nerdOpen() {
 
 function nerdClose() {
   $('nerd').hidden = true;
-  $('nerd-addresses').checked = false;
-  nerd.addresses = [];
-  $('nerd-banner').hidden = true;
+  nerdForgetAddresses();
   $('nerd-toggle').setAttribute('aria-pressed', 'false');
   if (nerd.timer !== null) clearInterval(nerd.timer);
   nerd.timer = null;
@@ -224,12 +253,21 @@ $('nerd-toggle').addEventListener('click', nerdToggle);
 $('nerd-close').addEventListener('click', nerdClose);
 $('nerd-item').addEventListener('click', nerdOpen);
 $('nerd-addresses').addEventListener('change', () => {
+  if (!$('nerd-addresses').checked) {
+    nerdForgetAddresses();
+    return;
+  }
   nerd.addresses = [];
-  $('nerd-banner').hidden = !$('nerd-addresses').checked;
-  nerdTick();
+  $('nerd-banner').hidden = false;
+  nerdDraw();
+  nerdAsk();
 });
 $('nerd-copy').addEventListener('click', () => {
-  const text = JSON.stringify(nerd.last ?? {}, null, 2);
+  // Addresses go with it only while the switch is on (nerd.last never holds them otherwise).
+  const last = nerd.last ?? {};
+  const shown = $('nerd-addresses').checked;
+  const out = shown || !last.sources ? last : { ...last, sources: last.sources.map(({ address: _a, path: _p, ...rest }) => rest) };
+  const text = JSON.stringify(out, null, 2);
   navigator.clipboard.writeText(text).then(
     () => {
       $('nerd-status').textContent = $('nerd-addresses').checked ? 'Copied, with addresses.' : 'Copied (no addresses).';

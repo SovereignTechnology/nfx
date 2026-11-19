@@ -4,9 +4,10 @@
 //! address, or through a relay) with the round-trip time: the open connection's path now, or
 //! the one seen when its last blob arrived (a node's connections close after each pull).
 //!
-//! It counts bytes iroh read from the network ([`iroh_blobs`]' request counters), before they
-//! are checked against the hash list: a blob that fails its sha256 still cost those bytes.
-//! Blobs already held are not fetched and not counted.
+//! It counts the payload bytes of each blob request that completed ([`iroh_blobs`]' request
+//! counters), before they are checked against the hash list: a blob that fails its sha256 still
+//! cost those bytes. A request that failed or timed out is not counted (iroh hands back no
+//! counters for it), nor are blobs already held, which are not fetched.
 //!
 //! Nothing here is logged, announced or sent anywhere, and the paths stay in memory beside
 //! what iroh itself holds: the desktop viewer reads the counters when its user opens the

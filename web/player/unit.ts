@@ -1097,6 +1097,13 @@ throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(ve
   const ids = new PeerBook(() => t);
   ids.received('x'.repeat(100), 1);
   eq('peer ids: cut to 64', ids.list()[0]?.id.length, 64);
+  const twins = new PeerBook(() => t);
+  twins.received('-WW0100-abcdefghijk\u0001', 1);
+  twins.received('-WW0100-abcdefghijk\u0002', 2);
+  eq('peer ids that print the same stay two peers', twins.list().map((p) => [p.id, p.down]), [
+    ['-WW0100-abcdefghijk?', 2],
+    ['-WW0100-abcdefghijk?', 1],
+  ]);
 }
 
 {
@@ -1117,7 +1124,7 @@ throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(ve
   const sample = { width: 1280, height: 720, bufferAhead: 12.34, dropped: 3, frames: 900 };
   const lone = nerdView({ ...base, mesh: null }, sample, 'Big Buck');
   eq('panel: no mesh says so', lone.rows.find(([k]) => k === 'Mesh')?.[1], 'off: every byte from the origin');
-  eq('panel: one source, the origin', lone.sources.map((x) => [x.kind, x.id, x.down]), [['origin', 'origin.example', 4096]]);
+  eq('panel: one source, the origin, its segments not counted', lone.sources.map((x) => [x.kind, x.id, x.down, x.segments]), [['origin', 'origin.example', 4096, null]]);
   eq('panel: playback rows', ['Resolution', 'Rendition', 'Bandwidth estimate', 'Buffer health', 'Dropped frames'].map((k) => lone.rows.find(([r]) => r === k)?.[1]), [
     '1280x720', '720p (2500 kb/s)', '12.34 Mb/s', '12.3 s', '3 of 900',
   ]);
