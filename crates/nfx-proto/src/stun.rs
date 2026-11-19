@@ -13,7 +13,7 @@
 //!
 //! Pure: callers pass `now`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, SocketAddr};
 
 use crate::beacon::is_stun_addr;
@@ -205,16 +205,21 @@ where
         }
     }
     // By first naming: the address and the distinct keys that name it.
+    // Indexed by address, so the work grows with the pairs, not with their square.
     let mut ranked: Vec<(&str, BTreeSet<&str>)> = Vec::new();
+    let mut at: BTreeMap<&str, usize> = BTreeMap::new();
     for (key, addr) in named {
         if !usable(addr) || own.iter().any(|o| o == addr) {
             continue;
         }
-        match ranked.iter_mut().find(|(a, _)| *a == addr) {
-            Some((_, keys)) => {
-                keys.insert(key);
+        match at.get(addr) {
+            Some(&i) => {
+                ranked[i].1.insert(key);
             }
-            None => ranked.push((addr, BTreeSet::from([key]))),
+            None => {
+                at.insert(addr, ranked.len());
+                ranked.push((addr, BTreeSet::from([key])));
+            }
         }
     }
     // Stable: equal counts keep the order first named.
