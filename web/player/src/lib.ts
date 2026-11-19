@@ -6,7 +6,9 @@
  * - `resolveManifest(a, relays)`: the current signed manifest of a video (NFX-02), over
  *   Nostr, with deletions applied (NFX-02 §6);
  * - `watchEndpoints(a, namespace, relays, onChange)`: origins and trackers named by
- *   seeders' live beacons (NFX-03), validated and capped;
+ *   seeders' live beacons (NFX-03), and STUN servers named by beacons and STUN service
+ *   announcements (NFX-10 §1), validated and capped; `selectStun(own, named)` picks a
+ *   session's STUN servers by NFX-10 §1's rules;
  * - `open(videoElement, options)`: verify the manifest again, fetch the hash list from the
  *   first origin whose copy verifies and that answers for an allowed rendition's init (the
  *   origin is asked; beacons' claims only order the asking), and play with hls.js behind a
@@ -43,6 +45,7 @@ import type {
   Session,
   Signaling,
   Stats,
+  StunNamed,
 } from './api';
 import {
   MAX_ICE_SERVERS as ENDPOINTS_MAX_ICE_SERVERS,
@@ -50,6 +53,7 @@ import {
   checkOriginSources,
   checkSignaling as checkSignalingOption,
   originBase as beaconOrigin,
+  selectStun as selectStunServers,
 } from './endpoints';
 import { MAX_RENDITIONS as LEVELS_MAX_RENDITIONS, checkRenditions, cutMaster, originOrder } from './levels';
 import {
@@ -112,6 +116,19 @@ export function originBase(url: string): string | null {
   return beaconOrigin(url);
 }
 
+/**
+ * The STUN servers a session uses (NFX-10 §1), as `stun:` URLs for `iceServers`, at most 4:
+ * the page's own (`own`) first, then those named over Nostr (`watchEndpoints`'s `stunNamed`)
+ * by two keys or more, most-named first; one named by a lone key only when the page has none
+ * of its own and none is named by two. Every NFX client picks by these rules, so Nostr never
+ * makes a viewer ask more than 4 STUN servers, or one at an address that is not global
+ * unicast. Each server named learns the viewer's address: a page that must not tell strangers
+ * who watches passes `own` alone to `open()`.
+ */
+export function selectStun(own: readonly string[], named: readonly StunNamed[]): string[] {
+  return selectStunServers(own, named);
+}
+
 /** The mesh engine: p2p-media-loader-core 4.0.0 built from its source with web/player/engine's patch. */
 const P2P_ENGINE = 'p2p-media-loader 4.0.0 (nfx engine patch)';
 
@@ -130,8 +147,10 @@ export function resolveManifest(a: string, relays: string[], options: ResolveOpt
  * which renditions they hold, each time that changes (the newest unexpired beacon per
  * seeder counts, at most 64 seeders; `https://` origins only, at most 8, with the
  * renditions beacons claim each serves, a hint for `open()`; `wss://` trackers only, at
- * most 4; global unicast STUN addresses only, at most 4; `availability`). Returns `stop`,
- * which closes the subscriptions.
+ * most 4; `availability`). STUN servers come from beacons' `stun` endpoints and from STUN
+ * service announcements for `namespace` (kind 33478, NFX-10 §1), global unicast addresses
+ * only, each counted once per key (`stunNamed`, and `stunServers`, what `selectStun` picks
+ * for a page with none of its own). Returns `stop`, which closes the subscriptions.
  */
 export function watchEndpoints(
   a: string,

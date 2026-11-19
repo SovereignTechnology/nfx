@@ -17,10 +17,13 @@ export interface Subscription {
 
 let seq = 0;
 
-/** Subscribe to `filter` on `url`. `onEvent` gets each event as JSON; `onEnd` fires once. */
+/**
+ * Subscribe to `filter` (or several, in one REQ) on `url`. `onEvent` gets each event as JSON;
+ * `onEnd` fires once.
+ */
 export function subscribe(
   url: string,
-  filter: Filter,
+  filter: Filter | Filter[],
   onEvent: (eventJson: string) => void,
   onEose: () => void,
   onEnd: (why: string) => void,
@@ -41,7 +44,8 @@ export function subscribe(
     queueMicrotask(() => end(`bad relay URL: ${String(e)}`));
     return { close() {} };
   }
-  ws.onopen = () => ws.send(JSON.stringify(['REQ', id, filter]));
+  const filters = Array.isArray(filter) ? filter : [filter];
+  ws.onopen = () => ws.send(JSON.stringify(['REQ', id, ...filters]));
   ws.onmessage = (m: MessageEvent) => {
     const text = typeof m.data === 'string' ? m.data : '';
     if (text.length === 0 || text.length > MAX_MESSAGE) return;

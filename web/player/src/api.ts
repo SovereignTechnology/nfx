@@ -111,15 +111,30 @@ export interface Endpoints {
   /** `wss://` trackers from `webrtc` endpoints (NFX-10 §2), at most 4, most-named first. */
   trackers: string[];
   /**
-   * `stun:<ip>:<port>` URLs from `stun` endpoints (NFX-10 §1), global unicast addresses
-   * only, at most 4, most-named first: for `iceServers`, after the page's own. Such a
-   * server learns each viewer's address, and beacons come from any key.
+   * The STUN servers NFX-10 §1's rules pick for a page with none of its own
+   * (`selectStun([], stunNamed)`), as `stun:<ip>:<port>` URLs, at most 4: from `stunNamed`,
+   * those named by two keys or more, most-named first, or failing any, those named by one.
+   * A page with servers of its own calls `selectStun(own, stunNamed)` instead. Such a server
+   * learns each viewer's address, and beacons and announcements come from any key.
    */
   stunServers: string[];
+  /**
+   * Every STUN server named over Nostr (NFX-10 §1): by live beacons' `stun` endpoints (their
+   * seeders) and by live STUN service announcements for the network (kind 33478, their
+   * operators); `stun:<ip>:<port>` URLs of global unicast addresses only, each with the number
+   * of distinct keys that name it, most first (ties: first heard), at most 16.
+   */
+  stunNamed: StunNamed[];
   /** How many seeders' beacons these come from. */
   seeders: number;
   /** Which renditions those seeders hold, and how many hold each. */
   availability: RenditionAvailability;
+}
+
+/** A STUN server named over Nostr, and by how many distinct keys (`Endpoints.stunNamed`). */
+export interface StunNamed {
+  url: string;
+  keys: number;
 }
 
 /** One rendition as hls.js parsed it from the master playlist. */
@@ -266,7 +281,9 @@ export interface OpenCommon {
   signaling?: Signaling;
   /**
    * STUN servers for the mesh (`stun:` or `stuns:` URLs only), at most 4. Default none.
-   * A page may take them from beacons (`stun` endpoints, NFX-10 §1) as well as its own.
+   * A page may take them from Nostr as well as its own (beacons' `stun` endpoints and STUN
+   * service announcements, NFX-10 §1): `selectStun(own, endpoints.stunNamed)` applies the
+   * rules every NFX client uses.
    */
   iceServers?: RTCIceServer[];
   onEvent?: (event: PlayerEvent) => void;
