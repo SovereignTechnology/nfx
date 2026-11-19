@@ -5,9 +5,10 @@
  * - `?a=<manifest address>&relay=<ws(s) URL>[&relay=…][&origin=<hint>]`: resolve the
  *   current signed manifest over Nostr, then play from an origin named by a verified
  *   beacon's `https` endpoint (or the hint). The trackers seeders' beacons name in
- *   `webrtc` endpoints are used too, and the STUN servers they name in `stun` endpoints
- *   (NFX-10 §1, global unicast only), after any `&stun=`. Signatures give the anchor;
- *   endpoints are only hints.
+ *   `webrtc` endpoints are used too, and the STUN servers Nostr names (beacons' `stun`
+ *   endpoints and STUN service announcements, NFX-10 §1), picked by `selectStun` after any
+ *   `&stun=`: global unicast only, at most 4. Signatures give the anchor; endpoints are only
+ *   hints.
  * - `?origin=<url>&root=<hex>[&video=<d>&segs=<n>]`: play a known root from a known origin.
  *
  * A loader wrapper checks every playlist, init and segment with nfx-proto (WASM) before
@@ -48,6 +49,7 @@ import {
   open,
   relayUrl,
   resolveManifest,
+  selectStun,
   trackerUrl,
   watchEndpoints,
 } from './lib';
@@ -61,7 +63,7 @@ interface State {
   origins: string[];
   /** Trackers named by seeders' beacons (all heard, before the cap). */
   beaconTrackers: string[];
-  /** STUN servers named by seeders' beacons. */
+  /** STUN servers named over Nostr (beacons and announcements). */
   beaconStun: string[];
   /** Who holds which renditions, by the beacons heard last. */
   availability: RenditionAvailability | null;
@@ -151,11 +153,11 @@ const segs = Number(params.get('segs'));
 const urlTrackers = [
   ...new Set(params.getAll('tracker').map(trackerUrl).filter((t): t is string => t !== null)),
 ].slice(0, MAX_TRACKERS);
-const iceServers: RTCIceServer[] = params
+const ownStun: string[] = params
   .getAll('stun')
   .filter((u) => /^stuns?:(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:\d{1,5})?$/.test(u))
-  .slice(0, 2)
-  .map((urls) => ({ urls }));
+  .slice(0, 2);
+const iceServers: RTCIceServer[] = ownStun.map((urls) => ({ urls }));
 /** `&signal=nostr`: the mesh signals through the page's relays, and no tracker. */
 const nostrRelays =
   params.get('signal') === 'nostr'
@@ -202,6 +204,7 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
     originSources: [],
     trackers: [],
     stunServers: [],
+    stunNamed: [],
     seeders: 0,
     availability: { seeders: 0, all: 0, renditions: [] },
   };
@@ -222,10 +225,10 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
         log(`a seeder names tracker ${t}`);
       }
     }
-    for (const s of e.stunServers) {
-      if (!st.beaconStun.includes(s)) {
-        st.beaconStun.push(s);
-        log(`a seeder names STUN server ${s}`);
+    for (const { url, keys } of e.stunNamed) {
+      if (!st.beaconStun.includes(url)) {
+        st.beaconStun.push(url);
+        log(`Nostr names STUN server ${url} (${keys} key${keys === 1 ? '' : 's'})`);
       }
     }
     wake?.();
@@ -241,8 +244,10 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
         fresh.forEach((o) => tried.add(o));
         // The page's own trackers first, then what seeders named by now.
         const trackers = [...new Set([...urlTrackers, ...heard.trackers])].slice(0, MAX_TRACKERS);
-        // Likewise its own STUN servers, then those seeders named (NFX-10 §1).
-        const stun = [...iceServers, ...heard.stunServers.map((urls) => ({ urls }))].slice(0, MAX_ICE_SERVERS);
+        // Likewise its own STUN servers, then those Nostr names, by NFX-10 §1's rules.
+        const stun = selectStun(ownStun, heard.stunNamed)
+          .slice(0, MAX_ICE_SERVERS)
+          .map((urls) => ({ urls }));
         // Each beacon-named origin with the renditions beacons claim it serves (a hint the
         // library only orders by); the page's own hint makes no claim.
         const origins = fresh.map((o): string | OriginSource => heard.originSources.find((s) => s.url === o) ?? o);

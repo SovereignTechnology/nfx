@@ -21,6 +21,7 @@ use nfx_proto::signal::{
     self, Parsed, Received, Room, Session, Signal, challenge, is_valid_scalar, read, room_h0,
     roomproof_id,
 };
+use nfx_proto::stun::{self, StunAnnouncement};
 use nfx_proto::voucher::Voucher;
 use nfx_proto::{KIND_BEACON, KIND_MANIFEST, sha256};
 use serde_json::Value;
@@ -1058,4 +1059,80 @@ fn a_relay_admits_what_a_reader_would_and_needs_no_session() {
     }
     assert_eq!(refused + carried, 36 + 7);
     assert!(refused >= 30, "refused only {refused}");
+}
+
+/// NFX-10 §1: every valid STUN service announcement reads as the vector says, and is
+/// reproduced byte for byte from the published key; every invalid one is rejected.
+#[test]
+fn stun_announcements_read_strictly() {
+    let v = vector!("stun-announcement.json");
+    let now = v["now"].as_u64().unwrap();
+    let mut valid = 0;
+    for case in v["valid"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        let ev = event(&case["event"]);
+        let a = StunAnnouncement::from_event(&ev, now).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let want = &case["reads_as"];
+        assert_eq!(a.operator, str_of(want, "operator"), "{name}");
+        assert_eq!(a.addr, str_of(want, "addr"), "{name}");
+        let networks: Vec<String> = a.networks.iter().map(ToString::to_string).collect();
+        let want_networks: Vec<String> = serde_json::from_value(want["networks"].clone()).unwrap();
+        assert_eq!(networks, want_networks, "{name}");
+        assert_eq!(a.created_at, want["created_at"].as_u64().unwrap(), "{name}");
+        assert_eq!(a.expiration, want["expiration"].as_u64().unwrap(), "{name}");
+        assert_eq!(resign(&ev, &secret(&v, "operator")), ev, "{name}");
+        // A sender's tags for the same announcement are the vector's own (beyond tags readers
+        // ignore).
+        let ttl = a.expiration - a.created_at;
+        let tags = stun::tags(&a.addr, &a.networks, a.created_at, ttl).unwrap();
+        let known: Vec<Vec<String>> = ev
+            .tags
+            .iter()
+            .filter(|t| matches!(t[0].as_str(), "d" | "n" | "expiration"))
+            .cloned()
+            .collect();
+        assert_eq!(tags, known, "{name}");
+        valid += 1;
+    }
+    let mut invalid = 0;
+    for case in v["invalid"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        let ev = event(&case["event"]);
+        assert!(
+            StunAnnouncement::from_event(&ev, now).is_err(),
+            "{name} must be rejected"
+        );
+        invalid += 1;
+    }
+    assert_eq!((valid, invalid), (5, 38));
+}
+
+/// NFX-10 §1: the selection rules give exactly the vector's servers, and the addresses a
+/// client may take from Nostr are exactly the vector's.
+#[test]
+fn stun_selection_matches_the_vectors() {
+    let v = vector!("stun-select.json");
+    let max = usize::try_from(v["max"].as_u64().unwrap()).unwrap();
+    assert_eq!(max, stun::MAX_SERVERS);
+    let strings = |v: &Value| -> Vec<String> { serde_json::from_value(v.clone()).unwrap() };
+    let mut n = 0;
+    for case in v["cases"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        let own = strings(&case["own"]);
+        let named: Vec<Vec<String>> = serde_json::from_value(case["named"].clone()).unwrap();
+        let pairs = named.iter().map(|p| (p[0].as_str(), p[1].as_str()));
+        assert_eq!(
+            stun::select(&own, pairs, max),
+            strings(&case["selected"]),
+            "{name}"
+        );
+        n += 1;
+    }
+    assert_eq!(n, 16);
+    for a in strings(&v["global_unicast"]["yes"]) {
+        assert!(stun::usable(&a), "{a}");
+    }
+    for a in strings(&v["global_unicast"]["no"]) {
+        assert!(!stun::usable(&a), "{a}");
+    }
 }

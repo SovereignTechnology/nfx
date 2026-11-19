@@ -9,19 +9,30 @@
  * (`beacon.json`, `beacon-renditions.json`) run through nfx-wasm into the book, so the shape
  * `verifyBeacon` returns is the shape the book reads, and the hash list vector through
  * nfx-wasm into what `open()` reads of it; the NFX-10 §6 vectors run through nfx-wasm's
- * MeshSession, which builds and reads every signaling event in the browser.
+ * MeshSession, which builds and reads every signaling event in the browser. The NFX-10 §1
+ * STUN vectors run through nfx-wasm (announcements) and the selection rules
+ * (`stun-select.json`), the verdicts nfx-proto and the generator give.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import initWasm, { MeshRoom, MeshSession, VerifiedHashList, sha256Hex, verifyBeacon } from './out/wasm/nfx_wasm.js';
+import initWasm, {
+  MeshRoom,
+  MeshSession,
+  VerifiedHashList,
+  sha256Hex,
+  verifyBeacon,
+  verifyStunAnnouncement,
+} from './out/wasm/nfx_wasm.js';
 import type { OriginSource, Signaling } from './src/api';
 import {
   EndpointBook,
+  MAX_ICE_SERVERS,
   MAX_ORIGINS,
   MAX_SEEDERS,
   type VerifiedBeacon,
+  type VerifiedStunAnnouncement,
   beaconStun,
   beaconTracker,
   checkIceServers,
@@ -32,6 +43,8 @@ import {
   originBase,
   checkRelays,
   pageOrigin,
+  rankNamed,
+  selectStun,
 } from './src/endpoints';
 import {
   MAX_RENDITIONS,
@@ -118,8 +131,15 @@ const trackers: [string, string | null][] = [
 for (const [input, want] of trackers) eq(`beaconTracker(${input})`, beaconTracker(input), want);
 
 const stuns: [string, string | null][] = [
-  ['203.0.113.10:3478', 'stun:203.0.113.10:3478'],
-  ['[2001:db8::1]:3478', 'stun:[2001:db8::1]:3478'],
+  ['1.1.1.1:3478', 'stun:1.1.1.1:3478'],
+  ['[2606:4700::1111]:3478', 'stun:[2606:4700::1111]:3478'],
+  ['203.0.113.10:3478', null], // documentation (RFC 5737): routes nowhere
+  ['198.51.100.7:3478', null],
+  ['192.0.2.1:3478', null],
+  ['[2001:db8::1]:3478', null], // documentation (RFC 3849)
+  ['[2001:db9::1]:3478', 'stun:[2001:db9::1]:3478'], // just past it
+  ['[3fff::1]:3478', null], // documentation (RFC 9637)
+  ['[3fff:fff:ffff::1]:3478', null],
   ['127.0.0.1:3478', null], // loopback
   ['10.1.2.3:3478', null], // private
   ['172.20.0.1:3478', null],
@@ -164,6 +184,7 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     originSources: [{ url: 'https://a.example' }],
     trackers: ['wss://t1.example'],
     stunServers: [],
+    stunNamed: [],
     seeders: 1,
     availability: allOf(1),
   });
@@ -177,11 +198,12 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     originSources: [{ url: 'https://b.example' }],
     trackers: [],
     stunServers: [],
+    stunNamed: [],
     seeders: 1,
     availability: allOf(1),
   });
   // It expires at NOW + 121.
-  eq('expired out', book.snapshot(NOW + 121), { origins: [], originSources: [], trackers: [], stunServers: [], seeders: 0, availability: allOf(0) });
+  eq('expired out', book.snapshot(NOW + 121), { origins: [], originSources: [], trackers: [], stunServers: [], stunNamed: [], seeders: 0, availability: allOf(0) });
   eq('an expired beacon is refused', book.add(beacon(S(2), NOW, [https('https://c.example')]), NOW + 200), false);
 }
 {
@@ -204,6 +226,7 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     originSources: [],
     trackers: ['wss://ok.example'],
     stunServers: [],
+    stunNamed: [],
     seeders: 1,
     availability: allOf(1),
   });
@@ -223,24 +246,95 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     originSources: [{ url: 'https://two.example' }, { url: 'https://one.example' }],
     trackers: ['wss://shared.example', 'wss://lonely.example'],
     stunServers: [],
+    stunNamed: [],
     seeders: 3,
     availability: allOf(3),
   });
 }
 {
-  // STUN servers: global unicast only, ranked like the rest, at most 4 in all.
+  // STUN servers (NFX-10 §1): global unicast only, ranked by distinct keys; one named by a
+  // lone key only when none has two; at most 4 in all.
   const stun = (...addrs: unknown[]) => ({ t: 'stun', addrs });
   const book = new EndpointBook();
-  book.add(beacon(S(1), NOW, [stun('203.0.113.1:3478', '127.0.0.1:3478', '192.168.0.2:3478')]), NOW);
-  book.add(beacon(S(2), NOW, [stun('198.51.100.2:3478', '203.0.113.1:3478'), stun(7, null)]), NOW);
-  book.add(beacon(S(3), NOW, [{ t: 'stun', addrs: '203.0.113.9:3478' }, stun('[2001:db8::5]:3478')]), NOW);
-  eq('stun ranked and filtered', book.snapshot(NOW).stunServers, [
-    'stun:203.0.113.1:3478',
-    'stun:198.51.100.2:3478',
-    'stun:[2001:db8::5]:3478',
+  book.add(beacon(S(1), NOW, [stun('1.1.1.1:3478', '127.0.0.1:3478', '192.168.0.2:3478')]), NOW);
+  eq('a lone key, nothing better', book.snapshot(NOW).stunServers, ['stun:1.1.1.1:3478']);
+  book.add(beacon(S(2), NOW, [stun('1.0.0.2:3478', '1.1.1.1:3478'), stun(7, null)]), NOW);
+  book.add(beacon(S(3), NOW, [{ t: 'stun', addrs: '1.1.1.9:3478' }, stun('[2606:4700::5]:3478')]), NOW);
+  eq('stun named, ranked and filtered', book.snapshot(NOW).stunNamed, [
+    { url: 'stun:1.1.1.1:3478', keys: 2 },
+    { url: 'stun:1.0.0.2:3478', keys: 1 },
+    { url: 'stun:[2606:4700::5]:3478', keys: 1 },
   ]);
-  for (let i = 4; i < 10; i++) book.add(beacon(S(i), NOW, [stun(`198.51.100.${i}:3478`)]), NOW);
-  eq('stun cap', book.snapshot(NOW).stunServers.length, 4);
+  eq('lone keys give way to a corroborated one', book.snapshot(NOW).stunServers, ['stun:1.1.1.1:3478']);
+  for (let i = 4; i < 10; i++) {
+    book.add(beacon(S(i), NOW, [stun(`1.0.0.${i}:3478`, `1.0.0.${i + 1}:3478`)]), NOW);
+  }
+  eq('stun cap, ties in the order first named', book.snapshot(NOW).stunServers, [
+    'stun:1.1.1.1:3478',
+    'stun:1.0.0.5:3478',
+    'stun:1.0.0.6:3478',
+    'stun:1.0.0.7:3478',
+  ]);
+}
+{
+  // STUN service announcements (NFX-10 §1) count with beacons, by distinct key.
+  const ann = (operator: string, addr: string, createdAt: number, ttl = 3600): VerifiedStunAnnouncement => ({
+    operator,
+    addr,
+    networks: ['nfx:mainnet:1'],
+    created_at: createdAt,
+    expiration: createdAt + ttl,
+  });
+  const book = new EndpointBook();
+  eq('announcement taken', book.addAnnouncement(ann(S(1), '1.1.1.7:3478', NOW), NOW), true);
+  eq('a lone operator, nothing better', book.snapshot(NOW).stunServers, ['stun:1.1.1.7:3478']);
+  eq('the same again', book.addAnnouncement(ann(S(1), '1.1.1.7:3478', NOW), NOW), false);
+  eq('an older one', book.addAnnouncement(ann(S(1), '1.1.1.7:3478', NOW - 5), NOW), false);
+  eq('a private server', book.addAnnouncement(ann(S(2), '10.0.0.1:3478', NOW), NOW), false);
+  eq('a documentation server', book.addAnnouncement(ann(S(2), '203.0.113.1:3478', NOW), NOW), false);
+  eq('expired', book.addAnnouncement(ann(S(2), '1.1.1.8:3478', NOW - 10, 5), NOW), false);
+  // A seeder's beacon names the same server: two keys.
+  book.add(beacon(S(3), NOW, [{ t: 'stun', addrs: ['1.1.1.7:3478'] }]), NOW);
+  book.addAnnouncement(ann(S(4), '1.1.1.8:3478', NOW), NOW);
+  eq('beacon and announcement together', book.snapshot(NOW).stunNamed, [
+    { url: 'stun:1.1.1.7:3478', keys: 2 },
+    { url: 'stun:1.1.1.8:3478', keys: 1 },
+  ]);
+  eq('the corroborated one only', book.snapshot(NOW).stunServers, ['stun:1.1.1.7:3478']);
+  // A key counts once, whether it seeds or announces.
+  book.addAnnouncement(ann(S(3), '1.1.1.8:3478', NOW), NOW);
+  book.add(beacon(S(4), NOW + 1, [{ t: 'stun', addrs: ['1.1.1.8:3478'] }]), NOW + 1);
+  eq('one key, counted once', book.snapshot(NOW + 1).stunNamed[1], { url: 'stun:1.1.1.8:3478', keys: 2 });
+  // An operator holds at most 8; announcements expire.
+  for (let i = 0; i < 12; i++) book.addAnnouncement(ann(S(9), `1.0.0.${i + 1}:3478`, NOW), NOW);
+  eq('per operator cap', book.snapshot(NOW).stunNamed.filter((n) => n.url.startsWith('stun:1.0.0.')).length, 8);
+  eq('announcements expire', book.snapshot(NOW + 3601).stunNamed, []);
+  eq('nothing left to expire', book.nextExpiration(NOW + 3601), null);
+}
+{
+  // Ties go to the server first heard, whether a beacon or an announcement named it; the book
+  // says when what it holds next expires, so a watcher can look again then.
+  const book = new EndpointBook();
+  book.addAnnouncement({ operator: S(1), addr: '1.1.1.1:3478', networks: ['nfx:mainnet:1'], created_at: NOW, expiration: NOW + 600 }, NOW);
+  book.add(beacon(S(2), NOW, [{ t: 'stun', addrs: ['1.1.1.2:3478', '1.1.1.3:3478'] }]), NOW);
+  eq('first heard first, across sources', book.snapshot(NOW).stunServers, [
+    'stun:1.1.1.1:3478',
+    'stun:1.1.1.2:3478',
+    'stun:1.1.1.3:3478',
+  ]);
+  eq('next expiration', book.nextExpiration(NOW), NOW + 120);
+  eq('then the announcement', book.nextExpiration(NOW + 120), NOW + 600);
+}
+{
+  // selectStun: the page's own first, then the named ones by the same rules.
+  const named = [
+    { url: 'stun:1.1.1.1:3478', keys: 1 },
+    { url: 'stun:1.1.1.2:3478', keys: 3 },
+  ];
+  eq('own first, lone keys out', selectStun(['stun:stun.example:3478'], named), ['stun:stun.example:3478', 'stun:1.1.1.2:3478']);
+  eq('own counts once', selectStun(['stun:1.1.1.2:3478', 'stun:1.1.1.2:3478'], named), ['stun:1.1.1.2:3478']);
+  eq('at most 4', selectStun(['stun:a:1', 'stun:b:1', 'stun:c:1', 'stun:d:1', 'stun:e:1'], named).length, 4);
+  eq('nothing at all', selectStun([], []), []);
 }
 {
   // Caps: per beacon, and overall.
@@ -252,6 +346,7 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     originSources: [0, 1, 2, 3].map((i) => ({ url: `https://o${i}.example` })),
     trackers: ['wss://t0.example', 'wss://t1.example', 'wss://t2.example', 'wss://t3.example'],
     stunServers: [],
+    stunNamed: [],
     seeders: 1,
     availability: allOf(1),
   });
@@ -882,6 +977,7 @@ const verified = JSON.parse(verifyBeacon(JSON.stringify(vector.event), vector.no
     originSources: [{ url: 'https://seed.example/nfx' }],
     trackers: ['wss://tracker.example/announce'],
     stunServers: [],
+    stunNamed: [],
     seeders: 1,
     availability: allOf(1),
   });
@@ -1013,6 +1109,56 @@ throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(ve
     eq(`ignored vector ${c.name}`, typeof r.ignored, 'string');
   }
   eq('vector counts', [bad.rejected.length, bad.ignored.length], [36, 7]);
+}
+
+// ---- STUN servers named over Nostr: the NFX-10 §1 vectors ----------------------------------
+{
+  // Announcements, through nfx-wasm.
+  const v = JSON.parse(readFileSync(join(here, '../../spec/test-vectors/stun-announcement.json'), 'utf8')) as {
+    now: number;
+    valid: { name: string; event: unknown; reads_as: unknown }[];
+    invalid: { name: string; event: unknown }[];
+  };
+  for (const c of v.valid) {
+    // nfx-wasm writes the keys sorted; the vector, in its own order: compare field by field.
+    const r = JSON.parse(verifyStunAnnouncement(JSON.stringify(c.event), v.now)) as VerifiedStunAnnouncement;
+    const want = c.reads_as as VerifiedStunAnnouncement;
+    eq(
+      `announcement ${c.name}`,
+      [r.operator, r.addr, r.networks, r.created_at, r.expiration],
+      [want.operator, want.addr, want.networks, want.created_at, want.expiration],
+    );
+  }
+  for (const c of v.invalid) throws(`announcement ${c.name}`, () => verifyStunAnnouncement(JSON.stringify(c.event), v.now));
+  eq('announcement vector counts', [v.valid.length, v.invalid.length], [5, 38]);
+  // One into the book, as the page takes it.
+  const book = new EndpointBook();
+  const a = JSON.parse(verifyStunAnnouncement(JSON.stringify(v.valid[0]?.event), v.now)) as VerifiedStunAnnouncement;
+  eq('vector announcement taken', book.addAnnouncement(a, v.now), true);
+  eq('vector announcement named', book.snapshot(v.now).stunServers, ['stun:1.1.1.1:3478']);
+}
+{
+  // Selection: the same verdicts as nfx-proto (Rust) and the generator (Python).
+  const v = JSON.parse(readFileSync(join(here, '../../spec/test-vectors/stun-select.json'), 'utf8')) as {
+    max: number;
+    cases: { name: string; own: string[]; named: [string, string][]; selected: string[] }[];
+    global_unicast: { yes: string[]; no: string[] };
+  };
+  eq('max', v.max, MAX_ICE_SERVERS);
+  for (const c of v.cases) {
+    const pairs = c.named.flatMap(([key, addr]): [string, string][] => {
+      const url = beaconStun(addr);
+      return url === null ? [] : [[key, url]];
+    });
+    const got = selectStun(
+      c.own.map((a) => `stun:${a}`),
+      rankNamed(pairs),
+      v.max,
+    );
+    eq(`select ${c.name}`, got, c.selected.map((a) => `stun:${a}`));
+  }
+  for (const a of v.global_unicast.yes) eq(`global unicast ${a}`, beaconStun(a) !== null, true);
+  for (const a of v.global_unicast.no) eq(`not global unicast ${a}`, beaconStun(a), null);
 }
 
 console.log(`unit: ${ran - bad}/${ran} ok`);

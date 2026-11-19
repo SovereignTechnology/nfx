@@ -16,6 +16,14 @@
 //! They are ephemeral like beacons. The network cannot be checked: kind 25050 carries no
 //! `n`, and the room key hides which video and network a room is.
 //!
+//! With STUN service announcements on ([`MayAdmit::stun_announcements`]), it also carries
+//! kind 33478 (NFX-04 §1 as amended 2026-11-19, NFX-10 §1): an announcement must pass a
+//! reader's checks when it arrives (`nfx_proto::stun::StunAnnouncement`) and name one of the
+//! relay's networks, within 2 KiB, 12 per hour per operator key and [`MAX_STUN_ANNOUNCEMENTS`]
+//! held at once. It is addressable, so the store keeps the newest per operator and server,
+//! never returns it after its `expiration` (NIP-40), and drops it from the store once it has
+//! expired, at the next admission of one.
+//!
 //! Stored manifests live in memory, capped at [`MAX_STORED_EVENTS`]: a restart forgets
 //! them, and publishers re-mirror (§4). TLS belongs in front, as for the origin.
 
@@ -34,6 +42,7 @@ use nfx_proto::deletion::Deletion;
 use nfx_proto::manifest::Manifest;
 use nfx_proto::namespace::Namespace;
 use nfx_proto::signal::{self, KIND_SIGNAL};
+use nfx_proto::stun::{KIND_STUN_ANNOUNCEMENT, StunAnnouncement};
 use nfx_proto::{KIND_BEACON, KIND_DELETION, KIND_MANIFEST, MAX_CLOCK_SKEW, Verified};
 use nostr_database::error::Error as DbError;
 use nostr_sdk::prelude as ns;
@@ -76,6 +85,14 @@ pub const PRESENCE_FLOOR_SECS: u64 = 10;
 /// negotiations in flight per room (NFX-10 §6.5); a seeder answers many rooms.
 pub const DIRECTED_PER_WINDOW: usize = 64;
 pub const DIRECTED_WINDOW_SECS: u64 = 30;
+/// STUN service announcements (§1 as amended 2026-11-19, §2): the hard size of one. A
+/// full one (8 networks) is under 1 KiB.
+pub const MAX_STUN_ANNOUNCEMENT_BYTES: usize = 2 * 1024;
+/// Announcements per operator key per hour. A sender re-sends each every 12 h (NFX-10 §1).
+pub const STUN_ANNOUNCEMENTS_PER_HOUR: usize = 12;
+/// Announcements held at once. Keys are free, so while this many are live a new one is
+/// refused (one that replaces a held one is not): they never crowd manifests out of the store.
+pub const MAX_STUN_ANNOUNCEMENTS: usize = 1024;
 /// Room for the `["EVENT", …]` framing around the largest admitted event.
 const MAX_MESSAGE_BYTES: usize = MAX_MANIFEST_BYTES + 1024;
 
@@ -91,8 +108,22 @@ struct Limits {
     presence: HashMap<(String, String, &'static str), u64>,
     /// sender → offer and answer admission times within the last window.
     directed: HashMap<String, VecDeque<u64>>,
+    /// (operator, server) → the held announcement: its `created_at`, `expiration` and id.
+    stun: HashMap<(String, String), (u64, u64, String)>,
+    /// operator → announcement admission times within the last hour.
+    stun_times: HashMap<String, VecDeque<u64>>,
     /// When stale keys were last swept (at most once per [`SWEEP_EVERY_SECS`]).
     swept_at: u64,
+}
+
+/// What a scoped relay admits beyond what NFX-04 §1 requires: its MAYs. Default: neither.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MayAdmit {
+    /// Kind-25050 mesh signaling, `nfx-mesh/1` (§1 as amended 2026-11-18, NFX-10 §6).
+    pub mesh_signaling: bool,
+    /// Kind-33478 STUN service announcements for its networks (§1 as amended 2026-11-19,
+    /// NFX-10 §1).
+    pub stun_announcements: bool,
 }
 
 /// NFX-04 §1 admission and §2 publish limits.
@@ -103,8 +134,8 @@ struct Admission {
     /// videos, are admitted: an operator's content policy (NFX-04 §8), and the strongest
     /// answer to floods from freshly minted keys.
     creators: Option<BTreeSet<String>>,
-    /// Whether kind-25050 mesh signaling is carried (NFX-04 §1, a MAY).
-    mesh: bool,
+    /// Which of NFX-04 §1's MAYs it takes.
+    may: MayAdmit,
     limits: Mutex<Limits>,
     /// The relay's own store, for applying NFX deletions (see [`Admission::apply`]).
     db: Arc<dyn ns::NostrDatabase>,
@@ -114,6 +145,9 @@ struct Admission {
 enum Admitted {
     Beacon,
     Signal,
+    /// A STUN announcement, and the expired ones (operator, server, `created_at`) to drop
+    /// from the store.
+    Stun(Vec<(String, String, u64)>),
     Manifest(Box<Verified<Manifest>>),
     Deletion(Deletion),
 }
@@ -124,8 +158,11 @@ impl Admission {
     fn admit(&self, event: &ns::Event, now: u64) -> Result<Admitted, Refusal> {
         use ns::MachineReadablePrefix::{Blocked, Invalid, RateLimited};
         let kind = event.kind.as_u16();
-        if kind == KIND_SIGNAL && self.mesh {
+        if kind == KIND_SIGNAL && self.may.mesh_signaling {
             return self.admit_signal(event, now);
+        }
+        if kind == KIND_STUN_ANNOUNCEMENT && self.may.stun_announcements {
+            return self.admit_stun(event, now);
         }
         if kind != KIND_MANIFEST && kind != KIND_BEACON && kind != KIND_DELETION {
             return Err((Blocked, "out of scope".into()));
@@ -260,6 +297,99 @@ impl Admission {
         Ok(Admitted::Signal)
     }
 
+    /// A kind-33478 STUN service announcement (§1 as amended 2026-11-19): a reader's checks
+    /// at arrival (NFX-10 §1), one of this relay's networks, then the §2 size, per-key rate
+    /// and the cap on those held. A creator allow-list does not apply: it names no video.
+    fn admit_stun(&self, event: &ns::Event, now: u64) -> Result<Admitted, Refusal> {
+        use ns::MachineReadablePrefix::{Blocked, Duplicate, Invalid, RateLimited};
+        if event.as_json().len() > MAX_STUN_ANNOUNCEMENT_BYTES {
+            return Err((Invalid, "announcement over 2 KiB".into()));
+        }
+        let ev = from_nostr(event).map_err(|_| (Invalid, "unreadable event".to_owned()))?;
+        // The scope first, before the signature: another network's costs nothing more.
+        let served = |n: &str| self.namespaces.contains(n);
+        if !ev
+            .tag_values("n")
+            .any(|v| v.first().is_some_and(|n| served(n.as_str())))
+        {
+            return Err((Blocked, "out of scope".into()));
+        }
+        let a = StunAnnouncement::from_event(&ev, now).map_err(|e| (Invalid, e.to_string()))?;
+        if !a.networks.iter().any(|n| served(n.to_string().as_str())) {
+            return Err((Blocked, "out of scope".into()));
+        }
+        let mut limits = self.limits.lock().unwrap_or_else(PoisonError::into_inner);
+        limits.sweep(now);
+        let key = (a.operator.clone(), a.addr.clone());
+        // The store keeps the newest per key and server, the lowest id on a tie (NIP-01): one
+        // that would not replace the held one is refused here, so this table and the store
+        // describe the same announcement.
+        let replaces = match limits.stun.get(&key) {
+            Some((held, expiration, id)) if *expiration > now => {
+                if *id == ev.id {
+                    return Err((Duplicate, "already held".into()));
+                }
+                if a.created_at < *held {
+                    return Err((
+                        Invalid,
+                        "a newer announcement of this server is held".into(),
+                    ));
+                }
+                if a.created_at == *held && ev.id > *id {
+                    return Err((
+                        Duplicate,
+                        "an equal announcement of this server, with a lower id, is held".into(),
+                    ));
+                }
+                true
+            }
+            _ => false,
+        };
+        if !replaces {
+            let live = limits.stun.values().filter(|(_, e, _)| *e > now).count();
+            if live >= MAX_STUN_ANNOUNCEMENTS {
+                return Err((RateLimited, "as many STUN announcements as it holds".into()));
+            }
+        }
+        let times = limits.stun_times.entry(a.operator.clone()).or_default();
+        while times.front().is_some_and(|t| now >= t + 3600) {
+            times.pop_front();
+        }
+        if times.len() >= STUN_ANNOUNCEMENTS_PER_HOUR {
+            return Err((RateLimited, "STUN announcements per hour".into()));
+        }
+        times.push_back(now);
+        // Expired ones leave the table here, and the store once this one is accepted.
+        let mut gone = Vec::new();
+        limits.stun.retain(|k, (created_at, expiration, _)| {
+            let keep = *expiration > now || *k == key;
+            if !keep {
+                gone.push((k.0.clone(), k.1.clone(), *created_at));
+            }
+            keep
+        });
+        limits
+            .stun
+            .insert(key, (a.created_at, a.expiration, ev.id.clone()));
+        Ok(Admitted::Stun(gone))
+    }
+
+    /// Drop expired STUN announcements from the store: NIP-40 keeps them from every reader
+    /// already, and this keeps them from holding room there.
+    async fn drop_expired(&self, gone: &[(String, String, u64)]) {
+        for (operator, server, created_at) in gone {
+            let Ok(author) = ns::PublicKey::parse(operator) else {
+                continue;
+            };
+            let filter = ns::Filter::new()
+                .kind(ns::Kind::from(KIND_STUN_ANNOUNCEMENT))
+                .author(author)
+                .identifier(server.clone())
+                .until(ns::Timestamp::from(*created_at));
+            let _ = self.db.delete(filter).await;
+        }
+    }
+
     /// Remove the stored revisions a deletion withdraws. nostr-sdk's own NIP-09 handling
     /// cannot: it splits an `a` tag at every colon, so an NFX address
     /// (`38504:<pk>:nfx:<network>:<specver>:<id>`) reaches it as `d` = `nfx`.
@@ -301,8 +431,11 @@ impl Limits {
     /// Drop stale rate-limit keys, at most once per [`SWEEP_EVERY_SECS`] and only past
     /// [`SWEEP_ABOVE`] keys: sweeps are O(keys).
     fn sweep(&mut self, now: u64) {
-        let keys =
-            self.beacons.len() + self.manifests.len() + self.presence.len() + self.directed.len();
+        let keys = self.beacons.len()
+            + self.manifests.len()
+            + self.presence.len()
+            + self.directed.len()
+            + self.stun_times.len();
         if now < self.swept_at.saturating_add(SWEEP_EVERY_SECS) || keys <= SWEEP_ABOVE {
             return;
         }
@@ -315,6 +448,8 @@ impl Limits {
             .retain(|_, last| now < *last + PRESENCE_FLOOR_SECS);
         self.directed
             .retain(|_, times| times.back().is_some_and(|t| now < t + DIRECTED_WINDOW_SECS));
+        self.stun_times
+            .retain(|_, times| times.back().is_some_and(|t| now < t + 3600));
     }
 }
 
@@ -327,6 +462,10 @@ impl ns::WritePolicy for Admission {
         Box::pin(async move {
             match self.admit(event, unix_now()) {
                 Ok(Admitted::Beacon | Admitted::Signal) => ns::WritePolicyResult::Accept,
+                Ok(Admitted::Stun(gone)) => {
+                    self.drop_expired(&gone).await;
+                    ns::WritePolicyResult::Accept
+                }
                 Ok(Admitted::Manifest(m)) if self.withdrawn(&m).await => {
                     ns::WritePolicyResult::reject(
                         ns::MachineReadablePrefix::Invalid,
@@ -487,7 +626,7 @@ impl ScopedRelay {
     /// An open scoped relay: any creator's manifests in `namespaces`.
     #[must_use]
     pub fn new(namespaces: &[Namespace]) -> Self {
-        Self::build(namespaces, None, false)
+        Self::build(namespaces, None, MayAdmit::default())
     }
 
     /// A scoped relay admitting only `creators` (x-only pubkey, 64 lowercase hex): their
@@ -498,7 +637,7 @@ impl ScopedRelay {
     /// An empty list, or a key in any other form, is an error: either would silently
     /// admit no one.
     pub fn with_creators(namespaces: &[Namespace], creators: &[String]) -> crate::Result<Self> {
-        Self::with_options(namespaces, Some(creators), false)
+        Self::admitting(namespaces, Some(creators), MayAdmit::default())
     }
 
     /// A scoped relay with an optional creator allow-list (as [`ScopedRelay::with_creators`])
@@ -512,8 +651,29 @@ impl ScopedRelay {
         creators: Option<&[String]>,
         mesh_signaling: bool,
     ) -> crate::Result<Self> {
+        Self::admitting(
+            namespaces,
+            creators,
+            MayAdmit {
+                mesh_signaling,
+                ..MayAdmit::default()
+            },
+        )
+    }
+
+    /// A scoped relay with an optional creator allow-list (as [`ScopedRelay::with_creators`])
+    /// that also takes the MAYs of NFX-04 §1 that `may` names: kind-25050 mesh signaling (as
+    /// [`ScopedRelay::with_options`]) and kind-33478 STUN service announcements for its
+    /// networks (§1 as amended 2026-11-19): a reader's checks at arrival, one of its
+    /// networks, the §2 size, rate and cap, kept until they expire (NIP-40). The allow-list
+    /// applies to neither: neither names a video.
+    pub fn admitting(
+        namespaces: &[Namespace],
+        creators: Option<&[String]>,
+        may: MayAdmit,
+    ) -> crate::Result<Self> {
         let Some(creators) = creators else {
-            return Ok(Self::build(namespaces, None, mesh_signaling));
+            return Ok(Self::build(namespaces, None, may));
         };
         if creators.is_empty() {
             return Err(crate::NodeError::Relay("empty creator allow-list".into()));
@@ -531,11 +691,11 @@ impl ScopedRelay {
         Ok(Self::build(
             namespaces,
             Some(creators.iter().cloned().collect()),
-            mesh_signaling,
+            may,
         ))
     }
 
-    fn build(namespaces: &[Namespace], creators: Option<BTreeSet<String>>, mesh: bool) -> Self {
+    fn build(namespaces: &[Namespace], creators: Option<BTreeSet<String>>, may: MayAdmit) -> Self {
         let names: BTreeSet<String> = namespaces.iter().map(ToString::to_string).collect();
         let database: Arc<dyn ns::NostrDatabase> = Arc::new(TitleSearch {
             inner: nostr_memory::MemoryDatabase::bounded(
@@ -548,7 +708,7 @@ impl ScopedRelay {
             .write_policy(Admission {
                 namespaces: names.clone(),
                 creators,
-                mesh,
+                may,
                 limits: Mutex::new(Limits::default()),
                 db: database,
             })
@@ -561,18 +721,27 @@ impl ScopedRelay {
             .max_websocket_message_size(MAX_MESSAGE_BYTES)
             .max_connections(crate::limit::MAX_CONNECTIONS)
             .build();
-        let (kinds, roles, description) = if mesh {
-            (
-                vec![KIND_MANIFEST, KIND_BEACON, KIND_DELETION, KIND_SIGNAL],
-                vec!["catalog", "availability", "signaling"],
-                "NFX-04 scoped relay: NFX manifests and beacons, and NFX mesh signaling (kind 25050, nfx-mesh/1)",
-            )
-        } else {
-            (
-                vec![KIND_MANIFEST, KIND_BEACON, KIND_DELETION],
-                vec!["catalog", "availability"],
-                "NFX-04 scoped relay: NFX manifests and beacons only",
-            )
+        let mut kinds = vec![KIND_MANIFEST, KIND_BEACON, KIND_DELETION];
+        let mut roles = vec!["catalog", "availability"];
+        if may.mesh_signaling {
+            kinds.push(KIND_SIGNAL);
+            roles.push("signaling");
+        }
+        if may.stun_announcements {
+            kinds.push(KIND_STUN_ANNOUNCEMENT);
+            roles.push("stun");
+        }
+        let description = match (may.mesh_signaling, may.stun_announcements) {
+            (false, false) => "NFX-04 scoped relay: NFX manifests and beacons only",
+            (true, false) => {
+                "NFX-04 scoped relay: NFX manifests and beacons, and NFX mesh signaling (kind 25050, nfx-mesh/1)"
+            }
+            (false, true) => {
+                "NFX-04 scoped relay: NFX manifests and beacons, and STUN service announcements (kind 33478)"
+            }
+            (true, true) => {
+                "NFX-04 scoped relay: NFX manifests and beacons, NFX mesh signaling (kind 25050, nfx-mesh/1) and STUN service announcements (kind 33478)"
+            }
         };
         let nip11 = serde_json::json!({
             "name": "nfx scoped relay",
@@ -725,6 +894,173 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    fn admission(namespaces: &[&str], may: MayAdmit) -> Admission {
+        Admission {
+            namespaces: namespaces.iter().map(ToString::to_string).collect(),
+            creators: None,
+            may,
+            limits: Mutex::new(Limits::default()),
+            db: Arc::new(nostr_memory::MemoryDatabase::bounded(
+                std::num::NonZeroUsize::new(100).unwrap(),
+            )),
+        }
+    }
+
+    fn stun_ad(secret: u8, addr: &str, nets: &[&str], created_at: u64, ttl: u64) -> ns::Event {
+        let nets: Vec<Namespace> = nets.iter().map(|n| Namespace::parse(n).unwrap()).collect();
+        let tags = nfx_proto::stun::tags(addr, &nets, created_at, ttl).unwrap();
+        let ev = nfx_proto::event::Event::sign(
+            &[secret; 32],
+            created_at,
+            KIND_STUN_ANNOUNCEMENT,
+            tags,
+            String::new(),
+        )
+        .unwrap();
+        crate::nostr::to_nostr(&ev).unwrap()
+    }
+
+    fn refused(r: Result<Admitted, Refusal>) -> String {
+        match r {
+            Ok(_) => panic!("admitted"),
+            Err((prefix, message)) => format!("{prefix}: {message}"),
+        }
+    }
+
+    /// NFX-04 §1 as amended 2026-11-19, against the vectors: off, kind 33478 is out of scope;
+    /// on, every valid announcement is admitted when the relay serves one of its networks
+    /// (and refused as out of scope when it serves none), and every invalid one is refused.
+    #[test]
+    fn a_relay_admits_the_valid_stun_announcements_and_refuses_the_rest() {
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../spec/test-vectors/stun-announcement.json"
+        ))
+        .unwrap();
+        let now = v["now"].as_u64().unwrap();
+        let event = |c: &serde_json::Value| -> ns::Event {
+            ns::Event::from_json(c["event"].to_string()).unwrap()
+        };
+        let off = admission(&["nfx:mainnet:1"], MayAdmit::default());
+        let first = event(&v["valid"][0]);
+        assert!(refused(off.admit(&first, now)).starts_with("blocked: out of scope"));
+        let on = MayAdmit {
+            stun_announcements: true,
+            ..MayAdmit::default()
+        };
+        let elsewhere = admission(&["nfx:other:1"], on);
+        let served = ["nfx:mainnet:1", "nfx:net-1:1"];
+        for case in v["valid"].as_array().unwrap() {
+            let name = &case["name"];
+            assert!(
+                refused(elsewhere.admit(&event(case), now)).starts_with("blocked: out of scope"),
+                "{name}"
+            );
+            // Each on a relay of its own: several name one server at one `created_at`, and a
+            // relay keeps one of those (the lowest id, NIP-01).
+            let relay = admission(&served, on);
+            assert!(
+                matches!(relay.admit(&event(case), now), Ok(Admitted::Stun(_))),
+                "{name}"
+            );
+            assert!(
+                refused(relay.admit(&event(case), now)).starts_with("duplicate:"),
+                "{name}: held already"
+            );
+        }
+        let relay = admission(&served, on);
+        for case in v["invalid"].as_array().unwrap() {
+            let r = relay.admit(&event(case), now);
+            assert!(r.is_err(), "{}", case["name"]);
+        }
+    }
+
+    /// §2: 12 per hour per key, the newest per (key, server) only, at most 1024 held while
+    /// live; an expired one frees its place and is named for the store to drop.
+    #[test]
+    fn stun_announcements_are_rate_limited_capped_and_forgotten_once_expired() {
+        let on = MayAdmit {
+            stun_announcements: true,
+            ..MayAdmit::default()
+        };
+        let relay = admission(&["nfx:testnet:1"], on);
+        let net = ["nfx:testnet:1"];
+        let t0 = 1_790_000_000;
+        // 12 an hour per key, whichever servers they name.
+        for i in 0..12u8 {
+            let ad = stun_ad(1, &format!("1.1.1.{}:3478", i + 1), &net, t0, 600);
+            assert!(relay.admit(&ad, t0).is_ok(), "{i}");
+        }
+        let ad = stun_ad(1, "1.1.1.99:3478", &net, t0, 600);
+        assert!(refused(relay.admit(&ad, t0)).starts_with("rate-limited:"));
+        // An hour later the key has its budget again.
+        let t1 = t0 + 3600;
+        assert!(
+            relay
+                .admit(&stun_ad(1, "1.1.1.1:3478", &net, t1, 600), t1)
+                .is_ok()
+        );
+
+        // A held announcement is replaced by a newer one, never by an older one.
+        let held = stun_ad(2, "1.0.0.1:3478", &net, t1, 600);
+        assert!(relay.admit(&held, t1).is_ok());
+        let older = stun_ad(2, "1.0.0.1:3478", &net, t1 - 10, 600);
+        assert!(refused(relay.admit(&older, t1)).starts_with("invalid: a newer"));
+        let newer = stun_ad(2, "1.0.0.1:3478", &net, t1 + 5, 600);
+        assert!(relay.admit(&newer, t1 + 5).is_ok());
+        // On a tie the lower id is the one kept (NIP-01): the other is refused, whichever
+        // comes first.
+        let (x, y) = (
+            stun_ad(3, "1.0.0.2:3478", &net, t1, 600),
+            stun_ad(3, "1.0.0.2:3478", &net, t1, 601),
+        );
+        let (low, high) = if x.id.to_hex() < y.id.to_hex() {
+            (x, y)
+        } else {
+            (y, x)
+        };
+        assert!(relay.admit(&high, t1).is_ok());
+        assert!(relay.admit(&low, t1).is_ok(), "the lower id replaces it");
+        assert!(refused(relay.admit(&high, t1)).starts_with("duplicate:"));
+
+        // The cap: fill it with live announcements from fresh keys.
+        let relay = admission(&["nfx:testnet:1"], on);
+        let mut n = 0usize;
+        'fill: for k in 1..=255u8 {
+            for j in 0..12u8 {
+                if n == MAX_STUN_ANNOUNCEMENTS {
+                    break 'fill;
+                }
+                let ad = stun_ad(
+                    k,
+                    &format!("203.0.{j}.{k}:3478"),
+                    &net,
+                    t0,
+                    60 + u64::from(k),
+                );
+                assert!(relay.admit(&ad, t0).is_ok(), "{k}/{j}");
+                n += 1;
+            }
+        }
+        assert_eq!(n, MAX_STUN_ANNOUNCEMENTS);
+        let fresh = stun_ad(200, "1.0.0.200:3478", &net, t0, 600);
+        assert!(refused(relay.admit(&fresh, t0)).starts_with("rate-limited:"));
+        // A held one may still be renewed while the table is full.
+        let renewal = stun_ad(86, "203.0.0.86:3478", &net, t0 + 1, 600);
+        assert!(relay.admit(&renewal, t0 + 1).is_ok());
+        // Once key 1's announcements (61 s) have expired, their places are free, and the next
+        // admission names them for the store to drop; key 2's (62 s) are still live.
+        let later = t0 + 61;
+        let fresh = stun_ad(200, "1.0.0.200:3478", &net, later, 600);
+        let key1 = nfx_proto::event::public_key_hex(&[1; 32]).unwrap();
+        match relay.admit(&fresh, later) {
+            Ok(Admitted::Stun(gone)) => {
+                assert_eq!(gone.len(), 12, "{gone:?}");
+                assert!(gone.iter().all(|(operator, _, _)| *operator == key1));
+            }
+            _ => panic!("admitted once places were free"),
+        }
+    }
 
     #[test]
     fn filters_wider_than_256_values_are_refused() {

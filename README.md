@@ -143,6 +143,14 @@ Joining a room tells anyone present there the node's candidate addresses, its pu
 included, as a tracker's swarm would. `--mesh-bind` fixes its UDP port and `--mesh-max-peers`
 (default 16) caps its connections.
 
+The mesh endpoint also learns STUN servers from Nostr (NFX-10 §1), on its `--mesh-relay`s:
+those the beacons of its videos name in `stun` endpoints, and those STUN service
+announcements name for their networks (below). It asks them after its own `--mesh-stun`, by
+the rules every NFX client uses: global unicast addresses only, ranked by how many distinct
+keys name each, one named by a lone key only when it has none of its own and no better one
+is named, at most 4 in all. So `--mesh-stun` is optional where the network's relays carry
+beacons or announcements. `--mesh-stun-from-nostr=false` turns this off.
+
 Behind a DNAT, a VM's say, STUN cannot tell the node its public address when the STUN server
 is its own (that would take a UDP hairpin), and no gateway maps a port. Name the address with
 `--mesh-public`, as `--bridge-public` does for the bridge:
@@ -157,6 +165,71 @@ port 7845; `--mesh-bind` must then be a fixed port. The node offers that address
 candidate and takes what arrives as sent to it, and offers no candidate address that is not
 public, so its address behind the DNAT never reaches a peer. `--mesh-stun` stays optional
 beside it.
+
+## Run a STUN server for the network
+
+Browsers and mesh endpoints behind NATs learn their public UDP mapping from STUN servers, and
+the more independent ones a network has, the less it depends on any one. `nfxd stun` runs
+one and nothing else: no store, no videos, no iroh, only RFC 8489 Binding requests answered,
+with the same rate limits as `nfxd run --stun` (16 answers a second per source address or
+IPv6 /64, 256 per /24 or /48, 4096 in all). No TURN, no authentication, and nothing about a
+client is logged.
+
+```sh
+nfxd key new stun.key                       # the operator key that signs the announcement
+nfxd stun --bind 203.0.113.7:3478 \
+  --announce --key stun.key --relay wss://relay.nutflix.xyz --relay wss://nos.lol \
+  --network nfx:mainnet:1
+```
+
+Here `203.0.113.7` stands for the host's public address: a documentation address like it
+routes nowhere, and `nfxd stun` refuses to announce one. `--bind` is the UDP address it
+answers on. On a host with several addresses, bind the one clients reach (not `0.0.0.0`): an answer leaves from the address the route picks, and a
+client's NAT drops one from another. Behind a DNAT, bind the host's own address and name the
+public one with `--public 203.0.113.7:3478`. With `--announce`, it signs a STUN service
+announcement (kind 33478, NFX-10 §1) with `--key`: that public address, for each
+`--network` (1 to 8), valid 24 h, sent to the `--relay`s (1 to 8) at once and again every
+12 h. Clients of those networks then find the server over Nostr. A scoped relay carries the
+announcement only if it admits kind 33478 (NFX-04 §1, as `nfxd run --embed-relay-stun-ads`
+makes nfxd's own); general relays carry it as is. Without `--announce` it is a STUN server
+that clients must be told about.
+
+Open UDP 3478 to it, for example with ufw:
+
+```sh
+sudo ufw allow 3478/udp comment 'nfxd stun'
+```
+
+A systemd unit (put the key where only the service user reads it):
+
+```ini
+# /etc/systemd/system/nfxd-stun.service
+[Unit]
+Description=nfxd stun: a STUN server for NFX networks
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=nfxd
+ExecStart=/usr/local/bin/nfxd stun --bind 203.0.113.7:3478 --announce --key /var/lib/nfxd/stun.key --relay wss://relay.nutflix.xyz --network nfx:mainnet:1
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/var/lib/nfxd
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**What the operator learns.** Every client that asks reveals its IP address, and when it
+gathers candidates, which is when it plays a video; a STUN server sees no video and no
+peer, and never touches a byte of one. The announcement ties the server's address to the
+operator's key, publicly. Clients use at most 4 STUN servers, prefer those named by several
+keys, and never take an address from Nostr that is not public (private, loopback or
+documentation; NFX-10 §1), so a lying or dead server costs a client one candidate, nothing
+more.
 
 ## Checks
 

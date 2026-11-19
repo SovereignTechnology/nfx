@@ -54,15 +54,62 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   holds would only fail. When it ranks renditions by how many seeders hold them (NFX-03
   §5), it MAY count `iroh` tickets as well, since those seeders feed bridges and
   pull-through origins.
-- **Using beacon-named STUN servers.** A page MAY add the STUN servers live beacons name
-  to `iceServers` as `stun:<ip>:<port>`, after its own, and SHOULD then take at most a
-  few (the reference player takes 4 in all), most-named first, and none whose address is
-  not global unicast (loopback, private, link-local, shared, multicast or unspecified): a
-  beacon from anywhere must not point viewers at their own network. Such a server moves
-  no bytes of video, but it learns each viewer's address and when it watches, as a
-  beacon-named tracker does. Beacons come from any key, so "most-named" counts keys a
-  stranger can multiply: a page that must not tell strangers who watches names only its
-  network's STUN servers, or takes beacon-named ones only from seeders it trusts.
+- **A STUN service announcement.** Whoever runs a STUN server as above (Binding only, no
+  authentication) MAY announce it to the networks it serves without seeding anything, with
+  an addressable event of kind **33478** (NFX-11 §1) signed by its own key:
+
+  ```json
+  { "kind": 33478, "pubkey": "<operator key>", "content": "",
+    "tags": [ ["d", "<server ip>:<port>"], ["n", "nfx:mainnet:1"], ["n", "nfx:testnet:1"],
+              ["expiration", "<created_at + 86400>"] ] }
+  ```
+
+  A reader accepts one only if: its NIP-01 id and signature verify; it has exactly one
+  `d`, the server's `ip:port` in the canonical form of the `stun` endpoint (above), whose
+  address is global unicast (below); 1 to 8 `n` tags, distinct, each a namespace (NFX-01
+  §2); exactly one `expiration`, a plain decimal with `created_at < expiration ≤
+  created_at + 86400` and later than now; a `created_at` at most 15 min ahead of now (so
+  `expiration` is at most 24 h ahead, give or take that skew); and empty content. It
+  ignores tags it does not know, and uses an announcement only for a network an `n` names.
+  A sender signs it with `expiration` = `created_at` + 86400 and signs a new one every 12 h,
+  so one is always live; being addressable, the newer replaces the older for that key and
+  server. On stop it withdraws nothing: the last one expires within 24 h. General relays
+  carry it as is; a scoped relay only if its NIP-11 `nfx.kinds` lists 33478 (NFX-04 §§1, 3,
+  as amended 2026-11-19). `stun-announcement.json` pins the checks.
+- **Global unicast**, for this section: an IPv4 address in none of 0/8, 10/8, 100.64/10,
+  127/8, 169.254/16, 172.16/12, 192.0.0/24, 192.168/16, 198.18/15, 224/4 and 240/4 (the
+  broadcast address included), nor in the documentation blocks 192.0.2.0/24,
+  198.51.100.0/24 and 203.0.113.0/24 (RFC 5737); an IPv6 address in 2000::/3 and not in the
+  documentation blocks 2001:db8::/32 (RFC 3849) and 3fff::/20 (RFC 9637). The first point a
+  client at its own network; the documentation blocks route nowhere. A beacon whose `stun`
+  endpoint names a documentation address is still a valid beacon (the endpoint's rule above
+  is its form, not its reach); only the selection below refuses the address.
+- **Using STUN servers named over Nostr.** A client, a page or a native peer, SHOULD use
+  the STUN servers Nostr names, beside its own: those in the `stun` endpoints of the live
+  beacons of the video it plays or serves, each named by the beacon's signer, and those of
+  the live announcements for its network, each named by the operator. It picks them by
+  these rules, which `stun-select.json` pins:
+  1. its own servers first (a page's own `iceServers`, a node's configured ones), each once;
+  2. then the named servers that are global unicast (above: never a private, loopback,
+     link-local, shared or documentation address) and not its own, ranked by the number of
+     distinct keys that name each (a key counts once, whether it seeds, announces, or both),
+     most first, ties in the order first named;
+  3. a server named by one key alone only when the client has none of its own and no named
+     server has two keys or more: a lone stranger's key adds no server beside a better one;
+  4. at most 4 STUN servers in all.
+- **The abuse bound.** Whatever beacons and announcements say, Nostr never makes a client
+  contact more than 4 STUN servers, or any address that is not global unicast: a beacon or
+  announcement from anywhere must not point viewers at their own network. A native client
+  that offers a server-reflexive candidate (§6) offers a mapping reported by a server named
+  over Nostr only if that mapping is global unicast, so a lying server adds at most one
+  candidate that fails (ICE tries every pair), never a private address for peers to check.
+  A STUN server cannot touch the video either: it never sees the SDP, which carries the
+  DTLS fingerprints that authenticate each peer.
+- **Privacy.** A STUN server moves no bytes of video, but it learns each client's IP address
+  and when it gathers, as a tracker does. Beacons and announcements come from any key, so
+  "most keys" counts keys a stranger can multiply: a client that must not tell strangers
+  who watches uses only its own STUN servers, or named ones only from keys it trusts. An
+  announcement ties the server's address to its operator's key, publicly.
 
 ## 2. Swarms and bridges
 
@@ -673,3 +720,15 @@ with full ICE, and a NAT test.
   in-place amendment: one that lists 25050 in its NIP-11 `nfx.kinds` admits nfx-mesh/1
   events that pass the checks a reader makes without a session. Nothing on the wire
   changes.
+- Draft 2026-11-19 (issue #104): §1 decentralizes who runs STUN and how clients find it.
+  A STUN service announcement (kind 33478, addressable, signed by the operator: `d` the
+  server's global unicast `ip:port`, `n` each network, `expiration` at most 24 h on, re-sent
+  every 12 h) lets someone who seeds nothing announce a STUN server; scoped relays may carry
+  it (NFX-04 as amended in place 2026-11-19). Clients SHOULD use STUN servers named over
+  Nostr, by beacons and announcements, by one set of rules: their own first, global unicast
+  only, ranked by distinct keys, a lone key only when nothing better exists, at most 4 in
+  all; a native client offers a mapping from such a server only if it is global unicast.
+  "Global unicast" is defined, the documentation blocks (RFC 5737, RFC 3849, RFC 9637)
+  refused with the rest. The privacy note now covers announcements. (Was: beacon-named
+  servers only, "at most a few", most-named first, documentation addresses allowed.) New
+  vectors `stun-announcement.json` and `stun-select.json`.

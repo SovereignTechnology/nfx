@@ -33,6 +33,16 @@
 //! - **Discovery is by room alone** (§6): a page that plays a rendition joins its room and
 //!   meets every node present there. Beacons need no new endpoint for it, but a page and a
 //!   node meet only on a relay both use.
+//! - **STUN from Nostr** ([`MeshConfig::stun_from_nostr`], on by default): on its relays, the
+//!   endpoint also reads the live beacons of the videos it serves
+//!   ([`Mesh::stun_from_beacons_of`]), for their `stun` endpoints, and the STUN service
+//!   announcements (kind 33478) for the networks of the rooms it joins (NFX-10 §1). It asks
+//!   the servers NFX-10 §1's rules pick (`nfx_proto::stun::select`): the configured ones
+//!   first; then global unicast ones of its family, ranked by how many distinct keys name
+//!   them; one named by a lone key only when nothing better exists; at most [`MAX_STUN`] in
+//!   all. A mapping such a server reports is offered only if it is global unicast, so a lying
+//!   server can add at most one useless candidate, never point peers at a private address.
+//!   It keeps [`MAX_NAMED`] sources of names at most, [`NAMED_PER_KEY`] per key.
 //!
 //! Hardening:
 //! - A full agent sends checks to the addresses a peer's SDP names. Only
@@ -42,7 +52,7 @@
 //! - Connections: at most [`MeshConfig::max_peers`] (default [`MAX_PEERS`]) in all and
 //!   [`MAX_PEERS_PER_ROOM`] in one room; at most [`MAX_ROOMS`] rooms. A peer that connects
 //!   again replaces its old connection in that room.
-//! - The socket takes STUN responses only from a configured server, for a transaction id it
+//! - The socket takes STUN responses only from a server it asked, for a transaction id it
 //!   sent; every other datagram goes to the connection that accepts it, or is dropped.
 //!
 //! **Privacy.** Joining a room tells anyone who announces presence there this node's
@@ -55,7 +65,7 @@ pub mod book;
 pub mod sdp;
 pub mod stun;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU16;
 use std::pin::Pin;
@@ -63,10 +73,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use n0_future::{Stream, StreamExt};
+use nfx_proto::beacon::{Beacon, Endpoint};
 use nfx_proto::event::Event;
 use nfx_proto::hashlist::HashList;
 use nfx_proto::namespace::VideoAddr;
 use nfx_proto::signal::{self, Parsed, Received, Room, Session, Signal};
+use nfx_proto::stun::{KIND_STUN_ANNOUNCEMENT, StunAnnouncement};
+use nfx_proto::{KIND_BEACON, KIND_MANIFEST};
 use nostr_sdk::prelude as ns;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::{Candidate, Input, Rtc};
@@ -130,6 +143,19 @@ const REFRESH_EVERY: Duration = Duration::from_secs(10);
 /// A room's presence is sent again, out of turn, at most this often: when a new peer whose
 /// key is lower (so it is the one to offer) appears, so it need not wait for the next round.
 const REANNOUNCE_EVERY: Duration = Duration::from_secs(5);
+/// STUN from Nostr: the sources of names held at most (a beacon per signer and video, an
+/// announcement per operator and server). Keys are free: past it, a new source is ignored
+/// until one expires.
+pub const MAX_NAMED: usize = 1024;
+/// STUN from Nostr: the sources one key may hold, so one key cannot fill the table.
+pub const NAMED_PER_KEY: usize = 8;
+/// STUN from Nostr: the addresses one source names, at most (a `stun` endpoint's limit;
+/// a beacon may carry several endpoints). The rest are not counted.
+pub const MAX_STUN_ADDRS: usize = nfx_proto::beacon::MAX_STUN_ADDRS;
+/// Manifest addresses (or networks) per subscription filter.
+const TAGS_PER_SUB: usize = 64;
+/// Stored announcements asked for per subscription.
+const ANNOUNCEMENTS_ASKED: usize = 512;
 
 /// Where the mesh endpoint listens, whom it asks for its public mapping, and which relays it
 /// signals through.
@@ -157,11 +183,15 @@ pub struct MeshConfig {
     /// whether it is public is the caller's to check (`nfxd` refuses one that is not).
     /// `None`: none.
     pub public: Option<SocketAddr>,
+    /// Learn STUN servers from Nostr (NFX-10 §1): beacons' `stun` endpoints for the videos
+    /// served ([`Mesh::stun_from_beacons_of`]) and STUN service announcements for the rooms'
+    /// networks, read on `relays`, picked by NFX-10 §1's rules after `stun`.
+    pub stun_from_nostr: bool,
 }
 
 impl MeshConfig {
-    /// Signal through `relays`, on an ephemeral IPv4 port, with no STUN server, [`MAX_PEERS`]
-    /// connections, no portmapper and no public address.
+    /// Signal through `relays`, on an ephemeral IPv4 port, with no STUN server of its own but
+    /// those learnt from Nostr, [`MAX_PEERS`] connections, no portmapper and no public address.
     #[must_use]
     pub fn new(relays: Vec<String>) -> Self {
         Self {
@@ -171,6 +201,7 @@ impl MeshConfig {
             max_peers: MAX_PEERS,
             portmapper: false,
             public: None,
+            stun_from_nostr: true,
         }
     }
 }
@@ -201,6 +232,8 @@ pub struct MeshStatus {
     /// The candidates every SDP carries, as `host <ip:port>` and `srflx <ip:port>`; the
     /// public address ([`MeshConfig::public`]) first, when there is one.
     pub candidates: Vec<String>,
+    /// The STUN servers asked now: the configured ones, then those learnt from Nostr.
+    pub stun: Vec<String>,
     /// Rooms joined.
     pub rooms: usize,
     /// Connections negotiating, and open.
@@ -219,11 +252,16 @@ pub struct MeshStatus {
 struct RoomSpec {
     room: Room,
     segments: Vec<String>,
+    /// The video's network (its namespace): announcements for it count.
+    network: String,
 }
 
 enum Control {
     Serve(Vec<RoomSpec>),
-    Forget(Vec<String>),
+    /// Leave these rooms, and stop reading the beacons of this video (`<namespace>:<id>`).
+    Forget(Vec<String>, String),
+    /// Read this manifest's beacons for `stun` endpoints.
+    Beacons(String),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -392,6 +430,7 @@ impl Mesh {
         let now = Instant::now();
         let status = Arc::new(Mutex::new(MeshStatus::default()));
         let session_key = session.pubkey().to_owned();
+        let nostr_stun = cfg.stun_from_nostr.then(NostrStun::default);
         let state = State {
             session,
             client: client.clone(),
@@ -399,6 +438,7 @@ impl Mesh {
             base,
             public: cfg.public,
             stun: Stun::new(cfg.stun.clone(), now),
+            nostr_stun,
             portmapped: None,
             gathered: false,
             started: now,
@@ -474,12 +514,14 @@ impl Mesh {
         only: Option<&[String]>,
     ) -> Result<Vec<String>> {
         let video = VideoAddr::parse(&list.video)?;
+        let network = video.namespace().to_string();
         let mut specs = Vec::new();
         let mut ids = Vec::new();
         for (id, segments) in crate::rtc_serve::vod_renditions(list, store, only) {
             specs.push(RoomSpec {
                 room: Room::derive(&video.web_stream_swarm_id(&id)),
                 segments,
+                network: network.clone(),
             });
             ids.push(id);
         }
@@ -503,7 +545,19 @@ impl Mesh {
             })
             .collect();
         self.control
-            .send(Control::Forget(rooms))
+            .send(Control::Forget(rooms, video.to_string()))
+            .await
+            .map_err(|_| NodeError::Transport("the mesh stopped".into()))
+    }
+
+    /// Count the `stun` endpoints of the live beacons of `manifest_a` (a manifest address,
+    /// `38504:<creator>:<namespace>:<video-id>`) among the STUN servers named over Nostr
+    /// (NFX-10 §1), as read on the mesh's relays. Nothing when [`MeshConfig::stun_from_nostr`]
+    /// is off. [`Mesh::forget`] of the video stops it.
+    pub async fn stun_from_beacons_of(&self, manifest_a: &str) -> Result<()> {
+        nfx_proto::beacon::parse_a_tag(manifest_a)?;
+        self.control
+            .send(Control::Beacons(manifest_a.to_owned()))
             .await
             .map_err(|_| NodeError::Transport("the mesh stopped".into()))
     }
@@ -521,7 +575,10 @@ impl Mesh {
 
 /// STUN requests in flight and the mappings servers reported.
 struct Stun {
+    /// The servers asked: the configured ones, then any learnt from Nostr.
     servers: Vec<SocketAddr>,
+    /// The configured ones ([`MeshConfig::stun`]).
+    configured: Vec<SocketAddr>,
     /// By transaction id: the server, the sends so far and when the next is due.
     pending: HashMap<[u8; 12], (SocketAddr, u32, Instant)>,
     /// Per server, the mapping it last reported.
@@ -532,11 +589,86 @@ struct Stun {
 impl Stun {
     fn new(servers: Vec<SocketAddr>, now: Instant) -> Self {
         Self {
+            configured: servers.clone(),
             servers,
             pending: HashMap::new(),
             mapped: HashMap::new(),
             next_round: now,
         }
+    }
+}
+
+/// One source of STUN server names: a signer's newest beacon for one video, or its newest
+/// announcement of one server.
+#[derive(Debug, Clone)]
+struct Named {
+    created_at: u64,
+    expiration: u64,
+    /// The order heard, for ties.
+    heard: u64,
+    /// At most [`MAX_STUN_ADDRS`] (a beacon may carry more `stun` endpoints than one).
+    addrs: Vec<String>,
+    /// An announcement's networks: it counts only while a room of one of them is joined.
+    /// `None` for a beacon, which counts while its video is watched.
+    networks: Option<Vec<String>>,
+}
+
+/// STUN servers named over Nostr (NFX-10 §1): what to read, and what was read.
+#[derive(Debug, Default)]
+struct NostrStun {
+    /// The manifest addresses whose beacons count.
+    watched: BTreeSet<String>,
+    /// By (signer, source): a source is `beacon <a>` or `announcement <server>`.
+    named: HashMap<(String, String), Named>,
+    heard: u64,
+    subs: Vec<(ns::SubscriptionId, ns::Filter)>,
+    sub_seq: u64,
+}
+
+impl NostrStun {
+    /// Take what a source names now, if it is newer than what it named before. An empty
+    /// list names nothing and is kept until it expires (within the same bounds), so an older
+    /// event replayed later does not bring back what the newer one withdrew. False if
+    /// nothing changed.
+    fn note(&mut self, signer: &str, source: String, named: Named, now: u64) -> bool {
+        let key = (signer.to_owned(), source);
+        match self.named.get(&key) {
+            Some(held) if held.created_at >= named.created_at => return false,
+            Some(_) => {}
+            None => {
+                if self.named.len() >= MAX_NAMED {
+                    self.named.retain(|_, n| n.expiration > now);
+                }
+                let mine = self.named.keys().filter(|(s, _)| s == signer).count();
+                if self.named.len() >= MAX_NAMED || mine >= NAMED_PER_KEY {
+                    return false;
+                }
+            }
+        }
+        self.heard += 1;
+        let heard = self.named.get(&key).map_or(self.heard, |n| n.heard);
+        self.named.insert(key, Named { heard, ..named });
+        true
+    }
+
+    /// The live (signer, address) pairs, in the order first heard: beacons', and those of
+    /// announcements for one of `networks`.
+    fn pairs(&mut self, now: u64, networks: &BTreeSet<String>) -> Vec<(String, String)> {
+        self.named.retain(|_, n| n.expiration > now);
+        let mut sources: Vec<(&(String, String), &Named)> = self
+            .named
+            .iter()
+            .filter(|(_, n)| {
+                n.networks
+                    .as_ref()
+                    .is_none_or(|nets| nets.iter().any(|x| networks.contains(x)))
+            })
+            .collect();
+        sources.sort_by_key(|(_, n)| n.heard);
+        sources
+            .into_iter()
+            .flat_map(|((signer, _), n)| n.addrs.iter().map(move |a| (signer.clone(), a.clone())))
+            .collect()
     }
 }
 
@@ -566,6 +698,8 @@ struct RoomState {
     backoff: OfferBackoff,
     /// When this room's presence may next go out of turn ([`REANNOUNCE_EVERY`]).
     reannounce_at: Instant,
+    /// The video's network (its namespace).
+    network: String,
 }
 
 struct State {
@@ -578,6 +712,8 @@ struct State {
     /// The public address of a DNAT in front of the socket ([`MeshConfig::public`]).
     public: Option<SocketAddr>,
     stun: Stun,
+    /// STUN servers named over Nostr, when it learns them ([`MeshConfig::stun_from_nostr`]).
+    nostr_stun: Option<NostrStun>,
     portmapped: Option<SocketAddr>,
     gathered: bool,
     started: Instant,
@@ -689,7 +825,8 @@ impl State {
 
     /// The local candidates every new connection gets, each address once: the public address
     /// (host) when there is one, the socket's own (host), then each distinct mapping a STUN
-    /// server or the gateway reported (server reflexive). With a public address, none but it
+    /// server or the gateway reported (server reflexive; one from a server learnt over Nostr
+    /// only if global unicast, [`State::stun_response`]). With a public address, none but it
     /// whose address is not public: neither the socket's address behind the DNAT nor a
     /// private mapping. A server-reflexive candidate's base is [`State::arrival`] (str0m
     /// writes no `raddr` of ours, but hashes the base into the foundation), so nothing in
@@ -747,6 +884,7 @@ impl State {
             .iter()
             .map(|c| format!("{} {}", c.kind(), c.addr()))
             .collect();
+        s.stun = self.stun.servers.iter().map(ToString::to_string).collect();
         s.rooms = self.rooms.len();
         s.open = self.links.iter().filter(|l| l.opened).count();
         s.connecting = self.links.len() - s.open;
@@ -774,7 +912,24 @@ impl State {
                     self.join_waiting().await;
                 }
             }
-            Control::Forget(keys) => {
+            Control::Beacons(a) => {
+                if let Some(n) = &mut self.nostr_stun
+                    && n.watched.insert(a)
+                {
+                    self.resubscribe_stun().await;
+                }
+            }
+            Control::Forget(keys, video) => {
+                if let Some(n) = &mut self.nostr_stun {
+                    // `38504:<creator>:<video>`: the watched addresses of that video.
+                    n.watched
+                        .retain(|a| a.splitn(3, ':').nth(2) != Some(video.as_str()));
+                    n.named.retain(|(_, source), _| {
+                        source
+                            .strip_prefix("beacon ")
+                            .is_none_or(|a| a.splitn(3, ':').nth(2) != Some(video.as_str()))
+                    });
+                }
                 self.waiting
                     .retain(|s| !keys.iter().any(|k| k == s.room.pubkey()));
                 let mut changed = false;
@@ -793,6 +948,18 @@ impl State {
                 if changed {
                     self.resubscribe().await;
                 }
+                self.resubscribe_stun().await;
+                // What the video's beacons named, and announcements for a network no room is
+                // in any more, count no longer.
+                let networks = self.networks();
+                if let Some(n) = &mut self.nostr_stun {
+                    n.named.retain(|_, x| {
+                        x.networks
+                            .as_ref()
+                            .is_none_or(|nets| nets.iter().any(|y| networks.contains(y)))
+                    });
+                }
+                self.select_stun(Instant::now(), true);
             }
             Control::Shutdown(_) => {}
         }
@@ -819,6 +986,7 @@ impl State {
                 limiter: SenderLimiter::default(),
                 backoff: OfferBackoff::default(),
                 reannounce_at: Instant::now(),
+                network: spec.network.clone(),
             });
             r.swarm = Swarm {
                 segments: spec.segments,
@@ -842,6 +1010,7 @@ impl State {
             }
         }
         self.resubscribe().await;
+        self.resubscribe_stun().await;
         let now = unix_now();
         for key in joined {
             if let Some(r) = self.rooms.get(&key)
@@ -873,6 +1042,54 @@ impl State {
         self.check_subscriptions().await;
     }
 
+    /// The networks of the rooms joined: announcements for them count.
+    fn networks(&self) -> BTreeSet<String> {
+        self.rooms.values().map(|r| r.network.clone()).collect()
+    }
+
+    /// Replace the subscriptions that learn STUN servers (NFX-10 §1) with ones for the videos
+    /// watched (their beacons) and the networks of the rooms joined (announcements).
+    async fn resubscribe_stun(&mut self) {
+        let networks = self.networks();
+        let Some(n) = &mut self.nostr_stun else {
+            return;
+        };
+        let watched: Vec<String> = n.watched.iter().cloned().collect();
+        let networks: Vec<String> = networks.into_iter().collect();
+        let mut filters = Vec::new();
+        for chunk in watched.chunks(TAGS_PER_SUB) {
+            filters.push(
+                ns::Filter::new()
+                    .kind(ns::Kind::from(KIND_BEACON))
+                    .custom_tags(ns::SingleLetterTag::LOWERCASE_A, chunk.iter().cloned()),
+            );
+        }
+        for chunk in networks.chunks(TAGS_PER_SUB) {
+            filters.push(
+                ns::Filter::new()
+                    .kind(ns::Kind::from(KIND_STUN_ANNOUNCEMENT))
+                    .custom_tags(ns::SingleLetterTag::LOWERCASE_N, chunk.iter().cloned())
+                    .limit(ANNOUNCEMENTS_ASKED),
+            );
+        }
+        if n.subs.iter().map(|(_, f)| f).eq(filters.iter()) {
+            return;
+        }
+        let old = std::mem::take(&mut n.subs);
+        for f in filters {
+            n.sub_seq += 1;
+            n.subs.push((
+                ns::SubscriptionId::new(format!("nfx-stun-{}", n.sub_seq)),
+                f,
+            ));
+        }
+        for (id, _) in old {
+            let _ = self.client.unsubscribe(&id).await;
+        }
+        self.next_sub_check = Instant::now();
+        self.check_subscriptions().await;
+    }
+
     /// Every connected relay holds every subscription; one that lacked some (it connected
     /// late, reconnected, or closed one) gets them, and this node's presence in every room.
     async fn check_subscriptions(&mut self) {
@@ -881,9 +1098,23 @@ impl State {
             return;
         }
         self.next_sub_check = now + SUB_CHECK;
+        let stun_subs: Vec<(ns::SubscriptionId, ns::Filter)> = self
+            .nostr_stun
+            .as_ref()
+            .map(|n| n.subs.clone())
+            .unwrap_or_default();
         for (url, relay) in self.client.relays().await {
             if !relay.status().is_connected() {
                 continue;
+            }
+            for (id, filter) in &stun_subs {
+                if relay.subscription(id).await.is_none() {
+                    let _ = self
+                        .client
+                        .subscribe(ns::ReqTarget::single(url.clone(), [filter.clone()]))
+                        .with_id(id.clone())
+                        .await;
+                }
             }
             let mut fresh = false;
             for (id, filter) in &self.subs {
@@ -950,10 +1181,59 @@ impl State {
             .insert(tid, (server, tries + 1, now + STUN_RTO * (1 << tries)));
     }
 
+    /// The servers to ask (NFX-10 §1): the configured ones, then those Nostr names that the
+    /// rules pick, of the socket's family. A server picked anew is asked at once (with `ask`;
+    /// else at the round about to start); one no longer picked is forgotten, with its mapping.
+    fn select_stun(&mut self, now: Instant, ask: bool) {
+        let networks = self.networks();
+        let Some(n) = &mut self.nostr_stun else {
+            return;
+        };
+        let v4 = self.base.is_ipv4();
+        let pairs: Vec<(String, String)> = n
+            .pairs(unix_now(), &networks)
+            .into_iter()
+            .filter(|(_, a)| a.parse::<SocketAddr>().is_ok_and(|a| a.is_ipv4() == v4))
+            .collect();
+        let own: Vec<String> = self
+            .stun
+            .configured
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let chosen: Vec<SocketAddr> = nfx_proto::stun::select(
+            &own,
+            pairs.iter().map(|(k, a)| (k.as_str(), a.as_str())),
+            MAX_STUN,
+        )
+        .iter()
+        .filter_map(|a| a.parse().ok())
+        .collect();
+        if chosen == self.stun.servers {
+            return;
+        }
+        let fresh: Vec<SocketAddr> = chosen
+            .iter()
+            .filter(|s| !self.stun.servers.contains(s))
+            .copied()
+            .collect();
+        self.stun.mapped.retain(|s, _| chosen.contains(s));
+        self.stun.pending.retain(|_, (s, _, _)| chosen.contains(s));
+        self.stun.servers = chosen;
+        if ask {
+            for server in fresh {
+                self.stun_send(server, 0, now);
+            }
+        }
+        self.publish_status();
+    }
+
     /// Start a round, retransmit what is due, and end gathering once the first round is
     /// answered or timed out, or [`GATHER_TIMEOUT`] has passed.
     fn stun_tick(&mut self, now: Instant) {
         if now >= self.stun.next_round {
+            // What expired is no longer counted.
+            self.select_stun(now, false);
             self.stun.next_round = now + STUN_REFRESH;
             self.stun.pending.clear();
             for server in self.stun.servers.clone() {
@@ -988,7 +1268,13 @@ impl State {
             return false;
         }
         self.stun.pending.remove(&tid);
-        if let Some(addr) = stun::mapped(bytes).filter(|a| a.is_ipv4() == self.base.is_ipv4()) {
+        // A server learnt over Nostr is anyone's: its mapping is offered only if it is global
+        // unicast, so a lying one never points peers at a private address (NFX-10 §1).
+        let learnt = !self.stun.configured.contains(&server);
+        if let Some(addr) = stun::mapped(bytes).filter(|a| {
+            a.is_ipv4() == self.base.is_ipv4()
+                && (!learnt || nfx_proto::stun::is_global_unicast(a.ip()))
+        }) {
             self.stun.mapped.insert(server, addr);
         }
         true
@@ -1138,6 +1424,11 @@ impl State {
     // ---- signaling --------------------------------------------------------------------------
 
     fn on_event(&mut self, event: &ns::Event) {
+        match event.kind.as_u16() {
+            KIND_BEACON => return self.on_beacon(event),
+            KIND_STUN_ANNOUNCEMENT => return self.on_announcement(event),
+            _ => {}
+        }
         // Our own come back from every relay: dropped before anything else.
         if event.pubkey.to_hex() == self.me() {
             return;
@@ -1194,6 +1485,90 @@ impl State {
                 let offer = offer.clone();
                 self.on_answer(&key, &r, &offer);
             }
+        }
+    }
+
+    /// A beacon of a watched video: the STUN servers its `stun` endpoint names (none, if it
+    /// has none: the signer's newer beacon withdraws what its older one named).
+    fn on_beacon(&mut self, event: &ns::Event) {
+        let Some(n) = &mut self.nostr_stun else {
+            return;
+        };
+        let Ok(ev) = from_nostr(event) else {
+            return;
+        };
+        // The cheap check first: a beacon of a video this node does not watch costs nothing more.
+        let Some(a) = ev
+            .tag_values("a")
+            .next()
+            .and_then(|v| v.first())
+            .filter(|a| n.watched.contains(*a))
+            .cloned()
+        else {
+            return;
+        };
+        let now = unix_now();
+        let Ok(b) = Beacon::from_event(&ev, now) else {
+            return;
+        };
+        if format!("{KIND_MANIFEST}:{}:{}", b.creator, b.content.video) != a {
+            return;
+        }
+        let mut addrs: Vec<String> = Vec::new();
+        for addr in b.content.endpoints.iter().flat_map(|e| match e {
+            Endpoint::Stun { addrs } => addrs.as_slice(),
+            _ => &[] as &[String],
+        }) {
+            if addrs.len() >= MAX_STUN_ADDRS {
+                break;
+            }
+            if !addrs.contains(addr) {
+                addrs.push(addr.clone());
+            }
+        }
+        let named = Named {
+            created_at: b.created_at,
+            expiration: b.expiration,
+            heard: 0,
+            addrs,
+            networks: None,
+        };
+        if n.note(&b.seeder, format!("beacon {a}"), named, now) {
+            self.select_stun(Instant::now(), true);
+        }
+    }
+
+    /// A STUN service announcement for a network of a room joined.
+    fn on_announcement(&mut self, event: &ns::Event) {
+        let networks = self.networks();
+        let Some(n) = &mut self.nostr_stun else {
+            return;
+        };
+        let Ok(ev) = from_nostr(event) else {
+            return;
+        };
+        if !ev
+            .tag_values("n")
+            .any(|v| v.first().is_some_and(|x| networks.contains(x)))
+        {
+            return;
+        }
+        let now = unix_now();
+        let Ok(a) = StunAnnouncement::from_event(&ev, now) else {
+            return;
+        };
+        if !a.networks.iter().any(|x| networks.contains(&x.to_string())) {
+            return;
+        }
+        let named = Named {
+            created_at: a.created_at,
+            expiration: a.expiration,
+            heard: 0,
+            addrs: vec![a.addr.clone()],
+            networks: Some(a.networks.iter().map(ToString::to_string).collect()),
+        };
+        if n.note(&a.operator, format!("announcement {}", a.addr), named, now) {
+            self.select_stun(Instant::now(), true);
         }
     }
 

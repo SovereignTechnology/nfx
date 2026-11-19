@@ -4,7 +4,7 @@
  * still untrusted. A beacon names where to fetch, never what is right: every byte is
  * checked against the signed anchor whatever its source.
  */
-import type { Endpoints, OriginSource, RenditionAvailability, Signaling } from './api';
+import type { Endpoints, OriginSource, RenditionAvailability, Signaling, StunNamed } from './api';
 import { MAX_RENDITIONS, beaconRenditionId } from './levels';
 import { MAX_RELAYS, MAX_TRACKERS, relayUrl, trackerUrl } from './mesh';
 
@@ -14,8 +14,13 @@ export const MAX_ORIGINS = 8;
 export const MAX_SEEDERS = 64;
 /** Most origins, and most trackers, taken from one beacon. */
 const PER_BEACON = 4;
-/** Most STUN servers one session takes. */
+/** Most STUN servers one session takes, its own included (NFX-10 §1's abuse bound). */
 export const MAX_ICE_SERVERS = 4;
+/** Most STUN service announcements held at once, and from one operator key. */
+export const MAX_ANNOUNCEMENTS = 256;
+const ANNOUNCEMENTS_PER_KEY = 8;
+/** Most entries of `Endpoints.stunNamed`. */
+const MAX_STUN_NAMED = 16;
 const STUN_URL = /^stuns?:(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/;
 
 /**
@@ -60,10 +65,10 @@ export function beaconTracker(raw: string): string | null {
   return t !== null && t.startsWith('wss://') ? t : null;
 }
 
-/** Whether an IPv4 address (as octets) is global unicast: none of the blocks that point a
- * viewer at its own network (this network, private, shared, loopback, link-local, IETF,
- * benchmarking) or that are not unicast (multicast, reserved, broadcast). Documentation
- * blocks pass: they reach nothing, and they point nowhere local. */
+/** Whether an IPv4 address (as octets) is global unicast (NFX-10 §1): none of the blocks
+ * that point a viewer at its own network (this network, private, shared, loopback,
+ * link-local, IETF, benchmarking), that route nowhere (documentation, RFC 5737), or that are
+ * not unicast (multicast, reserved, broadcast). */
 function globalV4(o: number[]): boolean {
   const [a = 0, b = 0, c = 0] = o;
   return !(
@@ -75,15 +80,19 @@ function globalV4(o: number[]): boolean {
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) ||
-    (a === 192 && b === 0 && c === 0) ||
-    (a === 198 && (b === 18 || b === 19))
+    (a === 192 && b === 0 && (c === 0 || c === 2)) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51 && c === 100) ||
+    (a === 203 && b === 0 && c === 113)
   );
 }
 
 /**
- * A beacon-named STUN address (NFX-10 §1: canonical `ip:port`, port not 0) as an
- * `iceServers` URL, or null: global unicast only (IPv4 above, IPv6 in 2000::/3), so a beacon
- * from anywhere cannot point viewers at their own network.
+ * A STUN address named over Nostr (NFX-10 §1: canonical `ip:port`, port not 0) as an
+ * `iceServers` URL, or null: global unicast only (IPv4 above; IPv6 in 2000::/3 but not the
+ * documentation blocks 2001:db8::/32 and 3fff::/20, RFC 3849 and RFC 9637), so a beacon or
+ * announcement from anywhere cannot point viewers at their own network, or at an address
+ * that routes nowhere.
  */
 export function beaconStun(addr: string): string | null {
   const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/.exec(addr);
@@ -108,11 +117,62 @@ export function beaconStun(addr: string): string | null {
     }
     // WHATWG's serialisation is RFC 5952's, as the canonical form requires.
     if (canonical !== `[${host}]` || String(port) !== v6[2]) return null;
-    const first = host.startsWith('::') ? 0 : parseInt(host.split(':')[0] ?? '', 16);
+    const groups = host.startsWith('::') ? [] : host.split(':');
+    const first = host.startsWith('::') ? 0 : parseInt(groups[0] ?? '', 16);
     if (!(Number.isInteger(first) && (first & 0xe000) === 0x2000)) return null;
+    // The documentation blocks 2001:db8::/32 (RFC 3849) and 3fff::/20 (RFC 9637). The
+    // canonical form writes a second group of 0x0db8 as `db8`, and an empty one is zeros.
+    const second = groups[1] === undefined || groups[1] === '' ? 0 : parseInt(groups[1], 16);
+    if ((first === 0x2001 && second === 0x0db8) || (first === 0x3fff && second < 0x1000)) return null;
     return `stun:[${host}]:${port}`;
   }
   return null;
+}
+
+/**
+ * The STUN servers named over Nostr, ranked: `pairs` are [key, URL] in the order heard (a
+ * beacon's seeder and each URL of its `stun` endpoint; an announcement's operator and its
+ * server), URLs already through `beaconStun`. Each URL counts the distinct keys that name it;
+ * most first, ties in the order first named.
+ */
+export function rankNamed(pairs: Iterable<readonly [string, string]>): StunNamed[] {
+  const keys = new Map<string, Set<string>>();
+  for (const [key, url] of pairs) {
+    const k = keys.get(url);
+    if (k) k.add(key);
+    else keys.set(url, new Set([key]));
+  }
+  // Array#sort is stable: equal counts keep the order first named.
+  return [...keys].map(([url, k]) => ({ url, keys: k.size })).sort((x, y) => y.keys - x.keys);
+}
+
+/**
+ * The STUN servers a session uses (NFX-10 §1), as `stun:` URLs, at most `max`: the page's
+ * own (`own`, each once) first; then the servers named over Nostr (`named`, as `rankNamed`
+ * gives them) that are not its own, most-named first; a server named by one key alone only
+ * when the page has none of its own and none named has two keys or more. So Nostr never makes
+ * a viewer ask more than 4 STUN servers, or one at an address that is not global unicast
+ * (`beaconStun` refused those).
+ */
+export function selectStun(own: readonly string[], named: readonly StunNamed[], max: number = MAX_ICE_SERVERS): string[] {
+  const out: string[] = [];
+  for (const o of own) if (out.length < max && !out.includes(o)) out.push(o);
+  const ranked = named.filter((n) => !own.includes(n.url)).sort((x, y) => y.keys - x.keys);
+  const loneOk = own.length === 0 && !ranked.some((n) => n.keys >= 2);
+  for (const n of ranked) {
+    if (out.length >= max) break;
+    if ((n.keys >= 2 || loneOk) && !out.includes(n.url)) out.push(n.url);
+  }
+  return out;
+}
+
+/** A STUN service announcement as nfx-wasm's `verifyStunAnnouncement` returns it. */
+export interface VerifiedStunAnnouncement {
+  operator: string;
+  addr: string;
+  networks: string[];
+  created_at: number;
+  expiration: number;
 }
 
 /** A beacon as nfx-wasm's `verifyBeacon` returns it (the fields used here). */
@@ -133,6 +193,8 @@ interface NamedOrigin {
 interface Entry {
   created_at: number;
   expiration: number;
+  /** When it was first heard, in the book's order (beacons and announcements together). */
+  heard: number;
   origins: NamedOrigin[];
   trackers: string[];
   stun: string[];
@@ -166,10 +228,43 @@ function narrow(a: string[] | null, b: string[] | null): string[] | null {
  * The newest unexpired beacon of each seeder, and what they name together. An older or
  * equal beacon from a seeder already held changes nothing (a relay replaying an old one,
  * or the same one from a second relay), and a seeder's newer beacon replaces what it said
- * before, so a seeder can withdraw an endpoint, or stop holding a rendition.
+ * before, so a seeder can withdraw an endpoint, or stop holding a rendition. Beside them,
+ * the newest unexpired STUN service announcement of each operator and server (NFX-10 §1),
+ * whose servers count with the beacons' `stun` endpoints, by distinct key.
  */
 export class EndpointBook {
   readonly #seeders = new Map<string, Entry>();
+  /** By `<operator> <server>`: the newest announcement of each. */
+  readonly #announcements = new Map<
+    string,
+    { operator: string; url: string; created_at: number; expiration: number; heard: number }
+  >();
+  /** The order things are first heard in, across beacons and announcements (for ties). */
+  #heard = 0;
+
+  /**
+   * Take in a STUN service announcement (NFX-10 §1), already verified and checked to serve
+   * the page's network, at `now`. True if it changed what the book holds. An older or equal
+   * one of the same operator and server changes nothing; at most `MAX_ANNOUNCEMENTS` are
+   * held, 8 per operator.
+   */
+  addAnnouncement(a: VerifiedStunAnnouncement, now: number): boolean {
+    if (typeof a.operator !== 'string' || typeof a.addr !== 'string') return false;
+    if (!Number.isSafeInteger(a.created_at) || !Number.isSafeInteger(a.expiration) || a.expiration <= now) return false;
+    const url = beaconStun(a.addr);
+    if (url === null) return false;
+    const key = `${a.operator} ${a.addr}`;
+    const held = this.#announcements.get(key);
+    if (held && held.created_at >= a.created_at) return false;
+    if (!held) {
+      for (const [k, e] of this.#announcements) if (e.expiration <= now) this.#announcements.delete(k);
+      const mine = [...this.#announcements.values()].filter((e) => e.operator === a.operator).length;
+      if (this.#announcements.size >= MAX_ANNOUNCEMENTS || mine >= ANNOUNCEMENTS_PER_KEY) return false;
+    }
+    const heard = held?.heard ?? ++this.#heard;
+    this.#announcements.set(key, { operator: a.operator, url, created_at: a.created_at, expiration: a.expiration, heard });
+    return true;
+  }
 
   /** Take `b` in at time `now` (unix seconds). True if it changed what the book holds. */
   add(b: VerifiedBeacon, now: number): boolean {
@@ -231,7 +326,8 @@ export class EndpointBook {
     }
     const holds = all ? 'all' : ids;
     // Map#set on a held key keeps its place: seeders stay in first-heard order.
-    this.#seeders.set(b.seeder, { created_at: b.created_at, expiration: b.expiration, origins, trackers, stun, holds });
+    const heard = held?.heard ?? ++this.#heard;
+    this.#seeders.set(b.seeder, { created_at: b.created_at, expiration: b.expiration, heard, origins, trackers, stun, holds });
     return true;
   }
 
@@ -242,12 +338,13 @@ export class EndpointBook {
   snapshot(now: number): Endpoints {
     const origins = new Map<string, { n: number; renditions: string[] | null }>();
     const trackers = new Map<string, number>();
-    const stun = new Map<string, number>();
+    /** [first heard, key, URL]: ties among STUN servers go to the one first heard. */
+    const stunPairs: [number, string, string][] = [];
     const named = new Map<string, number>();
     let seeders = 0;
     let holders = 0;
     let all = 0;
-    for (const e of this.#seeders.values()) {
+    for (const [seeder, e] of this.#seeders) {
       if (e.expiration <= now) continue;
       seeders += 1;
       for (const o of e.origins) {
@@ -258,7 +355,7 @@ export class EndpointBook {
         } else origins.set(o.url, { n: 1, renditions: o.renditions === null ? null : [...o.renditions] });
       }
       for (const t of e.trackers) trackers.set(t, (trackers.get(t) ?? 0) + 1);
-      for (const s of e.stun) stun.set(s, (stun.get(s) ?? 0) + 1);
+      for (const s of e.stun) stunPairs.push([e.heard, seeder, s]);
       if (e.holds === 'all') {
         holders += 1;
         all += 1;
@@ -267,6 +364,10 @@ export class EndpointBook {
         for (const id of e.holds) named.set(id, (named.get(id) ?? 0) + 1);
       }
     }
+    for (const a of this.#announcements.values()) if (a.expiration > now) stunPairs.push([a.heard, a.operator, a.url]);
+    // Array#sort is stable: within one source, the order it names them in.
+    stunPairs.sort((x, y) => x[0] - y[0]);
+    const stunNamed = rankNamed(stunPairs.map(([, key, url]): [string, string] => [key, url])).slice(0, MAX_STUN_NAMED);
     // Array#sort is stable, so equal counts keep first-heard order.
     const ranked = (m: Map<string, number>): string[] => [...m].sort((x, y) => y[1] - x[1]).map(([u]) => u);
     const originsRanked = [...origins].sort((x, y) => y[1].n - x[1].n).slice(0, MAX_ORIGINS);
@@ -282,15 +383,29 @@ export class EndpointBook {
       origins: originsRanked.map(([u]) => u),
       originSources: originsRanked.map(([url, c]): OriginSource => (c.renditions === null ? { url } : { url, renditions: c.renditions })),
       trackers: ranked(trackers).slice(0, MAX_TRACKERS),
-      stunServers: ranked(stun).slice(0, MAX_ICE_SERVERS),
+      stunServers: selectStun([], stunNamed),
+      stunNamed,
       seeders,
       availability,
     };
   }
 
+  /**
+   * When the next beacon or announcement held expires (unix seconds), or null when none is
+   * live: what the book names may change then with nothing new heard.
+   */
+  nextExpiration(now: number): number | null {
+    let next: number | null = null;
+    for (const e of [...this.#seeders.values(), ...this.#announcements.values()]) {
+      if (e.expiration > now && (next === null || e.expiration < next)) next = e.expiration;
+    }
+    return next;
+  }
+
   #prune(now: number): void {
     for (const [k, e] of this.#seeders) if (e.expiration <= now) this.#seeders.delete(k);
   }
+
 }
 
 /** The trackers a session may use, normalised; throws on any it may not. */

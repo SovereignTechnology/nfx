@@ -1,7 +1,8 @@
 //! NFX wire formats (`spec/`): namespaces and the `n` tag (NFX-01), kind-38504
 //! manifests (NFX-02), kind-20464 beacons (NFX-03), hash lists and playlists (NFX-05),
 //! gossip envelopes (NFX-06), vouchers (NFX-08), mesh signaling over Nostr (NFX-10 §6,
-//! with NIP-44 v2), canonical JSON (NFX-11 §9) and seeder ratings (NFX-16).
+//! with NIP-44 v2), STUN service announcements and the STUN selection rules (NFX-10 §1),
+//! canonical JSON (NFX-11 §9) and seeder ratings (NFX-16).
 //!
 //! Everything here is pure: no I/O, no clock (callers pass `now`), no RNG (callers pass
 //! keys and nonces). The same code is built natively and for `wasm32-unknown-unknown`, so
@@ -18,6 +19,7 @@ pub mod manifest;
 pub mod nip44;
 pub mod rating;
 pub mod signal;
+pub mod stun;
 mod verified;
 pub mod voucher;
 
@@ -33,6 +35,8 @@ pub const KIND_MANIFEST: u16 = 38504;
 pub const KIND_BEACON: u16 = 20464;
 /// Kind of a mesh signaling event (NFX-10 §6; the NIP-DC draft's kind, `i` = `nfx-mesh/1`).
 pub const KIND_SIGNAL: u16 = signal::KIND_SIGNAL;
+/// Kind of a STUN service announcement (NFX-10 §1; addressable, one per operator and server).
+pub const KIND_STUN_ANNOUNCEMENT: u16 = stun::KIND_STUN_ANNOUNCEMENT;
 /// Kind of a NIP-09 deletion request; NFX admits only manifest deletions (NFX-02 §6).
 pub const KIND_DELETION: u16 = 5;
 /// Kind of a seeder rating: nostr-identity's fact op, profiled by NFX-16 (not ours).
