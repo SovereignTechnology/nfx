@@ -292,7 +292,9 @@ document.addEventListener('click', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   const t = e.target;
-  const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+  // A checkbox or a button is not text: `n` still toggles the panel from there.
+  const notText = ['checkbox', 'radio', 'range', 'button', 'submit', 'reset', 'color', 'file'];
+  const typing = t && ((t.tagName === 'INPUT' && !notText.includes(t.type)) || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
   if (e.key === 'Escape') {
     if (!$('nerd-menu').hidden) $('nerd-menu').hidden = true;
     else if (!$('nerd').hidden) nerdClose();

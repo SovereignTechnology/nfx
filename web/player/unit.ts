@@ -46,7 +46,7 @@ import {
   sessionRenditions,
 } from './src/levels';
 import { MAX_PEERS_LISTED, MAX_RELAYS, PeerBook, printable, relayUrl, selectedPair } from './src/mesh';
-import { addressText, formatBytes, nerdView, pathText, shortId } from './src/nerd';
+import { addressText, formatBytes, nerdView, pathText, shortId, typingInto } from './src/nerd';
 import {
   PROBE_CONCURRENCY,
   PROBE_MAX_BYTES,
@@ -1162,6 +1162,14 @@ throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(ve
   eq('address: none', addressText(undefined), '–');
   eq('path: direct', pathText(at({})), 'direct (srflx/udp, 20 ms)');
   eq('path: unknown', pathText(at({ path: 'unknown' })), '–');
+  eq('n is a shortcut on a checkbox or button, text in a field', [
+    typingInto({ tagName: 'INPUT', type: 'checkbox' }),
+    typingInto({ tagName: 'BUTTON' }),
+    typingInto({ tagName: 'INPUT', type: 'text' }),
+    typingInto({ tagName: 'INPUT' }),
+    typingInto({ tagName: 'TEXTAREA' }),
+    typingInto({ tagName: 'DIV', isContentEditable: true }),
+  ], [false, false, true, true, true, true]);
 }
 
 console.log(`unit: ${ran - bad}/${ran} ok`);

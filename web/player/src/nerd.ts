@@ -178,6 +178,13 @@ export interface NerdPanel {
   snapshot(): string;
 }
 
+/** Keys typed here are text, not shortcuts: a text field, a select, an editable element. A checkbox or button is not. */
+const NOT_TEXT = new Set(['checkbox', 'radio', 'range', 'button', 'submit', 'reset', 'color', 'file']);
+export function typingInto(t: { tagName: string; isContentEditable?: boolean; type?: string }): boolean {
+  if (t.tagName === 'INPUT') return !NOT_TEXT.has(t.type ?? 'text');
+  return t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable === true;
+}
+
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -386,7 +393,7 @@ export function nerdPanel(opts: {
   });
   document.addEventListener('keydown', (e) => {
     const t = e.target as HTMLElement | null;
-    const typing = t !== null && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+    const typing = t !== null && typingInto(t);
     if (e.key === 'Escape') {
       if (!menu.hidden) menu.hidden = true;
       else if (!panel.hidden) api.close();
