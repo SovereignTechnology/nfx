@@ -44,7 +44,7 @@ export function subscribe(
     queueMicrotask(() => end(`bad relay URL: ${String(e)}`));
     return { close() {} };
   }
-  const filters = Array.isArray(filter) ? filter : [filter];
+  const filters: Filter[] = Array.isArray(filter) ? filter : [filter];
   ws.onopen = () => ws.send(JSON.stringify(['REQ', id, ...filters]));
   ws.onmessage = (m: MessageEvent) => {
     const text = typeof m.data === 'string' ? m.data : '';
