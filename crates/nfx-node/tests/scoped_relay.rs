@@ -715,7 +715,7 @@ async fn a_relay_with_stun_announcements_admits_rate_limits_and_expires_them() {
         .tags([
             ns::Tag::parse(["d", "192.168.1.2:3478"]).unwrap(),
             ns::Tag::parse(["n", "nfx:testnet:1"]).unwrap(),
-            ns::Tag::parse(["expiration", &(now + 600).to_string()]).unwrap(),
+            ns::Tag::parse(["expiration", (now + 600).to_string().as_str()]).unwrap(),
         ])
         .finalize(&operator)
         .unwrap();
