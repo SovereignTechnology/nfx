@@ -96,6 +96,22 @@ export function watchEndpoints(
   const book = new EndpointBook();
   let last = '';
   let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // Report what the book names now, if it changed, and look again when the next thing held
+  // expires: an announcement may live 24 h with nothing new heard meanwhile.
+  const report = (): void => {
+    if (stopped) return;
+    const t = now();
+    const snapshot = book.snapshot(t);
+    const key = JSON.stringify(snapshot);
+    if (key !== last) {
+      last = key;
+      onChange(snapshot);
+    }
+    clearTimeout(timer);
+    const next = book.nextExpiration(t);
+    if (next !== null) timer = setTimeout(report, Math.min(Math.max(next - t, 1), 3600) * 1000);
+  };
   const hear = (json: string): void => {
     if (stopped) return;
     let changed: boolean;
@@ -111,12 +127,7 @@ export function watchEndpoints(
     } catch {
       return; // fails NFX-03 or NFX-10 §1: neither a beacon nor an announcement
     }
-    if (!changed) return;
-    const snapshot = book.snapshot(now());
-    const key = JSON.stringify(snapshot);
-    if (key === last) return;
-    last = key;
-    onChange(snapshot);
+    if (changed) report();
   };
   const subs = relays.map((r) =>
     subscribe(
@@ -131,6 +142,7 @@ export function watchEndpoints(
   );
   return () => {
     stopped = true;
+    clearTimeout(timer);
     subs.forEach((s) => s.close());
   };
 }

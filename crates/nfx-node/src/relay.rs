@@ -108,8 +108,8 @@ struct Limits {
     presence: HashMap<(String, String, &'static str), u64>,
     /// sender → offer and answer admission times within the last window.
     directed: HashMap<String, VecDeque<u64>>,
-    /// (operator, server) → the held announcement's `created_at` and `expiration`.
-    stun: HashMap<(String, String), (u64, u64)>,
+    /// (operator, server) → the held announcement: its `created_at`, `expiration` and id.
+    stun: HashMap<(String, String), (u64, u64, String)>,
     /// operator → announcement admission times within the last hour.
     stun_times: HashMap<String, VecDeque<u64>>,
     /// When stale keys were last swept (at most once per [`SWEEP_EVERY_SECS`]).
@@ -301,7 +301,7 @@ impl Admission {
     /// at arrival (NFX-10 §1), one of this relay's networks, then the §2 size, per-key rate
     /// and the cap on those held. A creator allow-list does not apply: it names no video.
     fn admit_stun(&self, event: &ns::Event, now: u64) -> Result<Admitted, Refusal> {
-        use ns::MachineReadablePrefix::{Blocked, Invalid, RateLimited};
+        use ns::MachineReadablePrefix::{Blocked, Duplicate, Invalid, RateLimited};
         if event.as_json().len() > MAX_STUN_ANNOUNCEMENT_BYTES {
             return Err((Invalid, "announcement over 2 KiB".into()));
         }
@@ -321,19 +321,34 @@ impl Admission {
         let mut limits = self.limits.lock().unwrap_or_else(PoisonError::into_inner);
         limits.sweep(now);
         let key = (a.operator.clone(), a.addr.clone());
-        match limits.stun.get(&key) {
-            Some(&(held, expiration)) if expiration > now && a.created_at < held => {
-                return Err((
-                    Invalid,
-                    "a newer announcement of this server is held".into(),
-                ));
-            }
-            Some(&(_, expiration)) if expiration > now => {}
-            _ => {
-                let live = limits.stun.values().filter(|(_, e)| *e > now).count();
-                if live >= MAX_STUN_ANNOUNCEMENTS {
-                    return Err((RateLimited, "as many STUN announcements as it holds".into()));
+        // The store keeps the newest per key and server, the lowest id on a tie (NIP-01): one
+        // that would not replace the held one is refused here, so this table and the store
+        // describe the same announcement.
+        let replaces = match limits.stun.get(&key) {
+            Some((held, expiration, id)) if *expiration > now => {
+                if *id == ev.id {
+                    return Err((Duplicate, "already held".into()));
                 }
+                if a.created_at < *held {
+                    return Err((
+                        Invalid,
+                        "a newer announcement of this server is held".into(),
+                    ));
+                }
+                if a.created_at == *held && ev.id > *id {
+                    return Err((
+                        Duplicate,
+                        "an equal announcement of this server, with a lower id, is held".into(),
+                    ));
+                }
+                true
+            }
+            _ => false,
+        };
+        if !replaces {
+            let live = limits.stun.values().filter(|(_, e, _)| *e > now).count();
+            if live >= MAX_STUN_ANNOUNCEMENTS {
+                return Err((RateLimited, "as many STUN announcements as it holds".into()));
             }
         }
         let times = limits.stun_times.entry(a.operator.clone()).or_default();
@@ -346,14 +361,16 @@ impl Admission {
         times.push_back(now);
         // Expired ones leave the table here, and the store once this one is accepted.
         let mut gone = Vec::new();
-        limits.stun.retain(|k, &mut (created_at, expiration)| {
-            let keep = expiration > now || *k == key;
+        limits.stun.retain(|k, (created_at, expiration, _)| {
+            let keep = *expiration > now || *k == key;
             if !keep {
-                gone.push((k.0.clone(), k.1.clone(), created_at));
+                gone.push((k.0.clone(), k.1.clone(), *created_at));
             }
             keep
         });
-        limits.stun.insert(key, (a.created_at, a.expiration));
+        limits
+            .stun
+            .insert(key, (a.created_at, a.expiration, ev.id.clone()));
         Ok(Admitted::Stun(gone))
     }
 
@@ -932,18 +949,26 @@ mod tests {
             ..MayAdmit::default()
         };
         let elsewhere = admission(&["nfx:other:1"], on);
-        let relay = admission(&["nfx:mainnet:1", "nfx:net-1:1"], on);
+        let served = ["nfx:mainnet:1", "nfx:net-1:1"];
         for case in v["valid"].as_array().unwrap() {
             let name = &case["name"];
             assert!(
                 refused(elsewhere.admit(&event(case), now)).starts_with("blocked: out of scope"),
                 "{name}"
             );
+            // Each on a relay of its own: several name one server at one `created_at`, and a
+            // relay keeps one of those (the lowest id, NIP-01).
+            let relay = admission(&served, on);
             assert!(
                 matches!(relay.admit(&event(case), now), Ok(Admitted::Stun(_))),
                 "{name}"
             );
+            assert!(
+                refused(relay.admit(&event(case), now)).starts_with("duplicate:"),
+                "{name}: held already"
+            );
         }
+        let relay = admission(&served, on);
         for case in v["invalid"].as_array().unwrap() {
             let r = relay.admit(&event(case), now);
             assert!(r.is_err(), "{}", case["name"]);
@@ -983,6 +1008,20 @@ mod tests {
         assert!(refused(relay.admit(&older, t1)).starts_with("invalid: a newer"));
         let newer = stun_ad(2, "198.51.100.1:3478", &net, t1 + 5, 600);
         assert!(relay.admit(&newer, t1 + 5).is_ok());
+        // On a tie the lower id is the one kept (NIP-01): the other is refused, whichever
+        // comes first.
+        let (x, y) = (
+            stun_ad(3, "198.51.100.2:3478", &net, t1, 600),
+            stun_ad(3, "198.51.100.2:3478", &net, t1, 601),
+        );
+        let (low, high) = if x.id.to_hex() < y.id.to_hex() {
+            (x, y)
+        } else {
+            (y, x)
+        };
+        assert!(relay.admit(&high, t1).is_ok());
+        assert!(relay.admit(&low, t1).is_ok(), "the lower id replaces it");
+        assert!(refused(relay.admit(&high, t1)).starts_with("duplicate:"));
 
         // The cap: fill it with live announcements from fresh keys.
         let relay = admission(&["nfx:testnet:1"], on);

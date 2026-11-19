@@ -809,6 +809,7 @@ async fn stun_servers_named_over_nostr_are_picked_by_the_rules() {
                 expiration: now + 60,
                 heard: 0,
                 addrs: vec![a],
+                networks: None,
             },
             now,
         ) {
@@ -818,7 +819,11 @@ async fn stun_servers_named_over_nostr_are_picked_by_the_rules() {
     assert_eq!(kept, NAMED_PER_KEY);
     assert_eq!(n.named.len(), before + NAMED_PER_KEY);
     // And what expires is no longer counted.
-    assert!(n.pairs(now + 61).iter().all(|(k, _)| k != "k"));
+    assert!(
+        n.pairs(now + 61, &std::collections::BTreeSet::new())
+            .iter()
+            .all(|(k, _)| k != "k")
+    );
 }
 
 /// A mapping a server learnt over Nostr reports is offered only if it is global unicast: a
@@ -874,7 +879,8 @@ async fn a_learnt_server_s_private_mapping_is_never_offered() {
     );
 }
 
-/// Forgetting a video stops reading its beacons and drops what they named.
+/// Forgetting a video stops reading its beacons and drops what they named, and what
+/// announcements for its network (no other room's) named.
 #[tokio::test]
 async fn forgetting_a_video_drops_the_stun_servers_its_beacons_named() {
     let mut s = state(16).await;
@@ -890,6 +896,15 @@ async fn forgetting_a_video_drops_the_stun_servers_its_beacons_named() {
     let now = unix_now();
     feed(&mut s, &beacon(1, &["203.0.113.1:3478"], now));
     assert_eq!(servers(&s), ["203.0.113.1:3478"]);
+    feed(
+        &mut s,
+        &announcement(2, "203.0.113.2:3478", "nfx:mainnet:1", now),
+    );
+    feed(
+        &mut s,
+        &announcement(3, "203.0.113.2:3478", "nfx:mainnet:1", now),
+    );
+    assert_eq!(servers(&s), ["203.0.113.2:3478"]);
     s.control(Control::Forget(
         vec![room().pubkey().to_owned()],
         "nfx:mainnet:1:salt-flats-dusk".into(),
@@ -897,4 +912,52 @@ async fn forgetting_a_video_drops_the_stun_servers_its_beacons_named() {
     .await;
     assert!(s.nostr_stun.as_ref().unwrap().watched.is_empty());
     assert!(servers(&s).is_empty());
+}
+
+/// A seeder's first beacon heard may name no STUN server: it is kept until it expires, so its
+/// older beacon, replayed, does not name one again. A beacon with more `stun` endpoints than
+/// one counts at most 4 addresses.
+#[tokio::test]
+async fn a_withdrawal_heard_first_holds_and_a_beacon_names_at_most_four() {
+    use nfx_proto::beacon::{BeaconContent, Chunks, Endpoint};
+    use nfx_proto::namespace::VideoAddr;
+    let mut s = state(16).await;
+    s.nostr_stun = Some(NostrStun::default());
+    s.nostr_stun.as_mut().unwrap().watched.insert(watched_a());
+    let now = unix_now();
+    feed(&mut s, &beacon(1, &[], now));
+    feed(&mut s, &beacon(1, &["203.0.113.1:3478"], now - 5));
+    assert!(servers(&s).is_empty());
+    // Many endpoints in one beacon: the first 4 distinct addresses count, no more.
+    let endpoints: Vec<Endpoint> = (0..6u8)
+        .map(|i| Endpoint::Stun {
+            addrs: vec![format!("198.51.100.{}:3478", i + 1)],
+        })
+        .collect();
+    let content = BeaconContent {
+        v: 1,
+        video: VideoAddr::parse("nfx:mainnet:1:salt-flats-dusk").unwrap(),
+        endpoints,
+        skipped: vec![],
+        chunks: Chunks::All,
+        price_hint: 0,
+        accepts_mints: vec![],
+        free: true,
+    };
+    let tags = nfx_proto::beacon::tags(&watched_a(), now, 120).unwrap();
+    let many = Event::sign(
+        &[2; 32],
+        now,
+        nfx_proto::KIND_BEACON,
+        tags,
+        content.to_content(),
+    )
+    .unwrap();
+    feed(&mut s, &many);
+    let held = s
+        .nostr_stun
+        .as_mut()
+        .unwrap()
+        .pairs(now, &std::collections::BTreeSet::new());
+    assert_eq!(held.len(), super::MAX_STUN_ADDRS, "{held:?}");
 }

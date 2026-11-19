@@ -301,6 +301,21 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
   for (let i = 0; i < 12; i++) book.addAnnouncement(ann(S(9), `198.51.100.${i + 1}:3478`, NOW), NOW);
   eq('per operator cap', book.snapshot(NOW).stunNamed.filter((n) => n.url.startsWith('stun:198.51.100.')).length, 8);
   eq('announcements expire', book.snapshot(NOW + 3601).stunNamed, []);
+  eq('nothing left to expire', book.nextExpiration(NOW + 3601), null);
+}
+{
+  // Ties go to the server first heard, whether a beacon or an announcement named it; the book
+  // says when what it holds next expires, so a watcher can look again then.
+  const book = new EndpointBook();
+  book.addAnnouncement({ operator: S(1), addr: '203.0.113.1:3478', networks: ['nfx:mainnet:1'], created_at: NOW, expiration: NOW + 600 }, NOW);
+  book.add(beacon(S(2), NOW, [{ t: 'stun', addrs: ['203.0.113.2:3478', '203.0.113.3:3478'] }]), NOW);
+  eq('first heard first, across sources', book.snapshot(NOW).stunServers, [
+    'stun:203.0.113.1:3478',
+    'stun:203.0.113.2:3478',
+    'stun:203.0.113.3:3478',
+  ]);
+  eq('next expiration', book.nextExpiration(NOW), NOW + 120);
+  eq('then the announcement', book.nextExpiration(NOW + 120), NOW + 600);
 }
 {
   // selectStun: the page's own first, then the named ones by the same rules.

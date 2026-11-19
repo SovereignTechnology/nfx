@@ -184,6 +184,8 @@ interface NamedOrigin {
 interface Entry {
   created_at: number;
   expiration: number;
+  /** When it was first heard, in the book's order (beacons and announcements together). */
+  heard: number;
   origins: NamedOrigin[];
   trackers: string[];
   stun: string[];
@@ -224,7 +226,12 @@ function narrow(a: string[] | null, b: string[] | null): string[] | null {
 export class EndpointBook {
   readonly #seeders = new Map<string, Entry>();
   /** By `<operator> <server>`: the newest announcement of each. */
-  readonly #announcements = new Map<string, { operator: string; url: string; created_at: number; expiration: number }>();
+  readonly #announcements = new Map<
+    string,
+    { operator: string; url: string; created_at: number; expiration: number; heard: number }
+  >();
+  /** The order things are first heard in, across beacons and announcements (for ties). */
+  #heard = 0;
 
   /**
    * Take in a STUN service announcement (NFX-10 §1), already verified and checked to serve
@@ -245,7 +252,8 @@ export class EndpointBook {
       const mine = [...this.#announcements.values()].filter((e) => e.operator === a.operator).length;
       if (this.#announcements.size >= MAX_ANNOUNCEMENTS || mine >= ANNOUNCEMENTS_PER_KEY) return false;
     }
-    this.#announcements.set(key, { operator: a.operator, url, created_at: a.created_at, expiration: a.expiration });
+    const heard = held?.heard ?? ++this.#heard;
+    this.#announcements.set(key, { operator: a.operator, url, created_at: a.created_at, expiration: a.expiration, heard });
     return true;
   }
 
@@ -309,7 +317,8 @@ export class EndpointBook {
     }
     const holds = all ? 'all' : ids;
     // Map#set on a held key keeps its place: seeders stay in first-heard order.
-    this.#seeders.set(b.seeder, { created_at: b.created_at, expiration: b.expiration, origins, trackers, stun, holds });
+    const heard = held?.heard ?? ++this.#heard;
+    this.#seeders.set(b.seeder, { created_at: b.created_at, expiration: b.expiration, heard, origins, trackers, stun, holds });
     return true;
   }
 
@@ -320,7 +329,8 @@ export class EndpointBook {
   snapshot(now: number): Endpoints {
     const origins = new Map<string, { n: number; renditions: string[] | null }>();
     const trackers = new Map<string, number>();
-    const stunPairs: [string, string][] = [];
+    /** [first heard, key, URL]: ties among STUN servers go to the one first heard. */
+    const stunPairs: [number, string, string][] = [];
     const named = new Map<string, number>();
     let seeders = 0;
     let holders = 0;
@@ -336,7 +346,7 @@ export class EndpointBook {
         } else origins.set(o.url, { n: 1, renditions: o.renditions === null ? null : [...o.renditions] });
       }
       for (const t of e.trackers) trackers.set(t, (trackers.get(t) ?? 0) + 1);
-      for (const s of e.stun) stunPairs.push([seeder, s]);
+      for (const s of e.stun) stunPairs.push([e.heard, seeder, s]);
       if (e.holds === 'all') {
         holders += 1;
         all += 1;
@@ -345,8 +355,10 @@ export class EndpointBook {
         for (const id of e.holds) named.set(id, (named.get(id) ?? 0) + 1);
       }
     }
-    for (const a of this.#announcements.values()) if (a.expiration > now) stunPairs.push([a.operator, a.url]);
-    const stunNamed = rankNamed(stunPairs).slice(0, MAX_STUN_NAMED);
+    for (const a of this.#announcements.values()) if (a.expiration > now) stunPairs.push([a.heard, a.operator, a.url]);
+    // Array#sort is stable: within one source, the order it names them in.
+    stunPairs.sort((x, y) => x[0] - y[0]);
+    const stunNamed = rankNamed(stunPairs.map(([, key, url]): [string, string] => [key, url])).slice(0, MAX_STUN_NAMED);
     // Array#sort is stable, so equal counts keep first-heard order.
     const ranked = (m: Map<string, number>): string[] => [...m].sort((x, y) => y[1] - x[1]).map(([u]) => u);
     const originsRanked = [...origins].sort((x, y) => y[1].n - x[1].n).slice(0, MAX_ORIGINS);
@@ -367,6 +379,18 @@ export class EndpointBook {
       seeders,
       availability,
     };
+  }
+
+  /**
+   * When the next beacon or announcement held expires (unix seconds), or null when none is
+   * live: what the book names may change then with nothing new heard.
+   */
+  nextExpiration(now: number): number | null {
+    let next: number | null = null;
+    for (const e of [...this.#seeders.values(), ...this.#announcements.values()]) {
+      if (e.expiration > now && (next === null || e.expiration < next)) next = e.expiration;
+    }
+    return next;
   }
 
   #prune(now: number): void {

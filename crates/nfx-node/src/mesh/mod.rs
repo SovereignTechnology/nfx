@@ -149,6 +149,9 @@ const REANNOUNCE_EVERY: Duration = Duration::from_secs(5);
 pub const MAX_NAMED: usize = 1024;
 /// STUN from Nostr: the sources one key may hold, so one key cannot fill the table.
 pub const NAMED_PER_KEY: usize = 8;
+/// STUN from Nostr: the addresses one source names, at most (a `stun` endpoint's limit;
+/// a beacon may carry several endpoints). The rest are not counted.
+pub const MAX_STUN_ADDRS: usize = nfx_proto::beacon::MAX_STUN_ADDRS;
 /// Manifest addresses (or networks) per subscription filter.
 const TAGS_PER_SUB: usize = 64;
 /// Stored announcements asked for per subscription.
@@ -603,7 +606,11 @@ struct Named {
     expiration: u64,
     /// The order heard, for ties.
     heard: u64,
+    /// At most [`MAX_STUN_ADDRS`] (a beacon may carry more `stun` endpoints than one).
     addrs: Vec<String>,
+    /// An announcement's networks: it counts only while a room of one of them is joined.
+    /// `None` for a beacon, which counts while its video is watched.
+    networks: Option<Vec<String>>,
 }
 
 /// STUN servers named over Nostr (NFX-10 §1): what to read, and what was read.
@@ -620,14 +627,14 @@ struct NostrStun {
 
 impl NostrStun {
     /// Take what a source names now, if it is newer than what it named before. An empty
-    /// list withdraws what it named, and is kept until it expires, so an older event replayed
-    /// later does not bring it back. False if nothing changed.
+    /// list names nothing and is kept until it expires (within the same bounds), so an older
+    /// event replayed later does not bring back what the newer one withdrew. False if
+    /// nothing changed.
     fn note(&mut self, signer: &str, source: String, named: Named, now: u64) -> bool {
         let key = (signer.to_owned(), source);
         match self.named.get(&key) {
             Some(held) if held.created_at >= named.created_at => return false,
             Some(_) => {}
-            None if named.addrs.is_empty() => return false,
             None => {
                 if self.named.len() >= MAX_NAMED {
                     self.named.retain(|_, n| n.expiration > now);
@@ -644,10 +651,19 @@ impl NostrStun {
         true
     }
 
-    /// The live (signer, address) pairs, in the order first heard.
-    fn pairs(&mut self, now: u64) -> Vec<(String, String)> {
+    /// The live (signer, address) pairs, in the order first heard: beacons', and those of
+    /// announcements for one of `networks`.
+    fn pairs(&mut self, now: u64, networks: &BTreeSet<String>) -> Vec<(String, String)> {
         self.named.retain(|_, n| n.expiration > now);
-        let mut sources: Vec<(&(String, String), &Named)> = self.named.iter().collect();
+        let mut sources: Vec<(&(String, String), &Named)> = self
+            .named
+            .iter()
+            .filter(|(_, n)| {
+                n.networks
+                    .as_ref()
+                    .is_none_or(|nets| nets.iter().any(|x| networks.contains(x)))
+            })
+            .collect();
         sources.sort_by_key(|(_, n)| n.heard);
         sources
             .into_iter()
@@ -906,7 +922,6 @@ impl State {
             Control::Forget(keys, video) => {
                 if let Some(n) = &mut self.nostr_stun {
                     // `38504:<creator>:<video>`: the watched addresses of that video.
-                    let before = n.watched.len();
                     n.watched
                         .retain(|a| a.splitn(3, ':').nth(2) != Some(video.as_str()));
                     n.named.retain(|(_, source), _| {
@@ -914,9 +929,6 @@ impl State {
                             .strip_prefix("beacon ")
                             .is_none_or(|a| a.splitn(3, ':').nth(2) != Some(video.as_str()))
                     });
-                    if n.watched.len() != before {
-                        self.select_stun(Instant::now(), true);
-                    }
                 }
                 self.waiting
                     .retain(|s| !keys.iter().any(|k| k == s.room.pubkey()));
@@ -937,6 +949,17 @@ impl State {
                     self.resubscribe().await;
                 }
                 self.resubscribe_stun().await;
+                // What the video's beacons named, and announcements for a network no room is
+                // in any more, count no longer.
+                let networks = self.networks();
+                if let Some(n) = &mut self.nostr_stun {
+                    n.named.retain(|_, x| {
+                        x.networks
+                            .as_ref()
+                            .is_none_or(|nets| nets.iter().any(|y| networks.contains(y)))
+                    });
+                }
+                self.select_stun(Instant::now(), true);
             }
             Control::Shutdown(_) => {}
         }
@@ -1162,12 +1185,13 @@ impl State {
     /// rules pick, of the socket's family. A server picked anew is asked at once (with `ask`;
     /// else at the round about to start); one no longer picked is forgotten, with its mapping.
     fn select_stun(&mut self, now: Instant, ask: bool) {
+        let networks = self.networks();
         let Some(n) = &mut self.nostr_stun else {
             return;
         };
         let v4 = self.base.is_ipv4();
         let pairs: Vec<(String, String)> = n
-            .pairs(unix_now())
+            .pairs(unix_now(), &networks)
             .into_iter()
             .filter(|(_, a)| a.parse::<SocketAddr>().is_ok_and(|a| a.is_ipv4() == v4))
             .collect();
@@ -1490,21 +1514,24 @@ impl State {
         if format!("{KIND_MANIFEST}:{}:{}", b.creator, b.content.video) != a {
             return;
         }
-        let addrs: Vec<String> = b
-            .content
-            .endpoints
-            .iter()
-            .filter_map(|e| match e {
-                Endpoint::Stun { addrs } => Some(addrs.clone()),
-                _ => None,
-            })
-            .flatten()
-            .collect();
+        let mut addrs: Vec<String> = Vec::new();
+        for addr in b.content.endpoints.iter().flat_map(|e| match e {
+            Endpoint::Stun { addrs } => addrs.as_slice(),
+            _ => &[] as &[String],
+        }) {
+            if addrs.len() >= MAX_STUN_ADDRS {
+                break;
+            }
+            if !addrs.contains(addr) {
+                addrs.push(addr.clone());
+            }
+        }
         let named = Named {
             created_at: b.created_at,
             expiration: b.expiration,
             heard: 0,
             addrs,
+            networks: None,
         };
         if n.note(&b.seeder, format!("beacon {a}"), named, now) {
             self.select_stun(Instant::now(), true);
@@ -1538,6 +1565,7 @@ impl State {
             expiration: a.expiration,
             heard: 0,
             addrs: vec![a.addr.clone()],
+            networks: Some(a.networks.iter().map(ToString::to_string).collect()),
         };
         if n.note(&a.operator, format!("announcement {}", a.addr), named, now) {
             self.select_stun(Instant::now(), true);
