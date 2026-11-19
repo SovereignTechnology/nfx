@@ -1,0 +1,603 @@
+{
+  "about": "Vectors for web/player/src/remote-sdp.ts filterRemoteSdp(sdp, mode) (remoteCandidates, nutflix-pear ADR 0023 rule 5). A case's SDP is head + in + tail, each line ended by CRLF, and it must come out as head + out + tail the same way; or in_raw must come out as out_raw, byte for byte. mode is 'global' unless given. Addresses are examples only.",
+  "max_kept": 16,
+  "head": [
+    "v=0",
+    "o=- 4611731400430051336 2 IN IP4 127.0.0.1",
+    "s=-",
+    "t=0 0",
+    "a=group:BUNDLE 0",
+    "a=extmap-allow-mixed",
+    "a=msid-semantic: WMS",
+    "m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
+    "c=IN IP4 0.0.0.0",
+    "a=ice-ufrag:Vx9k",
+    "a=ice-pwd:0123456789abcdefghijkl",
+    "a=ice-options:trickle",
+    "a=fingerprint:sha-256 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF",
+    "a=setup:actpass",
+    "a=mid:0",
+    "a=sctp-port:5000",
+    "a=max-message-size:262144"
+  ],
+  "tail": [
+    "a=end-of-candidates"
+  ],
+  "cases": [
+    {
+      "name": "a global IPv4 host candidate (Chrome's form)",
+      "in": [
+        "a=candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host generation 0 network-id 1"
+      ],
+      "out": [
+        "a=candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host generation 0 network-id 1"
+      ]
+    },
+    {
+      "name": "a global IPv4 host candidate, upper-case UDP, no extensions (Firefox's form)",
+      "in": [
+        "a=candidate:2 1 UDP 2122252543 9.8.7.6 50002 typ host"
+      ],
+      "out": [
+        "a=candidate:2 1 UDP 2122252543 9.8.7.6 50002 typ host"
+      ]
+    },
+    {
+      "name": "global IPv6 host candidates",
+      "in": [
+        "a=candidate:3 1 udp 2122260223 2a00::1 50003 typ host generation 0 network-id 2",
+        "a=candidate:4 1 udp 2122260223 2600:1f18:4a3:6900::5 50004 typ host generation 0 network-id 1"
+      ],
+      "out": [
+        "a=candidate:3 1 udp 2122260223 2a00::1 50003 typ host generation 0 network-id 2",
+        "a=candidate:4 1 udp 2122260223 2600:1f18:4a3:6900::5 50004 typ host generation 0 network-id 1"
+      ]
+    },
+    {
+      "name": "srflx at a global address with a private raddr (raddr is reported, never checked against)",
+      "in": [
+        "a=candidate:5 1 udp 1686052607 1.2.3.4 50005 typ srflx raddr 192.168.1.20 rport 50001 generation 0 network-id 1"
+      ],
+      "out": [
+        "a=candidate:5 1 udp 1686052607 1.2.3.4 50005 typ srflx raddr 192.168.1.20 rport 50001 generation 0 network-id 1"
+      ]
+    },
+    {
+      "name": "srflx with raddr 0.0.0.0 rport 0 (a browser hiding its host behind mDNS)",
+      "in": [
+        "a=candidate:6 1 udp 1685987071 5.6.7.8 50006 typ srflx raddr 0.0.0.0 rport 0 generation 0 network-id 1 network-cost 10"
+      ],
+      "out": [
+        "a=candidate:6 1 udp 1685987071 5.6.7.8 50006 typ srflx raddr 0.0.0.0 rport 0 generation 0 network-id 1 network-cost 10"
+      ]
+    },
+    {
+      "name": "srflx with an IPv6 raddr",
+      "in": [
+        "a=candidate:7 1 udp 1686052863 2a00::2 50007 typ srflx raddr fe80::1 rport 9 generation 0"
+      ],
+      "out": [
+        "a=candidate:7 1 udp 1686052863 2a00::2 50007 typ srflx raddr fe80::1 rport 9 generation 0"
+      ]
+    },
+    {
+      "name": "prflx and relay at global addresses",
+      "in": [
+        "a=candidate:8 1 udp 1853824767 8.8.4.4 50008 typ prflx generation 0 network-id 1",
+        "a=candidate:9 1 udp 41885439 4.3.2.1 50009 typ relay raddr 1.2.3.4 rport 61000 generation 0"
+      ],
+      "out": [
+        "a=candidate:8 1 udp 1853824767 8.8.4.4 50008 typ prflx generation 0 network-id 1",
+        "a=candidate:9 1 udp 41885439 4.3.2.1 50009 typ relay raddr 1.2.3.4 rport 61000 generation 0"
+      ]
+    },
+    {
+      "name": "IPv4 next to the refused blocks stays global (1 of 2)",
+      "in": [
+        "a=candidate:10 1 udp 2122260223 1.0.0.1 50010 typ host generation 0 network-id 1",
+        "a=candidate:11 1 udp 2122260223 9.255.255.255 50011 typ host generation 0 network-id 1",
+        "a=candidate:12 1 udp 2122260223 11.0.0.1 50012 typ host generation 0 network-id 1",
+        "a=candidate:13 1 udp 2122260223 100.63.255.255 50013 typ host generation 0 network-id 1",
+        "a=candidate:14 1 udp 2122260223 100.128.0.1 50014 typ host generation 0 network-id 1",
+        "a=candidate:15 1 udp 2122260223 126.255.255.255 50015 typ host generation 0 network-id 1",
+        "a=candidate:16 1 udp 2122260223 128.0.0.1 50016 typ host generation 0 network-id 1",
+        "a=candidate:17 1 udp 2122260223 169.253.255.255 50017 typ host generation 0 network-id 1",
+        "a=candidate:18 1 udp 2122260223 169.255.0.1 50018 typ host generation 0 network-id 1",
+        "a=candidate:19 1 udp 2122260223 172.15.255.255 50019 typ host generation 0 network-id 1",
+        "a=candidate:20 1 udp 2122260223 172.32.0.1 50020 typ host generation 0 network-id 1",
+        "a=candidate:21 1 udp 2122260223 192.0.1.1 50021 typ host generation 0 network-id 1",
+        "a=candidate:22 1 udp 2122260223 192.0.3.1 50022 typ host generation 0 network-id 1",
+        "a=candidate:23 1 udp 2122260223 192.167.255.255 50023 typ host generation 0 network-id 1",
+        "a=candidate:24 1 udp 2122260223 192.169.0.1 50024 typ host generation 0 network-id 1",
+        "a=candidate:25 1 udp 2122260223 198.17.255.255 50025 typ host generation 0 network-id 1"
+      ],
+      "out": [
+        "a=candidate:10 1 udp 2122260223 1.0.0.1 50010 typ host generation 0 network-id 1",
+        "a=candidate:11 1 udp 2122260223 9.255.255.255 50011 typ host generation 0 network-id 1",
+        "a=candidate:12 1 udp 2122260223 11.0.0.1 50012 typ host generation 0 network-id 1",
+        "a=candidate:13 1 udp 2122260223 100.63.255.255 50013 typ host generation 0 network-id 1",
+        "a=candidate:14 1 udp 2122260223 100.128.0.1 50014 typ host generation 0 network-id 1",
+        "a=candidate:15 1 udp 2122260223 126.255.255.255 50015 typ host generation 0 network-id 1",
+        "a=candidate:16 1 udp 2122260223 128.0.0.1 50016 typ host generation 0 network-id 1",
+        "a=candidate:17 1 udp 2122260223 169.253.255.255 50017 typ host generation 0 network-id 1",
+        "a=candidate:18 1 udp 2122260223 169.255.0.1 50018 typ host generation 0 network-id 1",
+        "a=candidate:19 1 udp 2122260223 172.15.255.255 50019 typ host generation 0 network-id 1",
+        "a=candidate:20 1 udp 2122260223 172.32.0.1 50020 typ host generation 0 network-id 1",
+        "a=candidate:21 1 udp 2122260223 192.0.1.1 50021 typ host generation 0 network-id 1",
+        "a=candidate:22 1 udp 2122260223 192.0.3.1 50022 typ host generation 0 network-id 1",
+        "a=candidate:23 1 udp 2122260223 192.167.255.255 50023 typ host generation 0 network-id 1",
+        "a=candidate:24 1 udp 2122260223 192.169.0.1 50024 typ host generation 0 network-id 1",
+        "a=candidate:25 1 udp 2122260223 198.17.255.255 50025 typ host generation 0 network-id 1"
+      ]
+    },
+    {
+      "name": "IPv4 next to the refused blocks stays global (2 of 2)",
+      "in": [
+        "a=candidate:26 1 udp 2122260223 198.20.0.1 50026 typ host generation 0 network-id 1",
+        "a=candidate:27 1 udp 2122260223 198.51.99.1 50027 typ host generation 0 network-id 1",
+        "a=candidate:28 1 udp 2122260223 198.51.101.1 50028 typ host generation 0 network-id 1",
+        "a=candidate:29 1 udp 2122260223 203.0.112.1 50029 typ host generation 0 network-id 1",
+        "a=candidate:30 1 udp 2122260223 203.0.114.1 50030 typ host generation 0 network-id 1",
+        "a=candidate:31 1 udp 2122260223 223.255.255.254 50031 typ host generation 0 network-id 1",
+        "a=candidate:32 1 udp 2122260223 191.255.255.255 50032 typ host generation 0 network-id 1"
+      ],
+      "out": [
+        "a=candidate:26 1 udp 2122260223 198.20.0.1 50026 typ host generation 0 network-id 1",
+        "a=candidate:27 1 udp 2122260223 198.51.99.1 50027 typ host generation 0 network-id 1",
+        "a=candidate:28 1 udp 2122260223 198.51.101.1 50028 typ host generation 0 network-id 1",
+        "a=candidate:29 1 udp 2122260223 203.0.112.1 50029 typ host generation 0 network-id 1",
+        "a=candidate:30 1 udp 2122260223 203.0.114.1 50030 typ host generation 0 network-id 1",
+        "a=candidate:31 1 udp 2122260223 223.255.255.254 50031 typ host generation 0 network-id 1",
+        "a=candidate:32 1 udp 2122260223 191.255.255.255 50032 typ host generation 0 network-id 1"
+      ]
+    },
+    {
+      "name": "IPv6 in 2000::/3 next to 2001:db8::/32 stays global",
+      "in": [
+        "a=candidate:33 1 udp 2122260223 2000::1 50033 typ host generation 0 network-id 1",
+        "a=candidate:34 1 udp 2122260223 2001:db7:ffff::1 50034 typ host generation 0 network-id 1",
+        "a=candidate:35 1 udp 2122260223 2001:db9::1 50035 typ host generation 0 network-id 1",
+        "a=candidate:36 1 udp 2122260223 3fff:ffff::1 50036 typ host generation 0 network-id 1"
+      ],
+      "out": [
+        "a=candidate:33 1 udp 2122260223 2000::1 50033 typ host generation 0 network-id 1",
+        "a=candidate:34 1 udp 2122260223 2001:db7:ffff::1 50034 typ host generation 0 network-id 1",
+        "a=candidate:35 1 udp 2122260223 2001:db9::1 50035 typ host generation 0 network-id 1",
+        "a=candidate:36 1 udp 2122260223 3fff:ffff::1 50036 typ host generation 0 network-id 1"
+      ]
+    },
+    {
+      "name": "private and loopback IPv4",
+      "in": [
+        "a=candidate:37 1 udp 2122260223 10.0.0.5 50037 typ host generation 0 network-id 1",
+        "a=candidate:38 1 udp 2122260223 10.255.255.255 50038 typ host generation 0 network-id 1",
+        "a=candidate:39 1 udp 2122260223 127.0.0.1 50039 typ host generation 0 network-id 1",
+        "a=candidate:40 1 udp 2122260223 127.255.0.1 50040 typ host generation 0 network-id 1",
+        "a=candidate:41 1 udp 2122260223 172.16.0.1 50041 typ host generation 0 network-id 1",
+        "a=candidate:42 1 udp 2122260223 172.31.255.254 50042 typ host generation 0 network-id 1",
+        "a=candidate:43 1 udp 2122260223 192.168.0.1 50043 typ host generation 0 network-id 1",
+        "a=candidate:44 1 udp 2122260223 192.168.1.20 50044 typ host generation 0 network-id 1"
+      ],
+      "out": []
+    },
+    {
+      "name": "this network, shared (CGNAT), link-local and the cloud metadata address",
+      "in": [
+        "a=candidate:45 1 udp 2122260223 0.0.0.0 50045 typ host generation 0 network-id 1",
+        "a=candidate:46 1 udp 2122260223 0.1.2.3 50046 typ host generation 0 network-id 1",
+        "a=candidate:47 1 udp 2122260223 100.64.0.1 50047 typ host generation 0 network-id 1",
+        "a=candidate:48 1 udp 2122260223 100.127.255.254 50048 typ host generation 0 network-id 1",
+        "a=candidate:49 1 udp 2122260223 169.254.0.1 50049 typ host generation 0 network-id 1",
+        "a=candidate:50 1 udp 2122260223 169.254.169.254 50050 typ host generation 0 network-id 1"
+      ],
+      "out": []
+    },
+    {
+      "name": "IETF protocol assignments, documentation and benchmarking IPv4",
+      "in": [
+        "a=candidate:51 1 udp 2122260223 192.0.0.8 50051 typ host generation 0 network-id 1",
+        "a=candidate:52 1 udp 2122260223 192.0.0.170 50052 typ host generation 0 network-id 1",
+        "a=candidate:53 1 udp 2122260223 192.0.2.1 50053 typ host generation 0 network-id 1",
+        "a=candidate:54 1 udp 2122260223 198.51.100.7 50054 typ host generation 0 network-id 1",
+        "a=candidate:55 1 udp 2122260223 203.0.113.9 50055 typ host generation 0 network-id 1",
+        "a=candidate:56 1 udp 2122260223 198.18.0.1 50056 typ host generation 0 network-id 1",
+        "a=candidate:57 1 udp 2122260223 198.19.255.254 50057 typ host generation 0 network-id 1"
+      ],
+      "out": []
+    },
+    {
+      "name": "multicast, reserved and broadcast IPv4",
+      "in": [
+        "a=candidate:58 1 udp 2122260223 224.0.0.251 50058 typ host generation 0 network-id 1",
+        "a=candidate:59 1 udp 2122260223 239.255.255.250 50059 typ host generation 0 network-id 1",
+        "a=candidate:60 1 udp 2122260223 240.0.0.1 50060 typ host generation 0 network-id 1",
+        "a=candidate:61 1 udp 2122260223 254.1.2.3 50061 typ host generation 0 network-id 1",
+        "a=candidate:62 1 udp 2122260223 255.255.255.255 50062 typ host generation 0 network-id 1"
+      ],
+      "out": []
+    },
+    {
+      "name": "IPv6 outside 2000::/3: loopback, unspecified, link-local, unique-local, multicast, mapped, NAT64, reserved",
+      "in": [
+        "a=candidate:63 1 udp 2122260223 ::1 50063 typ host generation 0 network-id 1",
+        "a=candidate:64 1 udp 2122260223 :: 50064 typ host generation 0 network-id 1",
+        "a=candidate:65 1 udp 2122260223 fe80::1 50065 typ host generation 0 network-id 1",
+        "a=candidate:66 1 udp 2122260223 fd00::1 50066 typ host generation 0 network-id 1",
+        "a=candidate:67 1 udp 2122260223 fc00::1 50067 typ host generation 0 network-id 1",
+        "a=candidate:68 1 udp 2122260223 ff02::fb 50068 typ host generation 0 network-id 1",
+        "a=candidate:69 1 udp 2122260223 ::ffff:102:304 50069 typ host generation 0 network-id 1",
+        "a=candidate:70 1 udp 2122260223 64:ff9b::102:304 50070 typ host generation 0 network-id 1",
+        "a=candidate:71 1 udp 2122260223 4000::1 50071 typ host generation 0 network-id 1",
+        "a=candidate:72 1 udp 2122260223 e000::1 50072 typ host generation 0 network-id 1"
+      ],
+      "out": []
+    },
+    {
+      "name": "IPv6 documentation (2001:db8::/32)",
+      "in": [
+        "a=candidate:73 1 udp 2122260223 2001:db8:: 50073 typ host generation 0 network-id 1",
+        "a=candidate:74 1 udp 2122260223 2001:db8::1 50074 typ host generation 0 network-id 1",
+        "a=candidate:75 1 udp 2122260223 2001:db8:ffff:ffff:ffff:ffff:ffff:ffff 50075 typ host generation 0 network-id 1"
+      ],
+      "out": []
+    },
+    {
+      "name": "mDNS and other names (an ICE agent would resolve them)",
+      "in": [
+        "a=candidate:76 1 udp 2122260223 6c1b7a5e-6d6f-4a4b-9f3e-0e1d2c3b4a59.local 50076 typ host generation 0 network-id 1",
+        "a=candidate:77 1 udp 2122260223 localhost 50077 typ host generation 0 network-id 1",
+        "a=candidate:78 1 udp 2122260223 router.lan 50078 typ host generation 0 network-id 1",
+        "a=candidate:79 1 udp 2122260223 metadata.google.internal 50079 typ host generation 0 network-id 1",
+        "a=candidate:80 1 udp 2122260223 seed.example 50080 typ host generation 0 network-id 1",
+        "a=candidate:81 1 udp 2122260223 1.2.3.4. 50081 typ host generation 0 network-id 1"
+      ],
+      "out": []
+    },
+    {
+      "name": "IPv4 spelled other than dotted decimal",
+      "in": [
+        "a=candidate:82 1 udp 2122260223 01.2.3.4 50082 typ host generation 0 network-id 1",
+        "a=candidate:83 1 udp 2122260223 1.2.3.04 50083 typ host generation 0 network-id 1",
+        "a=candidate:84 1 udp 2122260223 1.2.3 50084 typ host generation 0 network-id 1",
+        "a=candidate:85 1 udp 2122260223 16909060 50085 typ host generation 0 network-id 1",
+        "a=candidate:86 1 udp 2122260223 0x1.0x2.0x3.0x4 50086 typ host generation 0 network-id 1",
+        "a=candidate:87 1 udp 2122260223 1.2.3.256 50087 typ host generation 0 network-id 1",
+        "a=candidate:88 1 udp 2122260223 1.2.3.4.5 50088 typ host generation 0 network-id 1"
+      ],
+      "out": []
+    },
+    {
+      "name": "IPv6 spelled other than RFC 5952",
+      "in": [
+        "a=candidate:89 1 udp 2122260223 2A00::1 50089 typ host generation 0 network-id 1",
+        "a=candidate:90 1 udp 2122260223 2a00:0::1 50090 typ host generation 0 network-id 1",
+        "a=candidate:91 1 udp 2122260223 2a00:0:0:0:0:0:0:1 50091 typ host generation 0 network-id 1",
+        "a=candidate:92 1 udp 2122260223 [2a00::1] 50092 typ host generation 0 network-id 1",
+        "a=candidate:93 1 udp 2122260223 2a00::1%eth0 50093 typ host generation 0 network-id 1",
+        "a=candidate:94 1 udp 2122260223 fe80::1%en0 50094 typ host generation 0 network-id 1",
+        "a=candidate:95 1 udp 2122260223 ::ffff:1.2.3.4 50095 typ host generation 0 network-id 1",
+        "a=candidate:96 1 udp 2122260223 2a00:0000::1 50096 typ host generation 0 network-id 1"
+      ],
+      "out": []
+    },
+    {
+      "name": "TCP candidates, at global addresses too",
+      "in": [
+        "a=candidate:97 1 tcp 1518280447 1.2.3.4 9 typ host tcptype active generation 0 network-id 1",
+        "a=candidate:98 1 TCP 1518280447 1.2.3.4 50098 typ host tcptype passive generation 0",
+        "a=candidate:99 1 tcp 1518280447 2a00::1 50099 typ host tcptype so generation 0",
+        "a=candidate:100 1 ssltcp 1518280447 1.2.3.4 50100 typ host generation 0"
+      ],
+      "out": []
+    },
+    {
+      "name": "more than 16: the first 16 kept, in SDP order",
+      "in": [
+        "a=candidate:101 1 udp 2122260223 1.2.4.1 50101 typ host generation 0 network-id 1",
+        "a=candidate:102 1 udp 2122260223 1.2.4.2 50102 typ host generation 0 network-id 1",
+        "a=candidate:103 1 udp 2122260223 1.2.4.3 50103 typ host generation 0 network-id 1",
+        "a=candidate:104 1 udp 2122260223 1.2.4.4 50104 typ host generation 0 network-id 1",
+        "a=candidate:105 1 udp 2122260223 1.2.4.5 50105 typ host generation 0 network-id 1",
+        "a=candidate:106 1 udp 2122260223 1.2.4.6 50106 typ host generation 0 network-id 1",
+        "a=candidate:107 1 udp 2122260223 1.2.4.7 50107 typ host generation 0 network-id 1",
+        "a=candidate:108 1 udp 2122260223 1.2.4.8 50108 typ host generation 0 network-id 1",
+        "a=candidate:109 1 udp 2122260223 1.2.4.9 50109 typ host generation 0 network-id 1",
+        "a=candidate:110 1 udp 2122260223 1.2.4.10 50110 typ host generation 0 network-id 1",
+        "a=candidate:111 1 udp 2122260223 1.2.4.11 50111 typ host generation 0 network-id 1",
+        "a=candidate:112 1 udp 2122260223 1.2.4.12 50112 typ host generation 0 network-id 1",
+        "a=candidate:113 1 udp 2122260223 1.2.4.13 50113 typ host generation 0 network-id 1",
+        "a=candidate:114 1 udp 2122260223 1.2.4.14 50114 typ host generation 0 network-id 1",
+        "a=candidate:115 1 udp 2122260223 1.2.4.15 50115 typ host generation 0 network-id 1",
+        "a=candidate:116 1 udp 2122260223 1.2.4.16 50116 typ host generation 0 network-id 1",
+        "a=candidate:117 1 udp 2122260223 1.2.4.17 50117 typ host generation 0 network-id 1",
+        "a=candidate:118 1 udp 2122260223 1.2.4.18 50118 typ host generation 0 network-id 1",
+        "a=candidate:119 1 udp 2122260223 1.2.4.19 50119 typ host generation 0 network-id 1",
+        "a=candidate:120 1 udp 2122260223 1.2.4.20 50120 typ host generation 0 network-id 1"
+      ],
+      "out": [
+        "a=candidate:101 1 udp 2122260223 1.2.4.1 50101 typ host generation 0 network-id 1",
+        "a=candidate:102 1 udp 2122260223 1.2.4.2 50102 typ host generation 0 network-id 1",
+        "a=candidate:103 1 udp 2122260223 1.2.4.3 50103 typ host generation 0 network-id 1",
+        "a=candidate:104 1 udp 2122260223 1.2.4.4 50104 typ host generation 0 network-id 1",
+        "a=candidate:105 1 udp 2122260223 1.2.4.5 50105 typ host generation 0 network-id 1",
+        "a=candidate:106 1 udp 2122260223 1.2.4.6 50106 typ host generation 0 network-id 1",
+        "a=candidate:107 1 udp 2122260223 1.2.4.7 50107 typ host generation 0 network-id 1",
+        "a=candidate:108 1 udp 2122260223 1.2.4.8 50108 typ host generation 0 network-id 1",
+        "a=candidate:109 1 udp 2122260223 1.2.4.9 50109 typ host generation 0 network-id 1",
+        "a=candidate:110 1 udp 2122260223 1.2.4.10 50110 typ host generation 0 network-id 1",
+        "a=candidate:111 1 udp 2122260223 1.2.4.11 50111 typ host generation 0 network-id 1",
+        "a=candidate:112 1 udp 2122260223 1.2.4.12 50112 typ host generation 0 network-id 1",
+        "a=candidate:113 1 udp 2122260223 1.2.4.13 50113 typ host generation 0 network-id 1",
+        "a=candidate:114 1 udp 2122260223 1.2.4.14 50114 typ host generation 0 network-id 1",
+        "a=candidate:115 1 udp 2122260223 1.2.4.15 50115 typ host generation 0 network-id 1",
+        "a=candidate:116 1 udp 2122260223 1.2.4.16 50116 typ host generation 0 network-id 1"
+      ]
+    },
+    {
+      "name": "dropped candidates do not count toward the 16",
+      "in": [
+        "a=candidate:121 1 udp 2122260223 192.168.1.20 50121 typ host generation 0 network-id 1",
+        "a=candidate:122 1 udp 2122260223 10.0.0.5 50122 typ host generation 0 network-id 1",
+        "a=candidate:125 1 udp 2122260223 1.2.5.1 50125 typ host generation 0 network-id 1",
+        "a=candidate:126 1 udp 2122260223 1.2.5.2 50126 typ host generation 0 network-id 1",
+        "a=candidate:127 1 udp 2122260223 1.2.5.3 50127 typ host generation 0 network-id 1",
+        "a=candidate:128 1 udp 2122260223 1.2.5.4 50128 typ host generation 0 network-id 1",
+        "a=candidate:129 1 udp 2122260223 1.2.5.5 50129 typ host generation 0 network-id 1",
+        "a=candidate:130 1 udp 2122260223 1.2.5.6 50130 typ host generation 0 network-id 1",
+        "a=candidate:131 1 udp 2122260223 1.2.5.7 50131 typ host generation 0 network-id 1",
+        "a=candidate:132 1 udp 2122260223 1.2.5.8 50132 typ host generation 0 network-id 1",
+        "a=candidate:123 1 udp 2122260223 fd00::1 50123 typ host generation 0 network-id 1",
+        "a=candidate:124 1 udp 2122260223 6c1b7a5e-6d6f-4a4b-9f3e-0e1d2c3b4a59.local 50124 typ host generation 0 network-id 1",
+        "a=candidate:133 1 udp 2122260223 1.2.5.9 50133 typ host generation 0 network-id 1",
+        "a=candidate:134 1 udp 2122260223 1.2.5.10 50134 typ host generation 0 network-id 1",
+        "a=candidate:135 1 udp 2122260223 1.2.5.11 50135 typ host generation 0 network-id 1",
+        "a=candidate:136 1 udp 2122260223 1.2.5.12 50136 typ host generation 0 network-id 1",
+        "a=candidate:137 1 udp 2122260223 1.2.5.13 50137 typ host generation 0 network-id 1",
+        "a=candidate:138 1 udp 2122260223 1.2.5.14 50138 typ host generation 0 network-id 1",
+        "a=candidate:139 1 udp 2122260223 1.2.5.15 50139 typ host generation 0 network-id 1",
+        "a=candidate:140 1 udp 2122260223 1.2.5.16 50140 typ host generation 0 network-id 1",
+        "a=candidate:141 1 udp 2122260223 1.2.5.17 50141 typ host generation 0 network-id 1"
+      ],
+      "out": [
+        "a=candidate:125 1 udp 2122260223 1.2.5.1 50125 typ host generation 0 network-id 1",
+        "a=candidate:126 1 udp 2122260223 1.2.5.2 50126 typ host generation 0 network-id 1",
+        "a=candidate:127 1 udp 2122260223 1.2.5.3 50127 typ host generation 0 network-id 1",
+        "a=candidate:128 1 udp 2122260223 1.2.5.4 50128 typ host generation 0 network-id 1",
+        "a=candidate:129 1 udp 2122260223 1.2.5.5 50129 typ host generation 0 network-id 1",
+        "a=candidate:130 1 udp 2122260223 1.2.5.6 50130 typ host generation 0 network-id 1",
+        "a=candidate:131 1 udp 2122260223 1.2.5.7 50131 typ host generation 0 network-id 1",
+        "a=candidate:132 1 udp 2122260223 1.2.5.8 50132 typ host generation 0 network-id 1",
+        "a=candidate:133 1 udp 2122260223 1.2.5.9 50133 typ host generation 0 network-id 1",
+        "a=candidate:134 1 udp 2122260223 1.2.5.10 50134 typ host generation 0 network-id 1",
+        "a=candidate:135 1 udp 2122260223 1.2.5.11 50135 typ host generation 0 network-id 1",
+        "a=candidate:136 1 udp 2122260223 1.2.5.12 50136 typ host generation 0 network-id 1",
+        "a=candidate:137 1 udp 2122260223 1.2.5.13 50137 typ host generation 0 network-id 1",
+        "a=candidate:138 1 udp 2122260223 1.2.5.14 50138 typ host generation 0 network-id 1",
+        "a=candidate:139 1 udp 2122260223 1.2.5.15 50139 typ host generation 0 network-id 1",
+        "a=candidate:140 1 udp 2122260223 1.2.5.16 50140 typ host generation 0 network-id 1"
+      ]
+    },
+    {
+      "name": "two media sections share one cap of 16",
+      "in": [
+        "a=candidate:142 1 udp 2122260223 1.2.6.1 50142 typ host generation 0 network-id 1",
+        "a=candidate:143 1 udp 2122260223 1.2.6.2 50143 typ host generation 0 network-id 1",
+        "a=candidate:144 1 udp 2122260223 1.2.6.3 50144 typ host generation 0 network-id 1",
+        "a=candidate:145 1 udp 2122260223 1.2.6.4 50145 typ host generation 0 network-id 1",
+        "a=candidate:146 1 udp 2122260223 1.2.6.5 50146 typ host generation 0 network-id 1",
+        "a=candidate:147 1 udp 2122260223 1.2.6.6 50147 typ host generation 0 network-id 1",
+        "a=candidate:148 1 udp 2122260223 1.2.6.7 50148 typ host generation 0 network-id 1",
+        "a=candidate:149 1 udp 2122260223 1.2.6.8 50149 typ host generation 0 network-id 1",
+        "a=candidate:150 1 udp 2122260223 1.2.6.9 50150 typ host generation 0 network-id 1",
+        "a=candidate:151 1 udp 2122260223 1.2.6.10 50151 typ host generation 0 network-id 1",
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
+        "c=IN IP4 0.0.0.0",
+        "a=mid:1",
+        "a=sctp-port:5000",
+        "a=candidate:152 1 udp 2122260223 1.2.7.1 50152 typ host generation 0 network-id 1",
+        "a=candidate:153 1 udp 2122260223 1.2.7.2 50153 typ host generation 0 network-id 1",
+        "a=candidate:154 1 udp 2122260223 1.2.7.3 50154 typ host generation 0 network-id 1",
+        "a=candidate:155 1 udp 2122260223 1.2.7.4 50155 typ host generation 0 network-id 1",
+        "a=candidate:156 1 udp 2122260223 1.2.7.5 50156 typ host generation 0 network-id 1",
+        "a=candidate:157 1 udp 2122260223 1.2.7.6 50157 typ host generation 0 network-id 1",
+        "a=candidate:158 1 udp 2122260223 1.2.7.7 50158 typ host generation 0 network-id 1",
+        "a=candidate:159 1 udp 2122260223 1.2.7.8 50159 typ host generation 0 network-id 1",
+        "a=candidate:160 1 udp 2122260223 1.2.7.9 50160 typ host generation 0 network-id 1",
+        "a=candidate:161 1 udp 2122260223 1.2.7.10 50161 typ host generation 0 network-id 1"
+      ],
+      "out": [
+        "a=candidate:142 1 udp 2122260223 1.2.6.1 50142 typ host generation 0 network-id 1",
+        "a=candidate:143 1 udp 2122260223 1.2.6.2 50143 typ host generation 0 network-id 1",
+        "a=candidate:144 1 udp 2122260223 1.2.6.3 50144 typ host generation 0 network-id 1",
+        "a=candidate:145 1 udp 2122260223 1.2.6.4 50145 typ host generation 0 network-id 1",
+        "a=candidate:146 1 udp 2122260223 1.2.6.5 50146 typ host generation 0 network-id 1",
+        "a=candidate:147 1 udp 2122260223 1.2.6.6 50147 typ host generation 0 network-id 1",
+        "a=candidate:148 1 udp 2122260223 1.2.6.7 50148 typ host generation 0 network-id 1",
+        "a=candidate:149 1 udp 2122260223 1.2.6.8 50149 typ host generation 0 network-id 1",
+        "a=candidate:150 1 udp 2122260223 1.2.6.9 50150 typ host generation 0 network-id 1",
+        "a=candidate:151 1 udp 2122260223 1.2.6.10 50151 typ host generation 0 network-id 1",
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
+        "c=IN IP4 0.0.0.0",
+        "a=mid:1",
+        "a=sctp-port:5000",
+        "a=candidate:152 1 udp 2122260223 1.2.7.1 50152 typ host generation 0 network-id 1",
+        "a=candidate:153 1 udp 2122260223 1.2.7.2 50153 typ host generation 0 network-id 1",
+        "a=candidate:154 1 udp 2122260223 1.2.7.3 50154 typ host generation 0 network-id 1",
+        "a=candidate:155 1 udp 2122260223 1.2.7.4 50155 typ host generation 0 network-id 1",
+        "a=candidate:156 1 udp 2122260223 1.2.7.5 50156 typ host generation 0 network-id 1",
+        "a=candidate:157 1 udp 2122260223 1.2.7.6 50157 typ host generation 0 network-id 1"
+      ]
+    },
+    {
+      "name": "malformed candidate lines",
+      "in": [
+        "a=candidate:1 1 udp 2122260223  1.2.3.4 50001 typ host",
+        "a=candidate:1 1 udp\t2122260223 1.2.3.4 50001 typ host",
+        "a=candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host ",
+        "a=candidate:1 1 udp 2122260223 1.2.3.4 50001 host",
+        "a=candidate:1 1 udp 2122260223 1.2.3.4 50001 type host",
+        "a=candidate:1 1 udp 2122260223 1.2.3.4 50001 typ bogus",
+        "a=candidate:1 1 udp 2122260223 1.2.3.4 50001 typ HOST",
+        "a=candidate:1 1 udp 2122260223 1.2.3.4 0 typ host",
+        "a=candidate:1 1 udp 2122260223 1.2.3.4 65536 typ host",
+        "a=candidate:1 1 udp 2122260223 1.2.3.4 05000 typ host",
+        "a=candidate:1 0 udp 2122260223 1.2.3.4 50001 typ host",
+        "a=candidate:1 257 udp 2122260223 1.2.3.4 50001 typ host",
+        "a=candidate:1 1 udp 4294967296 1.2.3.4 50001 typ host",
+        "a=candidate:1 1 udp 21222602a3 1.2.3.4 50001 typ host",
+        "a=candidate:111111111111111111111111111111111 1 udp 2122260223 1.2.3.4 50001 typ host",
+        "a=candidate:1-2 1 udp 2122260223 1.2.3.4 50001 typ host",
+        "a=candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host generation",
+        "a=candidate:1 1 udp 1686052607 1.2.3.4 50001 typ srflx raddr router.lan rport 50001",
+        "a=candidate:1 1 udp 1686052607 1.2.3.4 50001 typ srflx raddr 192.168.1.20 rport 70000",
+        "a=candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host\u0000",
+        "a=candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host g\u00e9n\u00e9ration 0",
+        "a=candidate:",
+        "a=candidate",
+        "a=candidate:1 1 udp 2122260223"
+      ],
+      "out": []
+    },
+    {
+      "name": "candidate lines spelled otherwise, which a lenient reader might still take",
+      "in": [
+        "a=CANDIDATE:1 1 udp 2122260223 1.2.3.4 50001 typ host",
+        "a=Candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host",
+        " a=candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host",
+        "\ta=candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host",
+        "a =candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host",
+        "a= candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host",
+        "A=candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host",
+        "a=candidate :1 1 udp 2122260223 1.2.3.4 50001 typ host",
+        "\u0000a=candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host",
+        "\ufeffa=candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host",
+        "a\u00a0=\u00a0candidate:1 1 udp 2122260223 1.2.3.4 50001 typ host"
+      ],
+      "out": []
+    },
+    {
+      "name": "lines that only look like candidates are not candidates, and are kept",
+      "in": [
+        "a=end-of-candidates",
+        "a=remote-candidates:1 1.2.3.4 50001",
+        "a=x-note:candidate 192.168.1.1"
+      ],
+      "out": [
+        "a=end-of-candidates",
+        "a=remote-candidates:1 1.2.3.4 50001",
+        "a=x-note:candidate 192.168.1.1"
+      ]
+    },
+    {
+      "name": "only candidate lines go: the rest of the SDP is kept as it is",
+      "in": [
+        "a=ice-lite",
+        "a=candidate:162 1 udp 2122260223 192.168.1.20 50162 typ host generation 0 network-id 1",
+        "a=ice-options:trickle renomination",
+        "a=candidate:163 1 udp 2122260223 1.2.3.4 50163 typ host generation 0 network-id 1",
+        "a=candidate:164 1 udp 2122260223 fd00::1 50164 typ host generation 0 network-id 1",
+        "a=x-local:192.168.1.20"
+      ],
+      "out": [
+        "a=ice-lite",
+        "a=ice-options:trickle renomination",
+        "a=candidate:163 1 udp 2122260223 1.2.3.4 50163 typ host generation 0 network-id 1",
+        "a=x-local:192.168.1.20"
+      ]
+    },
+    {
+      "name": "all: every line as it is, whatever it names",
+      "mode": "all",
+      "in": [
+        "a=candidate:165 1 udp 2122260223 192.168.1.20 50165 typ host generation 0 network-id 1",
+        "a=candidate:166 1 udp 2122260223 127.0.0.1 50166 typ host generation 0 network-id 1",
+        "a=candidate:167 1 udp 2122260223 6c1b7a5e-6d6f-4a4b-9f3e-0e1d2c3b4a59.local 50167 typ host generation 0 network-id 1",
+        "a=candidate:168 1 tcp 1518280447 1.2.3.4 9 typ host tcptype active",
+        "a=CANDIDATE:1 1 udp 2122260223 10.0.0.1 50001 typ host",
+        "a=candidate:169 1 udp 2122260223 1.2.8.1 50169 typ host generation 0 network-id 1",
+        "a=candidate:170 1 udp 2122260223 1.2.8.2 50170 typ host generation 0 network-id 1",
+        "a=candidate:171 1 udp 2122260223 1.2.8.3 50171 typ host generation 0 network-id 1",
+        "a=candidate:172 1 udp 2122260223 1.2.8.4 50172 typ host generation 0 network-id 1",
+        "a=candidate:173 1 udp 2122260223 1.2.8.5 50173 typ host generation 0 network-id 1",
+        "a=candidate:174 1 udp 2122260223 1.2.8.6 50174 typ host generation 0 network-id 1",
+        "a=candidate:175 1 udp 2122260223 1.2.8.7 50175 typ host generation 0 network-id 1",
+        "a=candidate:176 1 udp 2122260223 1.2.8.8 50176 typ host generation 0 network-id 1",
+        "a=candidate:177 1 udp 2122260223 1.2.8.9 50177 typ host generation 0 network-id 1",
+        "a=candidate:178 1 udp 2122260223 1.2.8.10 50178 typ host generation 0 network-id 1",
+        "a=candidate:179 1 udp 2122260223 1.2.8.11 50179 typ host generation 0 network-id 1",
+        "a=candidate:180 1 udp 2122260223 1.2.8.12 50180 typ host generation 0 network-id 1",
+        "a=candidate:181 1 udp 2122260223 1.2.8.13 50181 typ host generation 0 network-id 1",
+        "a=candidate:182 1 udp 2122260223 1.2.8.14 50182 typ host generation 0 network-id 1",
+        "a=candidate:183 1 udp 2122260223 1.2.8.15 50183 typ host generation 0 network-id 1",
+        "a=candidate:184 1 udp 2122260223 1.2.8.16 50184 typ host generation 0 network-id 1",
+        "a=candidate:185 1 udp 2122260223 1.2.8.17 50185 typ host generation 0 network-id 1",
+        "a=candidate:186 1 udp 2122260223 1.2.8.18 50186 typ host generation 0 network-id 1"
+      ],
+      "out": [
+        "a=candidate:165 1 udp 2122260223 192.168.1.20 50165 typ host generation 0 network-id 1",
+        "a=candidate:166 1 udp 2122260223 127.0.0.1 50166 typ host generation 0 network-id 1",
+        "a=candidate:167 1 udp 2122260223 6c1b7a5e-6d6f-4a4b-9f3e-0e1d2c3b4a59.local 50167 typ host generation 0 network-id 1",
+        "a=candidate:168 1 tcp 1518280447 1.2.3.4 9 typ host tcptype active",
+        "a=CANDIDATE:1 1 udp 2122260223 10.0.0.1 50001 typ host",
+        "a=candidate:169 1 udp 2122260223 1.2.8.1 50169 typ host generation 0 network-id 1",
+        "a=candidate:170 1 udp 2122260223 1.2.8.2 50170 typ host generation 0 network-id 1",
+        "a=candidate:171 1 udp 2122260223 1.2.8.3 50171 typ host generation 0 network-id 1",
+        "a=candidate:172 1 udp 2122260223 1.2.8.4 50172 typ host generation 0 network-id 1",
+        "a=candidate:173 1 udp 2122260223 1.2.8.5 50173 typ host generation 0 network-id 1",
+        "a=candidate:174 1 udp 2122260223 1.2.8.6 50174 typ host generation 0 network-id 1",
+        "a=candidate:175 1 udp 2122260223 1.2.8.7 50175 typ host generation 0 network-id 1",
+        "a=candidate:176 1 udp 2122260223 1.2.8.8 50176 typ host generation 0 network-id 1",
+        "a=candidate:177 1 udp 2122260223 1.2.8.9 50177 typ host generation 0 network-id 1",
+        "a=candidate:178 1 udp 2122260223 1.2.8.10 50178 typ host generation 0 network-id 1",
+        "a=candidate:179 1 udp 2122260223 1.2.8.11 50179 typ host generation 0 network-id 1",
+        "a=candidate:180 1 udp 2122260223 1.2.8.12 50180 typ host generation 0 network-id 1",
+        "a=candidate:181 1 udp 2122260223 1.2.8.13 50181 typ host generation 0 network-id 1",
+        "a=candidate:182 1 udp 2122260223 1.2.8.14 50182 typ host generation 0 network-id 1",
+        "a=candidate:183 1 udp 2122260223 1.2.8.15 50183 typ host generation 0 network-id 1",
+        "a=candidate:184 1 udp 2122260223 1.2.8.16 50184 typ host generation 0 network-id 1",
+        "a=candidate:185 1 udp 2122260223 1.2.8.17 50185 typ host generation 0 network-id 1",
+        "a=candidate:186 1 udp 2122260223 1.2.8.18 50186 typ host generation 0 network-id 1"
+      ]
+    },
+    {
+      "name": "LF line endings are kept",
+      "in_raw": "v=0\na=candidate:1 1 udp 2122260223 192.168.1.20 50001 typ host\na=candidate:2 1 udp 2122260223 1.2.3.4 50002 typ host\na=end-of-candidates\n",
+      "out_raw": "v=0\na=candidate:2 1 udp 2122260223 1.2.3.4 50002 typ host\na=end-of-candidates\n"
+    },
+    {
+      "name": "mixed line endings are kept, each with its line",
+      "in_raw": "v=0\r\na=candidate:2 1 udp 2122260223 1.2.3.4 50002 typ host\na=candidate:1 1 udp 2122260223 192.168.1.20 50001 typ host\r\na=end-of-candidates\n",
+      "out_raw": "v=0\r\na=candidate:2 1 udp 2122260223 1.2.3.4 50002 typ host\na=end-of-candidates\n"
+    },
+    {
+      "name": "a bare CR ends a line too: a candidate behind one is read and dropped",
+      "in_raw": "v=0\r\na=mid:0\ra=candidate:1 1 udp 2122260223 192.168.1.20 50001 typ host\r\na=end-of-candidates\r\n",
+      "out_raw": "v=0\r\na=mid:0\ra=end-of-candidates\r\n"
+    },
+    {
+      "name": "a bare CR between two candidates: each is read on its own",
+      "in_raw": "v=0\r\na=candidate:2 1 udp 2122260223 1.2.3.4 50002 typ host\ra=candidate:1 1 udp 2122260223 192.168.1.20 50001 typ host\r\n",
+      "out_raw": "v=0\r\na=candidate:2 1 udp 2122260223 1.2.3.4 50002 typ host\r"
+    },
+    {
+      "name": "no line ending after the last line",
+      "in_raw": "v=0\r\na=candidate:2 1 udp 2122260223 1.2.3.4 50002 typ host\r\na=candidate:1 1 udp 2122260223 192.168.1.20 50001 typ host",
+      "out_raw": "v=0\r\na=candidate:2 1 udp 2122260223 1.2.3.4 50002 typ host\r\n"
+    },
+    {
+      "name": "no line ending after a kept last line",
+      "in_raw": "v=0\r\na=candidate:2 1 udp 2122260223 1.2.3.4 50002 typ host",
+      "out_raw": "v=0\r\na=candidate:2 1 udp 2122260223 1.2.3.4 50002 typ host"
+    },
+    {
+      "name": "an empty SDP",
+      "in_raw": "",
+      "out_raw": ""
+    },
+    {
+      "name": "no candidate at all: passed on as it is",
+      "in_raw": "v=0\r\na=mid:0\r\n",
+      "out_raw": "v=0\r\na=mid:0\r\n"
+    }
+  ]
+}
