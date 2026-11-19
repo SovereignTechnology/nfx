@@ -52,14 +52,26 @@ ignore = [
     # code calls glib. Fixed only in glib 0.20 (gtk-rs 0.20), which the locked Tauri does not use.
     # Revisit at every tauri bump.
     { id = "RUSTSEC-2024-0429", reason = "glib 0.18.5 VariantStrIter unsound, via tauri > wry/tao > gtk 0.18 (Linux only); nfx never calls glib; fixed only in gtk-rs 0.20, which the locked tauri 2.11.6 does not use; revisit at every tauri bump" },
-    # Unsound, not a vulnerability (2026-11-19): heapless 0.8.0's IndexMap::insert can break its
-    # invariant on a map of u16::MAX entries whose last key hashes to u16::MAX. It comes in only via
-    # nostr 0.45 > faster-hex 0.10.1, which uses heapless only for `String` and `Vec` in encode.rs
-    # (read from the .crate whose sha256 equals the lock's checksum, 04839bdf…), never IndexMap, so
-    # the unsound path is not reachable. Fixed only in heapless >= 0.9.4, which no faster-hex release
-    # uses (0.10.1 and 1.0.0 both require ^0.8). heapless 0.7.17 (via postcard) is not affected.
-    # Remove at the first faster-hex (or nostr) release off heapless 0.8. Revisit by 2026-12-31.
-    { id = "RUSTSEC-2026-0582", reason = "heapless 0.8.0 IndexMap::insert unsound, via nostr > faster-hex 0.10.1, which uses only heapless String/Vec (never IndexMap); no faster-hex release on heapless >= 0.9.4; revisit by 2026-12-31" },
+    # Unsound, not vulnerabilities (2026-11-19): nine heapless advisories published together
+    # (RUSTSEC-2026-0574 to -0582), every one fixed only in heapless >= 0.9.4. heapless enters only
+    # through two crates, and no nfx crate names a heapless type:
+    #   - heapless 0.7.17 via iroh's postcard 1.1.3, which uses only heapless::Vec and ::String;
+    #   - heapless 0.8.0 via nostr 0.45 > faster-hex 0.10.1, which uses only Vec and String.
+    # (Read from the .crate files whose sha256 equals the lock's checksums: postcard 6764c3b5…,
+    # faster-hex 04839bdf….) The affected functions are IndexMap (-0576, -0582), Deque (-0579,
+    # -0581), SortedLinkedList (-0574, -0578), spsc (-0575), the pools (-0580), and in -0577
+    # Vec's IntoIter::drop, which needs an element whose Drop panics: here elements are bytes or
+    # serde-visited values of crates that never name heapless. None is reachable. No release of
+    # postcard or faster-hex uses heapless >= 0.9.4 yet. Remove when both move; revisit by 2026-12-31.
+    { id = "RUSTSEC-2026-0574", reason = "heapless SortedLinkedList FindMutView::pop; heapless only via postcard/faster-hex, which use Vec/String only; revisit by 2026-12-31" },
+    { id = "RUSTSEC-2026-0575", reason = "heapless spsc::Spsc::peek ordering; not used (postcard/faster-hex use Vec/String only); revisit by 2026-12-31" },
+    { id = "RUSTSEC-2026-0576", reason = "heapless IndexMap::truncate; not used (postcard/faster-hex use Vec/String only); revisit by 2026-12-31" },
+    { id = "RUSTSEC-2026-0577", reason = "heapless panic-safety in Deque/HistoryBuf/IndexMap and vec::IntoIter::drop; Vec elements here are bytes or serde values with no panicking Drop; revisit by 2026-12-31" },
+    { id = "RUSTSEC-2026-0578", reason = "heapless SortedLinkedList::zeroize; not used (postcard/faster-hex use Vec/String only); revisit by 2026-12-31" },
+    { id = "RUSTSEC-2026-0579", reason = "heapless Deque::try_from; not used (postcard/faster-hex use Vec/String only); revisit by 2026-12-31" },
+    { id = "RUSTSEC-2026-0580", reason = "heapless pool (treiber stack) race; not used (postcard/faster-hex use Vec/String only); revisit by 2026-12-31" },
+    { id = "RUSTSEC-2026-0581", reason = "heapless Deque::make_contiguous; not used (postcard/faster-hex use Vec/String only); revisit by 2026-12-31" },
+    { id = "RUSTSEC-2026-0582", reason = "heapless IndexMap::insert; not used (postcard/faster-hex use Vec/String only); revisit by 2026-12-31" },
 ]
 
 [licenses]
