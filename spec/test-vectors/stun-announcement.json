@@ -1,0 +1,1119 @@
+{
+  "description": "NFX-10 §1 STUN service announcements: kind 33478, addressable, signed by the operator of a STUN server, checked at 'now'. Tags: exactly one 'd', the server's ip:port in the canonical form of the beacon 'stun' endpoint, and global unicast; 1 to 8 distinct 'n', each a namespace; exactly one 'expiration', a plain decimal with created_at < expiration <= created_at + 86400, after 'now'; created_at at most 900 s ahead of 'now'; empty content; other tags ignored. A reader MUST accept every 'valid' event, reading it as 'reads_as', and MUST reject every 'invalid' one. A scoped relay that admits kind 33478 (NFX-04 §1) admits the valid ones when it serves one of their networks, and refuses the invalid ones.",
+  "secret_keys_DO_NOT_USE": {
+    "operator": "f540c76c34e72fae74c0b338db26d86f24666d3550079bd7bf14c7374b2eb7fb"
+  },
+  "now": 1790000010,
+  "valid": [
+    {
+      "name": "ipv4-one-network",
+      "reason": "what nfxd stun --announce sends: 24 h, one network",
+      "event": {
+        "id": "ad994e9c19cadf27af5d9f0d3f883ebc9665ca128aa7877852de163333629ae0",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "b23b8598b6831819e9659bbd805ba888b0e7528dbc94034fc24f1dbd1ec2b26510499042a0f0765ddf0757b1148d61765b694c5cb59e8f8c82c7ed2abff5dd77"
+      },
+      "reads_as": {
+        "operator": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "addr": "203.0.113.10:3478",
+        "networks": [
+          "nfx:mainnet:1"
+        ],
+        "created_at": 1790000000,
+        "expiration": 1790086400
+      }
+    },
+    {
+      "name": "ipv6-two-networks",
+      "reason": "a bracketed IPv6 server for two networks, 12 h",
+      "event": {
+        "id": "1c1f13b1b6c186f3bbd3e68ce794fac1372c1f73d4d339a9e2e2d419ff1ad164",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "[2001:db8::1]:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "n",
+            "nfx:testnet:1"
+          ],
+          [
+            "expiration",
+            "1790043200"
+          ]
+        ],
+        "content": "",
+        "sig": "0d210bc55480d1dfc23bb746132465f56e23d943e462167f43011889c59ad64420d4259827b585b94bae366d22250a1ff70f58971b5c65d964f8fecde264bf7a"
+      },
+      "reads_as": {
+        "operator": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "addr": "[2001:db8::1]:3478",
+        "networks": [
+          "nfx:mainnet:1",
+          "nfx:testnet:1"
+        ],
+        "created_at": 1790000000,
+        "expiration": 1790043200
+      }
+    },
+    {
+      "name": "eight-networks-unknown-tag",
+      "reason": "8 networks, the most; a tag readers do not know",
+      "event": {
+        "id": "bb61d0166a5f8ece527b09410abce0959dc04552d699dd6e0ea5ac107b6a6c6c",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "198.51.100.7:19302"
+          ],
+          [
+            "n",
+            "nfx:net-1:1"
+          ],
+          [
+            "n",
+            "nfx:net-2:1"
+          ],
+          [
+            "n",
+            "nfx:net-3:1"
+          ],
+          [
+            "n",
+            "nfx:net-4:1"
+          ],
+          [
+            "n",
+            "nfx:net-5:1"
+          ],
+          [
+            "n",
+            "nfx:net-6:1"
+          ],
+          [
+            "n",
+            "nfx:net-7:1"
+          ],
+          [
+            "n",
+            "nfx:net-8:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ],
+          [
+            "x-future",
+            "ignored"
+          ]
+        ],
+        "content": "",
+        "sig": "19674992f1375921fa06270b062bb2e232c14ef7f908e479ae79dc761aa8e01df3da7400cfce98c1f68a66b13a6a6e7314a0337a68b67e6d3150119071fc7c2d"
+      },
+      "reads_as": {
+        "operator": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "addr": "198.51.100.7:19302",
+        "networks": [
+          "nfx:net-1:1",
+          "nfx:net-2:1",
+          "nfx:net-3:1",
+          "nfx:net-4:1",
+          "nfx:net-5:1",
+          "nfx:net-6:1",
+          "nfx:net-7:1",
+          "nfx:net-8:1"
+        ],
+        "created_at": 1790000000,
+        "expiration": 1790086400
+      }
+    },
+    {
+      "name": "one-minute",
+      "reason": "a short life is allowed",
+      "event": {
+        "id": "0c3c306bfe59db983abd56846fcde249942dc91bbba69240fb0a1a40fb4a2f95",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790000060"
+          ]
+        ],
+        "content": "",
+        "sig": "98c5866f95ba58dc1cc1fb3507940224164a1ac23d8713d9a4df75922b59514f1648316773bfa6435083ebbf21facfcbd2ecdcbc4632ae5644176733f8e7dc41"
+      },
+      "reads_as": {
+        "operator": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "addr": "203.0.113.10:3478",
+        "networks": [
+          "nfx:mainnet:1"
+        ],
+        "created_at": 1790000000,
+        "expiration": 1790000060
+      }
+    },
+    {
+      "name": "signed-ahead",
+      "reason": "created_at 15 min ahead of now, the most allowed",
+      "event": {
+        "id": "d8521c9f68661f941ec74ccac7e6b8908c47e8f9897494a4dd11b61c4ac9b8b2",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000910,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790087310"
+          ]
+        ],
+        "content": "",
+        "sig": "8b42ecf9c74fba7ec41262ff131f50969021ce150285ec2013e79901a23a528bc9fc6a33c45ddb115b668b219a9848441a0f6ffeb9639f44099481beecbc04cf"
+      },
+      "reads_as": {
+        "operator": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "addr": "203.0.113.10:3478",
+        "networks": [
+          "nfx:mainnet:1"
+        ],
+        "created_at": 1790000910,
+        "expiration": 1790087310
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "wrong-kind",
+      "reason": "kind 33478 only",
+      "event": {
+        "id": "6985e4c6067d0ea3229565d33f023545897fab00727304599d0505dab7f6e5a5",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33477,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "9e19422a0eb49027664e4cba2245c8625723fb1d03b52e30f1b0a268928c115ab9a865b8313945a2c20c58128a4755865758e3ea598bf9c322870e750df0a16a"
+      }
+    },
+    {
+      "name": "bad-signature",
+      "reason": "the NIP-01 signature must verify",
+      "event": {
+        "id": "ad994e9c19cadf27af5d9f0d3f883ebc9665ca128aa7877852de163333629ae0",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "b23b8598b6831819e9659bbd805ba888b0e7528dbc94034fc24f1dbd1ec2b26510499042a0f0765ddf0757b1148d61765b694c5cb59e8f8c82c7ed2abff5dd00"
+      }
+    },
+    {
+      "name": "d-missing",
+      "reason": "exactly one d",
+      "event": {
+        "id": "13997e09974e13e3f99f5f50de368f365664849ad8679977c885c7ad71a6b8a4",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "d5972926e018e32d6a641e4d63864ca6ea786a2b50f590282f47538ca47f3bac52f1843428d1abf043cf189c071dcd63edaa07452ae5c64a529b82b4ea12a052"
+      }
+    },
+    {
+      "name": "d-twice",
+      "reason": "exactly one d",
+      "event": {
+        "id": "ccaed53e89eb451cfa6d9bec64cacdcc41cbd7e6019b5ccd864641efb81c756f",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ],
+          [
+            "d",
+            "203.0.113.11:3478"
+          ]
+        ],
+        "content": "",
+        "sig": "9608cd623a245ccfa9dec0f21e9d5b34e8bc744922d624a24e4b49d30017249fc2021c9fdacc1f63bc493ee6b1a260af3a9bb1435697c9a25e2d2f5967a58bb0"
+      }
+    },
+    {
+      "name": "d-private",
+      "reason": "global unicast only",
+      "event": {
+        "id": "4e07319edae761287ccebe4976249067888daf6c2e7e56eac0d8f597467de806",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "192.168.1.2:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "8b5e79325086a9e9523758e832822c6962dbfe7f7349b6bf317ac809aebcbdac47a961f18822199b74e37d1b8049907657e979114479a2326977273a59121ad8"
+      }
+    },
+    {
+      "name": "d-loopback",
+      "reason": "global unicast only",
+      "event": {
+        "id": "9b051d5a56948d25fa885e945694d3155bf4a58ce920272c66f439ea2540cc6e",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "127.0.0.1:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "e7ba8c6cbc0bc6ba8d39a8048b62ccc1f5c79fe7441eac17f990e78613123edb0d9d403c750ba25cf539333b2502f83df8b7aa0425a3fbf138c1eda833d17fa5"
+      }
+    },
+    {
+      "name": "d-shared",
+      "reason": "global unicast only (100.64/10)",
+      "event": {
+        "id": "7b2aa3e70d3e81f83d663ff37f9c97e10e2acb89be331b2064136cd566ac4c5a",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "100.64.0.1:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "73267ae487e5c136ba9351fba9cee100d01df6560badf939d41f8f18d38e9661328dcf423fdf098c97fcbb75f174990ef2b840200094e343b5b7963682c56e21"
+      }
+    },
+    {
+      "name": "d-link-local",
+      "reason": "global unicast only",
+      "event": {
+        "id": "825d178b473ea119729dc467dd2abd1c8e0ef68cd0cf59688c18969dda85a8ad",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "169.254.1.1:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "f783817abc3505510a6cf7f971f16ec5643e79c6e17bdc800dc1e1d3c358fd378c812302efd223c0c631f0a4f94d90418563edff0c72945cab8ffb01512a2458"
+      }
+    },
+    {
+      "name": "d-multicast",
+      "reason": "global unicast only",
+      "event": {
+        "id": "43efb79e08e315d6e9bf0c42ed5c4568bcd04cb836186b59b71fcb927f46d8ae",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "224.0.0.1:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "6cd316d3607e05cb2724493433f6ccab43118233509b946bf21e5d64fa563d81bb65566a69b60a298e04215aa1d570a1b932af5f9a49d8889ca90cfbff029698"
+      }
+    },
+    {
+      "name": "d-broadcast",
+      "reason": "global unicast only",
+      "event": {
+        "id": "66dd3750e50b3246dab50ce706d6b51d923f0c05861ac3a04d60b4161ab91217",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "255.255.255.255:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "42165a8a5b7ffb8c00fec0bb3dab7ec57ccd89d1e27e416eb6f7371d28756f1ac3dafc293f0450340dedf4fc774f81ad2d4690f9291c802ed4dd57d7682322fe"
+      }
+    },
+    {
+      "name": "d-ipv6-unique-local",
+      "reason": "global unicast only (2000::/3)",
+      "event": {
+        "id": "67e02c4e6ebdc54be0477eb3b4c524e9a5df663b5be0f05a032ab3e34186930c",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "[fd00::1]:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "257d9553ae27ed9c1f73abe857c87c48b3a845c0188c5c61c20315522fcfe26eb2c839d737c0249c5826102f23dd4f0f27aa4e47679209e325903e5481b1f071"
+      }
+    },
+    {
+      "name": "d-ipv6-link-local",
+      "reason": "global unicast only (2000::/3)",
+      "event": {
+        "id": "da3eee2df03da33cd3b4513870bf110c3ba9d7f7d9a17bf6f4af556b68f200de",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "[fe80::1]:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "6118f17cd1f6278145cdb16e83f536adf4a8df6809fb6dbb99bef244f7429a984abf32c99eb9e919a5905ad63d384b4950ddfc1bd4cb6293251b5934257b13d1"
+      }
+    },
+    {
+      "name": "d-hostname",
+      "reason": "an IP address, not a name",
+      "event": {
+        "id": "ed8ebde91812e81d6d32f2ad1f44c0fe3989b8d32bf09541a749b9bc3d5f972b",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "stun.example:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "718e6bfeabc1a419c1b02de8ca0b6b428712b17c04b5904125a089b3bf662a57a9976504a5d564c013186b91981c88f39d88d09dcfad35b65fdef7aa55b4b49b"
+      }
+    },
+    {
+      "name": "d-url",
+      "reason": "an address, not a stun: URL",
+      "event": {
+        "id": "d4fe27d160b974c37a1dc5f21b380117587b7bf1ca12e14e900d70d4bb483c22",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "stun:203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "d57dbb1921e26f01846eac96d4536175a320f0e74b9f8c38c9c70912551c9ccf438048696f81e1d34897197a908362cdb25f67b4564b229623de7ba44263886c"
+      }
+    },
+    {
+      "name": "d-no-port",
+      "reason": "ip:port",
+      "event": {
+        "id": "61a3beda20e75bdbc6922c0d2aff46068acc5733758031da99fdcecfd25597f0",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "3a39fef5b726e0d57f261ec7a7372631d3c40615528ab773066fa076d1e385534d96991be3acfc3c4d6bf879e00bb3bd17f37e64aa467ec6c29d542e6585a513"
+      }
+    },
+    {
+      "name": "d-port-zero",
+      "reason": "the port is not 0",
+      "event": {
+        "id": "a0cd835c2e88b0bb886c9e41422b9e74082e3ce29a042bee44ed0424907d9ee1",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:0"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "d120be39b81c2267ddec7d71c074596e36e38bb5ee24945b1ec6c874fc2939ad31a65e25947e9a3ff46a44cd82ceb87f479b592adcba7bfaecc25fe3c1b58b21"
+      }
+    },
+    {
+      "name": "d-ipv4-leading-zero",
+      "reason": "canonical text form",
+      "event": {
+        "id": "2fa867f52ed4c5c1d2e310c427c0d3fc835b80b026552f982324700618de20da",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.010:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "4ffa0de12ed43c3c4aa50a35748e993e1dbc87f607a88045ce0414836b074e9956ea158b4e02b9e278b088b641d1a5befba12f71a95f8c42a4cfe8bba79d761e"
+      }
+    },
+    {
+      "name": "d-ipv6-uppercase",
+      "reason": "RFC 5952: lowercase",
+      "event": {
+        "id": "0b71cb83b979b8852be0dc03013cc07790272ad9a358ab82d98c2a2d7e91aa66",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "[2001:DB8::1]:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "7cc1af791aa057a85aa5973e9a09c8b9792bcbc88e574c0787ace1463622983d6a0c421421a1bf9fd201140fb0d3b702d6e8a77b99426e95b57b0df3f86e6a87"
+      }
+    },
+    {
+      "name": "d-ipv4-mapped",
+      "reason": "IPv4 is never written inside IPv6",
+      "event": {
+        "id": "ae8f51df9f20b4de7fcce0a3549a288de7e17026b58a08e231113f965030f2a7",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "[::ffff:203.0.113.10]:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "422bd02035487cd17af2bdb58b96ac8fd2439e583a6dfe6384f8566a0126c203f229159fb86b6cccaabd8a2481172ec2d391c307de23fd5a159e0a4b2c148c99"
+      }
+    },
+    {
+      "name": "n-missing",
+      "reason": "1 to 8 n",
+      "event": {
+        "id": "149c68ee13ccea4ef282a748944af1658203a85be8ba0003d692168d2e18834d",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "96d99a51f3d10665b479404f887daafb905fa8539b229ffe8fc6f7a62c73a076a2263a1537f061264c977d68aeebc2f0f72cfce6d8c6867b54faadd895e21110"
+      }
+    },
+    {
+      "name": "n-nine",
+      "reason": "1 to 8 n",
+      "event": {
+        "id": "aa5d2ef71443d2d3baff3ba2a24c7097342287ff9b0b1ced6cf8c96f0b7ee500",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:net-1:1"
+          ],
+          [
+            "n",
+            "nfx:net-2:1"
+          ],
+          [
+            "n",
+            "nfx:net-3:1"
+          ],
+          [
+            "n",
+            "nfx:net-4:1"
+          ],
+          [
+            "n",
+            "nfx:net-5:1"
+          ],
+          [
+            "n",
+            "nfx:net-6:1"
+          ],
+          [
+            "n",
+            "nfx:net-7:1"
+          ],
+          [
+            "n",
+            "nfx:net-8:1"
+          ],
+          [
+            "n",
+            "nfx:net-9:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "d3ef043c8f268f25ac83078e6ec3e9362894e13179a4f169dd8636478bd97d1c1a93cce0a29cecddaf9f8679b4dc169663bf0b1b888d0d889f472bb2e43b9851"
+      }
+    },
+    {
+      "name": "n-repeated",
+      "reason": "distinct n",
+      "event": {
+        "id": "ec7214146d0a4a2c65a2d08ab2f836bfac913a0849abc47a56bc58d37103699d",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "2660f87329fddf62104bad157874ebe0f72aac2c5b346aa5c865a9e9aa94bd97417679cd5ce1067924e4a37fe7d43f00dbe02ba57425230e6105e652a269b20d"
+      }
+    },
+    {
+      "name": "n-not-a-namespace",
+      "reason": "each n is a namespace (NFX-01 §2)",
+      "event": {
+        "id": "cc6599007ee6221e07455ea31a303f3c1c3a2a2d13926d7b7286c401c1f86bc6",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nutflix:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "d966d98db518fdee68eac21093fab84b57c48a505d1b726dc14cdb3b4c1786d4067516d2df6c6dad0cabd0804b8400fb4b3174654852a29956fbd15667b5f4ca"
+      }
+    },
+    {
+      "name": "n-no-value",
+      "reason": "each n has a value",
+      "event": {
+        "id": "d72eaac13f11a8140f307d342671b5459593727d8d962c591edaa8332ae2b372",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "22b76bdc52330aec3329707bcb8172455fdf08f4ecd6977dd2f057d8b36d78dcc727380338a327ad1067652c69d7b1a7b73f067158a9d964e93547c586e0d8b2"
+      }
+    },
+    {
+      "name": "expiration-missing",
+      "reason": "exactly one expiration",
+      "event": {
+        "id": "24ff61d46ad0b26c279e3da6c478a19911aebc55482ff99979399a9891bcf1b3",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ]
+        ],
+        "content": "",
+        "sig": "8a35ec22c4909016aae989f91512fbc6c5687d52fe52cab1e1a1287088639d8ffdead7f9b454b1bea0e7381987443b5653b09aaaf7486f36019898118721d1a7"
+      }
+    },
+    {
+      "name": "expiration-twice",
+      "reason": "exactly one expiration",
+      "event": {
+        "id": "a91b7ce9c07ec68a8c396cd89b2f1ddb6f7ad7262f89a93f12fa5ec05a15a184",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ],
+          [
+            "expiration",
+            "1790000060"
+          ]
+        ],
+        "content": "",
+        "sig": "0dd09650b87430027bcfb1910dbe3fae9344a810b84f5eb6819bab79221ea14f13f2d7229a0bee69e07ebc93b281f5510995252ac5bb7a5658caf76f3b3a797f"
+      }
+    },
+    {
+      "name": "expiration-not-decimal",
+      "reason": "a plain decimal",
+      "event": {
+        "id": "3d9e01500c261d94d0f860c949eaa4f9837723f05ff5f2028fdc47176fa3fec5",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790000060.0"
+          ]
+        ],
+        "content": "",
+        "sig": "63d2eb401a0688d6511fa8434abc8deb948b06e8f8ec055ba14998286c272a116656097feb9703cd68936c101eacc6f4a269d44934251799d01e763bb84517fd"
+      }
+    },
+    {
+      "name": "expiration-leading-zero",
+      "reason": "a plain decimal",
+      "event": {
+        "id": "ab53890aad3e5e7dfd9b798202ebc9df0f8d00440463afbba8a904c75c043e16",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "01790000060"
+          ]
+        ],
+        "content": "",
+        "sig": "556d399928a13b5b5a9501a7025ce0d95964c7b1249f71b3a449e4cb8f021f5ae63818c656a0276d4d6c96175aa2d717a46c6609d281a984b60392a51361dd6b"
+      }
+    },
+    {
+      "name": "expiration-at-created-at",
+      "reason": "after created_at",
+      "event": {
+        "id": "11678f0631b56696dc47f90d0dac61b9e7223f2271d249087c3e984cd0c0ec93",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790000000"
+          ]
+        ],
+        "content": "",
+        "sig": "f69b3cedcd5306274ccc5a25affe9cac4dc926b65fcded0107e3c297369cffec33b8f659e27bbc654cd1e69634920e6b2823602e1bd220c3b3fc4f27bd0ef4d7"
+      }
+    },
+    {
+      "name": "expiration-over-24h",
+      "reason": "at most 24 h after created_at",
+      "event": {
+        "id": "ecb3a6be6987a824198c67b24bc043e1fecaae139ffb8cfa721188012bc0cbf7",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086401"
+          ]
+        ],
+        "content": "",
+        "sig": "9d1075b77a47c3ecc7016ca717288de376235f2e5a41a59f84540dfc2462de59817b381193e19f20ab14c9cc1c0eff614386a61bcf0ff17b4c50045a99ad47e8"
+      }
+    },
+    {
+      "name": "expired",
+      "reason": "expiration after now",
+      "event": {
+        "id": "7ea189db9e497af4a0a8dba5061dde00c6d33edaf4f80b72ab90b3e668362b9a",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790000010"
+          ]
+        ],
+        "content": "",
+        "sig": "da8b30ebf8e65ddbe9c904e171cf0254f9a9fcd252857c9abbbacda01d4301776504c034151966b6a7b25eb14b9b86570e71fa8d0f8e56c80d6bc89f108cf45a"
+      }
+    },
+    {
+      "name": "created-at-far-ahead",
+      "reason": "created_at at most 15 min ahead of now",
+      "event": {
+        "id": "df150cc76a9dd4715f63c438bf24c94143757311be65594a3f3b81712fff85f7",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000911,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790000971"
+          ]
+        ],
+        "content": "",
+        "sig": "92dad386f57b6594fad5eb7f5518fbf3474bb86e71a4a0356cac40a60bf256c4aa3034462a9d95f236313bf3fdfa23fe1996b266d03bec695e5f83cb10a8c7d4"
+      }
+    },
+    {
+      "name": "content-not-empty",
+      "reason": "empty content",
+      "event": {
+        "id": "c897456d71a72323a68da35c18f8728afd81b5a311814fb88f354530e91cbced",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "free STUN!",
+        "sig": "afcb14406420e6888ac43a170774624e8d50279bbd628a199d15572673fe01f3ad1886ec04390e8010c908f988a708fda7b85cfa12612cc86875fedd98536923"
+      }
+    }
+  ]
+}

@@ -1,7 +1,8 @@
 # NFX-04 — Scoped relay profile
 
-**Status: Frozen (M1)** · 2026-09-24, amended in place 2026-11-18 (§§1–3, an exception to the
-freeze rule: see the changelog) · depends on NFX-01/02/03, and NFX-10 §6 for the amendment
+**Status: Frozen (M1)** · 2026-09-24, amended in place 2026-11-18 and 2026-11-19 (§§1–3,
+exceptions to the freeze rule: see the changelog) · depends on NFX-01/02/03, and NFX-10 §§1, 6
+for the amendments
 
 A "scoped relay" is a bog-standard NIP-01 relay with a deliberately narrow admission
 policy. Nothing in this document invents wire mechanics; it is a *profile* — an
@@ -28,6 +29,15 @@ A scoped relay for namespace(s) `N…`:
   (NFX-10 §6.1). A relay can check a signaling event's kind, tags, shape, freshness, size,
   rate and room proof; it cannot tell which application or network sent it, and a creator
   allow-list (§8) does not apply to it;
+- MAY accept kind **33478** STUN service announcements (NFX-10 §1) at least one of whose
+  `n` tags is in `N…`. One that does admits one only if it passes a reader's checks of
+  NFX-10 §1 when it arrives (the NIP-01 signature; exactly one `d`, an `ip:port` in
+  canonical form that is global unicast; 1 to 8 distinct `n`; exactly one `expiration`,
+  after `created_at` and at most 24 h after it; empty content), within the §2 limits; keeps
+  it, as an addressable event (the newest per `pubkey` and `d`), at most until its
+  `expiration`, never returning it after (NIP-40); and refuses one that names none of its
+  namespaces as out of scope. A creator allow-list (§8) does not apply to it: an
+  announcement names no video;
 - MUST implement **NIP-40** and prune expired beacons;
 - MUST reject every other kind with `OK false "blocked: out of scope"` and SHOULD do
   the same for in-scope kinds whose `n` tag is absent/foreign;
@@ -44,6 +54,7 @@ A scoped relay for namespace(s) `N…`:
 | Event size | manifests ≤ 64 KiB hard; beacons ≤ 16 KiB hard |
 | `created_at` | ≤ now + 15 min (reject later ones: a far-future revision outranks, and in a capped store outlives, every real one) |
 | Mesh signaling, when admitted (§1) | presence (`connect`, `disconnect`) ≤ 1 per 10 s per (`pubkey`, `P`, `t`); offers and answers ≤ 64 per 30 s per `pubkey`; ≤ 36 KiB hard. Freshness is NFX-10 §6.5's (60 s back, 30 s ahead), not the row above |
+| STUN service announcements, when admitted (§1) | ≤ 12 per hour per `pubkey`; ≤ 2 KiB hard; ≤ 1024 held at once while live, a new one (not one that replaces a held one) refused while full; `created_at` as the row above |
 
 The 20 s beacon floor leaves slack under NFX-03's republish rule (TTL 60 → republish
 at 30 s). Being scoped is the rate limiter that makes beacon traffic viable: the relay
@@ -64,7 +75,8 @@ The relay's NIP-11 document MUST list `"supported_nips"` including `11` and `40`
 
 A relay that admits mesh signaling (§1) adds `25050` to `kinds` and `"signaling"` to
 `roles`. A page or node that wants a scoped relay for signaling reads this document; one
-that does not list 25050 refuses it.
+that does not list 25050 refuses it. A relay that admits STUN service announcements (§1)
+adds `33478` to `kinds` and `"stun"` to `roles`; one that does not list 33478 refuses them.
 
 ## 4. Serving the catalog side
 
@@ -142,3 +154,17 @@ redundancy comes from many operators).
   namespace is in the swarm ID, NFX-10 §2) and republished every manifest, for no reader's
   benefit. The decision and the alternatives considered (a version bump; a separate
   signaling URL on the same relay) are in issue #96.
+- **Amended in place 2026-11-19, a second exception to the freeze rule (the maintainer's
+  decision, sovtech, 2026-11-19).** §1: a scoped relay MAY carry kind-33478 STUN service
+  announcements (NFX-10 §1) for its namespaces: an announcement must pass a reader's checks
+  when it arrives (a global unicast server, an `expiration` at most 24 h on) and name one of
+  the relay's namespaces; it is kept as an addressable event until it expires (NIP-40), and
+  a creator allow-list does not apply to it. §2: at most 12 per hour per key, 2 KiB, and
+  1024 held at once. §3: such a relay lists 33478 and the role `stun`. Why in place and not
+  a `specver` bump, as for #96: the change is additive and a MAY; no artifact changes; a
+  relay that does not admit 33478 is exactly as conformant as before; no reader of NFX-02,
+  -03 or -05 changes behaviour; and clients read announcements from general relays too. A
+  bump would have re-derived every room key and republished every manifest, for no
+  reader's benefit. Unlike kind 25050, an announcement carries `n`, so the relay scopes it
+  to its networks as it does a beacon. The decision and the alternatives considered (a
+  version bump; reading announcements from general relays only) are in issue #104.

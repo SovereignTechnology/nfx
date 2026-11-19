@@ -13,12 +13,17 @@ Single table of every shared constant, so no constant lives twice across NFX doc
 | 30166 | addressable | NIP-66, profiled by NFX-04 §6 | scoped-relay announcement (adds `n` tag) |
 | 7368 | regular | `nostr-identity` fact op (`nostr-social-memory` `rating`), profiled by NFX-16 | seeder rating: scope `nfx.seeder`, adds `n` and `expiration` |
 | 25050 | ephemeral | the NIP-DC draft's signaling kind, profiled by NFX-10 §6 | mesh signaling: `connect`, `disconnect`, `offer`, `answer` with `i` = `nfx-mesh/1`, `y` = `nfx`; readers ignore every other `i` |
+| 33478 | addressable | NFX-10 §1 | STUN service announcement: `d` = the server's global unicast `ip:port`, `n` per network served (1 to 8), `expiration` at most 24 h after `created_at`; signed by the server's operator |
 
 Provisional until submitted to `nostr-protocol/registry-of-kinds`. Both 38504/20464
 chosen unclaimed as of 2026-09-16. 7368 is not ours: it is `nostr-identity`'s, also used by
 nostr-vpn (scope `vpn.exit`), and NFX-16 only profiles it. 25050 is not ours either: it is the
 NIP-DC draft's, which other applications use under their own `i`, and hashtree uses with
-another shape; NFX-10 §6 adds only the protocol identifier `nfx-mesh/1`.
+another shape; NFX-10 §6 adds only the protocol identifier `nfx-mesh/1`. 33478 is ours,
+chosen unclaimed on 2026-11-19 (neither the NIPs kind table nor `registry-of-kinds` lists it):
+addressable, so a relay keeps one announcement per operator key and server and a newer one
+replaces the older, and NIP-40's `expiration` bounds how long one lives; its digits echo
+3478, STUN's default port (RFC 8489).
 
 ## 2. Namespaces (NFX-01 §2)
 
@@ -134,12 +139,14 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | `stun` beacon endpoints, valid and invalid (NFX-10 §1) | `test-vectors/beacon-stun.json` |
 | Mesh signaling: rooms, room proofs, presence, offer and answer, NIP-44 v2 (NFX-10 §6) | `test-vectors/mesh-signal.json` |
 | Mesh signaling events that MUST be rejected or ignored (NFX-10 §6.5) | `test-vectors/mesh-signal-invalid.json` |
+| STUN service announcements, valid and invalid (NFX-10 §1) | `test-vectors/stun-announcement.json` |
+| STUN server selection, and the addresses a client may take from Nostr (NFX-10 §1) | `test-vectors/stun-select.json` |
 | `https` endpoints naming their renditions, valid and invalid (NFX-03 §4) | `test-vectors/beacon-renditions.json` |
 | `nfx/files/1` messages, valid and invalid (NFX-12 §4) | `test-vectors/files1.json` |
 | Seeder ratings, valid (NFX-16 §1) | `test-vectors/ratings.json` |
 | Invalid seeder ratings (every one MUST be rejected; NFX-16 §1) | `test-vectors/ratings-invalid.json` |
 | Seeder rating scores (NFX-16 §4) | `test-vectors/ratings-scoring.json` |
-| Generator (source of truth) | `test-vectors/generate.py` (with `pay1.py`, `ratings.py` and `meshsig.py`) |
+| Generator (source of truth) | `test-vectors/generate.py` (with `pay1.py`, `ratings.py`, `meshsig.py` and `stunad.py`) |
 
 Vectors use throwaway keys whose *secret is published in the file* — never use them
 elsewhere. Regenerate and re-verify (needs `coincurve`):
@@ -169,12 +176,19 @@ of NFX-12 §8.
   admitted; of `mesh-signal-invalid.json`, every rejected case a reader rejects before
   decrypting refused except `other-room`, the ones only the receiver can reject (it alone
   decrypts) and `other-room` carried; `not-for-us` carried and every other ignored case
-  refused.
+  refused. A relay that admits STUN service announcements (NFX-04 §1, a MAY) also claims
+  their checks and limits, and is tested against `stun-announcement.json` as a relay: every
+  valid event admitted when it serves one of the event's networks, refused as out of scope
+  when it serves none, and every invalid one refused.
 
 A README badge that doesn't name a level is non-claim.
 
 Seeder ratings (NFX-16) are optional and no level requires them. A claim names them beside a
 level ("L2 + NFX-16") and passes the three `ratings*.json` vector files.
+
+STUN servers named over Nostr (NFX-10 §1) are optional too, and no level requires them: a
+client that uses them claims it beside a level ("L2 + NFX-10 §1 STUN") and passes
+`stun-announcement.json` as a reader and `stun-select.json`.
 
 ## 9. Canonical JSON (`canon`)
 
@@ -276,3 +290,8 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
 - 2026-11-18 (issue #96) — L5 covers a scoped relay that admits kind-25050 mesh signaling
   (NFX-04 §1 as amended in place): it is tested against `mesh-signal-invalid.json` as a
   relay. No vector changes.
+- 2026-11-19 (issue #104) — kind 33478, the STUN service announcement (NFX-10 §1),
+  registered as ours: addressable, `d` = `ip:port`, `n`, `expiration` at most 24 h on. L5
+  covers a scoped relay that admits it (NFX-04 §1 as amended in place 2026-11-19); a client
+  that uses STUN servers named over Nostr claims it beside a level. New vectors
+  `stun-announcement.json` and `stun-select.json` (source `test-vectors/stunad.py`).
