@@ -1118,7 +1118,14 @@ throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(ve
     invalid: { name: string; event: unknown }[];
   };
   for (const c of v.valid) {
-    eq(`announcement ${c.name}`, JSON.parse(verifyStunAnnouncement(JSON.stringify(c.event), v.now)), c.reads_as);
+    // nfx-wasm writes the keys sorted; the vector, in its own order: compare field by field.
+    const r = JSON.parse(verifyStunAnnouncement(JSON.stringify(c.event), v.now)) as VerifiedStunAnnouncement;
+    const want = c.reads_as as VerifiedStunAnnouncement;
+    eq(
+      `announcement ${c.name}`,
+      [r.operator, r.addr, r.networks, r.created_at, r.expiration],
+      [want.operator, want.addr, want.networks, want.created_at, want.expiration],
+    );
   }
   for (const c of v.invalid) throws(`announcement ${c.name}`, () => verifyStunAnnouncement(JSON.stringify(c.event), v.now));
   eq('announcement vector counts', [v.valid.length, v.invalid.length], [5, 35]);
