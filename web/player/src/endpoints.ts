@@ -65,10 +65,10 @@ export function beaconTracker(raw: string): string | null {
   return t !== null && t.startsWith('wss://') ? t : null;
 }
 
-/** Whether an IPv4 address (as octets) is global unicast: none of the blocks that point a
- * viewer at its own network (this network, private, shared, loopback, link-local, IETF,
- * benchmarking) or that are not unicast (multicast, reserved, broadcast). Documentation
- * blocks pass: they reach nothing, and they point nowhere local. */
+/** Whether an IPv4 address (as octets) is global unicast (NFX-10 §1): none of the blocks
+ * that point a viewer at its own network (this network, private, shared, loopback,
+ * link-local, IETF, benchmarking), that route nowhere (documentation, RFC 5737), or that are
+ * not unicast (multicast, reserved, broadcast). */
 function globalV4(o: number[]): boolean {
   const [a = 0, b = 0, c = 0] = o;
   return !(
@@ -80,15 +80,18 @@ function globalV4(o: number[]): boolean {
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) ||
-    (a === 192 && b === 0 && c === 0) ||
-    (a === 198 && (b === 18 || b === 19))
+    (a === 192 && b === 0 && (c === 0 || c === 2)) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51 && c === 100) ||
+    (a === 203 && b === 0 && c === 113)
   );
 }
 
 /**
- * A beacon-named STUN address (NFX-10 §1: canonical `ip:port`, port not 0) as an
- * `iceServers` URL, or null: global unicast only (IPv4 above, IPv6 in 2000::/3), so a beacon
- * from anywhere cannot point viewers at their own network.
+ * A STUN address named over Nostr (NFX-10 §1: canonical `ip:port`, port not 0) as an
+ * `iceServers` URL, or null: global unicast only (IPv4 above; IPv6 in 2000::/3 but not the
+ * documentation block 2001:db8::/32, RFC 3849), so a beacon or announcement from anywhere
+ * cannot point viewers at their own network, or at an address that routes nowhere.
  */
 export function beaconStun(addr: string): string | null {
   const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/.exec(addr);
@@ -113,8 +116,11 @@ export function beaconStun(addr: string): string | null {
     }
     // WHATWG's serialisation is RFC 5952's, as the canonical form requires.
     if (canonical !== `[${host}]` || String(port) !== v6[2]) return null;
-    const first = host.startsWith('::') ? 0 : parseInt(host.split(':')[0] ?? '', 16);
+    const groups = host.startsWith('::') ? [] : host.split(':');
+    const first = host.startsWith('::') ? 0 : parseInt(groups[0] ?? '', 16);
     if (!(Number.isInteger(first) && (first & 0xe000) === 0x2000)) return null;
+    // 2001:db8::/32; the canonical form writes its second group as `db8` (none is `::` here).
+    if (first === 0x2001 && groups[1] === 'db8') return null;
     return `stun:[${host}]:${port}`;
   }
   return null;

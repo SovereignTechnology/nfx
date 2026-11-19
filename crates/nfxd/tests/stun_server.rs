@@ -72,7 +72,8 @@ async fn an_announcement_is_signed_tagged_and_expires_in_24_hours() {
     let keys = ns::Keys::generate();
     let testnet = Namespace::parse("nfx:testnet:1").unwrap();
     let mainnet = Namespace::parse("nfx:mainnet:1").unwrap();
-    let public: SocketAddr = "203.0.113.10:3478".parse().unwrap();
+    // A routable address (the test sends it no traffic: it only names it).
+    let public: SocketAddr = "1.1.1.1:3478".parse().unwrap();
     let before = unix_now();
     let server = StunServer::start(StunConfig {
         public: Some(public),
@@ -139,11 +140,19 @@ async fn what_cannot_work_is_refused_before_anything_is_sent() {
         relays: relays.into_iter().map(String::from).collect(),
         networks,
     };
-    let public = Some("203.0.113.10:3478".parse().unwrap());
+    let public = Some("1.1.1.1:3478".parse().unwrap());
     for (cfg, why) in [
         (
             StunConfig {
                 public: Some("192.168.1.2:3478".parse().unwrap()),
+                ..config("127.0.0.1:0")
+            },
+            "--public",
+        ),
+        (
+            // A documentation address routes nowhere (NFX-10 §1).
+            StunConfig {
+                public: Some("203.0.113.10:3478".parse().unwrap()),
                 ..config("127.0.0.1:0")
             },
             "--public",

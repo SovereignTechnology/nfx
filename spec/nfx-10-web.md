@@ -60,7 +60,7 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
 
   ```json
   { "kind": 33478, "pubkey": "<operator key>", "content": "",
-    "tags": [ ["d", "203.0.113.10:3478"], ["n", "nfx:mainnet:1"], ["n", "nfx:testnet:1"],
+    "tags": [ ["d", "<server ip>:<port>"], ["n", "nfx:mainnet:1"], ["n", "nfx:testnet:1"],
               ["expiration", "<created_at + 86400>"] ] }
   ```
 
@@ -78,17 +78,22 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   as amended 2026-11-19). `stun-announcement.json` pins the checks.
 - **Global unicast**, for this section: an IPv4 address in none of 0/8, 10/8, 100.64/10,
   127/8, 169.254/16, 172.16/12, 192.0.0/24, 192.168/16, 198.18/15, 224/4 and 240/4 (the
-  broadcast address included); an IPv6 address in 2000::/3. Documentation blocks pass:
-  they reach nothing, and point nowhere local.
+  broadcast address included), nor in the documentation blocks 192.0.2.0/24,
+  198.51.100.0/24 and 203.0.113.0/24 (RFC 5737); an IPv6 address in 2000::/3 and not in the
+  documentation block 2001:db8::/32 (RFC 3849). The first point a client at its own network;
+  the documentation blocks route nowhere. A beacon whose `stun` endpoint names a
+  documentation address is still a valid beacon (the endpoint's rule above is its form, not
+  its reach); only the selection below refuses the address.
 - **Using STUN servers named over Nostr.** A client, a page or a native peer, SHOULD use
   the STUN servers Nostr names, beside its own: those in the `stun` endpoints of the live
   beacons of the video it plays or serves, each named by the beacon's signer, and those of
   the live announcements for its network, each named by the operator. It picks them by
   these rules, which `stun-select.json` pins:
   1. its own servers first (a page's own `iceServers`, a node's configured ones), each once;
-  2. then the named servers that are global unicast and not its own, ranked by the number
-     of distinct keys that name each (a key counts once, whether it seeds, announces, or
-     both), most first, ties in the order first named;
+  2. then the named servers that are global unicast (above: never a private, loopback,
+     link-local, shared or documentation address) and not its own, ranked by the number of
+     distinct keys that name each (a key counts once, whether it seeds, announces, or both),
+     most first, ties in the order first named;
   3. a server named by one key alone only when the client has none of its own and no named
      server has two keys or more: a lone stranger's key adds no server beside a better one;
   4. at most 4 STUN servers in all.
@@ -723,6 +728,7 @@ with full ICE, and a NAT test.
   Nostr, by beacons and announcements, by one set of rules: their own first, global unicast
   only, ranked by distinct keys, a lone key only when nothing better exists, at most 4 in
   all; a native client offers a mapping from such a server only if it is global unicast.
-  "Global unicast" is defined. The privacy note now covers announcements. (Was: beacon-named
-  servers only, "at most a few", most-named first.) New vectors `stun-announcement.json` and
-  `stun-select.json`.
+  "Global unicast" is defined, the documentation blocks (RFC 5737, RFC 3849) refused with the
+  rest. The privacy note now covers announcements. (Was: beacon-named servers only, "at
+  most a few", most-named first, documentation addresses allowed.) New vectors
+  `stun-announcement.json` and `stun-select.json`.

@@ -57,17 +57,20 @@ def canonical_addr(text: str):
 
 
 def global_unicast(ip) -> bool:
-    """NFX-10 §1: an address that points a client nowhere local."""
+    """NFX-10 §1: an address that points a client nowhere local, and that routes somewhere:
+    the documentation blocks (RFC 5737, RFC 3849) are refused too."""
     if ip.version == 6:
-        return (int(ip) >> 125) == 1  # 2000::/3
+        return (int(ip) >> 125) == 1 and (int(ip) >> 96) != 0x20010DB8  # 2000::/3, not 2001:db8::/32
     a, b, c, _ = ip.packed
     return not (a == 0 or a == 10 or a == 127 or a >= 224
                 or (a == 100 and 64 <= b <= 127)
                 or (a == 169 and b == 254)
                 or (a == 172 and 16 <= b <= 31)
                 or (a == 192 and b == 168)
-                or (a == 192 and b == 0 and c == 0)
-                or (a == 198 and b in (18, 19)))
+                or (a == 192 and b == 0 and c in (0, 2))
+                or (a == 198 and b in (18, 19))
+                or (a == 198 and b == 51 and c == 100)
+                or (a == 203 and b == 0 and c == 113))
 
 
 def usable(addr: str) -> bool:
@@ -178,7 +181,7 @@ def stunad_vectors(keypair, nostr_event) -> dict:
     operator = keypair("nfx-test-vector/stun-operator")
     secret = hashlib.sha256(b"nfx-test-vector/stun-operator").hexdigest()
 
-    def tags(d="203.0.113.10:3478", networks=("nfx:mainnet:1",), ttl=MAX_TTL,
+    def tags(d="1.1.1.1:3478", networks=("nfx:mainnet:1",), ttl=MAX_TTL,
              created_at=CREATED_AT):
         return ([["d", d]] + [["n", n] for n in networks]
                 + [["expiration", str(created_at + ttl)]])
@@ -190,10 +193,10 @@ def stunad_vectors(keypair, nostr_event) -> dict:
     valid = [
         ("ipv4-one-network", "what nfxd stun --announce sends: 24 h, one network", event(tags())),
         ("ipv6-two-networks", "a bracketed IPv6 server for two networks, 12 h",
-         event(tags(d="[2001:db8::1]:3478", networks=("nfx:mainnet:1", "nfx:testnet:1"),
+         event(tags(d="[2606:4700::1111]:3478", networks=("nfx:mainnet:1", "nfx:testnet:1"),
                     ttl=MAX_TTL // 2))),
         ("eight-networks-unknown-tag", "8 networks, the most; a tag readers do not know",
-         event(tags(d="198.51.100.7:19302", networks=eight) + [["x-future", "ignored"]])),
+         event(tags(d="1.0.0.1:19302", networks=eight) + [["x-future", "ignored"]])),
         ("one-minute", "a short life is allowed", event(tags(ttl=60))),
         ("signed-ahead", "created_at 15 min ahead of now, the most allowed",
          event(tags(created_at=NOW + FUTURE_SKEW), created_at=NOW + FUTURE_SKEW)),
@@ -215,7 +218,7 @@ def stunad_vectors(keypair, nostr_event) -> dict:
         ("wrong-kind", "kind 33478 only", event(tags(), kind=33477)),
         ("bad-signature", "the NIP-01 signature must verify", bad_sig),
         ("d-missing", "exactly one d", event(without("d"))),
-        ("d-twice", "exactly one d", event(tags() + [["d", "203.0.113.11:3478"]])),
+        ("d-twice", "exactly one d", event(tags() + [["d", "1.0.0.1:3478"]])),
         ("d-private", "global unicast only", event(with_tag("d", "192.168.1.2:3478"))),
         ("d-loopback", "global unicast only", event(with_tag("d", "127.0.0.1:3478"))),
         ("d-shared", "global unicast only (100.64/10)", event(with_tag("d", "100.64.0.1:3478"))),
@@ -224,13 +227,17 @@ def stunad_vectors(keypair, nostr_event) -> dict:
         ("d-broadcast", "global unicast only", event(with_tag("d", "255.255.255.255:3478"))),
         ("d-ipv6-unique-local", "global unicast only (2000::/3)", event(with_tag("d", "[fd00::1]:3478"))),
         ("d-ipv6-link-local", "global unicast only (2000::/3)", event(with_tag("d", "[fe80::1]:3478"))),
+        ("d-documentation-ipv4", "a documentation address routes nowhere (RFC 5737)",
+         event(with_tag("d", "203.0.113.10:3478"))),
+        ("d-documentation-ipv6", "a documentation address routes nowhere (RFC 3849)",
+         event(with_tag("d", "[2001:db8::1]:3478"))),
         ("d-hostname", "an IP address, not a name", event(with_tag("d", "stun.example:3478"))),
-        ("d-url", "an address, not a stun: URL", event(with_tag("d", "stun:203.0.113.10:3478"))),
-        ("d-no-port", "ip:port", event(with_tag("d", "203.0.113.10"))),
-        ("d-port-zero", "the port is not 0", event(with_tag("d", "203.0.113.10:0"))),
-        ("d-ipv4-leading-zero", "canonical text form", event(with_tag("d", "203.0.113.010:3478"))),
-        ("d-ipv6-uppercase", "RFC 5952: lowercase", event(with_tag("d", "[2001:DB8::1]:3478"))),
-        ("d-ipv4-mapped", "IPv4 is never written inside IPv6", event(with_tag("d", "[::ffff:203.0.113.10]:3478"))),
+        ("d-url", "an address, not a stun: URL", event(with_tag("d", "stun:1.1.1.1:3478"))),
+        ("d-no-port", "ip:port", event(with_tag("d", "1.1.1.1"))),
+        ("d-port-zero", "the port is not 0", event(with_tag("d", "1.1.1.1:0"))),
+        ("d-ipv4-leading-zero", "canonical text form", event(with_tag("d", "1.1.1.01:3478"))),
+        ("d-ipv6-uppercase", "RFC 5952: lowercase", event(with_tag("d", "[2606:4700::AAAA]:3478"))),
+        ("d-ipv4-mapped", "IPv4 is never written inside IPv6", event(with_tag("d", "[::ffff:1.1.1.1]:3478"))),
         ("n-missing", "1 to 8 n", event(without("n"))),
         ("n-nine", "1 to 8 n", event(tags(networks=eight + ["nfx:net-9:1"]))),
         ("n-repeated", "distinct n", event(tags(networks=("nfx:mainnet:1", "nfx:mainnet:1")))),
@@ -258,15 +265,18 @@ def stunad_vectors(keypair, nostr_event) -> dict:
         raise AssertionError(f"stun-announcement invalid case {name} reads as valid")
 
     # ---- selection (NFX-10 §1) ----
-    x, y, z = "203.0.113.1:3478", "203.0.113.2:3478", "203.0.113.3:3478"
-    own_a = "192.0.2.9:3478"
-    six = [f"198.51.100.{i}:3478" for i in range(1, 7)]
+    # Global unicast addresses that route (no traffic is ever sent to them by a vector).
+    x, y, z = "1.1.1.1:3478", "1.0.0.1:3478", "8.8.8.8:3478"
+    own_a = "9.9.9.9:3478"
+    six = [f"1.1.1.{i}:3478" for i in range(11, 17)]
+    documentation = ["192.0.2.1:3478", "198.51.100.7:3478", "203.0.113.10:3478",
+                     "[2001:db8::1]:3478", "[2001:db8:ffff::1]:3478"]
     refused = ["10.0.0.1:3478", "127.0.0.1:3478", "192.168.1.1:3478", "100.64.0.1:3478",
                "169.254.1.1:3478", "172.16.0.1:3478", "192.0.0.1:3478", "198.18.0.1:3478",
                "224.0.0.1:3478", "255.255.255.255:3478", "0.0.0.0:3478", "[::1]:3478",
                "[fe80::1]:3478", "[fd00::1]:3478", "[ff02::1]:3478",
-               "203.0.113.010:3478", "[::ffff:203.0.113.10]:3478", "203.0.113.10:0",
-               "stun.example:3478", "stun:203.0.113.10:3478"]
+               "1.1.1.01:3478", "[::ffff:1.1.1.1]:3478", "1.1.1.1:0",
+               "stun.example:3478", "stun:1.1.1.1:3478"] + documentation
     cases = [
         ("nothing", "no server of its own and none named", [], [], []),
         ("own-only", "its own servers, as given", [own_a, x], [], [own_a, x]),
@@ -291,7 +301,11 @@ def stunad_vectors(keypair, nostr_event) -> dict:
         ("named-equal-to-own", "a named server that is the client's own is its own, once", [x],
          [["k1", x], ["k2", x], ["k3", y], ["k4", y]], [x, y]),
         ("ipv6", "a global unicast IPv6 server", [],
-         [["k1", "[2001:db8::1]:3478"], ["k2", "[2001:db8::1]:3478"]], ["[2001:db8::1]:3478"]),
+         [["k1", "[2606:4700::1111]:3478"], ["k2", "[2606:4700::1111]:3478"]], ["[2606:4700::1111]:3478"]),
+        ("documentation-refused", "documentation addresses (RFC 5737, RFC 3849) route nowhere: never "
+         "taken from Nostr, however many keys name them, and a lone key's routable server is "
+         "taken instead", [],
+         [[k, a] for a in documentation for k in ("k1", "k2")] + [["k3", x]], [x]),
         ("not-public-refused", "named addresses that are not global unicast, or not canonical, are "
          "never taken, however many keys name them", [],
          [[k, a] for a in refused for k in ("k1", "k2")], []),
@@ -305,10 +319,12 @@ def stunad_vectors(keypair, nostr_event) -> dict:
         select_out.append({"name": name, "reason": reason, "own": own, "named": named,
                            "selected": want})
 
-    yes = ["8.8.8.8:3478", "203.0.113.10:3478", "198.51.100.7:3478", "192.0.2.1:3478",
-           "100.63.255.255:3478", "100.128.0.0:3478", "172.15.255.255:3478", "172.32.0.0:3478",
-           "192.0.1.255:3478", "198.17.255.255:3478", "198.20.0.0:3478", "223.255.255.255:3478",
-           "[2001:db8::1]:3478", "[2a01:4f8::1]:3478", "[3fff:ffff::1]:3478"]
+    yes = ["8.8.8.8:3478", "1.1.1.1:3478", "100.63.255.255:3478", "100.128.0.0:3478",
+           "172.15.255.255:3478", "172.32.0.0:3478", "192.0.1.255:3478", "192.0.3.0:3478",
+           "198.17.255.255:3478", "198.20.0.0:3478", "198.51.99.255:3478", "198.51.101.0:3478",
+           "203.0.112.255:3478", "203.0.114.0:3478", "223.255.255.255:3478",
+           "[2606:4700::1111]:3478", "[2001:db7:ffff::1]:3478", "[2001:db9::1]:3478",
+           "[2a01:4f8::1]:3478", "[3fff:ffff::1]:3478"]
     no = refused + ["[4000::1]:3478", "240.0.0.1:3478", "[::]:3478"]
     for a in yes:
         assert usable(a), a
@@ -319,7 +335,8 @@ def stunad_vectors(keypair, nostr_event) -> dict:
         "stun-announcement.json": {
             "description": "NFX-10 §1 STUN service announcements: kind 33478, addressable, signed by the "
                            "operator of a STUN server, checked at 'now'. Tags: exactly one 'd', the server's "
-                           "ip:port in the canonical form of the beacon 'stun' endpoint, and global unicast; "
+                           "ip:port in the canonical form of the beacon 'stun' endpoint, and global unicast (not a "
+                           "documentation address either); "
                            "1 to 8 distinct 'n', each a namespace; exactly one 'expiration', a plain decimal "
                            "with created_at < expiration <= created_at + 86400, after 'now'; created_at at most "
                            "900 s ahead of 'now'; empty content; other tags ignored. A reader MUST accept every "
@@ -340,7 +357,11 @@ def stunad_vectors(keypair, nostr_event) -> dict:
                            "of distinct keys naming each (most first, ties in the order first named); an "
                            "address named by one key only when the client has none of its own and no named "
                            "address has two or more keys; at most 'max' in all. 'global_unicast' lists "
-                           "addresses a client may and may not take from Nostr.",
+                           "addresses a client may and may not take from Nostr. Global unicast here also "
+                           "excludes the documentation blocks (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, "
+                           "2001:db8::/32), which route nowhere; beacons that name them in a stun endpoint "
+                           "stay valid beacons (beacon-stun.json), and only this selection refuses them. "
+                           "No traffic is ever sent to an address of a vector.",
             "max": MAX_SERVERS,
             "cases": select_out,
             "global_unicast": {"yes": yes, "no": no},

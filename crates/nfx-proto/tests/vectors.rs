@@ -1104,7 +1104,7 @@ fn stun_announcements_read_strictly() {
         );
         invalid += 1;
     }
-    assert_eq!((valid, invalid), (5, 33));
+    assert_eq!((valid, invalid), (5, 35));
 }
 
 /// NFX-10 §1: the selection rules give exactly the vector's servers, and the addresses a
@@ -1128,7 +1128,7 @@ fn stun_selection_matches_the_vectors() {
         );
         n += 1;
     }
-    assert_eq!(n, 15);
+    assert_eq!(n, 16);
     for a in strings(&v["global_unicast"]["yes"]) {
         assert!(stun::usable(&a), "{a}");
     }

@@ -288,8 +288,10 @@ async fn leaving_a_room_says_so_and_drops_its_connections() {
 #[tokio::test]
 async fn gathering_offers_the_mapping_a_stun_server_reports() {
     let mut s = state(16).await;
+    // A configured server (`--mesh-stun`): trusted with what it reports.
     let server: SocketAddr = "127.0.0.1:3478".parse().unwrap();
     s.stun.servers = vec![server];
+    s.stun.configured = vec![server];
     let now = Instant::now();
     s.stun_send(server, 0, now);
     let (&tid, _) = s.stun.pending.iter().next().unwrap();
@@ -729,7 +731,7 @@ async fn stun_servers_named_over_nostr_are_picked_by_the_rules() {
     s.nostr_stun = Some(NostrStun::default());
     s.nostr_stun.as_mut().unwrap().watched.insert(watched_a());
     let now = unix_now();
-    let (x, y) = ("203.0.113.1:3478", "203.0.113.2:3478");
+    let (x, y) = ("1.1.1.1:3478", "1.0.0.1:3478");
 
     // A lone seeder's beacon: nothing better exists, so it is used.
     feed(&mut s, &beacon(1, &[x], now));
@@ -751,7 +753,7 @@ async fn stun_servers_named_over_nostr_are_picked_by_the_rules() {
     // Ignored: another network's announcement; a beacon of a video not watched (it is
     // checked by its `a` before its signature); a private server however many keys name it
     // (a beacon may name one; NFX-10 §1 refuses it as a client); another family.
-    let z = "203.0.113.3:3478";
+    let z = "8.8.8.8:3478";
     feed(&mut s, &announcement(5, z, "nfx:testnet:1", now));
     feed(&mut s, &announcement(6, z, "nfx:testnet:1", now));
     let mut other = beacon(7, &[z], now);
@@ -761,11 +763,11 @@ async fn stun_servers_named_over_nostr_are_picked_by_the_rules() {
     feed(&mut s, &beacon(9, &["10.0.0.1:3478"], now));
     feed(
         &mut s,
-        &announcement(10, "[2001:db8::1]:3478", "nfx:mainnet:1", now),
+        &announcement(10, "[2606:4700::1111]:3478", "nfx:mainnet:1", now),
     );
     feed(
         &mut s,
-        &announcement(11, "[2001:db8::1]:3478", "nfx:mainnet:1", now),
+        &announcement(11, "[2606:4700::1111]:3478", "nfx:mainnet:1", now),
     );
     assert_eq!(servers(&s), [x, y]);
     // A seeder's newer beacon without a `stun` endpoint withdraws what it named: x is down
@@ -776,12 +778,12 @@ async fn stun_servers_named_over_nostr_are_picked_by_the_rules() {
     feed(&mut s, &beacon(1, &[x], now - 5));
     assert_eq!(servers(&s), [y]);
     // At most 4 in all, the configured ones first: with one of its own, lone keys add nothing.
-    let own: SocketAddr = "192.0.2.9:3478".parse().unwrap();
+    let own: SocketAddr = "9.9.9.9:3478".parse().unwrap();
     s.stun.configured = vec![own];
     for (k, a) in [
-        (20, "198.51.100.1:3478"),
-        (22, "198.51.100.2:3478"),
-        (24, "198.51.100.3:3478"),
+        (20, "1.1.1.21:3478"),
+        (22, "1.1.1.22:3478"),
+        (24, "1.1.1.23:3478"),
     ] {
         feed(&mut s, &announcement(k, a, "nfx:mainnet:1", now));
         feed(&mut s, &announcement(k + 1, a, "nfx:mainnet:1", now));
@@ -800,7 +802,7 @@ async fn stun_servers_named_over_nostr_are_picked_by_the_rules() {
     let before = n.named.len();
     let mut kept = 0;
     for i in 0..20u8 {
-        let a = format!("198.51.100.{}:3478", 100 + i);
+        let a = format!("1.0.0.{}:3478", 100 + i);
         if n.note(
             "k",
             format!("announcement {a}"),
@@ -831,7 +833,7 @@ async fn stun_servers_named_over_nostr_are_picked_by_the_rules() {
 #[tokio::test]
 async fn a_learnt_server_s_private_mapping_is_never_offered() {
     let mut s = state(16).await;
-    let learnt: SocketAddr = "203.0.113.1:3478".parse().unwrap();
+    let learnt: SocketAddr = "1.1.1.1:3478".parse().unwrap();
     let configured: SocketAddr = "127.0.0.1:3478".parse().unwrap();
     s.stun.configured = vec![configured];
     s.stun.servers = vec![configured, learnt];
@@ -870,12 +872,15 @@ async fn a_learnt_server_s_private_mapping_is_never_offered() {
             "srflx 10.0.0.7:40001".to_owned()
         ]
     );
+    // Nor a documentation address, which routes nowhere.
+    respond(&mut s, learnt, [203, 0, 113, 99], 40003);
+    assert_eq!(s.candidates().len(), 2);
     // A global unicast one from the same learnt server is offered.
-    respond(&mut s, learnt, [203, 0, 113, 99], 40002);
+    respond(&mut s, learnt, [1, 1, 1, 99], 40002);
     assert!(
         s.candidates()
             .iter()
-            .any(|c| c.addr() == "203.0.113.99:40002".parse::<SocketAddr>().unwrap())
+            .any(|c| c.addr() == "1.1.1.99:40002".parse::<SocketAddr>().unwrap())
     );
 }
 
@@ -894,17 +899,17 @@ async fn forgetting_a_video_drops_the_stun_servers_its_beacons_named() {
             .contains(&watched_a())
     );
     let now = unix_now();
-    feed(&mut s, &beacon(1, &["203.0.113.1:3478"], now));
-    assert_eq!(servers(&s), ["203.0.113.1:3478"]);
+    feed(&mut s, &beacon(1, &["1.1.1.1:3478"], now));
+    assert_eq!(servers(&s), ["1.1.1.1:3478"]);
     feed(
         &mut s,
-        &announcement(2, "203.0.113.2:3478", "nfx:mainnet:1", now),
+        &announcement(2, "1.0.0.1:3478", "nfx:mainnet:1", now),
     );
     feed(
         &mut s,
-        &announcement(3, "203.0.113.2:3478", "nfx:mainnet:1", now),
+        &announcement(3, "1.0.0.1:3478", "nfx:mainnet:1", now),
     );
-    assert_eq!(servers(&s), ["203.0.113.2:3478"]);
+    assert_eq!(servers(&s), ["1.0.0.1:3478"]);
     s.control(Control::Forget(
         vec![room().pubkey().to_owned()],
         "nfx:mainnet:1:salt-flats-dusk".into(),
@@ -926,12 +931,12 @@ async fn a_withdrawal_heard_first_holds_and_a_beacon_names_at_most_four() {
     s.nostr_stun.as_mut().unwrap().watched.insert(watched_a());
     let now = unix_now();
     feed(&mut s, &beacon(1, &[], now));
-    feed(&mut s, &beacon(1, &["203.0.113.1:3478"], now - 5));
+    feed(&mut s, &beacon(1, &["1.1.1.1:3478"], now - 5));
     assert!(servers(&s).is_empty());
     // Many endpoints in one beacon: the first 4 distinct addresses count, no more.
     let endpoints: Vec<Endpoint> = (0..6u8)
         .map(|i| Endpoint::Stun {
-            addrs: vec![format!("198.51.100.{}:3478", i + 1)],
+            addrs: vec![format!("1.1.1.{}:3478", i + 31)],
         })
         .collect();
     let content = BeaconContent {

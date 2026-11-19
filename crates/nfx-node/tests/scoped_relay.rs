@@ -647,8 +647,7 @@ async fn a_relay_with_stun_announcements_admits_rate_limits_and_expires_them() {
     let net = Namespace::parse("nfx:testnet:1").unwrap();
     let operator = Keys::generate();
     let nets = std::slice::from_ref(&net);
-    let sign =
-        |ttl: u64| sign_stun_announcement(&operator, "203.0.113.10:3478", nets, unix_now(), ttl);
+    let sign = |ttl: u64| sign_stun_announcement(&operator, "1.1.1.1:3478", nets, unix_now(), ttl);
     let ad = sign(600).await.unwrap();
 
     // Off (the default): out of scope, and not advertised.
@@ -701,7 +700,7 @@ async fn a_relay_with_stun_announcements_admits_rate_limits_and_expires_them() {
     let mainnet = Namespace::parse("nfx:mainnet:1").unwrap();
     let foreign = sign_stun_announcement(
         &operator,
-        "203.0.113.11:3478",
+        "1.0.0.1:3478",
         std::slice::from_ref(&mainnet),
         unix_now(),
         600,
@@ -725,13 +724,13 @@ async fn a_relay_with_stun_announcements_admits_rate_limits_and_expires_them() {
     let private: Event = serde_json::from_str(&private.as_json()).unwrap();
     assert!(refusal(&c, &private).await.starts_with("invalid:"));
     let read = StunAnnouncement::from_event(&ad, ad.created_at).unwrap();
-    assert_eq!(read.addr, "203.0.113.10:3478");
+    assert_eq!(read.addr, "1.1.1.1:3478");
 
     // 12 an hour per key: the first was one of them.
     for i in 1..STUN_ANNOUNCEMENTS_PER_HOUR {
         let more = sign_stun_announcement(
             &operator,
-            &format!("198.51.100.{i}:3478"),
+            &format!("1.1.1.{}:3478", 10 + i),
             nets,
             unix_now(),
             600,
@@ -740,7 +739,7 @@ async fn a_relay_with_stun_announcements_admits_rate_limits_and_expires_them() {
         .unwrap();
         assert!(accepted(&c, &more).await, "{i}");
     }
-    let over = sign_stun_announcement(&operator, "198.51.100.99:3478", nets, unix_now(), 600)
+    let over = sign_stun_announcement(&operator, "1.1.1.99:3478", nets, unix_now(), 600)
         .await
         .unwrap();
     assert!(refusal(&c, &over).await.starts_with("rate-limited:"));

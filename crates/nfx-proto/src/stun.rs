@@ -150,10 +150,10 @@ pub fn tags(
 /// Whether `ip` is global unicast, as NFX-10 §1 uses the term: for IPv4 none of "this
 /// network" (0/8), private (10/8, 172.16/12, 192.168/16), shared (100.64/10), loopback
 /// (127/8), link-local (169.254/16), IETF protocol assignments (192.0.0/24), benchmarking
-/// (198.18/15), multicast (224/4) and reserved (240/4, the broadcast address included); for
-/// IPv6, inside 2000::/3. An address named over Nostr that is not must never be contacted:
-/// it would point a client at its own network. Documentation blocks pass: they reach
-/// nothing, and point nowhere local.
+/// (198.18/15), documentation (192.0.2/24, 198.51.100/24, 203.0.113/24, RFC 5737), multicast
+/// (224/4) and reserved (240/4, the broadcast address included); for IPv6, inside 2000::/3
+/// and outside documentation (2001:db8::/32, RFC 3849). An address named over Nostr that is
+/// not must never be contacted: it would point a client at its own network, or nowhere.
 #[must_use]
 pub fn is_global_unicast(ip: IpAddr) -> bool {
     match ip {
@@ -167,10 +167,15 @@ pub fn is_global_unicast(ip: IpAddr) -> bool {
                 || (a == 169 && b == 254)
                 || (a == 172 && (16..=31).contains(&b))
                 || (a == 192 && b == 168)
-                || (a == 192 && b == 0 && c == 0)
-                || (a == 198 && (b == 18 || b == 19)))
+                || (a == 192 && b == 0 && (c == 0 || c == 2))
+                || (a == 198 && (b == 18 || b == 19))
+                || (a == 198 && b == 51 && c == 100)
+                || (a == 203 && b == 0 && c == 113))
         }
-        IpAddr::V6(v6) => (v6.segments()[0] & 0xe000) == 0x2000,
+        IpAddr::V6(v6) => {
+            let [s0, s1, ..] = v6.segments();
+            (s0 & 0xe000) == 0x2000 && !(s0 == 0x2001 && s1 == 0x0db8)
+        }
     }
 }
 
@@ -274,22 +279,19 @@ mod tests {
     }
 
     fn good() -> Vec<Vec<String>> {
-        tags("203.0.113.10:3478", &[ns("nfx:testnet:1")], NOW, MAX_TTL).unwrap()
+        tags("1.1.1.1:3478", &[ns("nfx:testnet:1")], NOW, MAX_TTL).unwrap()
     }
 
     #[test]
     fn a_sender_s_announcement_reads_back() {
         let ev = announcement(good(), NOW, "");
         let a = StunAnnouncement::from_event(&ev, NOW + 10).unwrap();
-        assert_eq!(a.addr, "203.0.113.10:3478");
+        assert_eq!(a.addr, "1.1.1.1:3478");
         assert_eq!(a.networks, [ns("nfx:testnet:1")]);
         assert_eq!(a.expiration, NOW + MAX_TTL);
         assert!(a.serves(&ns("nfx:testnet:1")));
         assert!(!a.serves(&ns("nfx:mainnet:1")));
-        assert_eq!(
-            a.coordinate(),
-            format!("33478:{}:203.0.113.10:3478", ev.pubkey)
-        );
+        assert_eq!(a.coordinate(), format!("33478:{}:1.1.1.1:3478", ev.pubkey));
         // It expires.
         assert!(StunAnnouncement::from_event(&ev, NOW + MAX_TTL).is_err());
         // Signed ahead of the reader's clock: within the skew, and no further.
@@ -308,15 +310,17 @@ mod tests {
             )
         };
         assert!(t("10.0.0.1:3478", &["nfx:testnet:1"], 60).is_err());
-        assert!(t("203.0.113.010:3478", &["nfx:testnet:1"], 60).is_err());
-        assert!(t("203.0.113.10:3478", &[], 60).is_err());
-        assert!(t("203.0.113.10:3478", &["nfx:testnet:1", "nfx:testnet:1"], 60).is_err());
+        assert!(t("1.1.1.01:3478", &["nfx:testnet:1"], 60).is_err());
+        assert!(t("203.0.113.10:3478", &["nfx:testnet:1"], 60).is_err());
+        assert!(t("1.1.1.1:3478", &[], 60).is_err());
+        assert!(t("1.1.1.1:3478", &["nfx:testnet:1", "nfx:testnet:1"], 60).is_err());
         let nine: Vec<String> = (1..=9).map(|i| format!("nfx:t{i}:1")).collect();
         let nine: Vec<&str> = nine.iter().map(String::as_str).collect();
-        assert!(t("203.0.113.10:3478", &nine, 60).is_err());
-        assert!(t("203.0.113.10:3478", &["nfx:testnet:1"], 0).is_err());
-        assert!(t("203.0.113.10:3478", &["nfx:testnet:1"], MAX_TTL + 1).is_err());
-        assert!(t("[2001:db8::1]:3478", &nine[..8], MAX_TTL).is_ok());
+        assert!(t("1.1.1.1:3478", &nine, 60).is_err());
+        assert!(t("1.1.1.1:3478", &["nfx:testnet:1"], 0).is_err());
+        assert!(t("1.1.1.1:3478", &["nfx:testnet:1"], MAX_TTL + 1).is_err());
+        assert!(t("[2606:4700::1111]:3478", &nine[..8], MAX_TTL).is_ok());
+        assert!(t("[2001:db8::1]:3478", &nine[..8], MAX_TTL).is_err());
     }
 
     #[test]
@@ -333,7 +337,7 @@ mod tests {
         let mut no_n = good();
         no_n.retain(|t| t[0] != "n");
         let mut two_d = good();
-        two_d.push(vec!["d".into(), "203.0.113.11:3478".into()]);
+        two_d.push(vec!["d".into(), "1.0.0.1:3478".into()]);
         for (why, tags, content) in [
             ("private d", set("d", "192.168.1.2:3478"), ""),
             ("hostname d", set("d", "stun.example:3478"), ""),
@@ -365,14 +369,17 @@ mod tests {
     fn global_unicast_is_what_points_nowhere_local() {
         for yes in [
             "8.8.8.8",
-            "203.0.113.10",
-            "198.51.100.7",
+            "1.1.1.1",
+            "192.0.3.0",
+            "198.51.101.0",
+            "203.0.112.255",
             "100.63.255.255",
             "100.128.0.0",
             "172.15.255.255",
             "172.32.0.0",
             "223.255.255.255",
-            "2001:db8::1",
+            "2606:4700::1111",
+            "2001:db9::1",
             "2a01:4f8::1",
             "3fff:ffff::1",
         ] {
@@ -399,18 +406,24 @@ mod tests {
             "fe80::1",
             "ff02::1",
             "4000::1",
+            "192.0.2.1",
+            "198.51.100.7",
+            "203.0.113.10",
+            "2001:db8::1",
+            "2001:db8:ffff::1",
         ] {
             assert!(!is_global_unicast(no.parse().unwrap()), "{no}");
         }
-        assert!(usable("203.0.113.10:3478"));
-        assert!(!usable("203.0.113.10:0"));
-        assert!(!usable("[::ffff:203.0.113.10]:3478"));
+        assert!(usable("1.1.1.1:3478"));
+        assert!(!usable("1.1.1.1:0"));
+        assert!(!usable("[::ffff:1.1.1.1]:3478"));
+        assert!(!usable("203.0.113.10:3478"), "documentation");
     }
 
     #[test]
     fn selection_ranks_by_distinct_keys_and_takes_a_lone_key_last() {
         let own = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
-        let (x, y, z) = ("203.0.113.1:3478", "203.0.113.2:3478", "203.0.113.3:3478");
+        let (x, y, z) = ("1.1.1.1:3478", "1.0.0.1:3478", "8.8.8.8:3478");
         // Ranked by distinct keys; a key counts once however often it names a server.
         let named = [
             ("k1", x),
@@ -432,24 +445,24 @@ mod tests {
             [y]
         );
         assert_eq!(
-            select(&own(&["192.0.2.9:3478"]), [("k1", x)], 4),
-            ["192.0.2.9:3478"]
+            select(&own(&["9.9.9.9:3478"]), [("k1", x)], 4),
+            ["9.9.9.9:3478"]
         );
         // At most `max` in all, the client's own first and never twice.
         let many: Vec<(String, String)> = (1..=6)
             .flat_map(|i| {
-                let a = format!("203.0.113.{i}:3478");
+                let a = format!("1.1.1.{}:3478", 10 + i);
                 [(format!("a{i}"), a.clone()), (format!("b{i}"), a)]
             })
             .collect();
         let pairs = many.iter().map(|(k, a)| (k.as_str(), a.as_str()));
         assert_eq!(
-            select(&own(&["203.0.113.4:3478"]), pairs, MAX_SERVERS),
+            select(&own(&["1.1.1.14:3478"]), pairs, MAX_SERVERS),
             [
-                "203.0.113.4:3478",
-                "203.0.113.1:3478",
-                "203.0.113.2:3478",
-                "203.0.113.3:3478"
+                "1.1.1.14:3478",
+                "1.1.1.11:3478",
+                "1.1.1.12:3478",
+                "1.1.1.13:3478"
             ]
         );
         // Private, loopback and non-canonical addresses are refused, however many keys.

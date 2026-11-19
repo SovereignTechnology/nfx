@@ -181,8 +181,9 @@ nfxd stun --bind 203.0.113.7:3478 \
   --network nfx:mainnet:1
 ```
 
-`--bind` is the UDP address it answers on. On a host with several addresses, bind the one
-clients reach (not `0.0.0.0`): an answer leaves from the address the route picks, and a
+Here `203.0.113.7` stands for the host's public address: a documentation address like it
+routes nowhere, and `nfxd stun` refuses to announce one. `--bind` is the UDP address it
+answers on. On a host with several addresses, bind the one clients reach (not `0.0.0.0`): an answer leaves from the address the route picks, and a
 client's NAT drops one from another. Behind a DNAT, bind the host's own address and name the
 public one with `--public 203.0.113.7:3478`. With `--announce`, it signs a STUN service
 announcement (kind 33478, NFX-10 §1) with `--key`: that public address, for each
@@ -225,8 +226,9 @@ WantedBy=multi-user.target
 gathers candidates, which is when it plays a video; a STUN server sees no video and no
 peer, and never touches a byte of one. The announcement ties the server's address to the
 operator's key, publicly. Clients use at most 4 STUN servers, prefer those named by several
-keys, and never take an address that is not public from Nostr (NFX-10 §1), so a lying or
-dead server costs a client one candidate, nothing more.
+keys, and never take an address from Nostr that is not public (private, loopback or
+documentation; NFX-10 §1), so a lying or dead server costs a client one candidate, nothing
+more.
 
 ## Checks
 

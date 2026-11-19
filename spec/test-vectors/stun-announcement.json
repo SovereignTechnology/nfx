@@ -1,5 +1,5 @@
 {
-  "description": "NFX-10 §1 STUN service announcements: kind 33478, addressable, signed by the operator of a STUN server, checked at 'now'. Tags: exactly one 'd', the server's ip:port in the canonical form of the beacon 'stun' endpoint, and global unicast; 1 to 8 distinct 'n', each a namespace; exactly one 'expiration', a plain decimal with created_at < expiration <= created_at + 86400, after 'now'; created_at at most 900 s ahead of 'now'; empty content; other tags ignored. A reader MUST accept every 'valid' event, reading it as 'reads_as', and MUST reject every 'invalid' one. A scoped relay that admits kind 33478 (NFX-04 §1) admits the valid ones when it serves one of their networks, and refuses the invalid ones.",
+  "description": "NFX-10 §1 STUN service announcements: kind 33478, addressable, signed by the operator of a STUN server, checked at 'now'. Tags: exactly one 'd', the server's ip:port in the canonical form of the beacon 'stun' endpoint, and global unicast (not a documentation address either); 1 to 8 distinct 'n', each a namespace; exactly one 'expiration', a plain decimal with created_at < expiration <= created_at + 86400, after 'now'; created_at at most 900 s ahead of 'now'; empty content; other tags ignored. A reader MUST accept every 'valid' event, reading it as 'reads_as', and MUST reject every 'invalid' one. A scoped relay that admits kind 33478 (NFX-04 §1) admits the valid ones when it serves one of their networks, and refuses the invalid ones.",
   "secret_keys_DO_NOT_USE": {
     "operator": "f540c76c34e72fae74c0b338db26d86f24666d3550079bd7bf14c7374b2eb7fb"
   },
@@ -9,14 +9,14 @@
       "name": "ipv4-one-network",
       "reason": "what nfxd stun --announce sends: 24 h, one network",
       "event": {
-        "id": "ad994e9c19cadf27af5d9f0d3f883ebc9665ca128aa7877852de163333629ae0",
+        "id": "abd1644556a9c567cc7114a1b5e9929931228c423e68d2fbc0d4b3b7aaaeb06e",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -28,11 +28,11 @@
           ]
         ],
         "content": "",
-        "sig": "b23b8598b6831819e9659bbd805ba888b0e7528dbc94034fc24f1dbd1ec2b26510499042a0f0765ddf0757b1148d61765b694c5cb59e8f8c82c7ed2abff5dd77"
+        "sig": "b0dee6c9f8ba27413ef8efd88126e7a7aaf0e5c1b6b41de1062e6a34331f5dc819e3c33c0fc2e0397dc0a267fa6d06d47db5b092de1ca0201a3f2d711dd3095d"
       },
       "reads_as": {
         "operator": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
-        "addr": "203.0.113.10:3478",
+        "addr": "1.1.1.1:3478",
         "networks": [
           "nfx:mainnet:1"
         ],
@@ -44,14 +44,14 @@
       "name": "ipv6-two-networks",
       "reason": "a bracketed IPv6 server for two networks, 12 h",
       "event": {
-        "id": "1c1f13b1b6c186f3bbd3e68ce794fac1372c1f73d4d339a9e2e2d419ff1ad164",
+        "id": "a7fc5a5186aa37fd6a8584076324a96f7ec073fa2a10c90844203e9bd93c0463",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "[2001:db8::1]:3478"
+            "[2606:4700::1111]:3478"
           ],
           [
             "n",
@@ -67,11 +67,11 @@
           ]
         ],
         "content": "",
-        "sig": "0d210bc55480d1dfc23bb746132465f56e23d943e462167f43011889c59ad64420d4259827b585b94bae366d22250a1ff70f58971b5c65d964f8fecde264bf7a"
+        "sig": "641a1fddc061314efb8171e557eeb7c20eb1fb99453d28c29b2cdb5de3994292a698ae60d9c2fadd352fd04eaab8b2446e312ff932350a8c399f74bda0c90bd1"
       },
       "reads_as": {
         "operator": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
-        "addr": "[2001:db8::1]:3478",
+        "addr": "[2606:4700::1111]:3478",
         "networks": [
           "nfx:mainnet:1",
           "nfx:testnet:1"
@@ -84,14 +84,14 @@
       "name": "eight-networks-unknown-tag",
       "reason": "8 networks, the most; a tag readers do not know",
       "event": {
-        "id": "bb61d0166a5f8ece527b09410abce0959dc04552d699dd6e0ea5ac107b6a6c6c",
+        "id": "e3ee70535f5282e40e9d8d2bb0ca53d35cdc64490469bafb139ecf1e27e4e44f",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "198.51.100.7:19302"
+            "1.0.0.1:19302"
           ],
           [
             "n",
@@ -135,11 +135,11 @@
           ]
         ],
         "content": "",
-        "sig": "19674992f1375921fa06270b062bb2e232c14ef7f908e479ae79dc761aa8e01df3da7400cfce98c1f68a66b13a6a6e7314a0337a68b67e6d3150119071fc7c2d"
+        "sig": "eddb6d8049a9d83719f4296d50a0a0bd0aa080762263992b7d6891330a1b196f770407c77a3171e8fd4cfdd4cfa19090061d6ccf15e55492287d0c24d5f22bad"
       },
       "reads_as": {
         "operator": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
-        "addr": "198.51.100.7:19302",
+        "addr": "1.0.0.1:19302",
         "networks": [
           "nfx:net-1:1",
           "nfx:net-2:1",
@@ -158,14 +158,14 @@
       "name": "one-minute",
       "reason": "a short life is allowed",
       "event": {
-        "id": "0c3c306bfe59db983abd56846fcde249942dc91bbba69240fb0a1a40fb4a2f95",
+        "id": "f607a3a15a5013d0b681ac4bd89faa5234e2184d2c48d68e9dc301a7b252ab57",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -177,11 +177,11 @@
           ]
         ],
         "content": "",
-        "sig": "98c5866f95ba58dc1cc1fb3507940224164a1ac23d8713d9a4df75922b59514f1648316773bfa6435083ebbf21facfcbd2ecdcbc4632ae5644176733f8e7dc41"
+        "sig": "87a3311a208e3c0c4fa110070ecd6d9445d2a8b44ab172f394768b8981fc77ab1cc19305238e252330d909d3d1cb562cf4c39841ed99db015053d463fed207fa"
       },
       "reads_as": {
         "operator": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
-        "addr": "203.0.113.10:3478",
+        "addr": "1.1.1.1:3478",
         "networks": [
           "nfx:mainnet:1"
         ],
@@ -193,14 +193,14 @@
       "name": "signed-ahead",
       "reason": "created_at 15 min ahead of now, the most allowed",
       "event": {
-        "id": "d8521c9f68661f941ec74ccac7e6b8908c47e8f9897494a4dd11b61c4ac9b8b2",
+        "id": "80273e31a154e385c4b08dc0f241a9dfca4392b2f2a1e7f1dbe83dc2cbd6a974",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000910,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -212,11 +212,11 @@
           ]
         ],
         "content": "",
-        "sig": "8b42ecf9c74fba7ec41262ff131f50969021ce150285ec2013e79901a23a528bc9fc6a33c45ddb115b668b219a9848441a0f6ffeb9639f44099481beecbc04cf"
+        "sig": "95015d622d0197f9b5ba528b77c141a0d3e564d7f54b4adc3d0fb1e9946ba3cc885b97e17cb6a4bd3160ad5a1319f4f2fff99bcdc853f02309d189226962daee"
       },
       "reads_as": {
         "operator": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
-        "addr": "203.0.113.10:3478",
+        "addr": "1.1.1.1:3478",
         "networks": [
           "nfx:mainnet:1"
         ],
@@ -230,14 +230,14 @@
       "name": "wrong-kind",
       "reason": "kind 33478 only",
       "event": {
-        "id": "6985e4c6067d0ea3229565d33f023545897fab00727304599d0505dab7f6e5a5",
+        "id": "9c557e4bb584515481ea8ed543c73425b61d1755bc7f1e9881f3f581d9c33d66",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33477,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -249,21 +249,21 @@
           ]
         ],
         "content": "",
-        "sig": "9e19422a0eb49027664e4cba2245c8625723fb1d03b52e30f1b0a268928c115ab9a865b8313945a2c20c58128a4755865758e3ea598bf9c322870e750df0a16a"
+        "sig": "08f9d63eaf5097f8dae0213f3f4ca23fcb818acea89c85fa71ad784a455a1003f50ea89666d1db1c70bd95559294fb3484136a41c580562f05e1f1abdbea26fd"
       }
     },
     {
       "name": "bad-signature",
       "reason": "the NIP-01 signature must verify",
       "event": {
-        "id": "ad994e9c19cadf27af5d9f0d3f883ebc9665ca128aa7877852de163333629ae0",
+        "id": "abd1644556a9c567cc7114a1b5e9929931228c423e68d2fbc0d4b3b7aaaeb06e",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -275,7 +275,7 @@
           ]
         ],
         "content": "",
-        "sig": "b23b8598b6831819e9659bbd805ba888b0e7528dbc94034fc24f1dbd1ec2b26510499042a0f0765ddf0757b1148d61765b694c5cb59e8f8c82c7ed2abff5dd00"
+        "sig": "b0dee6c9f8ba27413ef8efd88126e7a7aaf0e5c1b6b41de1062e6a34331f5dc819e3c33c0fc2e0397dc0a267fa6d06d47db5b092de1ca0201a3f2d711dd30900"
       }
     },
     {
@@ -304,14 +304,14 @@
       "name": "d-twice",
       "reason": "exactly one d",
       "event": {
-        "id": "ccaed53e89eb451cfa6d9bec64cacdcc41cbd7e6019b5ccd864641efb81c756f",
+        "id": "b8840f0476dc58d10abf84170dc7aa04dd154d23c2bea8432bd67cb507683986",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -323,11 +323,11 @@
           ],
           [
             "d",
-            "203.0.113.11:3478"
+            "1.0.0.1:3478"
           ]
         ],
         "content": "",
-        "sig": "9608cd623a245ccfa9dec0f21e9d5b34e8bc744922d624a24e4b49d30017249fc2021c9fdacc1f63bc493ee6b1a260af3a9bb1435697c9a25e2d2f5967a58bb0"
+        "sig": "05a3e4613ef024c4051f8a8835b49095093006684f7489633f41b8f2c46caa3a7adc443cf49b2cb2709aa09308a73f1bf85abf854f1b6cb8e3b09eaadf478139"
       }
     },
     {
@@ -539,6 +539,58 @@
       }
     },
     {
+      "name": "d-documentation-ipv4",
+      "reason": "a documentation address routes nowhere (RFC 5737)",
+      "event": {
+        "id": "ad994e9c19cadf27af5d9f0d3f883ebc9665ca128aa7877852de163333629ae0",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "203.0.113.10:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "b23b8598b6831819e9659bbd805ba888b0e7528dbc94034fc24f1dbd1ec2b26510499042a0f0765ddf0757b1148d61765b694c5cb59e8f8c82c7ed2abff5dd77"
+      }
+    },
+    {
+      "name": "d-documentation-ipv6",
+      "reason": "a documentation address routes nowhere (RFC 3849)",
+      "event": {
+        "id": "5ede7898b80d271bc4e46e6ce3ad285448ce5c4d179412e98444796e6d464bae",
+        "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
+        "created_at": 1790000000,
+        "kind": 33478,
+        "tags": [
+          [
+            "d",
+            "[2001:db8::1]:3478"
+          ],
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "expiration",
+            "1790086400"
+          ]
+        ],
+        "content": "",
+        "sig": "68e63e63885a2060645a9db32e3422e7d9a0978a70cb79fa4d295331ef0eb8159037cf3b529a82088e566a202294790c015fe9294a02155233a7e36cf37889e7"
+      }
+    },
+    {
       "name": "d-hostname",
       "reason": "an IP address, not a name",
       "event": {
@@ -568,14 +620,14 @@
       "name": "d-url",
       "reason": "an address, not a stun: URL",
       "event": {
-        "id": "d4fe27d160b974c37a1dc5f21b380117587b7bf1ca12e14e900d70d4bb483c22",
+        "id": "3033fa06f5c075591ee30adfe65a9bea8ab050b0201ed82729fe34c0475272cc",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "stun:203.0.113.10:3478"
+            "stun:1.1.1.1:3478"
           ],
           [
             "n",
@@ -587,21 +639,21 @@
           ]
         ],
         "content": "",
-        "sig": "d57dbb1921e26f01846eac96d4536175a320f0e74b9f8c38c9c70912551c9ccf438048696f81e1d34897197a908362cdb25f67b4564b229623de7ba44263886c"
+        "sig": "8f9ddb4c68f907a531a3d7ecd9041b59c86bb157be50c420b0989e173c5b26b4bd40738e8e8227735156a723408d8189ee4d4ac0c17243575479ef29f3cad42f"
       }
     },
     {
       "name": "d-no-port",
       "reason": "ip:port",
       "event": {
-        "id": "61a3beda20e75bdbc6922c0d2aff46068acc5733758031da99fdcecfd25597f0",
+        "id": "4cbf9419a7ea803ac183be8ba8dc99a75c011e13e0a9699ed94c72041c7643ce",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10"
+            "1.1.1.1"
           ],
           [
             "n",
@@ -613,21 +665,21 @@
           ]
         ],
         "content": "",
-        "sig": "3a39fef5b726e0d57f261ec7a7372631d3c40615528ab773066fa076d1e385534d96991be3acfc3c4d6bf879e00bb3bd17f37e64aa467ec6c29d542e6585a513"
+        "sig": "03f198ef86a76f7f46b8da473d876badbbf82dcdf43011765c58c3e474a3f2f89b1176d9a670f071798e41f604178f1f84520d297d43961d1edeab9cd7643830"
       }
     },
     {
       "name": "d-port-zero",
       "reason": "the port is not 0",
       "event": {
-        "id": "a0cd835c2e88b0bb886c9e41422b9e74082e3ce29a042bee44ed0424907d9ee1",
+        "id": "399a8dd7d11ecf945d98311cb8888da71b46d9bb3297b06c9d056e49fdfd259b",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:0"
+            "1.1.1.1:0"
           ],
           [
             "n",
@@ -639,21 +691,21 @@
           ]
         ],
         "content": "",
-        "sig": "d120be39b81c2267ddec7d71c074596e36e38bb5ee24945b1ec6c874fc2939ad31a65e25947e9a3ff46a44cd82ceb87f479b592adcba7bfaecc25fe3c1b58b21"
+        "sig": "6e6e3889a358bcdce9d0f2cfcf25408b04405fe386b71d7b62888a69aa4bd70de8c3fe4f714ce6d90e193213398773d62c164009016d15f14f8bd6d45c502549"
       }
     },
     {
       "name": "d-ipv4-leading-zero",
       "reason": "canonical text form",
       "event": {
-        "id": "2fa867f52ed4c5c1d2e310c427c0d3fc835b80b026552f982324700618de20da",
+        "id": "77a1a463011b63fd0254b8b249808d55a3b28c41e002a378b4dbfc509aa07cde",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.010:3478"
+            "1.1.1.01:3478"
           ],
           [
             "n",
@@ -665,21 +717,21 @@
           ]
         ],
         "content": "",
-        "sig": "4ffa0de12ed43c3c4aa50a35748e993e1dbc87f607a88045ce0414836b074e9956ea158b4e02b9e278b088b641d1a5befba12f71a95f8c42a4cfe8bba79d761e"
+        "sig": "8a45c8551b7e0d0a21c3c1036526d269cdea334a306504f8bf1f816ada421f183a91c8c2076e911144bfcba1c9a9c4a3156a4b48dd56d3e4395d9493e6c13bab"
       }
     },
     {
       "name": "d-ipv6-uppercase",
       "reason": "RFC 5952: lowercase",
       "event": {
-        "id": "0b71cb83b979b8852be0dc03013cc07790272ad9a358ab82d98c2a2d7e91aa66",
+        "id": "5d124d4fbecd388683b15d8676f93c282dc1e78477fb421ead2daf0cb24b8c07",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "[2001:DB8::1]:3478"
+            "[2606:4700::AAAA]:3478"
           ],
           [
             "n",
@@ -691,21 +743,21 @@
           ]
         ],
         "content": "",
-        "sig": "7cc1af791aa057a85aa5973e9a09c8b9792bcbc88e574c0787ace1463622983d6a0c421421a1bf9fd201140fb0d3b702d6e8a77b99426e95b57b0df3f86e6a87"
+        "sig": "d9ceab3c156b1296d51cff81238c5e5a8e0928f541ad9077125910b3a4eb339f1a266f903d439965576e17da2398556568151348c7823ed3abf716c9494d98bd"
       }
     },
     {
       "name": "d-ipv4-mapped",
       "reason": "IPv4 is never written inside IPv6",
       "event": {
-        "id": "ae8f51df9f20b4de7fcce0a3549a288de7e17026b58a08e231113f965030f2a7",
+        "id": "2225b0d819a1bee7a74d60311fa8340c7633e6e3338bdb34ce4b1e49512ea65e",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "[::ffff:203.0.113.10]:3478"
+            "[::ffff:1.1.1.1]:3478"
           ],
           [
             "n",
@@ -717,21 +769,21 @@
           ]
         ],
         "content": "",
-        "sig": "422bd02035487cd17af2bdb58b96ac8fd2439e583a6dfe6384f8566a0126c203f229159fb86b6cccaabd8a2481172ec2d391c307de23fd5a159e0a4b2c148c99"
+        "sig": "b5a716c4478ae66633121d540117a4e9e10a3275ae8bad1c568605abf384e027f5e46964f8f831a60cd1034b818811e56e95a9e532287b74d49c56e122f80609"
       }
     },
     {
       "name": "n-missing",
       "reason": "1 to 8 n",
       "event": {
-        "id": "149c68ee13ccea4ef282a748944af1658203a85be8ba0003d692168d2e18834d",
+        "id": "919d79cfe862604e0b9cc2af4f365bcee4cf2c71f3cf46ba1219473aa115bc6a",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "expiration",
@@ -739,21 +791,21 @@
           ]
         ],
         "content": "",
-        "sig": "96d99a51f3d10665b479404f887daafb905fa8539b229ffe8fc6f7a62c73a076a2263a1537f061264c977d68aeebc2f0f72cfce6d8c6867b54faadd895e21110"
+        "sig": "faddb26479c9bba3e3504600914ac95bd933737ae852f512099421dd41b372bc7b510daf0625543ff1129a16908fd091031245961d81eaf7bd91b057fa36ae4c"
       }
     },
     {
       "name": "n-nine",
       "reason": "1 to 8 n",
       "event": {
-        "id": "aa5d2ef71443d2d3baff3ba2a24c7097342287ff9b0b1ced6cf8c96f0b7ee500",
+        "id": "0aa0583084ae63d6bac6b988e8119c814781e9eaf8d6aa9337a13996ec1ff17f",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -797,21 +849,21 @@
           ]
         ],
         "content": "",
-        "sig": "d3ef043c8f268f25ac83078e6ec3e9362894e13179a4f169dd8636478bd97d1c1a93cce0a29cecddaf9f8679b4dc169663bf0b1b888d0d889f472bb2e43b9851"
+        "sig": "49ed407b838a5fb99c4b0a560b751678d330f829a56c1f3274d4b90e213bf55cc1321eed3a22b1148e7f84bfa9a6f8c81b6ed5d7e61a6a1a63467e0443b5064b"
       }
     },
     {
       "name": "n-repeated",
       "reason": "distinct n",
       "event": {
-        "id": "ec7214146d0a4a2c65a2d08ab2f836bfac913a0849abc47a56bc58d37103699d",
+        "id": "78b8d0b9f459079a618d588e757f5decf6d78149b348b9f3336f409bf6b37ae0",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -827,21 +879,21 @@
           ]
         ],
         "content": "",
-        "sig": "2660f87329fddf62104bad157874ebe0f72aac2c5b346aa5c865a9e9aa94bd97417679cd5ce1067924e4a37fe7d43f00dbe02ba57425230e6105e652a269b20d"
+        "sig": "471fb427615564043a9bfd3131a2d5eda6eea56a809771a80c7622f46340214bcec8d5fa59006e86fbef35add556a3fefaf63d0bae38d3d92f479938b982ce3d"
       }
     },
     {
       "name": "n-not-a-namespace",
       "reason": "each n is a namespace (NFX-01 §2)",
       "event": {
-        "id": "cc6599007ee6221e07455ea31a303f3c1c3a2a2d13926d7b7286c401c1f86bc6",
+        "id": "f8b479f0e56214b2f1a8a0c7795c4478c7840ab8c7574a865b9a68b0ac1f386c",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -853,21 +905,21 @@
           ]
         ],
         "content": "",
-        "sig": "d966d98db518fdee68eac21093fab84b57c48a505d1b726dc14cdb3b4c1786d4067516d2df6c6dad0cabd0804b8400fb4b3174654852a29956fbd15667b5f4ca"
+        "sig": "99ad1033de350ce6cb706a49d75fb365e6cbb67fcdac5166848501a14fd7b67e1f2b4e9d07f4d8c2ea4bb4f250c12adfa9d69ba954745e2c37d0de4bcefe6041"
       }
     },
     {
       "name": "n-no-value",
       "reason": "each n has a value",
       "event": {
-        "id": "d72eaac13f11a8140f307d342671b5459593727d8d962c591edaa8332ae2b372",
+        "id": "790ddb7d1c230a0c25ab40fe206d727086324236474c6a72ac50c361faedce4a",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n"
@@ -878,21 +930,21 @@
           ]
         ],
         "content": "",
-        "sig": "22b76bdc52330aec3329707bcb8172455fdf08f4ecd6977dd2f057d8b36d78dcc727380338a327ad1067652c69d7b1a7b73f067158a9d964e93547c586e0d8b2"
+        "sig": "60d80073f7fb243c191bb48adc1ccb905de4a139e61f5f8296d04a813f66ed498c9350099ec3dbdfd90f424fcc1e943a2f02f4af6303a84a9197dd0155f9b1f6"
       }
     },
     {
       "name": "expiration-missing",
       "reason": "exactly one expiration",
       "event": {
-        "id": "24ff61d46ad0b26c279e3da6c478a19911aebc55482ff99979399a9891bcf1b3",
+        "id": "ca6f47c407a72b1e55c2089e7cce18e415d9ce0cf1b4b89627a905b1f68d1e8b",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -900,21 +952,21 @@
           ]
         ],
         "content": "",
-        "sig": "8a35ec22c4909016aae989f91512fbc6c5687d52fe52cab1e1a1287088639d8ffdead7f9b454b1bea0e7381987443b5653b09aaaf7486f36019898118721d1a7"
+        "sig": "eefdec72afd9fa19fcd8dc67225d6e75d9fc6707bc81e23618a96890955e1d18d0d507b035e1f5ab3ea730b4710b094bdb9b571dcc7de4661d08132f29cfaa00"
       }
     },
     {
       "name": "expiration-twice",
       "reason": "exactly one expiration",
       "event": {
-        "id": "a91b7ce9c07ec68a8c396cd89b2f1ddb6f7ad7262f89a93f12fa5ec05a15a184",
+        "id": "492481ab88320af660c1aca96518fd9ce8e433eeec7407ac1cbf644747a5edd7",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -930,21 +982,21 @@
           ]
         ],
         "content": "",
-        "sig": "0dd09650b87430027bcfb1910dbe3fae9344a810b84f5eb6819bab79221ea14f13f2d7229a0bee69e07ebc93b281f5510995252ac5bb7a5658caf76f3b3a797f"
+        "sig": "ade56f0064e41d726b9e99cc070a609900604e2883d1a5ecd9a819410bf1930adda4dcc108242b7f81806a28659561a5764c5fb4d372711d3ba5395773a13017"
       }
     },
     {
       "name": "expiration-not-decimal",
       "reason": "a plain decimal",
       "event": {
-        "id": "3d9e01500c261d94d0f860c949eaa4f9837723f05ff5f2028fdc47176fa3fec5",
+        "id": "e9f4371d1e3b4a8238f2d7e91bf610aaa8ef6fabe51f35792cfc588a68e4140b",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -956,21 +1008,21 @@
           ]
         ],
         "content": "",
-        "sig": "63d2eb401a0688d6511fa8434abc8deb948b06e8f8ec055ba14998286c272a116656097feb9703cd68936c101eacc6f4a269d44934251799d01e763bb84517fd"
+        "sig": "fa80168263381a75e94bae8f8d23917ec7d6509f2255c03ed0cec678c8c51cf8ed165cc96d02c1c48118d1b4a0f1f8514a2992d7817b5269d83a4c90c528b86f"
       }
     },
     {
       "name": "expiration-leading-zero",
       "reason": "a plain decimal",
       "event": {
-        "id": "ab53890aad3e5e7dfd9b798202ebc9df0f8d00440463afbba8a904c75c043e16",
+        "id": "db4df7cff15e016f94a9ebdc81887028ba42b4c23452296e9a16fb6e766c7aac",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -982,21 +1034,21 @@
           ]
         ],
         "content": "",
-        "sig": "556d399928a13b5b5a9501a7025ce0d95964c7b1249f71b3a449e4cb8f021f5ae63818c656a0276d4d6c96175aa2d717a46c6609d281a984b60392a51361dd6b"
+        "sig": "3c6c4b09ab23ad88f90537b974ef719feba89dbf9a3be723561b3c0372002085d5e2539c5606dec09e473737c23631ecd2a666a508506bebb14b799b0347ed3f"
       }
     },
     {
       "name": "expiration-at-created-at",
       "reason": "after created_at",
       "event": {
-        "id": "11678f0631b56696dc47f90d0dac61b9e7223f2271d249087c3e984cd0c0ec93",
+        "id": "0064039c38a01ff48262a336e63b65b8d1e23efb67e947ae793b6c5620a52ce4",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -1008,21 +1060,21 @@
           ]
         ],
         "content": "",
-        "sig": "f69b3cedcd5306274ccc5a25affe9cac4dc926b65fcded0107e3c297369cffec33b8f659e27bbc654cd1e69634920e6b2823602e1bd220c3b3fc4f27bd0ef4d7"
+        "sig": "e10fc8df795e710d33b246cb0a5cc1d70664d8f3f0a69db20e86d13ca68ed60c9c80711276c4ab4e2fe9e74b5fc2a8570cd769fc0a3f1fd0b691607f74111af6"
       }
     },
     {
       "name": "expiration-over-24h",
       "reason": "at most 24 h after created_at",
       "event": {
-        "id": "ecb3a6be6987a824198c67b24bc043e1fecaae139ffb8cfa721188012bc0cbf7",
+        "id": "82c78c4aa8dc0715adefd50907e1bcbb610ce6f79268537c12b6c9abaa43b6ec",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -1034,21 +1086,21 @@
           ]
         ],
         "content": "",
-        "sig": "9d1075b77a47c3ecc7016ca717288de376235f2e5a41a59f84540dfc2462de59817b381193e19f20ab14c9cc1c0eff614386a61bcf0ff17b4c50045a99ad47e8"
+        "sig": "a266783b39e4b1b358bdcf4bd2469fb6775bde5359df9e4ae8b3df114f8b855ff6f33066a0874ff283e3a023cf8716bbfd92e3df50575ec2041c159932df1777"
       }
     },
     {
       "name": "expired",
       "reason": "expiration after now",
       "event": {
-        "id": "7ea189db9e497af4a0a8dba5061dde00c6d33edaf4f80b72ab90b3e668362b9a",
+        "id": "b948149b1a3394027c13dd069e34d799f0660ebf0c120754b52f838ff40c34ea",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -1060,21 +1112,21 @@
           ]
         ],
         "content": "",
-        "sig": "da8b30ebf8e65ddbe9c904e171cf0254f9a9fcd252857c9abbbacda01d4301776504c034151966b6a7b25eb14b9b86570e71fa8d0f8e56c80d6bc89f108cf45a"
+        "sig": "631066a4139deb389b3c9a23caec51fb255d982e485881870f9836c268d5989805c716ad315577ecf229a1c322b3b41a589c46ceeb7ff911d473f4ade6a3e75b"
       }
     },
     {
       "name": "created-at-far-ahead",
       "reason": "created_at at most 15 min ahead of now",
       "event": {
-        "id": "df150cc76a9dd4715f63c438bf24c94143757311be65594a3f3b81712fff85f7",
+        "id": "c0263d6f7385b278fe92d0c1679c58ef633515abb2203378ec885d482d6020a7",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000911,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -1086,21 +1138,21 @@
           ]
         ],
         "content": "",
-        "sig": "92dad386f57b6594fad5eb7f5518fbf3474bb86e71a4a0356cac40a60bf256c4aa3034462a9d95f236313bf3fdfa23fe1996b266d03bec695e5f83cb10a8c7d4"
+        "sig": "3287b5826dcd286df5ac3442f65ff03fbffdb44403b383cd3e8e0774badf6d0a805f6a92f0ae8d13ec05382dd60a004504038a7156c82d6b723827ea35a10e50"
       }
     },
     {
       "name": "content-not-empty",
       "reason": "empty content",
       "event": {
-        "id": "c897456d71a72323a68da35c18f8728afd81b5a311814fb88f354530e91cbced",
+        "id": "e24fa92314a78e34b7f1f0ab0d05cff0ee061095aba11f0f49e69a2d3513e81d",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",
         "created_at": 1790000000,
         "kind": 33478,
         "tags": [
           [
             "d",
-            "203.0.113.10:3478"
+            "1.1.1.1:3478"
           ],
           [
             "n",
@@ -1112,7 +1164,7 @@
           ]
         ],
         "content": "free STUN!",
-        "sig": "afcb14406420e6888ac43a170774624e8d50279bbd628a199d15572673fe01f3ad1886ec04390e8010c908f988a708fda7b85cfa12612cc86875fedd98536923"
+        "sig": "30fef3df10f260482b697f9e5eaa922122fb02192e2adea9c35035b39584c92bd89adaecf6b1176a147a2984aee3b8f5de8cfc61f1db07ef6da11e6fe79dc839"
       }
     }
   ]

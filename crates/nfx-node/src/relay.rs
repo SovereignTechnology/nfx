@@ -988,31 +988,31 @@ mod tests {
         let t0 = 1_790_000_000;
         // 12 an hour per key, whichever servers they name.
         for i in 0..12u8 {
-            let ad = stun_ad(1, &format!("203.0.113.{}:3478", i + 1), &net, t0, 600);
+            let ad = stun_ad(1, &format!("1.1.1.{}:3478", i + 1), &net, t0, 600);
             assert!(relay.admit(&ad, t0).is_ok(), "{i}");
         }
-        let ad = stun_ad(1, "203.0.113.99:3478", &net, t0, 600);
+        let ad = stun_ad(1, "1.1.1.99:3478", &net, t0, 600);
         assert!(refused(relay.admit(&ad, t0)).starts_with("rate-limited:"));
         // An hour later the key has its budget again.
         let t1 = t0 + 3600;
         assert!(
             relay
-                .admit(&stun_ad(1, "203.0.113.1:3478", &net, t1, 600), t1)
+                .admit(&stun_ad(1, "1.1.1.1:3478", &net, t1, 600), t1)
                 .is_ok()
         );
 
         // A held announcement is replaced by a newer one, never by an older one.
-        let held = stun_ad(2, "198.51.100.1:3478", &net, t1, 600);
+        let held = stun_ad(2, "1.0.0.1:3478", &net, t1, 600);
         assert!(relay.admit(&held, t1).is_ok());
-        let older = stun_ad(2, "198.51.100.1:3478", &net, t1 - 10, 600);
+        let older = stun_ad(2, "1.0.0.1:3478", &net, t1 - 10, 600);
         assert!(refused(relay.admit(&older, t1)).starts_with("invalid: a newer"));
-        let newer = stun_ad(2, "198.51.100.1:3478", &net, t1 + 5, 600);
+        let newer = stun_ad(2, "1.0.0.1:3478", &net, t1 + 5, 600);
         assert!(relay.admit(&newer, t1 + 5).is_ok());
         // On a tie the lower id is the one kept (NIP-01): the other is refused, whichever
         // comes first.
         let (x, y) = (
-            stun_ad(3, "198.51.100.2:3478", &net, t1, 600),
-            stun_ad(3, "198.51.100.2:3478", &net, t1, 601),
+            stun_ad(3, "1.0.0.2:3478", &net, t1, 600),
+            stun_ad(3, "1.0.0.2:3478", &net, t1, 601),
         );
         let (low, high) = if x.id.to_hex() < y.id.to_hex() {
             (x, y)
@@ -1043,7 +1043,7 @@ mod tests {
             }
         }
         assert_eq!(n, MAX_STUN_ANNOUNCEMENTS);
-        let fresh = stun_ad(200, "198.51.100.200:3478", &net, t0, 600);
+        let fresh = stun_ad(200, "1.0.0.200:3478", &net, t0, 600);
         assert!(refused(relay.admit(&fresh, t0)).starts_with("rate-limited:"));
         // A held one may still be renewed while the table is full.
         let renewal = stun_ad(86, "203.0.0.86:3478", &net, t0 + 1, 600);
@@ -1051,7 +1051,7 @@ mod tests {
         // Once key 1's announcements (61 s) have expired, their places are free, and the next
         // admission names them for the store to drop; key 2's (62 s) are still live.
         let later = t0 + 61;
-        let fresh = stun_ad(200, "198.51.100.200:3478", &net, later, 600);
+        let fresh = stun_ad(200, "1.0.0.200:3478", &net, later, 600);
         let key1 = nfx_proto::event::public_key_hex(&[1; 32]).unwrap();
         match relay.admit(&fresh, later) {
             Ok(Admitted::Stun(gone)) => {
