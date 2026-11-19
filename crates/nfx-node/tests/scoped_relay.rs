@@ -647,9 +647,9 @@ async fn a_relay_with_stun_announcements_admits_rate_limits_and_expires_them() {
     let net = Namespace::parse("nfx:testnet:1").unwrap();
     let operator = Keys::generate();
     let nets = std::slice::from_ref(&net);
-    let ad = sign_stun_announcement(&operator, "203.0.113.10:3478", nets, unix_now(), 3)
-        .await
-        .unwrap();
+    let sign =
+        |ttl: u64| sign_stun_announcement(&operator, "203.0.113.10:3478", nets, unix_now(), ttl);
+    let ad = sign(600).await.unwrap();
 
     // Off (the default): out of scope, and not advertised.
     let (off, url, addr, server) = start(ScopedRelay::new(nets)).await;
@@ -679,6 +679,9 @@ async fn a_relay_with_stun_announcements_admits_rate_limits_and_expires_them() {
         serde_json::json!(["catalog", "availability", "signaling", "stun"])
     );
     let c = client(&url).await;
+    // Short-lived, signed just before it is sent: it expires during the test.
+    let ad = sign(5).await.unwrap();
+    let signed = std::time::Instant::now();
     assert!(accepted(&c, &ad).await, "a valid announcement");
     let stored = |c: Client| async move {
         let found = c
@@ -721,7 +724,7 @@ async fn a_relay_with_stun_announcements_admits_rate_limits_and_expires_them() {
         .unwrap();
     let private: Event = serde_json::from_str(&private.as_json()).unwrap();
     assert!(refusal(&c, &private).await.starts_with("invalid:"));
-    let read = StunAnnouncement::from_event(&ad, unix_now()).unwrap();
+    let read = StunAnnouncement::from_event(&ad, ad.created_at).unwrap();
     assert_eq!(read.addr, "203.0.113.10:3478");
 
     // 12 an hour per key: the first was one of them.
@@ -743,7 +746,7 @@ async fn a_relay_with_stun_announcements_admits_rate_limits_and_expires_them() {
     assert!(refusal(&c, &over).await.starts_with("rate-limited:"));
 
     // Expired (NIP-40): never returned again.
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    tokio::time::sleep(Duration::from_secs(7).saturating_sub(signed.elapsed())).await;
     let left = stored(c.clone()).await;
     assert_eq!(left.len(), STUN_ANNOUNCEMENTS_PER_HOUR - 1);
     assert!(!left.contains(&ad.id), "the expired one is gone");
