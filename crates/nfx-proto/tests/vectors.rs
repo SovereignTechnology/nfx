@@ -983,3 +983,79 @@ fn every_invalid_signal_is_rejected_and_foreign_ones_ignored() {
     }
     assert_eq!((rejected, ignored), (36, 7));
 }
+
+/// A relay that carries mesh signaling (NFX-04 §1 as amended 2026-11-18) makes the reader's
+/// checks that need no session: it admits every valid event, with its own `P` as the room;
+/// of the invalid ones it refuses exactly those a reader rejects before decrypting, except
+/// `other-room` (a relay subscribes to no room); of the ignored ones it admits only
+/// `not-for-us` (a relay is no session) and refuses the other protocols and types.
+#[test]
+fn a_relay_admits_what_a_reader_would_and_needs_no_session() {
+    let valid = vector!("mesh-signal.json");
+    let now = valid["now"].as_u64().unwrap();
+    let room = Room::derive(str_of(&valid["room"], "stream_swarm_id"));
+    for name in [
+        "connect",
+        "disconnect",
+        "offer",
+        "answer",
+        "answerer_connect",
+    ] {
+        let ev = event(&valid["events"][name]);
+        assert!(signal::is_nfx_mesh(&ev), "{name}");
+        let r = signal::relayable(&ev, now).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(r.room, room.pubkey(), "{name}");
+        assert_eq!(r.sender, ev.pubkey, "{name}");
+        assert_eq!(r.to.is_some(), matches!(name, "offer" | "answer"), "{name}");
+    }
+
+    let v = vector!("mesh-signal-invalid.json");
+    let now = v["now"].as_u64().unwrap();
+    let room = str_of(&v, "room");
+    let ans = Session::new(secret(&v, "answerer"), [0; 16]).unwrap();
+    let off = Session::new(secret(&v, "offerer"), [0; 16]).unwrap();
+    let (mut refused, mut carried) = (0, 0);
+    for case in v["rejected"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        let ev = event(&case["event"]);
+        let reader = if name.starts_with("answer-") {
+            &off
+        } else {
+            &ans
+        };
+        let reader_refuses = read(&ev, room, reader.pubkey(), now).is_err();
+        let relay = signal::relayable(&ev, now);
+        if name == "other-room" {
+            assert!(reader_refuses);
+            assert!(relay.is_ok(), "other-room: a relay subscribes to no room");
+            carried += 1;
+        } else if reader_refuses {
+            assert!(relay.is_err(), "{name} must be refused by a relay");
+            refused += 1;
+        } else {
+            // Rejected only when the receiver decrypts: a relay carries it, its receiver drops it.
+            assert!(
+                relay.is_ok(),
+                "{name}: a relay cannot decrypt, so it carries it"
+            );
+            carried += 1;
+        }
+    }
+    for case in v["ignored"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        let ev = event(&case["event"]);
+        let relay = signal::relayable(&ev, now);
+        if name == "not-for-us" {
+            assert!(relay.is_ok(), "not-for-us: a relay is no session");
+            carried += 1;
+        } else {
+            assert!(
+                relay.is_err(),
+                "{name}: another protocol or type is out of scope"
+            );
+            refused += 1;
+        }
+    }
+    assert_eq!(refused + carried, 36 + 7);
+    assert!(refused >= 30, "refused only {refused}");
+}

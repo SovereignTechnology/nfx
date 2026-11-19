@@ -1,8 +1,9 @@
 //! The mesh endpoint end to end on loopback (NFX-10 §6, issue #71): an in-process Nostr relay
-//! that carries kind 25050 (nostr-sdk's local relay; NFX-04's scoped relay refuses it), the
-//! endpoint serving the test-vector video, and a browser-like peer built from str0m (full
-//! ICE), nfx-proto's signaling and nostr-sdk. The peer finds the endpoint by its room alone,
-//! negotiates through the relay (either side offering, by the glare rule), opens the data
+//! that carries kind 25050 (nostr-sdk's local relay; NFX-04's scoped relay carries it only
+//! with mesh signaling on), the endpoint serving the test-vector video, and a browser-like
+//! peer built from str0m (full ICE), nfx-proto's signaling and nostr-sdk. The peer finds the
+//! endpoint by its room alone, negotiates through the relay (either side offering, by the
+//! glare rule), opens the data
 //! channel, asks for a segment with p2p-media-loader's protocol and checks its sha256. The
 //! same behind a DNAT: the endpoint bound on loopback and told a public address, which the
 //! peer alone reaches, through a DNAT in the test. Then two endpoints in one room, which find

@@ -188,7 +188,8 @@ export interface NostrSignaling {
   /**
    * `wss://`, or `ws://` on a loopback host; 1 to 8. Every event goes to all of them,
    * and each event is taken once whichever relays deliver it. A scoped relay (NFX-04)
-   * refuses kind 25050: name general relays.
+   * refuses kind 25050 unless its NIP-11 `nfx.kinds` lists it: name general relays, and
+   * such scoped relays beside them.
    */
   relays: string[];
 }

@@ -431,3 +431,202 @@ async fn a_search_matches_a_manifests_title_and_description() {
 
     server.abort();
 }
+
+/// Serve `relay` on a fresh loopback port: its `ws://` URL, address and task.
+async fn start(
+    relay: ScopedRelay,
+) -> (
+    Arc<ScopedRelay>,
+    String,
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<()>,
+) {
+    let relay = Arc::new(relay);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(relay.clone().serve(listener));
+    (relay, format!("ws://{addr}"), addr, server)
+}
+
+/// The relay's NIP-11 document.
+async fn nip11(addr: std::net::SocketAddr) -> Value {
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    let res = sender
+        .send_request(
+            Request::get("/")
+                .header("host", "relay.test")
+                .header("accept", "application/nostr+json")
+                .body(Empty::<Bytes>::new())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
+async fn client(url: &str) -> Client {
+    let c = Client::default();
+    c.add_relay(url).await.unwrap();
+    c.connect().and_wait(WAIT).await;
+    c
+}
+
+/// Send `event` and return whether the relay accepted it.
+async fn accepted(client: &Client, event: &Event) -> bool {
+    let event =
+        nostr_sdk::prelude::Event::from_json(serde_json::to_string(event).unwrap()).unwrap();
+    !client.send_event(&event).await.unwrap().success.is_empty()
+}
+
+/// NFX-04 §1 as amended 2026-11-18: without mesh signaling kind 25050 stays out of scope;
+/// with it, an nfx-mesh/1 event that passes the reader's sessionless checks is forwarded
+/// live and never stored, presence is held to one per 10 s per (sender, room, type), and
+/// every other kind-25050 event is refused (another protocol as out of scope).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_with_mesh_signaling_carries_nfx_mesh_only() {
+    use n0_future::StreamExt as _;
+    use nfx_proto::signal::{KIND_SIGNAL, Room, Session};
+    use nostr_sdk::prelude as ns;
+
+    let net = Namespace::parse("nfx:testnet:1").unwrap();
+    let room = Room::derive("nfx/1/web/nfx:testnet:1:salt-flats-dusk/720p");
+    let a = Session::new([1; 32], [2; 16]).unwrap();
+    let b = Session::new([3; 32], [4; 16]).unwrap();
+
+    // Off (the default): kind 25050 is out of scope and not advertised.
+    let (off, url, addr, server) = start(ScopedRelay::new(std::slice::from_ref(&net))).await;
+    assert_eq!(
+        nip11(addr).await["nfx"]["kinds"],
+        serde_json::json!([38504, 20464, 5])
+    );
+    let c = client(&url).await;
+    let connect = a.connect(&room, unix_now()).unwrap();
+    assert!(
+        refusal(&c, &connect)
+            .await
+            .starts_with("blocked: out of scope")
+    );
+    c.shutdown().await;
+    off.shutdown();
+    server.abort();
+
+    // On.
+    let relay = ScopedRelay::with_options(std::slice::from_ref(&net), None, true).unwrap();
+    let (relay, url, addr, server) = start(relay).await;
+    let doc = nip11(addr).await;
+    assert_eq!(
+        doc["nfx"]["kinds"],
+        serde_json::json!([38504, 20464, 5, 25050])
+    );
+    assert!(
+        doc["nfx"]["roles"]
+            .as_array()
+            .unwrap()
+            .contains(&"signaling".into())
+    );
+
+    let watcher = client(&url).await;
+    let mut notes = watcher.notifications();
+    watcher
+        .subscribe(
+            ns::Filter::new()
+                .kind(ns::Kind::from(KIND_SIGNAL))
+                .custom_tag(ns::SingleLetterTag::UPPERCASE_P, room.pubkey())
+                .since(ns::Timestamp::from(unix_now() - 60)),
+        )
+        .await
+        .unwrap();
+    // The REQ above is ordered before this fetch on the same connection: once it returns,
+    // the subscription is live.
+    watcher
+        .fetch_events(ns::Filter::new().kind(ns::Kind::from(38504u16)).limit(1))
+        .timeout(WAIT)
+        .await
+        .unwrap();
+
+    let sender = client(&url).await;
+    assert!(accepted(&sender, &connect).await, "a valid connect");
+    let forwarded = tokio::time::timeout(WAIT, async {
+        loop {
+            match notes.next().await {
+                Some(ns::ClientNotification::Event { event, .. })
+                    if event.id.to_hex() == connect.id =>
+                {
+                    return;
+                }
+                Some(_) => {}
+                None => panic!("the notification stream ended"),
+            }
+        }
+    })
+    .await;
+    assert!(forwarded.is_ok(), "the connect reaches the live subscriber");
+
+    // §2: one presence of a type per (sender, room) per 10 s; another type is not held.
+    let again = a.connect(&room, unix_now()).unwrap();
+    assert!(refusal(&sender, &again).await.starts_with("rate-limited:"));
+    assert!(accepted(&sender, &a.disconnect(&room, unix_now()).unwrap()).await);
+    // Another room is another key.
+    let other = Room::derive("nfx/1/web/nfx:testnet:1:salt-flats-dusk/360p");
+    assert!(accepted(&sender, &a.connect(&other, unix_now()).unwrap()).await);
+
+    // Offers and answers: admitted without decrypting; the relay is no session.
+    let offer = a
+        .offer(&room, b.pubkey(), "v=0\r\ns=-\r\n", &[9; 32], unix_now())
+        .unwrap();
+    assert!(accepted(&sender, &offer).await, "a valid offer");
+
+    // Another protocol's 25050 is out of scope; an nfx-mesh/1 one without a room proof
+    // is invalid.
+    let keys = Keys::generate();
+    let tag = |t: &[&str]| ns::Tag::parse(t.iter().copied()).unwrap();
+    let foreign = EventBuilder::new(Kind::from(KIND_SIGNAL), "")
+        .tags([
+            tag(&["t", "connect"]),
+            tag(&["P", room.pubkey()]),
+            tag(&["i", "other/1"]),
+        ])
+        .finalize(&keys)
+        .unwrap();
+    let foreign: Event = serde_json::from_str(&foreign.as_json()).unwrap();
+    assert!(
+        refusal(&sender, &foreign)
+            .await
+            .starts_with("blocked: out of scope")
+    );
+    let now = unix_now();
+    let unproven = EventBuilder::new(Kind::from(KIND_SIGNAL), "")
+        .tags([
+            tag(&["t", "connect"]),
+            tag(&["P", room.pubkey()]),
+            tag(&["d", &"ab".repeat(16)]),
+            tag(&["i", "nfx-mesh/1"]),
+            tag(&["y", "nfx"]),
+            tag(&["expiration", &(now + 90).to_string()]),
+        ])
+        .finalize(&keys)
+        .unwrap();
+    let unproven: Event = serde_json::from_str(&unproven.as_json()).unwrap();
+    assert!(refusal(&sender, &unproven).await.starts_with("invalid:"));
+
+    // Ephemeral: a fresh REQ finds none of them stored.
+    let stored = sender
+        .fetch_events(
+            ns::Filter::new()
+                .kind(ns::Kind::from(KIND_SIGNAL))
+                .since(ns::Timestamp::from(unix_now() - 600)),
+        )
+        .timeout(WAIT)
+        .await
+        .unwrap();
+    assert!(stored.is_empty(), "signals are never persisted");
+
+    watcher.shutdown().await;
+    sender.shutdown().await;
+    relay.shutdown();
+    server.abort();
+}

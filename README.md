@@ -126,8 +126,9 @@ a DNAT, bind `--bridge` to the host's own address and pass the public one as
 (default 64) caps the browsers it serves at once.
 
 A node behind a NAT, a home node say, serves browsers with no tracker and no forwarded port
-through the mesh endpoint (NFX-10 §6): `--mesh-relay <url>` (1 to 8 general Nostr relays;
-a scoped relay refuses the signaling kind) turns it on, and `--mesh-stun <ip:port>` names a
+through the mesh endpoint (NFX-10 §6): `--mesh-relay <url>` (1 to 8 Nostr relays: general
+ones, or a scoped relay that admits the signaling kind, NFX-04 §1, such as nfxd's own with
+`--embed-relay-mesh`) turns it on, and `--mesh-stun <ip:port>` names a
 public node's `--stun` so it learns its public mapping. Browsers that play a rendition it
 holds meet it in that rendition's room, and both ends punch through their NATs with full
 ICE:
