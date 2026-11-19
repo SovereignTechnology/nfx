@@ -40,6 +40,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, type Page } from 'playwright';
 
+import { nerdProblems } from './e2e-nerd';
+
 const here = dirname(fileURLToPath(import.meta.url));
 const crates = resolve(here, '../../crates');
 const bin = (name: string): string => join(crates, 'target/debug', name);
@@ -408,6 +410,10 @@ async function main(): Promise<void> {
       ),
     ].filter(Boolean);
     if (problems.length > 0) throw new Error(`nostr mesh: ${problems.join('; ')}: ${JSON.stringify(results)}`);
+    // Stats for nerds (nfx #99) over a Nostr peer, and the signaler's counters.
+    const nerd = await nerdProblems(pb);
+    if (!(b.mesh?.signal?.open === 1 && b.mesh.signal.received > 0)) nerd.push(`signal ${JSON.stringify(b.mesh?.signal)}`);
+    if (nerd.length > 0) throw new Error(`nostr stats: ${nerd.join('; ')}`);
 
     // ---- the library's lifecycle with Nostr signaling, on the shipped bundle ----
     const lc = await browser.newContext();

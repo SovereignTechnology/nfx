@@ -39,6 +39,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
+import { nerdProblems } from './e2e-nerd';
+
 const here = dirname(fileURLToPath(import.meta.url));
 const crates = resolve(here, '../../crates');
 const bin = (name: string): string => join(crates, 'target/debug', name);
@@ -403,6 +405,9 @@ async function main(): Promise<void> {
       (viaBridge.mesh?.rejected ?? []).length !== 0 ? `rejected ${JSON.stringify(viaBridge.mesh.rejected)}` : '',
     ].filter(Boolean);
     if (bridgeProblems.length > 0) throw new Error(`bridge: ${bridgeProblems.join('; ')}: ${JSON.stringify(results.bridge)}`);
+    // Stats for nerds (nfx #99) over a tracker peer: the bridge, by its peer id prefix.
+    const nerd = await nerdProblems(v, 'nfxd bridge?');
+    if (nerd.length > 0) throw new Error(`bridge stats: ${nerd.join('; ')}`);
 
     // The library's lifecycle, on the bundle the tar ships: open, play over the mesh, end
     // it (by destroy() in two rounds, by the open's signal in the third), and nothing may

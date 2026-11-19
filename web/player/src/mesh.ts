@@ -12,7 +12,7 @@
  * Playlists and inits never travel over the mesh: they go through the player's verifying
  * loader.
  */
-import type { MeshStats, Signaling } from './api';
+import type { MeshPeer, MeshStats, PeerAddress, Signaling } from './api';
 import type { NostrSignaler } from './signal-nostr';
 import type { Anchor } from './verify';
 
@@ -84,6 +84,213 @@ export interface MeshTuning {
   httpWindow?: number;
 }
 
+/** At most this many peers are listed (`MeshStats.peerList`) or asked for addresses. */
+export const MAX_PEERS_LISTED = 64;
+/** At most this many peers are remembered; past it, the one longest idle (closed first) goes. */
+const MAX_PEERS_KEPT = 256;
+const MAX_ID = 64;
+const MAX_VIA = 256;
+const MAX_ADDRESS = 64;
+
+/** A peer- or tracker-chosen string, made safe to show: printable ASCII only, cut to `max`. */
+export function printable(raw: unknown, max: number): string {
+  const s = typeof raw === 'string' ? raw : '';
+  let out = '';
+  for (const ch of s) {
+    if (out.length >= max) break;
+    const c = ch.codePointAt(0) ?? 0;
+    out += c >= 0x20 && c < 0x7f ? ch : '?';
+  }
+  return out;
+}
+
+/** What `PeerBook` needs of a peer connection: its statistics, and whether it is closed. */
+export interface StatsConnection {
+  readonly connectionState?: string;
+  getStats(): Promise<{ forEach(cb: (s: Record<string, unknown>) => void): void }>;
+}
+
+interface PeerEntry {
+  id: string;
+  via: string;
+  down: number;
+  up: number;
+  segments: number;
+  since: number;
+  last: number;
+  /** The open connections to it, one per stream swarm (by infohash). */
+  connections: Map<string, StatsConnection>;
+}
+
+/**
+ * Per-peer counters, from the engine's events, and the peers' connections for
+ * `addresses()`. Bounded: ids, `via` and the number of peers kept.
+ */
+export class PeerBook {
+  readonly #peers = new Map<string, PeerEntry>();
+  readonly #now: () => number;
+
+  constructor(now: () => number = Date.now) {
+    this.#now = now;
+  }
+
+  #entry(rawId: unknown): PeerEntry {
+    const id = printable(rawId, MAX_ID);
+    let e = this.#peers.get(id);
+    if (e === undefined) {
+      e = { id, via: '', down: 0, up: 0, segments: 0, since: 0, last: 0, connections: new Map() };
+      this.#peers.set(id, e);
+      if (this.#peers.size > MAX_PEERS_KEPT) this.#evict(e);
+    }
+    return e;
+  }
+
+  /** Drop the peer longest idle, closed ones before open ones, never `keep`. */
+  #evict(keep: PeerEntry): void {
+    let worst: PeerEntry | undefined;
+    for (const e of this.#peers.values()) {
+      if (e === keep) continue;
+      if (worst === undefined) worst = e;
+      else {
+        const open = this.#open(e) > 0;
+        const worstOpen = this.#open(worst) > 0;
+        if ((!open && worstOpen) || (open === worstOpen && e.last < worst.last)) worst = e;
+      }
+    }
+    if (worst !== undefined) this.#peers.delete(worst.id);
+  }
+
+  #open(e: PeerEntry): number {
+    for (const [k, c] of e.connections) if (c.connectionState === 'closed' || c.connectionState === 'failed') e.connections.delete(k);
+    return e.connections.size;
+  }
+
+  connect(d: { peerId?: unknown; infoHash?: unknown; trackerUrl?: unknown; connection?: unknown }): void {
+    const e = this.#entry(d.peerId);
+    e.via = printable(d.trackerUrl, MAX_VIA);
+    e.since = this.#now();
+    e.last = e.since;
+    const c = d.connection as StatsConnection | undefined;
+    if (c !== undefined && c !== null && typeof c.getStats === 'function') e.connections.set(String(d.infoHash), c);
+  }
+
+  close(d: { peerId?: unknown; infoHash?: unknown }): void {
+    const e = this.#peers.get(printable(d.peerId, MAX_ID));
+    e?.connections.delete(String(d.infoHash));
+  }
+
+  received(peerId: unknown, n: number): void {
+    const e = this.#entry(peerId);
+    e.down += n;
+    e.last = this.#now();
+  }
+
+  sent(peerId: unknown, n: number): void {
+    const e = this.#entry(peerId);
+    e.up += n;
+    e.last = this.#now();
+  }
+
+  segment(peerId: unknown): void {
+    this.#entry(peerId).segments += 1;
+  }
+
+  /** Open connections, across peers and swarms. */
+  connected(): number {
+    let n = 0;
+    for (const e of this.#peers.values()) n += this.#open(e);
+    return n;
+  }
+
+  /** `MeshStats.peerList`: open first, then most bytes; at most `MAX_PEERS_LISTED`. */
+  list(): MeshPeer[] {
+    return [...this.#peers.values()]
+      .map((e) => ({ e, open: this.#open(e) > 0 }))
+      .sort((a, b) => Number(b.open) - Number(a.open) || b.e.down + b.e.up - (a.e.down + a.e.up))
+      .slice(0, MAX_PEERS_LISTED)
+      .map(({ e, open }) => ({ id: e.id, via: e.via, down: e.down, up: e.up, segments: e.segments, connected: open, since: e.since, last: e.last }));
+  }
+
+  /** Forget every connection (the session ended): counters stay, connections are dropped. */
+  release(): void {
+    for (const e of this.#peers.values()) e.connections.clear();
+  }
+
+  /** `Session.addresses()`: each open peer's first connection, asked now. */
+  async addresses(): Promise<PeerAddress[]> {
+    const open = this.list().filter((p) => p.connected);
+    const out = await Promise.all(
+      open.map(async (p) => {
+        const c = this.#peers.get(p.id)?.connections.values().next().value;
+        if (c === undefined) return null;
+        try {
+          return { id: p.id, ...selectedPair(await c.getStats()) };
+        } catch {
+          return { id: p.id, ...UNKNOWN_PAIR };
+        }
+      }),
+    );
+    return out.filter((a): a is PeerAddress => a !== null);
+  }
+}
+
+const UNKNOWN_PAIR: Omit<PeerAddress, 'id'> = {
+  address: '',
+  port: null,
+  remoteType: '',
+  localType: '',
+  protocol: '',
+  path: 'unknown',
+  rttMs: null,
+};
+const CANDIDATE_TYPES = new Set(['host', 'srflx', 'prflx', 'relay']);
+const PROTOCOLS = new Set(['udp', 'tcp']);
+
+/**
+ * The selected candidate pair in an `RTCStatsReport`: the transport's
+ * `selectedCandidatePairId` (Chromium), else a pair marked `selected` (Firefox), else a
+ * nominated pair that succeeded. Everything read is checked and bounded: the address is the
+ * browser's, but it names a peer.
+ */
+export function selectedPair(report: { forEach(cb: (s: Record<string, unknown>) => void): void }): Omit<PeerAddress, 'id'> {
+  const byId = new Map<string, Record<string, unknown>>();
+  report.forEach((s) => {
+    if (typeof s.id === 'string') byId.set(s.id, s);
+  });
+  let pair: Record<string, unknown> | undefined;
+  for (const s of byId.values()) {
+    if (s.type === 'transport' && typeof s.selectedCandidatePairId === 'string') pair = byId.get(s.selectedCandidatePairId);
+  }
+  if (pair === undefined) {
+    for (const s of byId.values()) {
+      if (s.type === 'candidate-pair' && (s.selected === true || (s.nominated === true && s.state === 'succeeded'))) {
+        pair = s;
+        break;
+      }
+    }
+  }
+  if (pair === undefined) return { ...UNKNOWN_PAIR };
+  const remote = typeof pair.remoteCandidateId === 'string' ? byId.get(pair.remoteCandidateId) : undefined;
+  const local = typeof pair.localCandidateId === 'string' ? byId.get(pair.localCandidateId) : undefined;
+  const kind = (c: Record<string, unknown> | undefined): string =>
+    typeof c?.candidateType === 'string' && CANDIDATE_TYPES.has(c.candidateType) ? c.candidateType : '';
+  const remoteType = kind(remote);
+  const localType = kind(local);
+  const port = remote?.port;
+  const protocol = remote?.protocol;
+  const rtt = pair.currentRoundTripTime;
+  return {
+    // `ip` is the older name of `address`.
+    address: printable(remote?.address ?? remote?.ip, MAX_ADDRESS),
+    port: typeof port === 'number' && Number.isInteger(port) && port >= 0 && port <= 65535 ? port : null,
+    remoteType,
+    localType,
+    protocol: typeof protocol === 'string' && PROTOCOLS.has(protocol) ? protocol : '',
+    path: remoteType === 'relay' || localType === 'relay' ? 'relayed' : 'direct',
+    rttMs: typeof rtt === 'number' && Number.isFinite(rtt) && rtt >= 0 ? Math.round(rtt * 1000) : null,
+  };
+}
+
 /** The `p2p` part of the hls.js config, and the stats it fills in. */
 export function meshConfig(
   anchor: Anchor,
@@ -93,6 +300,7 @@ export function meshConfig(
   log: (m: string) => void,
   tuning: MeshTuning = {},
   nostr?: NostrSignaler,
+  book: PeerBook = new PeerBook(),
 ) {
   const windows =
     tuning.httpWindow === undefined
@@ -138,14 +346,25 @@ export function meshConfig(
       },
       onHlsJsCreated(hls: { p2pEngine: EngineEvents }) {
         const e = hls.p2pEngine;
-        e.addEventListener('onChunkDownloaded', (n: number, source: string) => {
+        e.addEventListener('onChunkDownloaded', (n: number, source: string, peerId?: string) => {
           if (source === 'p2p' || source === 'http') stats.bytes[source] += n;
+          if (source === 'p2p' && peerId !== undefined) book.received(peerId, n);
         });
-        e.addEventListener('onChunkUploaded', (n: number) => {
+        e.addEventListener('onChunkUploaded', (n: number, peerId?: string) => {
           stats.uploaded += n;
+          if (peerId !== undefined) book.sent(peerId, n);
         });
-        e.addEventListener('onPeerConnect', () => {
+        e.addEventListener('onSegmentLoaded', (d: { downloadSource?: string; peerId?: string }) => {
+          if (d.downloadSource === 'p2p' || d.downloadSource === 'http') stats.segments[d.downloadSource] += 1;
+          if (d.downloadSource === 'p2p' && d.peerId !== undefined) book.segment(d.peerId);
+        });
+        // The patched engine hands over the peer's RTCPeerConnection (PeerConnectDetails).
+        e.addEventListener('onPeerConnect', (d: { peerId?: string; infoHash?: string; trackerUrl?: string; connection?: unknown }) => {
           stats.peers += 1;
+          book.connect(d);
+        });
+        e.addEventListener('onPeerClose', (d: { peerId?: string; infoHash?: string }) => {
+          book.close(d);
         });
       },
     },
