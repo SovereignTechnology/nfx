@@ -263,6 +263,8 @@ struct RoomSpec {
     segments: Vec<String>,
     /// The video's network (its namespace): announcements for it count.
     network: String,
+    /// The video's address without its creator: the fallback scopes beacons by it.
+    video: String,
 }
 
 enum Control {
@@ -532,6 +534,7 @@ impl Mesh {
                 room: Room::derive(&video.web_stream_swarm_id(&id)),
                 segments,
                 network: network.clone(),
+                video: video.to_string(),
             });
             ids.push(id);
         }
@@ -692,9 +695,9 @@ impl NostrStun {
             .collect()
     }
 
-    /// The live (seeder, address) pairs of beacons alone, in the order first heard: what the
-    /// fallback may take from, never an announcement.
-    fn beacon_pairs(&self, now: u64) -> Vec<(String, String)> {
+    /// The live (video, seeder, address) triples of beacons alone, in the order first heard:
+    /// what the fallback may take from, never an announcement.
+    fn beacon_pairs(&self, now: u64) -> Vec<(String, String, String)> {
         let mut sources: Vec<(&(String, String), &Named)> = self
             .named
             .iter()
@@ -703,7 +706,16 @@ impl NostrStun {
         sources.sort_by_key(|(_, n)| n.heard);
         sources
             .into_iter()
-            .flat_map(|((seeder, _), n)| n.addrs.iter().map(move |a| (seeder.clone(), a.clone())))
+            .flat_map(|((seeder, source), n)| {
+                let video = source
+                    .strip_prefix("beacon ")
+                    .and_then(|a| a.splitn(3, ':').nth(2))
+                    .unwrap_or_default()
+                    .to_owned();
+                n.addrs
+                    .iter()
+                    .map(move |a| (video.clone(), seeder.clone(), a.clone()))
+            })
             .collect()
     }
 }
@@ -736,6 +748,9 @@ struct RoomState {
     reannounce_at: Instant,
     /// The video's network (its namespace).
     network: String,
+    /// The video's address without its creator (`<namespace>:<video-id>`), as a beacon's
+    /// source holds it: the fallback counts a beacon only for the peers of its own video.
+    video: String,
 }
 
 struct State {
@@ -934,10 +949,19 @@ impl State {
         let Some(ips) = self.fallback.peers.get(&(key.to_owned(), peer.to_owned())) else {
             return Vec::new();
         };
+        let (Some(room), Some(n)) = (self.rooms.get(key), &self.nostr_stun) else {
+            return Vec::new();
+        };
+        let named = n.beacon_pairs(unix_now());
         self.fallback
             .servers
             .iter()
-            .filter(|(_, server)| ips.contains(&server.ip()))
+            .filter(|(seeder, server)| {
+                ips.contains(&server.ip())
+                    && named.iter().any(|(video, s, a)| {
+                        *video == room.video && s == seeder && *a == server.to_string()
+                    })
+            })
             .filter_map(|(_, server)| self.fallback.mapped.get(server).copied())
             .collect()
     }
@@ -1059,6 +1083,7 @@ impl State {
                 backoff: OfferBackoff::default(),
                 reannounce_at: Instant::now(),
                 network: spec.network.clone(),
+                video: spec.video.clone(),
             });
             r.swarm = Swarm {
                 segments: spec.segments,
@@ -1334,14 +1359,30 @@ impl State {
             return;
         }
         let v4 = self.base.is_ipv4();
-        let beacons: Vec<(String, String)> = self
-            .nostr_stun
-            .as_ref()
-            .map(|n| n.beacon_pairs(unix))
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|(_, a)| a.parse::<SocketAddr>().is_ok_and(|a| a.is_ipv4() == v4))
-            .collect();
+        // A beacon counts only for the peers in the rooms of its own video.
+        let beacons: Vec<(String, String)> = {
+            let mut by_video: HashMap<&str, Vec<IpAddr>> = HashMap::new();
+            for ((k, _), ips) in &self.fallback.peers {
+                if let Some(r) = self.rooms.get(k) {
+                    by_video.entry(r.video.as_str()).or_default().extend(ips);
+                }
+            }
+            self.nostr_stun
+                .as_ref()
+                .map(|n| n.beacon_pairs(unix))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(video, _, a)| {
+                    a.parse::<SocketAddr>().is_ok_and(|a| {
+                        a.is_ipv4() == v4
+                            && by_video
+                                .get(video.as_str())
+                                .is_some_and(|ips| ips.contains(&a.ip()))
+                    })
+                })
+                .map(|(_, seeder, a)| (seeder, a))
+                .collect()
+        };
         let mut signaling: Vec<IpAddr> = self.fallback.peers.values().flatten().copied().collect();
         signaling.sort_unstable();
         signaling.dedup();

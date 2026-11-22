@@ -80,6 +80,7 @@ async fn state(max_peers: usize) -> State {
             backoff: OfferBackoff::default(),
             reannounce_at: now,
             network: "nfx:mainnet:1".into(),
+            video: "nfx:mainnet:1:salt-flats-dusk".into(),
         },
     );
     s
@@ -1049,8 +1050,14 @@ async fn own_stun_failing_falls_back_only_to_a_signaled_seeder_s_server() {
     feed(&mut s, &offer_at(&lo[1], "1.0.0.1:50000", now, 2));
     assert!(s.fallback.servers.is_empty() && !asks(&s, seeder));
 
-    // A peer at the beacon's address: asked at once, one server, counted in the status.
+    // A peer at the beacon's address, but in a room of another video: not a seeder of this one.
+    s.rooms.get_mut(&key).unwrap().video = "nfx:mainnet:1:another-video".into();
     feed(&mut s, &offer_at(&lo[2], "1.1.1.1:50000", now, 3));
+    assert!(s.fallback.servers.is_empty() && !asks(&s, seeder));
+    s.rooms.get_mut(&key).unwrap().video = "nfx:mainnet:1:salt-flats-dusk".into();
+
+    // A peer at the beacon's address: asked at once, one server, counted in the status.
+    s.select_fallback(Instant::now(), true);
     assert_eq!(s.fallback.servers.len(), 1);
     assert_eq!(s.fallback.servers[0].1, seeder);
     assert!(asks(&s, seeder));

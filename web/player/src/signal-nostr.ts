@@ -618,7 +618,7 @@ export class RoomClient {
       this.#release(peer, e);
       return null;
     }
-    if (extra.length > 0) this.#s.log(`mesh: no STUN mapping: also asking ${extra.length} seeder STUN server(s) at the address of ${peer.slice(0, 12)}…`);
+    if (extra.length > 0) this.#s.pool.log(`mesh: no STUN mapping: also asking ${extra.length} seeder STUN server(s) for one peer`);
     const n: Negotiation = { role, pc, fallback: extra.length > 0, offerId, answer: null, superseded: false, abort: new AbortController() };
     this.#negotiating.set(peer, n);
     return n;

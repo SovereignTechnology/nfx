@@ -101,8 +101,8 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   and got no mapping from any server it asks (no server-reflexive candidate when gathering
   finished; for a native client, none after its attempts) MAY also ask, for the connection
   to one peer, a STUN server named by a seeder, if all of this holds:
-  1. a live, verified beacon of the video names the server in its `stun` endpoint. A STUN
-     service announcement alone never qualifies;
+  1. a live, verified beacon of the video this connection is for names the server in its
+     `stun` endpoint. A STUN service announcement alone never qualifies;
   2. the client is **already signaling with that seeder**. A session key is deliberately
      not linked to the key that signs a beacon (§6.4), so the test is by address: the
      server's IP address is among the candidates of an SDP this peer has sent the client,
