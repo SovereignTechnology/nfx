@@ -60,12 +60,21 @@ export function beaconTracker(raw: string): string | null {
   return t !== null && t.startsWith('wss://') ? t : null;
 }
 
+/**
+ * Which addresses count as global unicast. `beacon` (beacon-named STUN servers) lets the
+ * documentation blocks pass: they reach nothing, and they point nowhere local. `ice` (the
+ * remote ICE candidates `remoteCandidates: 'global'` keeps, nutflix-pear ADR 0023 rule 5)
+ * refuses them too: 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 and 2001:db8::/32.
+ */
+export type GlobalRule = 'beacon' | 'ice';
+
 /** Whether an IPv4 address (as octets) is global unicast: none of the blocks that point a
  * viewer at its own network (this network, private, shared, loopback, link-local, IETF,
- * benchmarking) or that are not unicast (multicast, reserved, broadcast). Documentation
- * blocks pass: they reach nothing, and they point nowhere local. */
-function globalV4(o: number[]): boolean {
+ * benchmarking) or that are not unicast (multicast, reserved, broadcast), and under `ice`
+ * none of the documentation blocks. */
+function globalV4(o: number[], rule: GlobalRule): boolean {
   const [a = 0, b = 0, c = 0] = o;
+  const documentation = (a === 192 && b === 0 && c === 2) || (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113);
   return !(
     a === 0 ||
     a === 10 ||
@@ -76,43 +85,61 @@ function globalV4(o: number[]): boolean {
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) ||
     (a === 192 && b === 0 && c === 0) ||
-    (a === 198 && (b === 18 || b === 19))
+    (a === 198 && (b === 18 || b === 19)) ||
+    (rule === 'ice' && documentation)
   );
 }
 
 /**
- * A beacon-named STUN address (NFX-10 §1: canonical `ip:port`, port not 0) as an
- * `iceServers` URL, or null: global unicast only (IPv4 above, IPv6 in 2000::/3), so a beacon
- * from anywhere cannot point viewers at their own network.
+ * The family of `host` if it is an IP address in canonical text, else null. Canonical: IPv4
+ * as four decimal octets with no leading zeros; IPv6 as RFC 5952 writes it (lower case,
+ * zeros compressed, no zone, no embedded IPv4). Null for anything else: a name, an mDNS
+ * name, or another spelling of an address, which a reader elsewhere might take for a
+ * different address than this one does.
  */
-export function beaconStun(addr: string): string | null {
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/.exec(addr);
-  const v6 = /^\[([0-9a-f:]+)\]:(\d{1,5})$/.exec(addr);
-  const port = Number((v4 ?? v6)?.[(v4 ? 5 : 2)]);
-  if (!(Number.isInteger(port) && port >= 1 && port <= 65535)) return null;
+export function ipFamily(host: string): 4 | 6 | null {
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
   if (v4) {
     const parts = v4.slice(1, 5);
     const octets = parts.map(Number);
-    // Canonical: no leading zeros, each at most 255, and the port as written.
-    if (parts.some((p, i) => String(octets[i]) !== p) || octets.some((n) => n > 255)) return null;
-    if (String(port) !== v4[5] || !globalV4(octets)) return null;
-    return `stun:${parts.join('.')}:${port}`;
+    return parts.some((p, i) => String(octets[i]) !== p) || octets.some((n) => n > 255) ? null : 4;
   }
-  if (v6) {
-    const host = v6[1] ?? '';
-    let canonical: string;
-    try {
-      canonical = new URL(`http://[${host}]/`).hostname;
-    } catch {
-      return null;
-    }
+  if (!/^[0-9a-f:]+$/.test(host)) return null;
+  try {
     // WHATWG's serialisation is RFC 5952's, as the canonical form requires.
-    if (canonical !== `[${host}]` || String(port) !== v6[2]) return null;
-    const first = host.startsWith('::') ? 0 : parseInt(host.split(':')[0] ?? '', 16);
-    if (!(Number.isInteger(first) && (first & 0xe000) === 0x2000)) return null;
-    return `stun:[${host}]:${port}`;
+    return new URL(`http://[${host}]/`).hostname === `[${host}]` ? 6 : null;
+  } catch {
+    return null;
   }
-  return null;
+}
+
+/**
+ * Whether `host` is an IP address in canonical text (`ipFamily`) that is global unicast
+ * under `rule`: IPv4 by `globalV4`; IPv6 in 2000::/3, and under `ice` not in 2001:db8::/32.
+ */
+export function globalUnicast(host: string, rule: GlobalRule): boolean {
+  const family = ipFamily(host);
+  if (family === 4) return globalV4(host.split('.').map(Number), rule);
+  if (family !== 6) return false;
+  const first = host.startsWith('::') ? 0 : parseInt(host.split(':')[0] ?? '', 16);
+  if (!(Number.isInteger(first) && (first & 0xe000) === 0x2000)) return false;
+  return !(rule === 'ice' && host.startsWith('2001:db8:'));
+}
+
+/**
+ * A beacon-named STUN address (NFX-10 §1: canonical `ip:port`, port not 0) as an
+ * `iceServers` URL, or null: global unicast only (`globalUnicast`, rule `beacon`), so a
+ * beacon from anywhere cannot point viewers at their own network.
+ */
+export function beaconStun(addr: string): string | null {
+  const m = /^(?:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})|\[([0-9a-f:]+)\]):(\d{1,5})$/.exec(addr);
+  if (!m) return null;
+  const port = Number(m[3]);
+  // The port as written: no leading zeros, and not 0.
+  if (!(port >= 1 && port <= 65535) || String(port) !== m[3]) return null;
+  const host = m[1] ?? m[2] ?? '';
+  if (!globalUnicast(host, 'beacon')) return null;
+  return m[1] !== undefined ? `stun:${host}:${port}` : `stun:[${host}]:${port}`;
 }
 
 /** A beacon as nfx-wasm's `verifyBeacon` returns it (the fields used here). */
@@ -319,11 +346,22 @@ export function checkRelays(list: readonly string[]): string[] {
   return out;
 }
 
-/** The signaling a session may use, normalised; null for none; throws otherwise. */
+/**
+ * The signaling a session may use, normalised; null for none; throws otherwise. Nostr
+ * signaling keeps `remoteCandidates` when given (`all` or `global`). Trackers signaling
+ * refuses `remoteCandidates` other than `all`: their SDP goes through the engine's tracker
+ * clients, which this option does not filter, and a filter asked for must not be silently
+ * missing.
+ */
 export function checkSignaling(s: Signaling | undefined): Signaling | null {
   if (s === undefined) return null;
   const kind = (s as { kind?: unknown } | null)?.kind;
+  const remote = (s as { remoteCandidates?: unknown } | null)?.remoteCandidates;
+  if (!(remote === undefined || remote === 'all' || remote === 'global')) {
+    throw new TypeError(`nfx: remoteCandidates must be 'all' or 'global', not ${typeof remote === 'string' ? JSON.stringify(remote) : typeof remote}`);
+  }
   if (kind === 'trackers') {
+    if (remote === 'global') throw new TypeError("nfx: remoteCandidates 'global' needs nostr signaling");
     const urls = checkTrackers((s as { urls: string[] }).urls ?? []);
     if (urls.length === 0) throw new TypeError('nfx: trackers signaling needs at least one tracker');
     return { kind, urls };
@@ -331,7 +369,7 @@ export function checkSignaling(s: Signaling | undefined): Signaling | null {
   if (kind === 'nostr') {
     const relays = checkRelays((s as { relays: string[] }).relays ?? []);
     if (relays.length === 0) throw new TypeError('nfx: nostr signaling needs at least one relay');
-    return { kind, relays };
+    return remote === undefined ? { kind, relays } : { kind, relays, remoteCandidates: remote };
   }
   throw new TypeError(`nfx: signaling of kind ${JSON.stringify(kind)} is not in this build`);
 }
