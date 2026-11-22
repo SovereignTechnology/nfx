@@ -3,6 +3,16 @@
 //! can embed an NFX-04 scoped relay (§7). Everything here is wiring; the protocol lives
 //! in `nfx-node` and `nfx-proto`, but for [`stun`], a minimal STUN Binding responder.
 
+/// A status line on stderr. Unlike `eprintln!` it never panics: a journal or pipe that has
+/// gone away must not end a seeding node.
+#[macro_export]
+macro_rules! status {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr(), $($arg)*);
+    }};
+}
+
 pub mod daemon;
 pub mod key;
 pub mod package;
