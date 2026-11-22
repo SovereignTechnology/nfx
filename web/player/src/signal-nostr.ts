@@ -9,7 +9,9 @@
  *   30 s, and negotiates peer connections: the lower session key offers (NFX-10 §6.6), each
  *   SDP complete (ICE gathering finished) and NIP-44 encrypted to its receiver. A peer's
  *   SDP reaches `setRemoteDescription` through the session's `remoteCandidates` filter
- *   (./remote-sdp.ts; `all`, the default, passes it as it is). It claims a peer from the
+ *   (./remote-sdp.ts; `all`, the default, passes it as it is). When the session's own STUN
+ *   found no mapping, a connection may also ask a seeder's STUN server at that peer's own
+ *   address (`stunFallback`, ./stun-fallback.ts, NFX-10 §1). It claims a peer from the
  *   engine before negotiating and reports each peer connected or failed, so the engine
  *   keeps its peer de-duplication and limits.
  *
@@ -26,6 +28,7 @@ import { MeshRoom, MeshSession } from '../out/wasm/nfx_wasm.js';
 
 import type { RemoteCandidates } from './api';
 import { filterRemoteSdpCounted } from './remote-sdp';
+import type { StunFallbackBook } from './stun-fallback';
 import {
   LIMITS,
   OfferBackoff,
@@ -353,6 +356,8 @@ export class NostrSignaler {
     readonly log: (m: string) => void,
     /** Which candidates of a peer's SDP reach `setRemoteDescription` (./remote-sdp.ts). */
     readonly remoteCandidates: RemoteCandidates = 'all',
+    /** What to try when this session's own STUN fails; null (the default) for nothing. */
+    readonly stunFallback: StunFallbackBook | null = null,
   ) {
     this.session = newSession();
     this.pool = new RelayPool(relays, log);
@@ -393,6 +398,8 @@ function newSession(): MeshSession {
 interface Negotiation {
   role: 'offerer' | 'answerer';
   pc: RTCPeerConnection;
+  /** It also asks a fallback STUN server, so its gathering says nothing of the session's own. */
+  fallback: boolean;
   /** The offer's event id, once sent (offerer). */
   offerId: string | null;
   /** Hands the answer's SDP to the waiting offerer. */
@@ -532,6 +539,7 @@ export class RoomClient {
         break;
       case 'disconnect':
         this.#presence.add(r.sender, r.created_at, null, now);
+        this.#s.stunFallback?.forget(r.sender);
         break;
       case 'offer':
         this.#onOffer(r.sender, r.id, r.content ?? '');
@@ -590,6 +598,7 @@ export class RoomClient {
     if (!held || held.role !== 'offerer' || held.offerId !== offerId || held.answer === null) return;
     const sdp = this.#open(peer, content);
     if (sdp === null) return;
+    this.#s.stunFallback?.signaled(peer, sdp);
     const deliver = held.answer;
     held.answer = null;
     deliver(sdp);
@@ -598,13 +607,19 @@ export class RoomClient {
   /** A negotiation for `peer`, registered; null (and the claim released) if no peer connection could be made. */
   #begin(peer: string, role: Negotiation['role'], offerId: string | null): Negotiation | null {
     let pc: RTCPeerConnection;
+    let extra: string[] = [];
     try {
-      pc = new RTCPeerConnection(this.#ctx.rtcConfig());
+      const config = this.#ctx.rtcConfig();
+      extra = this.#s.stunFallback?.serversFor(peer, nowSeconds()) ?? [];
+      pc = new RTCPeerConnection(
+        extra.length === 0 ? config : { ...config, iceServers: [...(config?.iceServers ?? []), ...extra.map((urls) => ({ urls }))] },
+      );
     } catch (e) {
       this.#release(peer, e);
       return null;
     }
-    const n: Negotiation = { role, pc, offerId, answer: null, superseded: false, abort: new AbortController() };
+    if (extra.length > 0) this.#s.log(`mesh: no STUN mapping: also asking ${extra.length} seeder STUN server(s) at the address of ${peer.slice(0, 12)}…`);
+    const n: Negotiation = { role, pc, fallback: extra.length > 0, offerId, answer: null, superseded: false, abort: new AbortController() };
     this.#negotiating.set(peer, n);
     return n;
   }
@@ -619,6 +634,7 @@ export class RoomClient {
       await pc.setLocalDescription(await pc.createOffer());
       await this.#gathered(pc, n.abort.signal);
       this.#check(n, peer);
+      this.#noteGathered(n);
       const ev = this.#s.session.offer(this.#room!, peer, pc.localDescription!.sdp, random(32), nowSeconds());
       n.offerId = eventId(ev);
       // Armed before the offer goes out: its answer cannot come sooner.
@@ -649,6 +665,7 @@ export class RoomClient {
   }
 
   async #answer(peer: string, offerId: string, offerSdp: string): Promise<void> {
+    this.#s.stunFallback?.signaled(peer, offerSdp);
     const n = this.#begin(peer, 'answerer', offerId);
     if (n === null) return;
     const { pc } = n;
@@ -659,6 +676,7 @@ export class RoomClient {
       await pc.setLocalDescription(await pc.createAnswer());
       await this.#gathered(pc, n.abort.signal);
       this.#check(n, peer);
+      this.#noteGathered(n);
       const ev = this.#s.session.answer(this.#room!, peer, offerId, pc.localDescription!.sdp, random(32), nowSeconds());
       this.#publish(ev);
       this.#s.stats.answers += 1;
@@ -684,6 +702,11 @@ export class RoomClient {
       this.#s.log(`mesh: nostr SDP from ${peer.slice(0, 12)}…: ${f.kept} candidate(s) kept, ${f.dropped} dropped (remoteCandidates: global)`);
     }
     return f.sdp;
+  }
+
+  /** What a gathering with only the session's own servers says of them (`stunFallback`). */
+  #noteGathered(n: Negotiation): void {
+    if (!n.fallback) this.#s.stunFallback?.gathered(n.pc.localDescription?.sdp ?? '');
   }
 
   /** Throws unless `n` is still this peer's live negotiation. */

@@ -40,6 +40,7 @@ import {
   checkOriginSources,
   checkOrigins,
   checkSignaling,
+  checkStunFallbackServers,
   checkTrackers,
   globalUnicast,
   ipFamily,
@@ -48,7 +49,10 @@ import {
   pageOrigin,
   rankNamed,
   selectStun,
+  selectStunFallback,
+  stunHost,
 } from './src/endpoints';
+import { StunFallbackBook } from './src/stun-fallback';
 import {
   MAX_RENDITIONS,
   checkRenditions,
@@ -189,6 +193,7 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     trackers: ['wss://t1.example'],
     stunServers: [],
     stunNamed: [],
+    stunSeeders: [],
     seeders: 1,
     availability: allOf(1),
   });
@@ -203,11 +208,12 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     trackers: [],
     stunServers: [],
     stunNamed: [],
+    stunSeeders: [],
     seeders: 1,
     availability: allOf(1),
   });
   // It expires at NOW + 121.
-  eq('expired out', book.snapshot(NOW + 121), { origins: [], originSources: [], trackers: [], stunServers: [], stunNamed: [], seeders: 0, availability: allOf(0) });
+  eq('expired out', book.snapshot(NOW + 121), { origins: [], originSources: [], trackers: [], stunServers: [], stunNamed: [], stunSeeders: [], seeders: 0, availability: allOf(0) });
   eq('an expired beacon is refused', book.add(beacon(S(2), NOW, [https('https://c.example')]), NOW + 200), false);
 }
 {
@@ -231,6 +237,7 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     trackers: ['wss://ok.example'],
     stunServers: [],
     stunNamed: [],
+    stunSeeders: [],
     seeders: 1,
     availability: allOf(1),
   });
@@ -251,6 +258,7 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     trackers: ['wss://shared.example', 'wss://lonely.example'],
     stunServers: [],
     stunNamed: [],
+    stunSeeders: [],
     seeders: 3,
     availability: allOf(3),
   });
@@ -351,6 +359,7 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     trackers: ['wss://t0.example', 'wss://t1.example', 'wss://t2.example', 'wss://t3.example'],
     stunServers: [],
     stunNamed: [],
+    stunSeeders: [],
     seeders: 1,
     availability: allOf(1),
   });
@@ -1042,6 +1051,7 @@ const verified = JSON.parse(verifyBeacon(JSON.stringify(vector.event), vector.no
     trackers: ['wss://tracker.example/announce'],
     stunServers: [],
     stunNamed: [],
+    stunSeeders: [],
     seeders: 1,
     availability: allOf(1),
   });
@@ -1206,6 +1216,15 @@ throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(ve
   const v = JSON.parse(readFileSync(join(here, '../../spec/test-vectors/stun-select.json'), 'utf8')) as {
     max: number;
     cases: { name: string; own: string[]; named: [string, string][]; selected: string[] }[];
+    fallback: {
+      name: string;
+      own: string[];
+      in_use: string[];
+      mapped: boolean;
+      beacons: [string, string][];
+      signaling: string[];
+      selected: string[];
+    }[];
     global_unicast: { yes: string[]; no: string[] };
   };
   eq('max', v.max, MAX_ICE_SERVERS);
@@ -1223,6 +1242,82 @@ throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(ve
   }
   for (const a of v.global_unicast.yes) eq(`global unicast ${a}`, beaconStun(a) !== null, true);
   for (const a of v.global_unicast.no) eq(`not global unicast ${a}`, beaconStun(a), null);
+  // The fallback: the same verdicts, and an announcement is not even an input.
+  const url = (a: string): string => `stun:${a}`;
+  for (const c of v.fallback) {
+    const seeders: { seeder: string; urls: string[] }[] = [];
+    for (const [seeder, addr] of c.beacons) {
+      const held = seeders.find((s) => s.seeder === seeder);
+      if (held) held.urls.push(url(addr));
+      else seeders.push({ seeder, urls: [url(addr)] });
+    }
+    const got = selectStunFallback(c.own.map(url), c.in_use.map(url), c.mapped, seeders, c.signaling, v.max);
+    eq(`fallback ${c.name}`, got.map((p) => p.url), c.selected.map(url));
+  }
+  eq('fallback vector count', v.fallback.length, 17);
+}
+{
+  // The fallback as one session's state (NFX-10 §1).
+  const X = 'stun:1.1.1.1:3478';
+  const Y = 'stun:1.0.0.1:3478';
+  const OWN = 'stun:9.9.9.9:3478';
+  const sdpAt = (ip: string): string => `v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=candidate:1 1 udp 2122260223 ${ip} 50000 typ host\r\n`;
+  const noMapping = 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=candidate:1 1 udp 2122260223 abcd.local 50000 typ host\r\n';
+  const mapping = `${noMapping}a=candidate:2 1 udp 1686052607 1.2.3.4 41000 typ srflx raddr 0.0.0.0 rport 0\r\n`;
+  const seeders = [
+    { seeder: 's1', urls: [X], expiration: 1000 },
+    { seeder: 's2', urls: [Y], expiration: 2000 },
+  ];
+  const book = new StunFallbackBook({ own: [OWN], seeders: () => seeders }, [OWN]);
+  book.signaled('p1', sdpAt('1.1.1.1'));
+  eq('fallback: off until a gathering found no mapping', book.serversFor('p1', 500), []);
+  book.gathered(mapping);
+  eq('fallback: off while a mapping came back', book.serversFor('p1', 500), []);
+  book.gathered(noMapping);
+  eq('fallback: the seeder at this peer\'s address', book.serversFor('p1', 500), [X]);
+  eq('fallback: the same server again, for the same peer', book.serversFor('p1', 500), [X]);
+  eq('fallback: not a peer it never heard an SDP from', book.serversFor('p2', 500), []);
+  book.signaled('p3', sdpAt('8.8.8.8'));
+  eq('fallback: not a peer at no seeder\'s address', book.serversFor('p3', 500), []);
+  eq('fallback: an expired beacon names nothing', book.serversFor('p1', 1000), []);
+  book.forget('p1');
+  eq('fallback: not after the peer left', book.serversFor('p1', 500), []);
+  const before = 'v=0\r\na=candidate:1 1 udp 2122260223 1.1.1.1 50000 typ host\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n';
+  book.signaled('p4', before);
+  eq('fallback: a candidate outside any media section counts for nothing', book.serversFor('p4', 500), []);
+  book.gathered(mapping);
+  book.signaled('p1', sdpAt('1.1.1.1'));
+  eq('fallback: off again once a mapping came back', book.serversFor('p1', 500), []);
+
+  // At most 4 in the whole session, its own included, across peers.
+  const many = [1, 2, 3, 4].map((i) => ({ seeder: `s${i}`, urls: [`stun:1.1.1.${i}:3478`], expiration: 1000 }));
+  const capped = new StunFallbackBook({ own: [OWN], seeders: () => many }, [OWN, 'stun:9.9.9.10:3478']);
+  capped.gathered(noMapping);
+  const asked = [1, 2, 3, 4].flatMap((i) => {
+    capped.signaled(`p${i}`, sdpAt(`1.1.1.${i}`));
+    return capped.serversFor(`p${i}`, 500);
+  });
+  eq('fallback: two of its own, so two more in the session', asked, ['stun:1.1.1.1:3478', 'stun:1.1.1.2:3478']);
+
+  const broken = new StunFallbackBook({ own: [OWN], seeders: () => { throw new Error('page'); } }, [OWN]);
+  broken.gathered(noMapping);
+  broken.signaled('p1', sdpAt('1.1.1.1'));
+  eq('fallback: a page function that throws means none', broken.serversFor('p1', 500), []);
+
+  eq('stunHost', [X, 'stun:[2606:4700::1111]:3478', 'stun:10.0.0.1:3478', 'stuns:1.1.1.1:3478'].map(stunHost), ['1.1.1.1', '2606:4700::1111', null, null]);
+  const seedersFn = (): typeof seeders => seeders;
+  eq(
+    'checkSignaling keeps stunFallback',
+    checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], stunFallback: { own: [OWN], seeders: seedersFn } }),
+    { kind: 'nostr', relays: ['wss://r.example'], stunFallback: { own: [OWN], seeders: seedersFn } },
+  );
+  throws('stunFallback needs nostr', () => checkSignaling({ kind: 'trackers', urls: ['wss://t.example'], stunFallback: { own: [OWN], seeders: seedersFn } } as unknown as Signaling));
+  throws('stunFallback.own empty', () => checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], stunFallback: { own: [], seeders: seedersFn } }));
+  throws('stunFallback.own not STUN', () => checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], stunFallback: { own: ['https://x.example'], seeders: seedersFn } }));
+  throws('stunFallback.seeders not a function', () => checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], stunFallback: { own: [OWN], seeders: [] as never } }));
+  const withFallback: Signaling = { kind: 'nostr', relays: ['wss://r.example'], stunFallback: { own: [OWN], seeders: seedersFn } };
+  throws('stunFallback.own must be among iceServers', () => checkStunFallbackServers(withFallback, [{ urls: [X] }]));
+  checkStunFallbackServers(withFallback, [{ urls: [OWN] }]);
 }
 
 console.log(`unit: ${ran - bad}/${ran} ok`);

@@ -45,6 +45,7 @@ import {
   type RenditionAvailability,
   type Session,
   type Signaling,
+  type StunFallback,
   init,
   open,
   relayUrl,
@@ -164,9 +165,9 @@ const nostrRelays =
     ? [...new Set(relays.map(relayUrl).filter((r): r is string => r !== null))].slice(0, MAX_RELAYS)
     : [];
 /** The mesh over Nostr, or through these trackers, or no mesh. */
-const trackerSignaling = (urls: string[]): Signaling | undefined =>
+const trackerSignaling = (urls: string[], stunFallback?: StunFallback): Signaling | undefined =>
   nostrRelays.length > 0
-    ? { kind: 'nostr', relays: nostrRelays }
+    ? { kind: 'nostr', relays: nostrRelays, ...(stunFallback ? { stunFallback } : {}) }
     : urls.length > 0
       ? { kind: 'trackers', urls }
       : undefined;
@@ -205,6 +206,7 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
     trackers: [],
     stunServers: [],
     stunNamed: [],
+    stunSeeders: [],
     seeders: 0,
     availability: { seeders: 0, all: 0, renditions: [] },
   };
@@ -251,8 +253,10 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
         // Each beacon-named origin with the renditions beacons claim it serves (a hint the
         // library only orders by); the page's own hint makes no claim.
         const origins = fresh.map((o): string | OriginSource => heard.originSources.find((s) => s.url === o) ?? o);
+        // If the page's own STUN finds no mapping: a seeder's server at a peer's own address.
+        const stunFallback = ownStun.length > 0 ? { own: ownStun, seeders: () => heard.stunSeeders } : undefined;
         try {
-          await play({ ...common, iceServers: stun, manifestJson: m.event, origins, renditions: urlRenditions, signaling: trackerSignaling(trackers) });
+          await play({ ...common, iceServers: stun, manifestJson: m.event, origins, renditions: urlRenditions, signaling: trackerSignaling(trackers, stunFallback) });
           return;
         } catch (e) {
           log(e instanceof Error ? e.message : String(e));

@@ -1,5 +1,5 @@
 {
-  "description": "NFX-10 §1 STUN server selection. 'own' are the client's own servers; 'named' are [key, address] pairs, in the order heard, from live beacons' stun endpoints (the beacon's signer) and live announcements (the operator). 'selected' is what the client uses, in order: its own first, each once; then the named addresses that are global unicast in canonical form and not its own, ranked by the number of distinct keys naming each (most first, ties in the order first named); an address named by one key only when the client has none of its own and no named address has two or more keys; at most 'max' in all. 'global_unicast' lists addresses a client may and may not take from Nostr. Global unicast here also excludes the documentation blocks (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32, 3fff::/20), which route nowhere; beacons that name them in a stun endpoint stay valid beacons (beacon-stun.json), and only this selection refuses them. No traffic is ever sent to an address of a vector.",
+  "description": "NFX-10 §1 STUN server selection. 'own' are the client's own servers; 'named' are [key, address] pairs, in the order heard, from live beacons' stun endpoints (the beacon's signer) and live announcements (the operator). 'selected' is what the client uses, in order: its own first, each once; then the named addresses that are global unicast in canonical form and not its own, ranked by the number of distinct keys naming each (most first, ties in the order first named); an address named by one key only when the client has none of its own and no named address has two or more keys; at most 'max' in all. 'global_unicast' lists addresses a client may and may not take from Nostr. Global unicast here also excludes the documentation blocks (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32, 3fff::/20), which route nowhere; beacons that name them in a stun endpoint stay valid beacons (beacon-stun.json), and only this selection refuses them. 'fallback' is what a client may add when its own STUN failed: nothing unless it has servers of its own ('own') and none it asks ('in_use', its own included) gave a mapping ('mapped' false); then, in the order of 'beacons' ([seeder, address] of live verified beacons of the video), at most one server per seeder, global unicast, on a port of 1024 or above, not asked yet, whose IP address is in 'signaling' (the addresses of the candidates of the peers it is signaling with), while it asks fewer than 'max' in all. 'announced' servers are never taken on their own. No traffic is ever sent to an address of a vector.",
   "max": 4,
   "cases": [
     {
@@ -624,6 +624,475 @@
       ],
       "selected": [
         "1.1.1.1:3478"
+      ]
+    }
+  ],
+  "fallback": [
+    {
+      "name": "trigger-on",
+      "reason": "its own STUN gave no mapping, and a seeder it signals with names a server at that peer's address",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.1.1.1"
+      ],
+      "selected": [
+        "1.1.1.1:3478"
+      ]
+    },
+    {
+      "name": "trigger-off",
+      "reason": "a mapping came back: no fallback",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478"
+      ],
+      "mapped": true,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.1.1.1"
+      ],
+      "selected": []
+    },
+    {
+      "name": "no-server-of-its-own",
+      "reason": "a client with none of its own has rule 3, not this",
+      "own": [],
+      "in_use": [],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.1.1.1"
+      ],
+      "selected": []
+    },
+    {
+      "name": "seeder-not-signaled",
+      "reason": "a live beacon's server at an address no peer it signals with gave",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.0.0.1"
+      ],
+      "selected": []
+    },
+    {
+      "name": "nobody-signaled",
+      "reason": "not signaling with anyone",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [],
+      "selected": []
+    },
+    {
+      "name": "announcement-only",
+      "reason": "a server named only by an announcement, at a signaled address, is never taken",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478"
+      ],
+      "mapped": false,
+      "beacons": [],
+      "announced": [
+        [
+          "op1",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "signaling": [
+        "1.1.1.1"
+      ],
+      "selected": []
+    },
+    {
+      "name": "announcement-beside-a-beacon",
+      "reason": "the beacon is what counts",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "announced": [
+        [
+          "op1",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "signaling": [
+        "1.1.1.1"
+      ],
+      "selected": [
+        "1.1.1.1:3478"
+      ]
+    },
+    {
+      "name": "another-port",
+      "reason": "the address is what counts: a seeder's STUN port is not its ICE port",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:19302"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.1.1.1"
+      ],
+      "selected": [
+        "1.1.1.1:19302"
+      ]
+    },
+    {
+      "name": "one-per-seeder",
+      "reason": "one server per seeder, the first that matches",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:3478"
+        ],
+        [
+          "s1",
+          "1.1.1.1:19302"
+        ],
+        [
+          "s1",
+          "1.0.0.1:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.1.1.1",
+        "1.0.0.1"
+      ],
+      "selected": [
+        "1.1.1.1:3478"
+      ]
+    },
+    {
+      "name": "two-seeders",
+      "reason": "one each",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:3478"
+        ],
+        [
+          "s2",
+          "1.0.0.1:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.1.1.1",
+        "1.0.0.1"
+      ],
+      "selected": [
+        "1.1.1.1:3478",
+        "1.0.0.1:3478"
+      ]
+    },
+    {
+      "name": "at-most-four-in-all",
+      "reason": "with those it asks already",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478",
+        "1.1.1.11:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:3478"
+        ],
+        [
+          "s2",
+          "1.0.0.1:3478"
+        ],
+        [
+          "s3",
+          "8.8.8.8:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.1.1.1",
+        "1.0.0.1",
+        "8.8.8.8"
+      ],
+      "selected": [
+        "1.1.1.1:3478",
+        "1.0.0.1:3478"
+      ]
+    },
+    {
+      "name": "already-four",
+      "reason": "no room for one more",
+      "own": [
+        "1.1.1.11:3478",
+        "1.1.1.12:3478",
+        "1.1.1.13:3478",
+        "1.1.1.14:3478"
+      ],
+      "in_use": [
+        "1.1.1.11:3478",
+        "1.1.1.12:3478",
+        "1.1.1.13:3478",
+        "1.1.1.14:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.1.1.1"
+      ],
+      "selected": []
+    },
+    {
+      "name": "asked-already",
+      "reason": "a server it asks is not added; that seeder's next one may be",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478",
+        "1.1.1.1:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:3478"
+        ],
+        [
+          "s1",
+          "1.1.1.1:19302"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.1.1.1"
+      ],
+      "selected": [
+        "1.1.1.1:19302"
+      ]
+    },
+    {
+      "name": "documentation-refused",
+      "reason": "never a documentation address, even one a peer's SDP names",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "s0",
+          "192.0.2.1:3478"
+        ],
+        [
+          "s1",
+          "198.51.100.7:3478"
+        ],
+        [
+          "s2",
+          "203.0.113.10:3478"
+        ],
+        [
+          "s3",
+          "[2001:db8::1]:3478"
+        ],
+        [
+          "s4",
+          "[2001:db8:ffff::1]:3478"
+        ],
+        [
+          "s5",
+          "[3fff::1]:3478"
+        ],
+        [
+          "s6",
+          "[3fff:fff:ffff::1]:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "192.0.2.1",
+        "198.51.100.7",
+        "203.0.113.10",
+        "2001:db8::1",
+        "2001:db8:ffff::1",
+        "3fff::1",
+        "3fff:fff:ffff::1"
+      ],
+      "selected": []
+    },
+    {
+      "name": "not-public-refused",
+      "reason": "never an address that is not global unicast",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "10.0.0.1:3478"
+        ],
+        [
+          "s2",
+          "127.0.0.1:3478"
+        ],
+        [
+          "s3",
+          "[fe80::1]:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "10.0.0.1",
+        "127.0.0.1",
+        "fe80::1"
+      ],
+      "selected": []
+    },
+    {
+      "name": "well-known-port-refused",
+      "reason": "never a port below 1024: a beacon must not aim a client at a service such as DNS",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:53"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.1.1.1"
+      ],
+      "selected": []
+    },
+    {
+      "name": "ipv6",
+      "reason": "a global unicast IPv6 server",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "in_use": [
+        "9.9.9.9:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "[2606:4700::1111]:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "2606:4700::1111"
+      ],
+      "selected": [
+        "[2606:4700::1111]:3478"
       ]
     }
   ],

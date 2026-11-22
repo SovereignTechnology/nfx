@@ -18,6 +18,7 @@ use tokio::net::UdpSocket;
 use super::book::{OfferBackoff, PENDING_OFFERS_PER_ROOM, PresenceBook, SeenIds, SenderLimiter};
 use super::{
     Control, MAX_PEERS_PER_ROOM, MeshStatus, NAMED_PER_KEY, NostrStun, RoomState, State, Stun,
+    StunFallback,
 };
 use crate::nostr::to_nostr;
 use crate::rtc_serve::{Swarm, Uploader};
@@ -45,6 +46,7 @@ async fn state(max_peers: usize) -> State {
         public: None,
         stun: Stun::new(vec![], now),
         nostr_stun: None,
+        fallback: StunFallback::default(),
         portmapped: None,
         gathered: true,
         started: now,
@@ -965,4 +967,150 @@ async fn a_withdrawal_heard_first_holds_and_a_beacon_names_at_most_four() {
         .unwrap()
         .pairs(now, &std::collections::BTreeSet::new());
     assert_eq!(held.len(), super::MAX_STUN_ADDRS, "{held:?}");
+}
+
+/// An offer from `peer` whose one candidate is at `candidate`.
+fn offer_at(peer: &Session, candidate: &str, at: u64, nonce: u8) -> Event {
+    let mut rtc = Rtc::builder().build(Instant::now());
+    rtc.add_local_candidate(Candidate::host(candidate.parse().unwrap(), "udp").unwrap());
+    let mut api = rtc.sdp_api();
+    api.add_channel("webtorrent".into());
+    let (offer, _pending) = api.apply().unwrap();
+    let me = Session::new(ME, [9; 16]).unwrap();
+    peer.offer(
+        &room(),
+        me.pubkey(),
+        &offer.to_sdp_string(),
+        &[nonce; 32],
+        at,
+    )
+    .unwrap()
+}
+
+/// A Binding success from `server` for the request pending to it, reporting `mapped`.
+fn stun_reply(s: &mut State, server: SocketAddr, mapped: [u8; 4], port: u16) {
+    let (&tid, _) = s
+        .stun
+        .pending
+        .iter()
+        .find(|(_, (srv, _, _))| *srv == server)
+        .expect("a request to that server");
+    let mut resp = super::stun::binding_request(&tid).to_vec();
+    resp[0..2].copy_from_slice(&0x0101u16.to_be_bytes());
+    resp[3] = 12;
+    resp.extend_from_slice(&[0x00, 0x20, 0x00, 0x08, 0, 1]);
+    resp.extend_from_slice(&(port ^ 0x2112).to_be_bytes());
+    resp.extend(
+        mapped
+            .iter()
+            .zip([0x21u8, 0x12, 0xa4, 0x42])
+            .map(|(a, b)| a ^ b),
+    );
+    assert!(s.stun_response(&resp, server));
+}
+
+fn asks(s: &State, server: SocketAddr) -> bool {
+    s.stun.pending.values().any(|(a, _, _)| *a == server)
+}
+
+/// NFX-10 §1's fallback: with its own STUN silent, the node asks the server of a seeder's
+/// beacon only at the address of a peer it is signaling with, never one an announcement
+/// alone names; the mapping goes to that peer's connection only; and its own server's mapping
+/// ends it.
+#[tokio::test]
+async fn own_stun_failing_falls_back_only_to_a_signaled_seeder_s_server() {
+    let mut s = state(16).await;
+    s.base = "192.168.1.5:40000".parse().unwrap();
+    s.nostr_stun = Some(NostrStun::default());
+    s.nostr_stun.as_mut().unwrap().watched.insert(watched_a());
+    let own: SocketAddr = "9.9.9.9:3478".parse().unwrap();
+    s.stun.configured = vec![own];
+    s.stun.servers = vec![own];
+    let now = unix_now();
+    let key = room().pubkey().to_owned();
+    let (seeder, announced): (SocketAddr, SocketAddr) = (
+        "1.1.1.1:3478".parse().unwrap(),
+        "8.8.8.8:3478".parse().unwrap(),
+    );
+    let (_, lo) = peers();
+
+    // A beacon names one server, an operator announces another; rule 3 adds neither.
+    feed(&mut s, &beacon(1, &["1.1.1.1:3478"], now));
+    feed(
+        &mut s,
+        &announcement(2, "8.8.8.8:3478", "nfx:mainnet:1", now),
+    );
+    assert_eq!(servers(&s), [own.to_string()]);
+
+    // A peer at the announced server's address: an announcement alone is never taken.
+    feed(&mut s, &offer_at(&lo[0], "8.8.8.8:50000", now, 1));
+    assert!(s.fallback.servers.is_empty() && !asks(&s, announced));
+    // A peer at another address: that seeder is not one it is signaling with.
+    feed(&mut s, &offer_at(&lo[1], "1.0.0.1:50000", now, 2));
+    assert!(s.fallback.servers.is_empty() && !asks(&s, seeder));
+
+    // A peer at the beacon's address: asked at once, one server, counted in the status.
+    feed(&mut s, &offer_at(&lo[2], "1.1.1.1:50000", now, 3));
+    assert_eq!(s.fallback.servers.len(), 1);
+    assert_eq!(s.fallback.servers[0].1, seeder);
+    assert!(asks(&s, seeder));
+    assert!(s.status.lock().unwrap().stun.contains(&seeder.to_string()));
+
+    // Its mapping is for that peer's connection alone, never every SDP.
+    stun_reply(&mut s, seeder, [1, 2, 3, 4], 41000);
+    let mapping: SocketAddr = "1.2.3.4:41000".parse().unwrap();
+    assert!(!s.candidates().iter().any(|c| c.addr() == mapping));
+    assert_eq!(s.fallback_mappings(&key, lo[2].pubkey()), [mapping]);
+    assert!(s.fallback_mappings(&key, lo[1].pubkey()).is_empty());
+    assert!(s.no_mapping(), "a fallback's mapping is not its own");
+
+    // A mapping from its own server ends the fallback, and what it reported.
+    s.stun_send(own, 0, Instant::now());
+    stun_reply(&mut s, own, [5, 6, 7, 8], 42000);
+    assert!(s.fallback.servers.is_empty() && s.fallback.mapped.is_empty());
+    assert!(s.fallback_mappings(&key, lo[2].pubkey()).is_empty());
+}
+
+/// The fallback keeps to 4 STUN servers in all, one per seeder, and stops asking a server
+/// once no peer it signals with is at its address.
+#[tokio::test]
+async fn the_fallback_keeps_to_four_servers_and_to_peers_still_there() {
+    let mut s = state(16).await;
+    s.base = "192.168.1.5:40000".parse().unwrap();
+    s.nostr_stun = Some(NostrStun::default());
+    s.nostr_stun.as_mut().unwrap().watched.insert(watched_a());
+    let own: Vec<SocketAddr> = ["9.9.9.9:3478", "9.9.9.10:3478"]
+        .iter()
+        .map(|a| a.parse().unwrap())
+        .collect();
+    s.stun.configured.clone_from(&own);
+    s.stun.servers.clone_from(&own);
+    let now = unix_now();
+    let (_, lo) = peers();
+    // Three seeders, the first naming two servers at its address.
+    feed(&mut s, &beacon(1, &["1.1.1.1:3478", "1.1.1.1:19302"], now));
+    feed(&mut s, &beacon(2, &["1.0.0.1:3478"], now));
+    feed(&mut s, &beacon(3, &["8.8.8.8:3478"], now));
+    for (i, addr) in ["1.1.1.1:50000", "1.0.0.1:50000", "8.8.8.8:50000"]
+        .iter()
+        .enumerate()
+    {
+        let n = u8::try_from(i).unwrap();
+        feed(&mut s, &offer_at(&lo[i], addr, now, n + 1));
+    }
+    let got: Vec<String> = s
+        .fallback
+        .servers
+        .iter()
+        .map(|(_, a)| a.to_string())
+        .collect();
+    assert_eq!(got.len(), 2, "two of its own, so two more: {got:?}");
+    assert_eq!(got[0], "1.1.1.1:3478", "one per seeder");
+
+    // The peers go: their links die and they hold no presence, so the servers are dropped.
+    for l in &mut s.links {
+        l.conn.dead = true;
+    }
+    s.select_fallback(Instant::now(), false);
+    assert!(s.fallback.peers.is_empty() && s.fallback.servers.is_empty());
 }

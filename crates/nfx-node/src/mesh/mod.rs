@@ -43,6 +43,13 @@
 //!   all. A mapping such a server reports is offered only if it is global unicast, so a lying
 //!   server can add at most one useless candidate, never point peers at a private address.
 //!   It keeps [`MAX_NAMED`] sources of names at most, [`NAMED_PER_KEY`] per key.
+//! - **The fallback when its own STUN fails** (NFX-10 §1): with servers configured and no
+//!   mapping from any server after gathering, it also asks the server a live beacon of a
+//!   watched video names, one per seeder and within [`MAX_STUN`] in all, when that server's
+//!   IP address is among the candidates of a peer it is signaling with (a session key says
+//!   nothing of who signed a beacon, so the address is the test: its ICE agent is sent there
+//!   anyway). Never a server only an announcement names. The mapping goes only into the SDP
+//!   of that peer's next connection.
 //!
 //! Hardening:
 //! - A full agent sends checks to the addresses a peer's SDP names. Only
@@ -152,6 +159,8 @@ pub const NAMED_PER_KEY: usize = 8;
 /// STUN from Nostr: the addresses one source names, at most (a `stun` endpoint's limit;
 /// a beacon may carry several endpoints). The rest are not counted.
 pub const MAX_STUN_ADDRS: usize = nfx_proto::beacon::MAX_STUN_ADDRS;
+/// The fallback (NFX-10 §1): peers whose candidate addresses are held at most.
+const MAX_FALLBACK_PEERS: usize = 256;
 /// Manifest addresses (or networks) per subscription filter.
 const TAGS_PER_SUB: usize = 64;
 /// Stored announcements asked for per subscription.
@@ -439,6 +448,7 @@ impl Mesh {
             public: cfg.public,
             stun: Stun::new(cfg.stun.clone(), now),
             nostr_stun,
+            fallback: StunFallback::default(),
             portmapped: None,
             gathered: false,
             started: now,
@@ -598,6 +608,17 @@ impl Stun {
     }
 }
 
+/// NFX-10 §1's fallback for when no STUN server this node asks returned a mapping.
+#[derive(Debug, Default)]
+struct StunFallback {
+    /// By (room key, peer's session key): the candidate addresses of its last SDP.
+    peers: HashMap<(String, String), Vec<IpAddr>>,
+    /// The servers asked, each with the seeder whose beacon named it.
+    servers: Vec<(String, SocketAddr)>,
+    /// Per server, the mapping it last reported: offered only to a peer at its address.
+    mapped: HashMap<SocketAddr, SocketAddr>,
+}
+
 /// One source of STUN server names: a signer's newest beacon for one video, or its newest
 /// announcement of one server.
 #[derive(Debug, Clone)]
@@ -670,6 +691,21 @@ impl NostrStun {
             .flat_map(|((signer, _), n)| n.addrs.iter().map(move |a| (signer.clone(), a.clone())))
             .collect()
     }
+
+    /// The live (seeder, address) pairs of beacons alone, in the order first heard: what the
+    /// fallback may take from, never an announcement.
+    fn beacon_pairs(&self, now: u64) -> Vec<(String, String)> {
+        let mut sources: Vec<(&(String, String), &Named)> = self
+            .named
+            .iter()
+            .filter(|(_, n)| n.networks.is_none() && n.expiration > now)
+            .collect();
+        sources.sort_by_key(|(_, n)| n.heard);
+        sources
+            .into_iter()
+            .flat_map(|((seeder, _), n)| n.addrs.iter().map(move |a| (seeder.clone(), a.clone())))
+            .collect()
+    }
 }
 
 /// A connection with one peer in one room: who offered, and where the negotiation stands.
@@ -714,6 +750,8 @@ struct State {
     stun: Stun,
     /// STUN servers named over Nostr, when it learns them ([`MeshConfig::stun_from_nostr`]).
     nostr_stun: Option<NostrStun>,
+    /// What it asks when its own STUN gave no mapping (NFX-10 §1).
+    fallback: StunFallback,
     portmapped: Option<SocketAddr>,
     gathered: bool,
     started: Instant,
@@ -876,6 +914,34 @@ impl State {
         rtc
     }
 
+    /// The fallback's mappings (NFX-10 §1) as candidates of the connection to `peer` in room
+    /// `key` alone: those of the servers at an address that peer's SDP named.
+    fn add_fallback_candidates(&self, rtc: &mut Rtc, key: &str, peer: &str) {
+        let mut seen: Vec<SocketAddr> = self.candidates().iter().map(Candidate::addr).collect();
+        for addr in self.fallback_mappings(key, peer) {
+            if seen.len() >= MAX_LOCAL_CANDIDATES || seen.contains(&addr) {
+                continue;
+            }
+            if let Ok(c) = Candidate::server_reflexive(addr, self.arrival(), "udp") {
+                seen.push(addr);
+                rtc.add_local_candidate(c);
+            }
+        }
+    }
+
+    /// The mappings of the fallback servers at an address this peer's last SDP named.
+    fn fallback_mappings(&self, key: &str, peer: &str) -> Vec<SocketAddr> {
+        let Some(ips) = self.fallback.peers.get(&(key.to_owned(), peer.to_owned())) else {
+            return Vec::new();
+        };
+        self.fallback
+            .servers
+            .iter()
+            .filter(|(_, server)| ips.contains(&server.ip()))
+            .filter_map(|(_, server)| self.fallback.mapped.get(server).copied())
+            .collect()
+    }
+
     fn publish_status(&mut self) {
         let mut s = self.counts.clone();
         s.gathered = self.gathered;
@@ -884,7 +950,13 @@ impl State {
             .iter()
             .map(|c| format!("{} {}", c.kind(), c.addr()))
             .collect();
-        s.stun = self.stun.servers.iter().map(ToString::to_string).collect();
+        s.stun = self
+            .stun
+            .servers
+            .iter()
+            .chain(self.fallback.servers.iter().map(|(_, a)| a))
+            .map(ToString::to_string)
+            .collect();
         s.rooms = self.rooms.len();
         s.open = self.links.iter().filter(|l| l.opened).count();
         s.connecting = self.links.len() - s.open;
@@ -1209,23 +1281,139 @@ impl State {
         .iter()
         .filter_map(|a| a.parse().ok())
         .collect();
-        if chosen == self.stun.servers {
+        if chosen != self.stun.servers {
+            let fresh: Vec<SocketAddr> = chosen
+                .iter()
+                .filter(|s| !self.stun.servers.contains(s))
+                .copied()
+                .collect();
+            self.stun.mapped.retain(|s, _| chosen.contains(s));
+            let fallback = &self.fallback.servers;
+            self.stun
+                .pending
+                .retain(|_, (s, _, _)| chosen.contains(s) || fallback.iter().any(|(_, a)| a == s));
+            self.stun.servers = chosen;
+            if ask {
+                for server in fresh {
+                    self.stun_send(server, 0, now);
+                }
+            }
+            self.publish_status();
+        }
+        self.select_fallback(now, ask);
+    }
+
+    /// Whether no STUN server this node has asked returned a mapping (NFX-10 §1's trigger):
+    /// it has servers of its own, gathering has ended, and it has no address from elsewhere.
+    fn no_mapping(&self) -> bool {
+        self.gathered
+            && !self.stun.configured.is_empty()
+            && self.public.is_none()
+            && self.portmapped.is_none()
+            && !self
+                .stun
+                .servers
+                .iter()
+                .any(|s| self.stun.mapped.contains_key(s))
+    }
+
+    /// The fallback servers now (NFX-10 §1): those still named by their seeder's live beacon
+    /// at the address of a peer it is signaling with, then any the rule adds, within
+    /// [`MAX_STUN`] with the servers it asks anyway. None once a mapping came back.
+    fn select_fallback(&mut self, now: Instant, ask: bool) {
+        let unix = unix_now();
+        let (rooms, links) = (&self.rooms, &self.links);
+        self.fallback.peers.retain(|(k, p), _| {
+            rooms.get(k).is_some_and(|r| r.presence.present(p, unix))
+                || links
+                    .iter()
+                    .any(|l| !l.conn.dead && l.conn.swarm == *k && l.conn.remote == *p)
+        });
+        let mapped = !self.no_mapping();
+        if mapped && self.fallback.servers.is_empty() {
             return;
         }
-        let fresh: Vec<SocketAddr> = chosen
-            .iter()
-            .filter(|s| !self.stun.servers.contains(s))
-            .copied()
+        let v4 = self.base.is_ipv4();
+        let beacons: Vec<(String, String)> = self
+            .nostr_stun
+            .as_ref()
+            .map(|n| n.beacon_pairs(unix))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, a)| a.parse::<SocketAddr>().is_ok_and(|a| a.is_ipv4() == v4))
             .collect();
-        self.stun.mapped.retain(|s, _| chosen.contains(s));
-        self.stun.pending.retain(|_, (s, _, _)| chosen.contains(s));
-        self.stun.servers = chosen;
+        let mut signaling: Vec<IpAddr> = self.fallback.peers.values().flatten().copied().collect();
+        signaling.sort_unstable();
+        signaling.dedup();
+        let room = MAX_STUN.saturating_sub(self.stun.servers.len());
+        let keep: Vec<(String, SocketAddr)> = self
+            .fallback
+            .servers
+            .iter()
+            .filter(|(seeder, a)| {
+                !mapped
+                    && !self.stun.servers.contains(a)
+                    && signaling.contains(&a.ip())
+                    && beacons
+                        .iter()
+                        .any(|(k, x)| k == seeder && *x == a.to_string())
+            })
+            .take(room)
+            .cloned()
+            .collect();
+        let own: Vec<String> = self
+            .stun
+            .configured
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let in_use: Vec<String> = self
+            .stun
+            .servers
+            .iter()
+            .chain(keep.iter().map(|(_, a)| a))
+            .map(ToString::to_string)
+            .collect();
+        let pairs = beacons
+            .iter()
+            .filter(|(k, _)| !keep.iter().any(|(s, _)| s == k))
+            .map(|(k, a)| (k.as_str(), a.as_str()));
+        let fresh: Vec<(String, SocketAddr)> =
+            nfx_proto::stun::fallback(&own, &in_use, mapped, pairs, &signaling, MAX_STUN)
+                .into_iter()
+                .filter_map(|(k, a)| Some((k.to_owned(), a.parse().ok()?)))
+                .collect();
+        let chosen: Vec<(String, SocketAddr)> =
+            keep.into_iter().chain(fresh.iter().cloned()).collect();
+        if chosen == self.fallback.servers {
+            return;
+        }
+        self.fallback
+            .mapped
+            .retain(|s, _| chosen.iter().any(|(_, a)| a == s));
+        let servers = &self.stun.servers;
+        self.stun
+            .pending
+            .retain(|_, (s, _, _)| servers.contains(s) || chosen.iter().any(|(_, a)| a == s));
+        self.fallback.servers = chosen;
         if ask {
-            for server in fresh {
+            for (_, server) in fresh {
                 self.stun_send(server, 0, now);
             }
         }
         self.publish_status();
+    }
+
+    /// The candidate addresses of a peer's SDP (as filtered), for the fallback: only while
+    /// STUN is learnt from Nostr, and for at most [`MAX_FALLBACK_PEERS`] peers.
+    fn note_signaled(&mut self, key: &str, peer: &str, filtered: &str) {
+        if self.nostr_stun.is_none() {
+            return;
+        }
+        let k = (key.to_owned(), peer.to_owned());
+        if self.fallback.peers.len() < MAX_FALLBACK_PEERS || self.fallback.peers.contains_key(&k) {
+            self.fallback.peers.insert(k, sdp::candidate_ips(filtered));
+        }
     }
 
     /// Start a round, retransmit what is due, and end gathering once the first round is
@@ -1236,7 +1424,14 @@ impl State {
             self.select_stun(now, false);
             self.stun.next_round = now + STUN_REFRESH;
             self.stun.pending.clear();
-            for server in self.stun.servers.clone() {
+            let asked: Vec<SocketAddr> = self
+                .stun
+                .servers
+                .iter()
+                .chain(self.fallback.servers.iter().map(|(_, a)| a))
+                .copied()
+                .collect();
+            for server in asked {
                 self.stun_send(server, 0, now);
             }
         }
@@ -1275,7 +1470,14 @@ impl State {
             a.is_ipv4() == self.base.is_ipv4()
                 && (!learnt || nfx_proto::stun::is_global_unicast(a.ip()))
         }) {
-            self.stun.mapped.insert(server, addr);
+            // A fallback server's mapping is for the peer at its address alone.
+            if self.fallback.servers.iter().any(|(_, s)| *s == server) {
+                self.fallback.mapped.insert(server, addr);
+            } else {
+                self.stun.mapped.insert(server, addr);
+                // A mapping from its own servers ends the fallback.
+                self.select_fallback(Instant::now(), false);
+            }
         }
         true
     }
@@ -1615,6 +1817,7 @@ impl State {
             return;
         }
         let mut rtc = self.new_rtc(now);
+        self.add_fallback_candidates(&mut rtc, key, peer);
         let mut api = rtc.sdp_api();
         api.add_channel("nfx".into());
         let Some((offer, pending)) = api.apply() else {
@@ -1664,10 +1867,13 @@ impl State {
         let Ok(sdp) = self.session.open(r) else {
             return;
         };
-        let Ok(offer) = SdpOffer::from_sdp_string(&sdp::filter_candidates(&sdp, self.base)) else {
+        let filtered = sdp::filter_candidates(&sdp, self.base);
+        let Ok(offer) = SdpOffer::from_sdp_string(&filtered) else {
             return;
         };
+        self.note_signaled(key, &r.sender, &filtered);
         let mut rtc = self.new_rtc(now);
+        self.add_fallback_candidates(&mut rtc, key, &r.sender);
         let Ok(answer) = rtc.sdp_api().accept_offer(offer) else {
             return;
         };
@@ -1701,6 +1907,8 @@ impl State {
             opened: false,
             superseded: false,
         });
+        // With the link in place, so this peer counts as one it is signaling with.
+        self.select_fallback(now, true);
     }
 
     /// The answer to our pending offer to that peer, and only to it.
@@ -1725,9 +1933,10 @@ impl State {
         let Ok(sdp) = self.session.open(r) else {
             return;
         };
-        let base = self.base;
+        let filtered = sdp::filter_candidates(&sdp, self.base);
+        self.note_signaled(key, &r.sender, &filtered);
         let l = &mut self.links[i];
-        let answer = SdpAnswer::from_sdp_string(&sdp::filter_candidates(&sdp, base));
+        let answer = SdpAnswer::from_sdp_string(&filtered);
         let accepted = match (answer, l.pending.take()) {
             (Ok(answer), Some(pending)) => {
                 l.conn.rtc.sdp_api().accept_answer(pending, answer).is_ok()
@@ -1739,6 +1948,7 @@ impl State {
         } else {
             l.conn.dead = true;
         }
+        self.select_fallback(now, true);
     }
 }
 

@@ -71,6 +71,15 @@ makes a viewer ask more than 4 STUN servers, or one at an address that is not pu
 STUN server learns the viewer's address, and keys are free: a page that must not tell
 strangers who watches passes only its own servers to `open()`.
 
+If the page's own STUN fails, Nostr signaling can fall back, when asked to:
+`signaling: { kind: 'nostr', relays, stunFallback: { own, seeders: () => endpoints.stunSeeders } }`.
+Once a gathering ends with no server-reflexive candidate, a later connection to a peer also
+asks one STUN server per seeder, for that connection only, if a live beacon names it and its
+IP address is among the candidates that same peer's SDP gave (a session key is not linked
+to a beacon key, so the address is the test). Never a server only an announcement names or on
+a port below 1024, and at most 4 STUN servers in the session. `selectStunFallback` is the same rule as a pure
+function.
+
 `signaling` is how mesh peers find each other and exchange offers, answers and ICE
 candidates, wired into the engine in one place (`src/mesh.ts` `engineSignaling`). Two kinds:
 

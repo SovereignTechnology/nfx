@@ -17,6 +17,7 @@ MAX_TTL = 24 * 60 * 60
 MAX_NETWORKS = 8
 MAX_SERVERS = 4
 FUTURE_SKEW = 15 * 60
+MIN_FALLBACK_PORT = 1024
 CREATED_AT = 1_790_000_000
 NOW = CREATED_AT + 10
 
@@ -177,6 +178,30 @@ def select(own, named, maximum=MAX_SERVERS):
     return out
 
 
+def fallback(own, in_use, mapped, beacons, signaling, maximum=MAX_SERVERS):
+    """NFX-10 §1, the fallback when a client's own STUN failed: nothing unless it has servers
+    of its own and got no mapping; then, in the order of `beacons` ([seeder, address] from
+    live beacons, never an announcement), at most one server per seeder, usable, on a port of
+    1024 or above, not asked yet, at an address in `signaling` (those of the candidates of the
+    peers it signals with), while it asks fewer than `maximum` in all."""
+    if not own or mapped:
+        return []
+    asked = set(own) | set(in_use)
+    ips = {ipaddress.ip_address(s) for s in signaling}
+    out, seeders = [], set()
+    for seeder, addr in beacons:
+        if len(asked) >= maximum:
+            break
+        if seeder in seeders or addr in asked or not usable(addr):
+            continue
+        ip, port = canonical_addr(addr)
+        if port >= MIN_FALLBACK_PORT and ip in ips:
+            seeders.add(seeder)
+            asked.add(addr)
+            out.append(addr)
+    return out
+
+
 def stunad_vectors(keypair, nostr_event) -> dict:
     """NFX-10 §1 vectors. `keypair(seed)` and `nostr_event(sk, kind, tags, content,
     created_at)` are generate.py's helpers."""
@@ -328,6 +353,56 @@ def stunad_vectors(keypair, nostr_event) -> dict:
         select_out.append({"name": name, "reason": reason, "own": own, "named": named,
                            "selected": want})
 
+    # ---- the fallback when a client's own STUN failed (NFX-10 §1) ----
+    x_ip, y_ip, z_ip = "1.1.1.1", "1.0.0.1", "8.8.8.8"
+    x_other_port = "1.1.1.1:19302"
+    v6 = "[2606:4700::1111]:3478"
+    # name, reason, own, in_use, mapped, beacons, announced, signaling, selected
+    fallback_cases = [
+        ("trigger-on", "its own STUN gave no mapping, and a seeder it signals with names a server at "
+         "that peer's address", [own_a], [own_a], False, [["s1", x]], [], [x_ip], [x]),
+        ("trigger-off", "a mapping came back: no fallback", [own_a], [own_a], True,
+         [["s1", x]], [], [x_ip], []),
+        ("no-server-of-its-own", "a client with none of its own has rule 3, not this", [], [], False,
+         [["s1", x]], [], [x_ip], []),
+        ("seeder-not-signaled", "a live beacon's server at an address no peer it signals with gave",
+         [own_a], [own_a], False, [["s1", x]], [], [y_ip], []),
+        ("nobody-signaled", "not signaling with anyone", [own_a], [own_a], False, [["s1", x]], [], [], []),
+        ("announcement-only", "a server named only by an announcement, at a signaled address, is "
+         "never taken", [own_a], [own_a], False, [], [["op1", x]], [x_ip], []),
+        ("announcement-beside-a-beacon", "the beacon is what counts", [own_a], [own_a], False,
+         [["s1", x]], [["op1", x]], [x_ip], [x]),
+        ("another-port", "the address is what counts: a seeder's STUN port is not its ICE port",
+         [own_a], [own_a], False, [["s1", x_other_port]], [], [x_ip], [x_other_port]),
+        ("one-per-seeder", "one server per seeder, the first that matches", [own_a], [own_a], False,
+         [["s1", x], ["s1", x_other_port], ["s1", y]], [], [x_ip, y_ip], [x]),
+        ("two-seeders", "one each", [own_a], [own_a], False, [["s1", x], ["s2", y]], [],
+         [x_ip, y_ip], [x, y]),
+        ("at-most-four-in-all", "with those it asks already", [own_a], [own_a, six[0]], False,
+         [["s1", x], ["s2", y], ["s3", z]], [], [x_ip, y_ip, z_ip], [x, y]),
+        ("already-four", "no room for one more", six[:4], six[:4], False, [["s1", x]], [], [x_ip], []),
+        ("asked-already", "a server it asks is not added; that seeder's next one may be", [own_a],
+         [own_a, x], False, [["s1", x], ["s1", x_other_port]], [], [x_ip], [x_other_port]),
+        ("documentation-refused", "never a documentation address, even one a peer's SDP names",
+         [own_a], [own_a], False, [[f"s{i}", a] for i, a in enumerate(documentation)], [],
+         ["192.0.2.1", "198.51.100.7", "203.0.113.10", "2001:db8::1", "2001:db8:ffff::1", "3fff::1",
+          "3fff:fff:ffff::1"], []),
+        ("not-public-refused", "never an address that is not global unicast", [own_a], [own_a], False,
+         [["s1", "10.0.0.1:3478"], ["s2", "127.0.0.1:3478"], ["s3", "[fe80::1]:3478"]], [],
+         ["10.0.0.1", "127.0.0.1", "fe80::1"], []),
+        ("well-known-port-refused", "never a port below 1024: a beacon must not aim a client at "
+         "a service such as DNS", [own_a], [own_a], False, [["s1", "1.1.1.1:53"]], [], [x_ip], []),
+        ("ipv6", "a global unicast IPv6 server", [own_a], [own_a], False, [["s1", v6]], [],
+         ["2606:4700::1111"], [v6]),
+    ]
+    fallback_out = []
+    for name, reason, own, in_use, mapped, beacons, announced, signaling, want in fallback_cases:
+        got = fallback(own, in_use, mapped, [tuple(p) for p in beacons], signaling)
+        assert got == want, f"stun-select fallback {name}: {got} != {want}"
+        fallback_out.append({"name": name, "reason": reason, "own": own, "in_use": in_use,
+                             "mapped": mapped, "beacons": beacons, "announced": announced,
+                             "signaling": signaling, "selected": want})
+
     yes = ["8.8.8.8:3478", "1.1.1.1:3478", "100.63.255.255:3478", "100.128.0.0:3478",
            "172.15.255.255:3478", "172.32.0.0:3478", "192.0.1.255:3478", "192.0.3.0:3478",
            "198.17.255.255:3478", "198.20.0.0:3478", "198.51.99.255:3478", "198.51.101.0:3478",
@@ -370,9 +445,17 @@ def stunad_vectors(keypair, nostr_event) -> dict:
                            "excludes the documentation blocks (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, "
                            "2001:db8::/32, 3fff::/20), which route nowhere; beacons that name them in a stun endpoint "
                            "stay valid beacons (beacon-stun.json), and only this selection refuses them. "
+                           "'fallback' is what a client may add when its own STUN failed: nothing unless it "
+                           "has servers of its own ('own') and none it asks ('in_use', its own included) gave "
+                           "a mapping ('mapped' false); then, in the order of 'beacons' ([seeder, address] of "
+                           "live verified beacons of the video), at most one server per seeder, global "
+                           "unicast, on a port of 1024 or above, not asked yet, whose IP address is in 'signaling' (the addresses of the "
+                           "candidates of the peers it is signaling with), while it asks fewer than 'max' in "
+                           "all. 'announced' servers are never taken on their own. "
                            "No traffic is ever sent to an address of a vector.",
             "max": MAX_SERVERS,
             "cases": select_out,
+            "fallback": fallback_out,
             "global_unicast": {"yes": yes, "no": no},
         },
     }

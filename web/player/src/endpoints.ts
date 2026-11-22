@@ -4,7 +4,7 @@
  * still untrusted. A beacon names where to fetch, never what is right: every byte is
  * checked against the signed anchor whatever its source.
  */
-import type { Endpoints, OriginSource, RenditionAvailability, Signaling, StunNamed } from './api';
+import type { Endpoints, OriginSource, RenditionAvailability, SeederStun, Signaling, StunFallback, StunNamed } from './api';
 import { MAX_RENDITIONS, beaconRenditionId } from './levels';
 import { MAX_RELAYS, MAX_TRACKERS, relayUrl, trackerUrl } from './mesh';
 
@@ -191,6 +191,54 @@ export function selectStun(own: readonly string[], named: readonly StunNamed[], 
   return out;
 }
 
+/** The lowest port the STUN fallback asks: a beacon must not aim a viewer at a well-known service. */
+const MIN_FALLBACK_PORT = 1024;
+
+/** The host of a `stun:<ip>:<port>` URL as `beaconStun` writes it, else null. */
+export function stunHost(url: string): string | null {
+  const addr = url.startsWith('stun:') ? url.slice(5) : '';
+  if (beaconStun(addr) !== url) return null;
+  return addr.startsWith('[') ? addr.slice(1, addr.indexOf(']')) : addr.slice(0, addr.lastIndexOf(':'));
+}
+
+/**
+ * The fallback when a client's own STUN failed (NFX-10 §1): which servers it may also ask,
+ * each with the seeder that named it. Nothing unless it has servers of its own (`own`) and
+ * none it asks (`inUse`, its own included) returned a mapping (`mapped` false). Then, in the
+ * order of `seeders` (live verified beacons of this video, never an announcement), at most one
+ * server per seeder: global unicast, on a port of 1024 or above, not asked yet, whose IP
+ * address is in `signaling` (the candidate addresses of the peers it is signaling with), at
+ * most `max` STUN servers in all.
+ */
+export function selectStunFallback(
+  own: readonly string[],
+  inUse: readonly string[],
+  mapped: boolean,
+  seeders: readonly Pick<SeederStun, 'seeder' | 'urls'>[],
+  signaling: readonly string[],
+  max: number = MAX_ICE_SERVERS,
+): { seeder: string; url: string }[] {
+  const out: { seeder: string; url: string }[] = [];
+  if (own.length === 0 || mapped) return out;
+  const asked = new Set([...own, ...inUse]);
+  const taken = new Set<string>();
+  for (const { seeder, urls } of seeders) {
+    if (taken.has(seeder)) continue;
+    for (const url of urls) {
+      if (asked.size >= max) return out;
+      if (asked.has(url)) continue;
+      const host = stunHost(url);
+      if (host === null || !signaling.includes(host)) continue;
+      if (Number(url.slice(url.lastIndexOf(':') + 1)) < MIN_FALLBACK_PORT) continue;
+      asked.add(url);
+      taken.add(seeder);
+      out.push({ seeder, url });
+      break;
+    }
+  }
+  return out;
+}
+
 /** A STUN service announcement as nfx-wasm's `verifyStunAnnouncement` returns it. */
 export interface VerifiedStunAnnouncement {
   operator: string;
@@ -366,6 +414,7 @@ export class EndpointBook {
     /** [first heard, key, URL]: ties among STUN servers go to the one first heard. */
     const stunPairs: [number, string, string][] = [];
     const named = new Map<string, number>();
+    const stunSeeders: SeederStun[] = [];
     let seeders = 0;
     let holders = 0;
     let all = 0;
@@ -381,6 +430,7 @@ export class EndpointBook {
       }
       for (const t of e.trackers) trackers.set(t, (trackers.get(t) ?? 0) + 1);
       for (const s of e.stun) stunPairs.push([e.heard, seeder, s]);
+      if (e.stun.length > 0) stunSeeders.push({ seeder, urls: [...e.stun], expiration: e.expiration });
       if (e.holds === 'all') {
         holders += 1;
         all += 1;
@@ -410,6 +460,7 @@ export class EndpointBook {
       trackers: ranked(trackers).slice(0, MAX_TRACKERS),
       stunServers: selectStun([], stunNamed),
       stunNamed,
+      stunSeeders,
       seeders,
       availability,
     };
@@ -464,7 +515,7 @@ export function checkRelays(list: readonly string[]): string[] {
  * signaling keeps `remoteCandidates` when given (`all` or `global`). Trackers signaling
  * refuses `remoteCandidates` other than `all`: their SDP goes through the engine's tracker
  * clients, which this option does not filter, and a filter asked for must not be silently
- * missing.
+ * missing. `stunFallback` is for Nostr signaling only, for the same reason.
  */
 export function checkSignaling(s: Signaling | undefined): Signaling | null {
   if (s === undefined) return null;
@@ -473,8 +524,10 @@ export function checkSignaling(s: Signaling | undefined): Signaling | null {
   if (!(remote === undefined || remote === 'all' || remote === 'global')) {
     throw new TypeError(`nfx: remoteCandidates must be 'all' or 'global', not ${typeof remote === 'string' ? JSON.stringify(remote) : typeof remote}`);
   }
+  const fallback = (s as { stunFallback?: unknown } | null)?.stunFallback;
   if (kind === 'trackers') {
     if (remote === 'global') throw new TypeError("nfx: remoteCandidates 'global' needs nostr signaling");
+    if (fallback !== undefined) throw new TypeError('nfx: stunFallback needs nostr signaling');
     const urls = checkTrackers((s as { urls: string[] }).urls ?? []);
     if (urls.length === 0) throw new TypeError('nfx: trackers signaling needs at least one tracker');
     return { kind, urls };
@@ -482,9 +535,32 @@ export function checkSignaling(s: Signaling | undefined): Signaling | null {
   if (kind === 'nostr') {
     const relays = checkRelays((s as { relays: string[] }).relays ?? []);
     if (relays.length === 0) throw new TypeError('nfx: nostr signaling needs at least one relay');
-    return remote === undefined ? { kind, relays } : { kind, relays, remoteCandidates: remote };
+    return {
+      kind,
+      relays,
+      ...(remote === undefined ? {} : { remoteCandidates: remote }),
+      ...(fallback === undefined ? {} : { stunFallback: checkStunFallback(fallback) }),
+    };
   }
   throw new TypeError(`nfx: signaling of kind ${JSON.stringify(kind)} is not in this build`);
+}
+
+/** `stunFallback` as given: 1 to 4 distinct STUN URLs of the page's own, and a function. */
+function checkStunFallback(raw: unknown): StunFallback {
+  const f = raw as { own?: unknown; seeders?: unknown } | null;
+  const own = f?.own;
+  if (!Array.isArray(own) || own.length === 0 || own.length > MAX_ICE_SERVERS || !own.every((u) => typeof u === 'string' && STUN_URL.test(u))) {
+    throw new TypeError(`nfx: stunFallback.own must be 1 to ${MAX_ICE_SERVERS} stun: or stuns: URLs`);
+  }
+  if (typeof f?.seeders !== 'function') throw new TypeError('nfx: stunFallback.seeders must be a function');
+  return { own: [...new Set(own as string[])], seeders: f.seeders as StunFallback['seeders'] };
+}
+
+/** Throws unless every server `stunFallback` calls the page's own is one the session asks. */
+export function checkStunFallbackServers(s: Signaling | null, iceServers: readonly RTCIceServer[]): void {
+  if (s?.kind !== 'nostr' || s.stunFallback === undefined) return;
+  const asked = iceServers.flatMap((i) => i.urls);
+  if (!s.stunFallback.own.every((u) => asked.includes(u))) throw new TypeError('nfx: stunFallback.own must be among iceServers');
 }
 
 /** The ICE servers a session may use: STUN only, no credentials; throws otherwise. */

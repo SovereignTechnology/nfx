@@ -1136,3 +1136,34 @@ fn stun_selection_matches_the_vectors() {
         assert!(!stun::usable(&a), "{a}");
     }
 }
+
+/// NFX-10 §1's fallback gives exactly the vector's servers. The function takes no
+/// announcement at all: a server only `announced` cannot be picked.
+#[test]
+fn stun_fallback_matches_the_vectors() {
+    let v = vector!("stun-select.json");
+    let max = usize::try_from(v["max"].as_u64().unwrap()).unwrap();
+    let strings = |v: &Value| -> Vec<String> { serde_json::from_value(v.clone()).unwrap() };
+    let cases = v["fallback"].as_array().unwrap();
+    for case in cases {
+        let name = str_of(case, "name");
+        let beacons: Vec<Vec<String>> = serde_json::from_value(case["beacons"].clone()).unwrap();
+        let signaling: Vec<std::net::IpAddr> = strings(&case["signaling"])
+            .iter()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        let got: Vec<&str> = stun::fallback(
+            &strings(&case["own"]),
+            &strings(&case["in_use"]),
+            case["mapped"].as_bool().unwrap(),
+            beacons.iter().map(|p| (p[0].as_str(), p[1].as_str())),
+            &signaling,
+            max,
+        )
+        .into_iter()
+        .map(|(_, addr)| addr)
+        .collect();
+        assert_eq!(got, strings(&case["selected"]), "{name}");
+    }
+    assert_eq!(cases.len(), 17);
+}

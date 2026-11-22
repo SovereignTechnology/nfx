@@ -149,7 +149,10 @@ announcements name for their networks (below). It asks them after its own `--mes
 the rules every NFX client uses: global unicast addresses only, ranked by how many distinct
 keys name each, one named by a lone key only when it has none of its own and no better one
 is named, at most 4 in all. So `--mesh-stun` is optional where the network's relays carry
-beacons or announcements. `--mesh-stun-from-nostr=false` turns this off.
+beacons or announcements. `--mesh-stun-from-nostr=false` turns this off. If its `--mesh-stun`
+servers return no mapping, it also asks a server a seeder's beacon names, one per seeder and
+within the 4, when that server's IP is among the candidates of a peer it is signaling with,
+and uses the answer for that peer's connection only.
 
 Behind a DNAT, a VM's say, STUN cannot tell the node its public address when the STUN server
 is its own (that would take a UDP hairpin), and no gateway maps a port. Name the address with

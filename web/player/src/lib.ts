@@ -46,6 +46,7 @@ import type {
   Session,
   Signaling,
   Stats,
+  SeederStun,
   StunNamed,
 } from './api';
 import {
@@ -53,8 +54,10 @@ import {
   checkIceServers,
   checkOriginSources,
   checkSignaling as checkSignalingOption,
+  checkStunFallbackServers,
   originBase as beaconOrigin,
   selectStun as selectStunServers,
+  selectStunFallback as selectFallbackServers,
 } from './endpoints';
 import { MAX_RENDITIONS as LEVELS_MAX_RENDITIONS, checkRenditions, cutMaster, originOrder } from './levels';
 import {
@@ -67,6 +70,7 @@ import {
 import { type Probe, type Selection, describe as describeProbes, initUrl, probeStatus, selectRenditions } from './probe';
 import { MAX_REMOTE_CANDIDATES as SDP_MAX_REMOTE_CANDIDATES, filterRemoteSdp as filterSdp } from './remote-sdp';
 import { NostrSignaler } from './signal-nostr';
+import { StunFallbackBook } from './stun-fallback';
 import { resolveManifest as resolveOverRelays, watchEndpoints as watchBeacons } from './resolve';
 import { Anchor, MAX_HASH_LIST_BYTES, type ManifestBinding, loadWasm } from './verify';
 
@@ -129,6 +133,25 @@ export function originBase(url: string): string | null {
  */
 export function selectStun(own: readonly string[], named: readonly StunNamed[]): string[] {
   return selectStunServers(own, named);
+}
+
+/**
+ * The fallback when a client's own STUN failed (NFX-10 §1), as a pure function: the servers
+ * it may also ask, each with its seeder. Nothing unless it has servers of its own (`own`) and
+ * none it asks (`inUse`, its own included) returned a mapping (`mapped` false). Then at most
+ * one per seeder of `seeders` (`Endpoints.stunSeeders`, never an announcement): global unicast,
+ * on a port of 1024 or above, not asked yet, whose IP address is in `signaling` (the candidate addresses of the peers it
+ * is signaling with), at most 4 STUN servers in all. `open()` applies it for you when
+ * Nostr signaling is given `stunFallback`.
+ */
+export function selectStunFallback(
+  own: readonly string[],
+  inUse: readonly string[],
+  mapped: boolean,
+  seeders: readonly Pick<SeederStun, 'seeder' | 'urls'>[],
+  signaling: readonly string[],
+): { seeder: string; url: string }[] {
+  return selectFallbackServers(own, inUse, mapped, seeders, signaling);
 }
 
 /** Most candidates `remoteCandidates: 'global'` keeps from one SDP. */
@@ -200,6 +223,7 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
   const wanted = checkRenditions(options.renditions);
   const signaling = checkSignalingOption(options.signaling);
   const iceServers = checkIceServers(options.iceServers ?? []);
+  checkStunFallbackServers(signaling, iceServers);
   const autoplay = options.autoplay ?? true;
   const level = options.level;
   const httpWindow = options.httpWindow;
@@ -388,7 +412,10 @@ function start(
     mesh = { signaling: signaling.kind, trackers: [], relays: [], swarms: [], bytes: { http: 0, p2p: 0 }, uploaded: 0, peers: 0, rejected: [] };
     const HlsWithP2P = HlsJsP2PEngine.injectMixin(Hls);
     const tuning = o.httpWindow === undefined ? {} : { httpWindow: o.httpWindow };
-    if (signaling.kind === 'nostr') nostr = new NostrSignaler(signaling.relays, log, signaling.remoteCandidates ?? 'all');
+    if (signaling.kind === 'nostr') {
+      const fallback = signaling.stunFallback ? new StunFallbackBook(signaling.stunFallback, o.iceServers.flatMap((i) => i.urls)) : null;
+      nostr = new NostrSignaler(signaling.relays, log, signaling.remoteCandidates ?? 'all', fallback);
+    }
     hls = new HlsWithP2P({ ...base, ...meshConfig(anchor, signaling, o.iceServers, mesh, log, tuning, nostr) } as never);
     engine = `hls.js ${Hls.version} + ${P2P_ENGINE}`;
     const filtered = nostr?.remoteCandidates === 'global' ? ' (remote candidates: global unicast UDP only)' : '';

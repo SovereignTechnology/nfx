@@ -10,6 +10,7 @@
 //! - [`tags`]: the tags a sender writes.
 //! - [`is_global_unicast`] and [`usable`]: the addresses a client may take from Nostr.
 //! - [`select`]: which STUN servers a client uses, its own first, at most [`MAX_SERVERS`].
+//! - [`fallback`]: what it may add for a peer it signals with when its own returned no mapping.
 //!
 //! Pure: callers pass `now`.
 
@@ -34,6 +35,10 @@ pub const REANNOUNCE_EVERY: u64 = 12 * 60 * 60;
 pub const MAX_NETWORKS: usize = 8;
 /// Most STUN servers a client uses in all, its own included (NFX-10 §1's abuse bound).
 pub const MAX_SERVERS: usize = 4;
+
+/// The lowest port the fallback ([`fallback`]) asks: a beacon from any key must not aim a
+/// client's request at a well-known service (DNS, NTP, SNMP, and so on).
+pub const MIN_FALLBACK_PORT: u16 = 1024;
 
 /// An announcement that passed NFX-10 §1 at time `now`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +245,52 @@ where
         }
         if keys.len() >= 2 || lone_ok {
             out.push(addr.to_owned());
+        }
+    }
+    out
+}
+
+/// The fallback when a client's own STUN failed (NFX-10 §1): the servers it may also ask, as
+/// `(seeder, addr)`, in the order of `beacons`. Empty unless the client has servers of its own
+/// (`own`) and none of those it asks (`in_use`, its own included) returned a mapping
+/// (`mapped` false). `beacons` are the (seeder, address) pairs of the `stun` endpoints of the
+/// live, verified beacons of this video, in the order heard, and never an announcement's.
+/// `signaling` are the addresses of the candidates in the SDP of the peers it is signaling
+/// with: a session key says nothing of who signed a beacon (NFX-10 §6.4), so a server counts
+/// only at an address the client's ICE agent was given anyway. At most one per seeder, only
+/// [`usable`] addresses on a port of at least [`MIN_FALLBACK_PORT`] that it does not ask yet,
+/// and at most `max` servers in all.
+pub fn fallback<'a, I>(
+    own: &[String],
+    in_use: &[String],
+    mapped: bool,
+    beacons: I,
+    signaling: &[IpAddr],
+    max: usize,
+) -> Vec<(&'a str, &'a str)>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let mut out = Vec::new();
+    if own.is_empty() || mapped {
+        return out;
+    }
+    let mut asked: BTreeSet<&str> = own.iter().chain(in_use).map(String::as_str).collect();
+    let mut seeders: BTreeSet<&str> = BTreeSet::new();
+    for (seeder, addr) in beacons {
+        if asked.len() >= max {
+            break;
+        }
+        if seeders.contains(seeder) || asked.contains(addr) || !usable(addr) {
+            continue;
+        }
+        if addr
+            .parse::<SocketAddr>()
+            .is_ok_and(|a| a.port() >= MIN_FALLBACK_PORT && signaling.contains(&a.ip()))
+        {
+            seeders.insert(seeder);
+            asked.insert(addr);
+            out.push((seeder, addr));
         }
     }
     out
@@ -478,5 +529,46 @@ mod tests {
         ];
         let pairs = refused.iter().flat_map(|a| [("k1", *a), ("k2", *a)]);
         assert!(select(&[], pairs, MAX_SERVERS).is_empty());
+    }
+
+    #[test]
+    fn the_fallback_takes_only_a_signaled_seeder_s_server() {
+        let own = vec!["9.9.9.9:3478".to_owned()];
+        let (x, y) = ("1.1.1.1:3478", "1.0.0.1:3478");
+        let at = |s: &str| -> IpAddr { s.parse().unwrap() };
+        let ips = [at("1.1.1.1")];
+        // The trigger, on and off; no server of its own, no fallback.
+        assert_eq!(
+            fallback(&own, &own, false, [("s1", x)], &ips, MAX_SERVERS),
+            [("s1", x)]
+        );
+        assert!(fallback(&own, &own, true, [("s1", x)], &ips, MAX_SERVERS).is_empty());
+        assert!(fallback(&[], &[], false, [("s1", x)], &ips, MAX_SERVERS).is_empty());
+        // A seeder not being signaled with.
+        assert!(fallback(&own, &own, false, [("s1", y)], &ips, MAX_SERVERS).is_empty());
+        // One per seeder, whichever of its addresses match.
+        let same = "1.1.1.1:19302";
+        assert_eq!(
+            fallback(&own, &own, false, [("s1", x), ("s1", same)], &ips, 4),
+            [("s1", x)]
+        );
+        // At most `max` with those it asks already, and never one it asks.
+        let full: Vec<String> = (1..=4).map(|i| format!("9.9.9.{i}:3478")).collect();
+        assert!(fallback(&full, &full, false, [("s1", x)], &ips, 4).is_empty());
+        let asked = vec![own[0].clone(), x.to_owned()];
+        assert_eq!(
+            fallback(&own, &asked, false, [("s1", x), ("s1", same)], &ips, 4),
+            [("s1", same)]
+        );
+        // Never an address that is not global unicast, even one a peer's SDP names.
+        let private = [at("10.0.0.1"), at("203.0.113.10")];
+        let refused = [("s1", "10.0.0.1:3478"), ("s2", "203.0.113.10:3478")];
+        assert!(fallback(&own, &own, false, refused, &private, 4).is_empty());
+        // Nor a well-known port, at an address that would otherwise count.
+        assert!(fallback(&own, &own, false, [("s1", "1.1.1.1:53")], &ips, 4).is_empty());
+        assert_eq!(
+            fallback(&own, &own, false, [("s1", "1.1.1.1:1024")], &ips, 4),
+            [("s1", "1.1.1.1:1024")]
+        );
     }
 }

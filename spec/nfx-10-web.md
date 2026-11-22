@@ -97,8 +97,31 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   3. a server named by one key alone only when the client has none of its own and no named
      server has two keys or more: a lone stranger's key adds no server beside a better one;
   4. at most 4 STUN servers in all.
+- **A fallback when a client's own STUN fails.** A client that has STUN servers of its own
+  and got no mapping from any server it asks (no server-reflexive candidate when gathering
+  finished; for a native client, none after its attempts) MAY also ask, for the connection
+  to one peer, a STUN server named by a seeder, if all of this holds:
+  1. a live, verified beacon of the video names the server in its `stun` endpoint. A STUN
+     service announcement alone never qualifies;
+  2. the client is **already signaling with that seeder**. A session key is deliberately
+     not linked to the key that signs a beacon (§6.4), so the test is by address: the
+     server's IP address is among the candidates of an SDP this peer has sent the client,
+     which its ICE agent checks anyway. A beacon's server at any other address is not asked;
+  3. the address is global unicast (above) and its port is 1024 or above, so a beacon cannot
+     aim a client at a well-known service;
+  4. one server per seeder, and at most 4 STUN servers in all, those it asks already
+     included.
+
+  What that server reports is used for that peer's connection only. A client with no server
+  of its own has rule 3 above and not this. A client that offers learns the peer's addresses
+  from its answer, so the fallback applies from its next attempt with that peer. The test
+  shows where the request goes, not who signed the beacon: a peer can copy a seeder's address
+  into its SDP, but it could already make the client's ICE agent send checks there. A seeder
+  whose STUN server is at another address than its candidates is not reached this way.
+  `stun-select.json` pins the rule (`fallback`).
 - **The abuse bound.** Whatever beacons and announcements say, Nostr never makes a client
-  contact more than 4 STUN servers, or any address that is not global unicast: a beacon or
+  contact more than 4 STUN servers, the fallback's included, or any address that is not
+  global unicast: a beacon or
   announcement from anywhere must not point viewers at their own network. A native client
   that offers a server-reflexive candidate (§6) offers a mapping reported by a server named
   over Nostr only if that mapping is global unicast, so a lying server adds at most one
@@ -109,7 +132,9 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   and when it gathers, as a tracker does. Beacons and announcements come from any key, so
   "most keys" counts keys a stranger can multiply: a client that must not tell strangers
   who watches uses only its own STUN servers, or named ones only from keys it trusts. An
-  announcement ties the server's address to its operator's key, publicly.
+  announcement ties the server's address to its operator's key, publicly. The fallback tells
+  no new address about the client: it asks only an IP address the peer it is connecting to
+  already gave its ICE agent to check.
 
 ## 2. Swarms and bridges
 
@@ -732,3 +757,10 @@ with full ICE, and a NAT test.
   refused with the rest. The privacy note now covers announcements. (Was: beacon-named
   servers only, "at most a few", most-named first, documentation addresses allowed.) New
   vectors `stun-announcement.json` and `stun-select.json`.
+- Draft 2026-11-22 (issue #104): §1 adds a fallback for a client whose own STUN servers gave
+  no mapping: it may also ask a STUN server named by the live beacon of a seeder it is
+  already signaling with, one per seeder, within the limit of 4, for that peer's connection
+  only, on a port of 1024 or above, and never one only an announcement names. Since session keys are not linked to
+  beacon keys (§6.4), "signaling with" is tested by address: the server's IP must be among
+  that peer's SDP candidates. The rest of the selection is unchanged. `stun-select.json`
+  gains `fallback` cases.
