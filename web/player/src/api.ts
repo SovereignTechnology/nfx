@@ -202,8 +202,9 @@ export interface MeshPeer {
 }
 
 /**
- * Where an open mesh connection goes, by the browser's own statistics of its selected ICE
- * candidate pair (`Session.addresses()`).
+ * Where an open mesh peer's connection goes, by the browser's own statistics of its selected
+ * ICE candidate pair (`Session.addresses()`). One per peer: a peer connected in several swarms
+ * (renditions) is reported by its first open connection.
  *
  * **These are other viewers' IP addresses.** A page shows them only when its user asks,
  * and never logs, stores or sends them.
@@ -428,10 +429,10 @@ export interface Session {
   setLevel(index: number): void;
   stats(): Stats;
   /**
-   * Where each open mesh connection goes (`PeerAddress`), read from the browser's
-   * `getStats()` of each peer connection when called, and only then. Empty without a mesh,
-   * or once destroyed. At most 64. These are other viewers' IP addresses: call it only when
-   * the user asks to see them.
+   * Where each open mesh peer's connection goes (`PeerAddress`, one per peer), read from the
+   * browser's `getStats()` when called, and only then. Empty without a mesh, or once destroyed.
+   * At most 64. These are other viewers' IP addresses: call it only when the user asks to see
+   * them.
    */
   addresses(): Promise<PeerAddress[]>;
   /**

@@ -53,8 +53,9 @@ refused, it says where the bytes came from:
 - `mesh.signal`: the Nostr kind's counters (events sent and received, offers, answers) and
   how many of its relay sockets are open.
 
-`addresses()` reads each open peer connection's selected ICE candidate pair from the
-browser's `getStats()` (`PeerAddress`: the remote address and port as the browser reports
+`addresses()` reads the selected ICE candidate pair of each open peer (one per peer: its first
+open connection, when it is connected in several swarms) from the browser's `getStats()`
+(`PeerAddress`: the remote address and port as the browser reports
 them, both candidate types, `direct` or `relayed` through TURN, the round-trip time). It
 runs only when called. **These are other viewers' IP addresses**: a page asks only when its
 user asks to see them, and never logs, stores or sends them. The test page shows them behind
