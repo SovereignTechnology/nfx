@@ -10,7 +10,8 @@
  * (`beacon.json`, `beacon-renditions.json`) run through nfx-wasm into the book, so the shape
  * `verifyBeacon` returns is the shape the book reads, and the hash list vector through
  * nfx-wasm into what `open()` reads of it; the NFX-10 §6 vectors run through nfx-wasm's
- * MeshSession, which builds and reads every signaling event in the browser.
+ * MeshSession, which builds and reads every signaling event in the browser; and the stats
+ * panel's per-peer book and candidate-pair reader (nfx #99).
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -47,7 +48,8 @@ import {
   probeOrder,
   sessionRenditions,
 } from './src/levels';
-import { MAX_RELAYS, relayUrl } from './src/mesh';
+import { MAX_PEERS_LISTED, MAX_RELAYS, PeerBook, printable, relayUrl, selectedPair } from './src/mesh';
+import { addressText, formatBytes, nerdView, pathText, shortId, typingInto } from './src/nerd';
 import {
   PROBE_CONCURRENCY,
   PROBE_MAX_BYTES,
@@ -1072,6 +1074,161 @@ throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(ve
     eq(`ignored vector ${c.name}`, typeof r.ignored, 'string');
   }
   eq('vector counts', [bad.rejected.length, bad.ignored.length], [36, 7]);
+}
+
+{
+  // The stats panel's sources (nfx #99): per-peer counters from the engine's events, and the
+  // selected candidate pair of each open connection, read only when asked.
+  type Stat = Record<string, unknown>;
+  const report = (stats: Stat[]) => ({ forEach: (cb: (s: Stat) => void) => stats.forEach(cb) });
+  const conn = (stats: Stat[], state = 'connected') => ({ connectionState: state, getStats: async () => report(stats) });
+  const chrome: Stat[] = [
+    { id: 'T1', type: 'transport', selectedCandidatePairId: 'P2' },
+    { id: 'P1', type: 'candidate-pair', nominated: true, state: 'succeeded', localCandidateId: 'L1', remoteCandidateId: 'R1' },
+    { id: 'P2', type: 'candidate-pair', nominated: true, state: 'succeeded', localCandidateId: 'L1', remoteCandidateId: 'R2', currentRoundTripTime: 0.0234 },
+    { id: 'L1', type: 'local-candidate', candidateType: 'srflx', address: '198.51.100.7', port: 50000, protocol: 'udp' },
+    { id: 'R1', type: 'remote-candidate', candidateType: 'host', address: 'x.local', port: 1, protocol: 'udp' },
+    { id: 'R2', type: 'remote-candidate', candidateType: 'srflx', address: '203.0.113.9', port: 61234, protocol: 'udp' },
+  ];
+  eq('pair: the transport names it', selectedPair(report(chrome)), {
+    address: '203.0.113.9', port: 61234, remoteType: 'srflx', localType: 'srflx', protocol: 'udp', path: 'direct', rttMs: 23,
+  });
+  eq('pair: a TURN relay on either side is relayed', selectedPair(report([
+    { id: 'P', type: 'candidate-pair', selected: true, localCandidateId: 'L', remoteCandidateId: 'R' },
+    { id: 'L', type: 'local-candidate', candidateType: 'relay' },
+    { id: 'R', type: 'remote-candidate', candidateType: 'host', ip: '192.0.2.1', port: 9, protocol: 'tcp' },
+  ])), { address: '192.0.2.1', port: 9, remoteType: 'host', localType: 'relay', protocol: 'tcp', path: 'relayed', rttMs: null });
+  eq('pair: none selected yet', selectedPair(report([
+    { id: 'P', type: 'candidate-pair', nominated: true, state: 'in-progress', localCandidateId: 'L', remoteCandidateId: 'R' },
+  ])).path, 'unknown');
+  eq('pair: hostile values are bounded', selectedPair(report([
+    { id: 'T', type: 'transport', selectedCandidatePairId: 'P' },
+    { id: 'P', type: 'candidate-pair', localCandidateId: 'L', remoteCandidateId: 'R', currentRoundTripTime: -1 },
+    { id: 'L', type: 'local-candidate', candidateType: '<b>' },
+    { id: 'R', type: 'remote-candidate', candidateType: 'evil', address: `a\u0000<script>${'9'.repeat(100)}`, port: 70000, protocol: 'sctp' },
+  ])), { address: `a?<script>${'9'.repeat(54)}`, port: null, remoteType: '', localType: '', protocol: '', path: 'direct', rttMs: null });
+  eq('printable: control and non-ASCII characters', printable('-NX0100-\u0007é', 64), '-NX0100-??');
+  eq('printable: not a string', printable(42, 64), '');
+
+  let t = 1000;
+  const book = new PeerBook(() => t);
+  const a = conn(chrome);
+  book.connect({ peerId: 'peerA', infoHash: 'h720', trackerUrl: 'nostr:wss://relay.example', connection: a });
+  book.connect({ peerId: 'peerA', infoHash: 'h360', trackerUrl: 'nostr:wss://relay.example', connection: conn(chrome) });
+  book.connect({ peerId: 'peerB', infoHash: 'h720', trackerUrl: 'wss://tracker.example', connection: conn([], 'closed') });
+  t = 2000;
+  book.received('peerA', 1000);
+  book.received('peerA', 500);
+  book.segment('peerA');
+  book.sent('peerB', 70);
+  book.received('stranger', 5); // bytes before (or without) a connect still count
+  eq('connected: closed connections do not count', book.connected(), 2);
+  eq('peer list: open first, then most bytes', book.list().map((p) => [p.id, p.connected, p.down, p.up, p.segments]), [
+    ['peerA', true, 1500, 0, 1],
+    ['peerB', false, 0, 70, 0],
+    ['stranger', false, 5, 0, 0],
+  ]);
+  eq('peer list: via and times', (({ via, since, last }) => ({ via, since, last }))(book.list()[0]!), { via: 'nostr:wss://relay.example', since: 1000, last: 2000 });
+  book.close({ peerId: 'peerA', infoHash: 'h360' });
+  eq('close: one swarm of two', book.connected(), 1);
+  const released = new PeerBook(() => t);
+  released.connect({ peerId: 'r', infoHash: 'h', trackerUrl: '', connection: conn(chrome) });
+  released.received('r', 9);
+  released.release();
+  eq('release: connections dropped, counters kept', [released.connected(), released.list()[0]?.down], [0, 9]);
+  const asked: string[] = [];
+  const spied = { connectionState: 'connected', getStats: async () => (asked.push('x'), report(chrome)) };
+  const quiet = new PeerBook(() => t);
+  quiet.connect({ peerId: 'p', infoHash: 'h', trackerUrl: '', connection: spied });
+  quiet.received('p', 1);
+  void quiet.list();
+  void quiet.connected();
+  eq('getStats is never called but by addresses()', asked.length, 0);
+  eq('addresses: one per open peer', await book.addresses(), [{
+    id: 'peerA', address: '203.0.113.9', port: 61234, remoteType: 'srflx', localType: 'srflx', protocol: 'udp', path: 'direct', rttMs: 23,
+  }]);
+  const broken = new PeerBook(() => t);
+  broken.connect({ peerId: 'q', infoHash: 'h', trackerUrl: '', connection: { connectionState: 'connected', getStats: async () => { throw new Error('closed'); } } });
+  eq('addresses: a failing getStats is unknown', (await broken.addresses())[0]?.path, 'unknown');
+  const many = new PeerBook(() => t);
+  for (let i = 0; i < 300; i += 1) many.received(`p${i}`, i + 1);
+  eq('peer list: bounded', [many.list().length, many.list()[0]?.id], [MAX_PEERS_LISTED, 'p299']);
+  const ids = new PeerBook(() => t);
+  ids.received('x'.repeat(100), 1);
+  eq('peer ids: cut to 64', ids.list()[0]?.id.length, 64);
+  const twins = new PeerBook(() => t);
+  twins.received('-WW0100-abcdefghijk\u0001', 1);
+  twins.received('-WW0100-abcdefghijk\u0002', 2);
+  eq('peer ids that print the same stay two peers', twins.list().map((p) => [p.id, p.down]), [
+    ['-WW0100-abcdefghijk?', 2],
+    ['-WW0100-abcdefghijk?', 1],
+  ]);
+}
+
+{
+  // The test page's panel (src/nerd.ts): its rows and sources, pure.
+  const base = {
+    engine: 'hls.js 1.7.4 + p2p-media-loader 4.0.0',
+    origin: 'https://origin.example/nfx',
+    root: 'ab'.repeat(32),
+    video: 'ns:vid',
+    verified: 7,
+    rejected: [],
+    levels: [{ index: 0, id: '720p', width: 1280, height: 720, bitrate: 2_500_000 }],
+    level: 0,
+    playing: true,
+    originBytes: 4096,
+    bandwidthEstimate: 12_340_000,
+  };
+  const sample = { width: 1280, height: 720, bufferAhead: 12.34, dropped: 3, frames: 900 };
+  const lone = nerdView({ ...base, mesh: null }, sample, 'Big Buck');
+  eq('panel: no mesh says so', lone.rows.find(([k]) => k === 'Mesh')?.[1], 'off: every byte from the origin');
+  eq('panel: one source, the origin, its segments not counted', lone.sources.map((x) => [x.kind, x.id, x.down, x.segments]), [['origin', 'origin.example', 4096, null]]);
+  eq('panel: playback rows', ['Resolution', 'Rendition', 'Bandwidth estimate', 'Buffer health', 'Dropped frames'].map((k) => lone.rows.find(([r]) => r === k)?.[1]), [
+    '1280x720', '720p (2500 kb/s)', '12.34 Mb/s', '12.3 s', '3 of 900',
+  ]);
+  const key = 'cd'.repeat(32);
+  const meshed = nerdView({
+    ...base,
+    mesh: {
+      signaling: 'nostr', trackers: [], relays: ['wss://relay.example', 'wss://r2.example'], swarms: [],
+      bytes: { http: 1000, p2p: 3000 }, uploaded: 500, peers: 3, rejected: [], connected: 2,
+      segments: { http: 1, p2p: 3 },
+      peerList: [
+        { id: key, via: 'nostr:wss://relay.example', down: 3000, up: 0, segments: 3, connected: true, since: 1, last: 2 },
+        { id: '-NX0100-abcdefghijkl', via: 'wss://tracker.example/announce', down: 0, up: 500, segments: 0, connected: false, since: 1, last: 2 },
+      ],
+      signal: { open: 1, sent: 4, received: 9, offers: 1, answers: 1 },
+    },
+  }, sample, null);
+  eq('panel: share from peers', meshed.rows.find(([k]) => k === 'From peers')?.[1], '75% (2.93 KiB of 3.91 KiB of segments)');
+  eq('panel: signaling', meshed.rows.find(([k]) => k === 'Signaling')?.[1], 'Nostr, 1 of 2 relays open');
+  eq('panel: sources', meshed.sources.map((x) => [x.kind, x.id, x.label, x.via, x.down, x.up, x.connected]), [
+    ['origin', 'origin.example', 'HTTPS origin', '', 5096, 0, true],
+    ['webrtc', 'cdcdcdcd', 'peer', 'nostr', 3000, 0, true],
+    ['webrtc', '-NX0100-abcdefghijkl', 'nfxd bridge?', 'tracker.example', 0, 500, false],
+  ]);
+  eq('shortId: a session key', shortId(key), 'cdcdcdcd');
+  eq('shortId: anything else', shortId('x'.repeat(40)).length, 20);
+  eq('formatBytes', [0, 1023, 1024, 10 * 1024 * 1024, -1].map(formatBytes), ['0 B', '1023 B', '1.00 KiB', '10.0 MiB', '–']);
+  const at = (o: Partial<Parameters<typeof addressText>[0] & object>) => ({
+    id: 'p', address: '203.0.113.9', port: 443, remoteType: 'srflx', localType: 'host', protocol: 'udp', path: 'direct' as const, rttMs: 20, ...o,
+  });
+  eq('address: IPv4', addressText(at({})), '203.0.113.9:443');
+  eq('address: IPv6', addressText(at({ address: '2001:db8::1' })), '[2001:db8::1]:443');
+  eq('address: hidden', addressText(at({ address: '' })), 'hidden by browser');
+  eq('address: mDNS', addressText(at({ address: 'f1e2.local' })), 'hidden by browser (mDNS)');
+  eq('address: none', addressText(undefined), '–');
+  eq('path: direct', pathText(at({})), 'direct (srflx/udp, 20 ms)');
+  eq('path: unknown', pathText(at({ path: 'unknown' })), '–');
+  eq('n is a shortcut on a checkbox or button, text in a field', [
+    typingInto({ tagName: 'INPUT', type: 'checkbox' }),
+    typingInto({ tagName: 'BUTTON' }),
+    typingInto({ tagName: 'INPUT', type: 'text' }),
+    typingInto({ tagName: 'INPUT' }),
+    typingInto({ tagName: 'TEXTAREA' }),
+    typingInto({ tagName: 'DIV', isContentEditable: true }),
+  ], [false, false, true, true, true, true]);
 }
 
 console.log(`unit: ${ran - bad}/${ran} ok`);

@@ -40,10 +40,10 @@ wait_for() { # file pattern seconds
 cargo build --release --locked --manifest-path "$crates/Cargo.toml" -p nfxd -p nfx-media --bins -j 4
 bin=$crates/target/release
 cp "$crates/../web/player/node_modules/hls.js/dist/hls.min.js" "$here/ui/hls.min.js"
-# The page runs this script with IPC access: only the pinned hls.js 1.7.3 build is used.
-hls_sha256=a12e7ee1cd64a69dcdb314157e45dafcba705bfb0b1440b7935cb265d374423e
+# The page runs this script with IPC access: only the pinned hls.js 1.7.4 build is used.
+hls_sha256=cfc70cc9e9fc63d071919e087670abc760c8fd1bc889b88588026e4d22193bbe
 echo "$hls_sha256  $here/ui/hls.min.js" | sha256sum -c --quiet - \
-  || { echo "hls.min.js is not the pinned hls.js 1.7.3 build" >&2; rm -f "$here/ui/hls.min.js"; exit 1; }
+  || { echo "hls.min.js is not the pinned hls.js 1.7.4 build" >&2; rm -f "$here/ui/hls.min.js"; exit 1; }
 (cd "$here" && nice -n 10 cargo build --release --locked -j 4)
 
 ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=size=1280x720:rate=30 \
@@ -91,7 +91,8 @@ start_app() { # share tag [more JSON fields]
 check_app() { # tag step
   wait_for "$work/app-$1.log" '^EXIT ' 240 || true
   grep -E '^\{|^RESULT' "$work/app-$1.log" || true
-  grep -q '^RESULT PASS' "$work/app-$1.log" && grep -q "\"step\":\"$2\"" "$work/app-$1.log"
+  grep -q '^RESULT PASS' "$work/app-$1.log" && grep -q "\"step\":\"$2\"" "$work/app-$1.log" \
+    && grep -q '"step":"nerd-check"' "$work/app-$1.log"
 }
 
 start_app false private ",\"rating_root\":\"$npub\",\"general_relays\":[\"$relay\"]"

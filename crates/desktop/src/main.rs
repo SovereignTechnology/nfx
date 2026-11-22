@@ -321,6 +321,15 @@ async fn watch(state: State<'_, AppState>, a: String) -> Result<Watched, String>
     })
 }
 
+/// A video's state as the page shows it.
+fn describe(s: &VideoState) -> String {
+    match s {
+        VideoState::Unannounced(why) => format!("seeding (unannounced: {why})"),
+        VideoState::Failed(why) => format!("failed: {why}"),
+        other => format!("{other:?}").to_lowercase(),
+    }
+}
+
 #[tauri::command]
 async fn status(state: State<'_, AppState>) -> Result<Vec<(String, String)>, String> {
     Ok(state
@@ -329,14 +338,7 @@ async fn status(state: State<'_, AppState>) -> Result<Vec<(String, String)>, Str
         .map(|d| {
             d.state()
                 .into_iter()
-                .map(|(a, s)| {
-                    let s = match s {
-                        VideoState::Unannounced(why) => format!("seeding (unannounced: {why})"),
-                        VideoState::Failed(why) => format!("failed: {why}"),
-                        other => format!("{other:?}").to_lowercase(),
-                    };
-                    (a, s)
-                })
+                .map(|(a, s)| (a, describe(&s)))
                 .collect()
         })
         .unwrap_or_default())
@@ -345,6 +347,129 @@ async fn status(state: State<'_, AppState>) -> Result<Vec<(String, String)>, Str
 #[tauri::command]
 fn test_config(state: State<'_, AppState>) -> Option<TestConfig> {
     state.test.clone()
+}
+
+/// One seeder of the video playing, for the page's "stats for nerds" (nfx #99).
+#[derive(Serialize)]
+struct NerdPeer {
+    /// Its iroh endpoint id (hex).
+    peer: String,
+    bytes: u64,
+    blobs: u64,
+    last_ms: u64,
+    open: bool,
+}
+
+/// What this node serves to browsers over WebRTC (sharing on), without addresses.
+#[derive(Serialize)]
+struct NerdMesh {
+    rooms: usize,
+    connecting: usize,
+    open: usize,
+    opened: u64,
+    failed: u64,
+    served: u64,
+}
+
+#[derive(Serialize)]
+struct NerdStats {
+    state: String,
+    /// Seeders known from beacons and gossip.
+    known: usize,
+    peers: Vec<NerdPeer>,
+    mesh: Option<NerdMesh>,
+}
+
+/// A seeder's path, only when the user asks to see addresses.
+#[derive(Serialize)]
+struct NerdRoute {
+    peer: String,
+    /// `direct`, `relay` or `unknown`.
+    path: &'static str,
+    /// The seeder's address (direct) or the relay's host (relay).
+    address: Option<String>,
+    rtt_ms: Option<u64>,
+    open: bool,
+}
+
+fn root_ok(root: &str) -> Result<(), String> {
+    if root.len() == 64
+        && root
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        Ok(())
+    } else {
+        Err("not a root".into())
+    }
+}
+
+/// Where the video `root` (address `a`) came from: per seeder bytes, what is known, and
+/// what this node serves. No addresses (`nerd_addresses` has them, on request).
+#[tauri::command]
+async fn nerd_stats(
+    state: State<'_, AppState>,
+    a: String,
+    root: String,
+) -> Result<NerdStats, String> {
+    root_ok(&root)?;
+    let daemon = state.daemon().await.ok_or("no node running")?;
+    let video_state = daemon
+        .state()
+        .get(&a)
+        .map(describe)
+        .unwrap_or_else(|| "not on this node".into());
+    let peers = daemon
+        .node()
+        .transfers()
+        .peers(&root)
+        .into_iter()
+        .map(|p| NerdPeer {
+            peer: p.peer,
+            bytes: p.bytes,
+            blobs: p.blobs,
+            last_ms: p.last_ms,
+            open: p.open,
+        })
+        .collect();
+    let mesh = daemon.mesh_status().map(|m| NerdMesh {
+        rooms: m.rooms,
+        connecting: m.connecting,
+        open: m.open,
+        opened: m.opened,
+        failed: m.failed,
+        served: m.served,
+    });
+    Ok(NerdStats {
+        state: video_state,
+        known: daemon.sources(&a).len(),
+        peers,
+        mesh,
+    })
+}
+
+/// The path to each seeder of `root`: other hosts' addresses, so the page asks only while
+/// its "Show addresses" switch is on.
+#[tauri::command]
+async fn nerd_addresses(
+    state: State<'_, AppState>,
+    root: String,
+) -> Result<Vec<NerdRoute>, String> {
+    root_ok(&root)?;
+    let daemon = state.daemon().await.ok_or("no node running")?;
+    Ok(daemon
+        .node()
+        .transfers()
+        .routes(&root)
+        .into_iter()
+        .map(|r| NerdRoute {
+            peer: r.peer,
+            path: r.path.kind(),
+            address: r.path.address(),
+            rtt_ms: r.rtt_ms,
+            open: r.open,
+        })
+        .collect())
 }
 
 /// Test mode only: a line of the e2e's report.
@@ -443,6 +568,8 @@ fn main() {
             save_settings,
             watch,
             status,
+            nerd_stats,
+            nerd_addresses,
             test_config,
             report,
             done
