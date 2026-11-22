@@ -39,6 +39,7 @@ import type {
   PeerAddress,
   PlayerEvent,
   Rejection,
+  RemoteCandidates,
   ResolveOptions,
   ResolvedManifest,
   Session,
@@ -62,6 +63,7 @@ import {
   trackerUrl as meshTrackerUrl,
 } from './mesh';
 import { type Probe, type Selection, describe as describeProbes, initUrl, probeStatus, selectRenditions } from './probe';
+import { MAX_REMOTE_CANDIDATES as SDP_MAX_REMOTE_CANDIDATES, filterRemoteSdp as filterSdp } from './remote-sdp';
 import { NostrSignaler } from './signal-nostr';
 import { resolveManifest as resolveOverRelays, watchEndpoints as watchBeacons } from './resolve';
 import { Anchor, MAX_HASH_LIST_BYTES, type ManifestBinding, loadWasm } from './verify';
@@ -112,6 +114,20 @@ export function checkSignaling(signaling: Signaling | undefined): Signaling | nu
 /** A beacon-named origin as a plain `https://host[:port][/prefix]` base, or null. */
 export function originBase(url: string): string | null {
   return beaconOrigin(url);
+}
+
+/** Most candidates `remoteCandidates: 'global'` keeps from one SDP. */
+export const MAX_REMOTE_CANDIDATES: number = SDP_MAX_REMOTE_CANDIDATES;
+
+/**
+ * A peer's SDP cut to the candidates `mode` lets an ICE agent try (`RemoteCandidates`), as
+ * `open()` applies it with Nostr signaling's `remoteCandidates`: `all` returns it as it is;
+ * `global` keeps at most `MAX_REMOTE_CANDIDATES` UDP candidates at global unicast addresses,
+ * in the strict form browsers write, and every other line byte for byte. Pure, and never
+ * throws for an SDP left with no candidate; throws a `TypeError` for another mode.
+ */
+export function filterRemoteSdp(sdp: string, mode: RemoteCandidates): string {
+  return filterSdp(sdp, mode);
 }
 
 /** The mesh engine: p2p-media-loader-core 4.0.0 built from its source with web/player/engine's patch. */
@@ -371,10 +387,11 @@ function start(
     };
     const HlsWithP2P = HlsJsP2PEngine.injectMixin(Hls);
     const tuning = o.httpWindow === undefined ? {} : { httpWindow: o.httpWindow };
-    if (signaling.kind === 'nostr') nostr = new NostrSignaler(signaling.relays, log);
+    if (signaling.kind === 'nostr') nostr = new NostrSignaler(signaling.relays, log, signaling.remoteCandidates ?? 'all');
     hls = new HlsWithP2P({ ...base, ...meshConfig(anchor, signaling, o.iceServers, mesh, log, tuning, nostr, book) } as never);
     engine = `hls.js ${Hls.version} + ${P2P_ENGINE}`;
-    log(`mesh: ${signaling.kind} ${(signaling.kind === 'nostr' ? signaling.relays : signaling.urls).join(' ')}`);
+    const filtered = nostr?.remoteCandidates === 'global' ? ' (remote candidates: global unicast UDP only)' : '';
+    log(`mesh: ${signaling.kind} ${(signaling.kind === 'nostr' ? signaling.relays : signaling.urls).join(' ')}${filtered}`);
   } else {
     hls = new Hls(base);
     engine = `hls.js ${Hls.version}`;

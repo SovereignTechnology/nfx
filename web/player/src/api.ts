@@ -264,7 +264,30 @@ export interface NostrSignaling {
    * such scoped relays beside them.
    */
   relays: string[];
+  /**
+   * Which of a peer's ICE candidates this session's ICE agent may try (`RemoteCandidates`).
+   * Default `all`.
+   */
+  remoteCandidates?: RemoteCandidates;
 }
+
+/**
+ * Which candidates of a peer's SDP (its offer or answer) reach `setRemoteDescription`.
+ *
+ * - `all` (the default): every candidate, as the peer wrote it.
+ * - `global`: only UDP candidates at global unicast IP addresses, at most 16 per SDP (the
+ *   first, in SDP order), for a page that must not let a stranger's SDP point its ICE
+ *   agent's connectivity checks at the user's LAN, loopback, router or a cloud metadata
+ *   address (a desktop renderer: nutflix-pear ADR 0023 rule 5). Dropped: private, shared
+ *   (CGNAT), loopback, link-local, documentation, benchmarking, multicast and reserved
+ *   IPv4; IPv6 outside 2000::/3 and in 2001:db8::/32; mDNS (`.local`) and other names; TCP;
+ *   and any candidate line not in the strict form `filterRemoteSdp` reads. Every other line
+ *   (`a=end-of-candidates` included) is kept as it is. An SDP left with no candidate is still
+ *   applied, and that connection fails; the session goes on fetching from its origin.
+ *   A browser peer behind a NAT is still reached through its server-reflexive candidate,
+ *   and one on the same LAN, which offers only mDNS host candidates, is not.
+ */
+export type RemoteCandidates = 'all' | 'global';
 
 /** What `onEvent` hears. Nothing is delivered after `destroy()`. */
 export type PlayerEvent =

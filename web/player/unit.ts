@@ -4,8 +4,9 @@
  * what beacons claim each origin serves included), `open()`'s option checks and the levels it
  * offers (`renditions`, origin hints, asking the origin what it holds: the probe runner, its
  * bounds, timeouts and aborts, the byte-capped GET, a hostile hint ignored; the master
- * playlist cut), and the Nostr signaler's
- * bookkeeping (presence, glare, freshness, bounds). The spec's signed beacon vectors
+ * playlist cut), the Nostr signaler's
+ * bookkeeping (presence, glare, freshness, bounds), and the remote candidate filter
+ * (`remoteCandidates: 'global'`, its vectors in test-vectors/remote-sdp.json). The spec's signed beacon vectors
  * (`beacon.json`, `beacon-renditions.json`) run through nfx-wasm into the book, so the shape
  * `verifyBeacon` returns is the shape the book reads, and the hash list vector through
  * nfx-wasm into what `open()` reads of it; the NFX-10 §6 vectors run through nfx-wasm's
@@ -17,7 +18,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import initWasm, { MeshRoom, MeshSession, VerifiedHashList, sha256Hex, verifyBeacon } from './out/wasm/nfx_wasm.js';
-import type { OriginSource, Signaling } from './src/api';
+import type { OriginSource, RemoteCandidates, Signaling } from './src/api';
 import {
   EndpointBook,
   MAX_ORIGINS,
@@ -30,6 +31,8 @@ import {
   checkOrigins,
   checkSignaling,
   checkTrackers,
+  globalUnicast,
+  ipFamily,
   originBase,
   checkRelays,
   pageOrigin,
@@ -58,6 +61,7 @@ import {
   probeStatus,
   selectRenditions,
 } from './src/probe';
+import { MAX_REMOTE_CANDIDATES, filterRemoteSdp, filterRemoteSdpCounted } from './src/remote-sdp';
 import {
   LIMITS,
   OfferBackoff,
@@ -868,6 +872,61 @@ eq('eventId', [eventId('{"id":"' + 'a'.repeat(64) + '"}'), eventId('{"id":"A"}')
   null,
   null,
 ]);
+
+// ---- the remote candidate filter (remoteCandidates: 'global', nutflix-pear ADR 0023 rule 5) --
+eq('nostr signaling, remote candidates global', checkSignaling({ kind: 'nostr', relays: ['wss://r.example/'], remoteCandidates: 'global' }), {
+  kind: 'nostr',
+  relays: ['wss://r.example'],
+  remoteCandidates: 'global',
+});
+eq('nostr signaling, remote candidates all', checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], remoteCandidates: 'all' }), {
+  kind: 'nostr',
+  relays: ['wss://r.example'],
+  remoteCandidates: 'all',
+});
+throws('remote candidates neither all nor global', () =>
+  checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], remoteCandidates: 'private' as RemoteCandidates }),
+);
+throws('remote candidates not a string', () => checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], remoteCandidates: 1 as unknown as RemoteCandidates }));
+throws('remote candidates global with trackers (not filtered there)', () =>
+  checkSignaling({ kind: 'trackers', urls: ['wss://t.example'], remoteCandidates: 'global' } as unknown as Signaling),
+);
+eq('remote candidates all with trackers', checkSignaling({ kind: 'trackers', urls: ['wss://t.example'], remoteCandidates: 'all' } as unknown as Signaling), {
+  kind: 'trackers',
+  urls: ['wss://t.example'],
+});
+eq('ipFamily', ['1.2.3.4', '2a00::1', '01.2.3.4', '2A00::1', 'host.local', '::ffff:1.2.3.4', ''].map(ipFamily), [4, 6, null, null, null, null, null]);
+eq(
+  'documentation blocks: global for a beacon, not for ICE',
+  ['192.0.2.1', '198.51.100.1', '203.0.113.1', '2001:db8::1'].map((a) => [globalUnicast(a, 'beacon'), globalUnicast(a, 'ice')]),
+  [
+    [true, false],
+    [true, false],
+    [true, false],
+    [true, false],
+  ],
+);
+throws('filterRemoteSdp: another mode', () => filterRemoteSdp('v=0\r\n', 'none' as RemoteCandidates));
+throws('filterRemoteSdp: not a string', () => filterRemoteSdp(null as unknown as string, 'global'));
+{
+  const v = JSON.parse(readFileSync(join(here, 'test-vectors/remote-sdp.json'), 'utf8')) as {
+    max_kept: number;
+    head: string[];
+    tail: string[];
+    cases: { name: string; mode?: RemoteCandidates; in?: string[]; out?: string[]; in_raw?: string; out_raw?: string }[];
+  };
+  const sdp = (lines: string[]): string => [...v.head, ...lines, ...v.tail].map((l) => `${l}\r\n`).join('');
+  eq('remote SDP: at most 16 kept', [MAX_REMOTE_CANDIDATES, v.max_kept], [16, 16]);
+  for (const c of v.cases) {
+    const input = c.in_raw ?? sdp(c.in ?? []);
+    eq(`remote SDP: ${c.name}`, filterRemoteSdp(input, c.mode ?? 'global'), c.out_raw ?? sdp(c.out ?? []));
+  }
+  eq('remote SDP vectors', [v.cases.length, new Set(v.cases.map((c) => c.name)).size], [36, 36]);
+  const cap = v.cases.find((c) => c.name === 'dropped candidates do not count toward the 16');
+  const counted = filterRemoteSdpCounted(sdp(cap?.in ?? []), 'global');
+  eq('remote SDP: counts', [counted.kept, counted.dropped], [16, 5]);
+  eq('remote SDP: all is the identity', filterRemoteSdp('v=0\ra=candidate:x\n', 'all'), 'v=0\ra=candidate:x\n');
+}
 
 // ---- the signed beacon vector, through nfx-wasm ------------------------------------------
 await initWasm({ module_or_path: readFileSync(join(here, 'out/wasm/nfx_wasm_bg.wasm')) });

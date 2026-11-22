@@ -98,6 +98,25 @@ candidates, wired into the engine in one place (`src/mesh.ts` `engineSignaling`)
   2026-11-18): give general relays, and such scoped relays beside them. `relayUrl()`,
   `checkSignaling()`, `MAX_RELAYS`, `NOSTR_SIGNAL_KIND` and `NOSTR_SIGNAL_PROTOCOL` let a
   page check its settings first.
+
+  `remoteCandidates` (optional, `'all'` or `'global'`; default `'all'`, every candidate as
+  before) says which ICE candidates of a peer's offer or answer reach
+  `setRemoteDescription`. `{ kind: 'nostr', relays, remoteCandidates: 'global' }` is for a
+  page that must not let a stranger's SDP point its ICE agent's connectivity checks at the
+  user's LAN, loopback, router or a cloud metadata address, such as a desktop renderer
+  (nutflix-pear ADR 0023 rule 5). It keeps only UDP candidates at global unicast IP
+  addresses, at most 16 per SDP (`MAX_REMOTE_CANDIDATES`), the first in SDP order. It drops
+  private, shared (CGNAT), loopback, link-local, documentation, benchmarking, multicast and
+  reserved IPv4; IPv6 outside 2000::/3 and in 2001:db8::/32; mDNS (`.local`) and other
+  names; TCP; and any candidate line not in the strict form browsers write. Every other line,
+  `a=end-of-candidates` included, is kept byte for byte (`src/remote-sdp.ts` has the rules).
+  An SDP left with no candidate is still applied, and that connection fails while playback
+  keeps fetching from the origin. A peer behind a NAT is still reached through its
+  server-reflexive candidate. A peer on the same LAN that offers only mDNS host candidates
+  is not reached. The filter is `filterRemoteSdp(sdp, mode)`, exported and pure, so a
+  consumer can test against it. Its vectors are in `test-vectors/remote-sdp.json`. Trackers
+  signaling refuses `'global'`, since its SDP goes through the engine's tracker clients,
+  which this does not filter.
 - `{ kind: 'trackers', urls }` (1 to 4, `wss://`): WebTorrent trackers, as before.
 
 Trackers and origins named by beacons are hints:
@@ -112,7 +131,7 @@ npm ci
 npm run build          # the WASM (wasm-pack) and the test page, out/
 npm run build:lib      # the library: out-lib/player.js (minified) and its declarations
 npm run typecheck
-npm run unit           # sanitisers, the beacon endpoint book and availability, open()'s option checks, levels and probes
+npm run unit           # sanitisers, the beacon endpoint book and availability, open()'s option checks, levels and probes, the remote candidate filter
 npm run e2e            # the test page end to end (cargo, ffmpeg, openssl, Chromium), held renditions and a hostile beacon included
 npm run e2e:mesh       # the mesh, the bridge, the library's lifecycle, trackers from a beacon
 eval "$(bash e2e-strfry.sh /var/tmp/strfry)"   # the stock relay, strfry at a pinned commit
