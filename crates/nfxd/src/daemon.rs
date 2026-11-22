@@ -1461,13 +1461,13 @@ async fn come_online(node: Arc<Node>, status: watch::Sender<Option<String>>, rel
         .is_ok();
     status.send_replace(None);
     if !reached {
-        eprintln!(
+        crate::status!(
             "nfxd: warning: iroh relay {relays} not reached in {} s; seeding without it \
              (beacons name it once it connects)",
             RELAY_WAIT.as_secs()
         );
         node.endpoint().online().await;
-        eprintln!("nfxd: iroh relay reached; the next beacons name it");
+        crate::status!("nfxd: iroh relay reached; the next beacons name it");
     }
 }
 
