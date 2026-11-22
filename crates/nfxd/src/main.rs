@@ -20,6 +20,10 @@
 //! `<a>` is a manifest address, `38504:<creator-hex>:<namespace>:<video-id>`, as
 //! `publish` prints it. Secrets never reach the terminal: only public keys are printed.
 //!
+//! `key new` and `key show` print two lines, the hex public key and then the npub. A reader
+//! may stop after the first (`nfxd key show f | head -n 1`): a closed stdout or stderr is
+//! never a panic, and `run` keeps seeding when its status output goes away.
+//!
 //! An item may name the only renditions this node holds of it: `--seed <a>#720p`,
 //! `--fetch <a>#720p,360p`, `--pull <a>#360p`, by the ids in the video's hash list
 //! (`renditions[].id`; a video id never contains `#`). Without, it holds every rendition.
@@ -130,7 +134,7 @@ use nfx_node::unix_now;
 use nfx_proto::namespace::Namespace;
 use nfxd::daemon::{Config, Daemon};
 use nfxd::package::Package;
-use nfxd::{Error, Result, key};
+use nfxd::{Error, Result, key, status};
 use nostr_sdk::prelude::ToBech32 as _;
 
 const USAGE: &str = "usage:
@@ -152,7 +156,7 @@ const USAGE: &str = "usage:
   too: ephemeral, room proof checked, rate-limited per sender. Off by default.";
 
 fn usage() -> ExitCode {
-    eprintln!("{USAGE}");
+    status!("{USAGE}");
     ExitCode::from(2)
 }
 
@@ -170,7 +174,7 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(Error::Config(msg)) if msg == "usage" => usage(),
         Err(e) => {
-            eprintln!("nfxd: {e}");
+            status!("nfxd: {e}");
             ExitCode::FAILURE
         }
     }
@@ -180,20 +184,36 @@ fn bad_usage() -> Error {
     Error::Config("usage".into())
 }
 
-fn print_public(keys: &nostr_sdk::prelude::Keys) {
+/// Writes `lines` to `out`. A reader that has gone away (`nfxd key show f | head -n 1`) is a
+/// normal end, not a failure: it already took what it wanted. Any other write error, such as
+/// a full disk, is returned.
+fn write_lines(out: &mut impl std::io::Write, lines: &[&str]) -> std::io::Result<()> {
+    let written = lines
+        .iter()
+        .try_for_each(|line| writeln!(out, "{line}"))
+        .and_then(|()| out.flush());
+    match written {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
+fn print_lines(lines: &[&str]) -> Result<()> {
+    Ok(write_lines(&mut std::io::stdout().lock(), lines)?)
+}
+
+fn print_public(keys: &nostr_sdk::prelude::Keys) -> Result<()> {
     let pk = keys.public_key();
-    println!("{}", pk.to_hex());
     let Ok(npub) = pk.to_bech32();
-    println!("{npub}");
+    print_lines(&[pk.to_hex().as_str(), npub.as_str()])
 }
 
 fn key_cmd(args: &[String]) -> Result<()> {
     match args {
         [cmd, file] if cmd == "new" => print_public(&key::create(Path::new(file))?),
         [cmd, file] if cmd == "show" => print_public(&key::load(Path::new(file))?),
-        _ => return Err(bad_usage()),
+        _ => Err(bad_usage()),
     }
-    Ok(())
 }
 
 /// Flags: each `--name value`, repeatable; no positionals.
@@ -262,9 +282,8 @@ async fn publish(args: &[String]) -> Result<()> {
     let accepted = relays.publish(&event).await;
     relays.shutdown().await;
     let accepted = accepted?;
-    eprintln!("published to {accepted} relay(s)");
-    println!("{}", manifest.a_tag());
-    Ok(())
+    status!("published to {accepted} relay(s)");
+    print_lines(&[manifest.a_tag().as_ref()])
 }
 
 async fn delete(args: &[String]) -> Result<()> {
@@ -280,7 +299,7 @@ async fn delete(args: &[String]) -> Result<()> {
     let relays = Relays::connect(&relays, Duration::from_secs(10)).await?;
     let accepted = relays.publish(&event).await;
     relays.shutdown().await;
-    eprintln!("deletion accepted by {} relay(s)", accepted?);
+    status!("deletion accepted by {} relay(s)", accepted?);
     Ok(())
 }
 
@@ -409,42 +428,42 @@ async fn run(args: &[String]) -> Result<()> {
     };
     let daemon = Daemon::start(cfg).await?;
     if let Some(url) = &daemon.relay_url {
-        eprintln!("embedded relay: {url}");
+        status!("embedded relay: {url}");
     }
     if let Some(addr) = daemon.origin_addr {
-        eprintln!("origin: http://{addr}/");
+        status!("origin: http://{addr}/");
     }
     if let Some(url) = &daemon.tracker_url {
-        eprintln!("embedded tracker: {url}");
+        status!("embedded tracker: {url}");
     }
     if let Some(addr) = daemon.bridge_addr {
-        eprintln!("bridge: udp {addr}");
+        status!("bridge: udp {addr}");
         if let Some(public) = daemon.bridge_public.filter(|p| *p != addr) {
-            eprintln!("bridge public: udp {public}");
+            status!("bridge public: udp {public}");
         }
     }
     if let Some(addr) = daemon.stun_addr {
-        eprintln!("stun: udp {addr}");
+        status!("stun: udp {addr}");
         match daemon.stun_public {
-            Some(public) if public != addr => eprintln!("stun public: udp {public}"),
+            Some(public) if public != addr => status!("stun public: udp {public}"),
             Some(_) => {}
-            None => eprintln!(
+            None => status!(
                 "stun: not announced in beacons (no address a browser can reach; see --stun-public)"
             ),
         }
     }
     if let (Some(addr), Some(session)) = (daemon.mesh_addr, &daemon.mesh_session) {
-        eprintln!("mesh: udp {addr}, session {session}");
+        status!("mesh: udp {addr}, session {session}");
         if let Some(public) = daemon.mesh_public {
-            eprintln!("mesh public: udp {public} (offered as a host candidate)");
+            status!("mesh public: udp {public} (offered as a host candidate)");
         }
     }
     if gossip {
         let me = daemon.node().addr();
         for t in &me.addrs {
             match t {
-                iroh::TransportAddr::Ip(ip) => eprintln!("gossip peer: {}@{ip}", me.id),
-                iroh::TransportAddr::Relay(url) => eprintln!("gossip peer: {}@{url}", me.id),
+                iroh::TransportAddr::Ip(ip) => status!("gossip peer: {}@{ip}", me.id),
+                iroh::TransportAddr::Relay(url) => status!("gossip peer: {}@{url}", me.id),
                 _ => {}
             }
         }
@@ -463,14 +482,14 @@ async fn run(args: &[String]) -> Result<()> {
                 let now = daemon.state();
                 for (a, s) in &now {
                     if last.get(a) != Some(s) {
-                        eprintln!("{a}: {s:?}");
+                        status!("{a}: {s:?}");
                     }
                 }
                 last = now;
                 let mesh = daemon.mesh_status().map(|s| mesh_line(&s));
                 if mesh != last_mesh {
                     if let Some(line) = &mesh {
-                        eprintln!("{line}");
+                        status!("{line}");
                     }
                     last_mesh = mesh;
                 }
@@ -670,7 +689,50 @@ fn gossip_peers(values: &[String]) -> Result<Vec<iroh::EndpointAddr>> {
 mod tests {
     use super::{
         bridge_max_peers, flags, gossip_peers, ip_port, iroh_addrs, items, pubkey_hex, relay_cas,
+        write_lines,
     };
+
+    /// Takes `left` bytes, then fails every write with `kind`.
+    struct FailsAfter {
+        left: usize,
+        kind: std::io::ErrorKind,
+        got: Vec<u8>,
+    }
+
+    impl std::io::Write for FailsAfter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.left == 0 {
+                return Err(self.kind.into());
+            }
+            let n = buf.len().min(self.left);
+            self.got.extend_from_slice(&buf[..n]);
+            self.left -= n;
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_reader_that_left_ends_the_output_and_other_write_errors_are_returned() {
+        let mut out = FailsAfter {
+            left: 6,
+            kind: std::io::ErrorKind::BrokenPipe,
+            got: Vec::new(),
+        };
+        write_lines(&mut out, &["first", "second"]).unwrap();
+        assert_eq!(out.got, b"first\n");
+
+        let mut out = FailsAfter {
+            left: 6,
+            kind: std::io::ErrorKind::StorageFull,
+            got: Vec::new(),
+        };
+        let e = write_lines(&mut out, &["first", "second"]).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::StorageFull);
+    }
 
     fn ca_pem() -> String {
         use base64::Engine as _;
