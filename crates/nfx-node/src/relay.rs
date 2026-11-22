@@ -323,9 +323,10 @@ impl Admission {
         let key = (a.operator.clone(), a.addr.clone());
         // The store keeps the newest per key and server, the lowest id on a tie (NIP-01): one
         // that would not replace the held one is refused here, so this table and the store
-        // describe the same announcement.
+        // describe the same announcement. An expired one counts too: the store holds it until
+        // it is dropped, and would keep it over an older one that this table then took for it.
         let replaces = match limits.stun.get(&key) {
-            Some((held, expiration, id)) if *expiration > now => {
+            Some((held, expiration, id)) => {
                 if *id == ev.id {
                     return Err((Duplicate, "already held".into()));
                 }
@@ -341,9 +342,9 @@ impl Admission {
                         "an equal announcement of this server, with a lower id, is held".into(),
                     ));
                 }
-                true
+                *expiration > now
             }
-            _ => false,
+            None => false,
         };
         if !replaces {
             let live = limits.stun.values().filter(|(_, e, _)| *e > now).count();
@@ -1022,6 +1023,15 @@ mod tests {
         assert!(relay.admit(&high, t1).is_ok());
         assert!(relay.admit(&low, t1).is_ok(), "the lower id replaces it");
         assert!(refused(relay.admit(&high, t1)).starts_with("duplicate:"));
+        // Expired but not yet dropped, it still outranks an older one that is live: the store
+        // would keep it, and the table must not describe the other. A newer one replaces it.
+        let short = stun_ad(4, "1.0.0.3:3478", &net, t1, 10);
+        assert!(relay.admit(&short, t1).is_ok());
+        let after = t1 + 20;
+        let older = stun_ad(4, "1.0.0.3:3478", &net, t1 - 5, 600);
+        assert!(refused(relay.admit(&older, after)).starts_with("invalid: a newer"));
+        let newer = stun_ad(4, "1.0.0.3:3478", &net, after, 600);
+        assert!(relay.admit(&newer, after).is_ok());
 
         // The cap: fill it with live announcements from fresh keys.
         let relay = admission(&["nfx:testnet:1"], on);
