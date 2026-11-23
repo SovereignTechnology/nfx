@@ -24,11 +24,18 @@
 //! never returns it after its `expiration` (NIP-40), and drops it from the store once it has
 //! expired, at the next admission of one.
 //!
+//! With seeder lookup on ([`MayAdmit::seeder_lookup`]), it also carries kind 20465 (NFX-17 §5):
+//! a viewer's ask and a seeder's tell, ephemeral like beacons. Before an event is verified only
+//! its size, its shape and the budget of its connection apply. Limits keyed on a key or a video
+//! are charged after full verification, the embedded beacon included, so an unsigned event
+//! cannot spend someone else's budget. An id already carried is dropped and charges nothing.
+//!
 //! Stored manifests live in memory, capped at [`MAX_STORED_EVENTS`]: a restart forgets
 //! them, and publishers re-mirror (§4). TLS belongs in front, as for the origin.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
+use std::hash::Hash;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -39,6 +46,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use nfx_proto::beacon::Beacon;
 use nfx_proto::deletion::Deletion;
+use nfx_proto::lookup::{self, KIND_LOOKUP};
 use nfx_proto::manifest::Manifest;
 use nfx_proto::namespace::Namespace;
 use nfx_proto::signal::{self, KIND_SIGNAL};
@@ -65,8 +73,9 @@ pub const MAX_FILTER_VALUES: usize = 256;
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 pub const MAX_BEACON_BYTES: usize = 16 * 1024;
 /// Events per minute per connection, across videos. A seeder announcing many videos at
-/// TTL/2 over one connection must fit; the per-key limits above are the real bound.
-const EVENTS_PER_MINUTE: u32 = 1_200;
+/// TTL/2 over one connection must fit (1200 videos at a 60 s lifetime); the per-key limits
+/// above are the real bound.
+const EVENTS_PER_MINUTE: u32 = 2_400;
 /// Stored events (manifests; beacons are never stored). Keys are free, so a flood of valid
 /// manifests from fresh keys must not grow memory without bound; past the cap the oldest
 /// go. Publishers mirror manifests to public relays too (§4).
@@ -93,6 +102,27 @@ pub const STUN_ANNOUNCEMENTS_PER_HOUR: usize = 12;
 /// Announcements held at once. Keys are free, so while this many are live a new one is
 /// refused (one that replaces a held one is not): they never crowd manifests out of the store.
 pub const MAX_STUN_ANNOUNCEMENTS: usize = 1024;
+/// Seeder lookup (NFX-17 §5): the window of the ask, route and connection limits.
+pub const LOOKUP_WINDOW_SECS: u64 = 10;
+/// Asks per (signer, video) per [`LOOKUP_WINDOW_SECS`].
+pub const ASKS_PER_KEY_AND_VIDEO: usize = 2;
+/// Asks per video per [`LOOKUP_WINDOW_SECS`].
+pub const ASKS_PER_VIDEO: usize = 30;
+/// Tells per (seeder, asker, video) per [`LOOKUP_WINDOW_SECS`].
+pub const TELLS_PER_ROUTE: usize = 2;
+/// Tells per seeder key per [`TELLS_PER_KEY_WINDOW_SECS`].
+pub const TELLS_PER_KEY: usize = 160;
+pub const TELLS_PER_KEY_WINDOW_SECS: u64 = 30;
+/// Lookup events per connection per [`LOOKUP_WINDOW_SECS`]. The one limit charged before
+/// verification: the connection is the only thing about an unverified event that is known.
+pub const LOOKUPS_PER_CONNECTION: usize = 96;
+/// How long a carried event id is remembered, so that a replay charges nothing.
+pub const LOOKUP_SEEN_SECS: u64 = 120;
+/// Carried ids remembered at once; past this the oldest go, which costs only a replay's charge.
+const MAX_LOOKUP_SEEN: usize = 65_536;
+/// Lookup rate-limit keys held at once. Keys and video names are free, so while this many are
+/// live new lookups are refused, and viewers fall back on the periodic beacon.
+const MAX_LOOKUP_KEYS: usize = 65_536;
 /// Room for the `["EVENT", …]` framing around the largest admitted event.
 const MAX_MESSAGE_BYTES: usize = MAX_MANIFEST_BYTES + 1024;
 
@@ -112,8 +142,91 @@ struct Limits {
     stun: HashMap<(String, String), (u64, u64, String)>,
     /// operator → announcement admission times within the last hour.
     stun_times: HashMap<String, VecDeque<u64>>,
+    /// Seeder lookup, which sweeps itself.
+    lookup: LookupLimits,
     /// When stale keys were last swept (at most once per [`SWEEP_EVERY_SECS`]).
     swept_at: u64,
+}
+
+/// The rate-limit state of seeder lookup (NFX-17 §5).
+#[derive(Debug, Default)]
+struct LookupLimits {
+    /// Connection → lookup events in the last window, verified or not.
+    connections: HashMap<SocketAddr, VecDeque<u64>>,
+    /// (asker, a) → admitted asks.
+    asks: HashMap<(String, String), VecDeque<u64>>,
+    /// a → admitted asks.
+    asks_per_video: HashMap<String, VecDeque<u64>>,
+    /// (seeder, asker, a) → admitted tells.
+    tells: HashMap<(String, String, String), VecDeque<u64>>,
+    /// seeder → admitted tells.
+    tells_per_key: HashMap<String, VecDeque<u64>>,
+    /// Ids verified and carried. Only a verified event enters, so a forged one cannot poison it.
+    seen: HashSet<String>,
+    /// The same ids, oldest first, with when each was carried.
+    seen_order: VecDeque<(u64, String)>,
+    swept_at: u64,
+}
+
+/// Whether `times` holds fewer than `max` entries inside the last `window` seconds.
+fn has_room(times: Option<&VecDeque<u64>>, now: u64, window: u64, max: usize) -> bool {
+    times.is_none_or(|t| t.iter().filter(|at| now < **at + window).count() < max)
+}
+
+/// Record one use at `now`, dropping what has left the window.
+fn charge(times: &mut VecDeque<u64>, now: u64, window: u64) {
+    while times.front().is_some_and(|t| now >= t + window) {
+        times.pop_front();
+    }
+    times.push_back(now);
+}
+
+/// Drop the keys with no use inside the last `window` seconds.
+fn keep_live<K: Eq + Hash>(map: &mut HashMap<K, VecDeque<u64>>, now: u64, window: u64) {
+    map.retain(|_, times| times.back().is_some_and(|at| now < at + window));
+}
+
+impl LookupLimits {
+    fn keys(&self) -> usize {
+        self.connections.len()
+            + self.asks.len()
+            + self.asks_per_video.len()
+            + self.tells.len()
+            + self.tells_per_key.len()
+    }
+
+    /// Sweeps are O(keys): at most once per [`SWEEP_EVERY_SECS`] past [`SWEEP_ABOVE`] keys, and
+    /// at most once a second while the table is full.
+    fn sweep(&mut self, now: u64) {
+        let keys = self.keys();
+        let due = keys > SWEEP_ABOVE && now >= self.swept_at.saturating_add(SWEEP_EVERY_SECS);
+        let full = keys >= MAX_LOOKUP_KEYS && now > self.swept_at;
+        if !due && !full {
+            return;
+        }
+        self.swept_at = now;
+        keep_live(&mut self.connections, now, LOOKUP_WINDOW_SECS);
+        keep_live(&mut self.asks, now, LOOKUP_WINDOW_SECS);
+        keep_live(&mut self.asks_per_video, now, LOOKUP_WINDOW_SECS);
+        keep_live(&mut self.tells, now, LOOKUP_WINDOW_SECS);
+        keep_live(&mut self.tells_per_key, now, TELLS_PER_KEY_WINDOW_SECS);
+    }
+
+    /// Remember a verified and carried id.
+    fn remember(&mut self, id: String, now: u64) {
+        while self
+            .seen_order
+            .front()
+            .is_some_and(|(at, _)| now >= at + LOOKUP_SEEN_SECS)
+            || self.seen_order.len() >= MAX_LOOKUP_SEEN
+        {
+            if let Some((_, old)) = self.seen_order.pop_front() {
+                self.seen.remove(&old);
+            }
+        }
+        self.seen.insert(id.clone());
+        self.seen_order.push_back((now, id));
+    }
 }
 
 /// What a scoped relay admits beyond what NFX-04 §1 requires: its MAYs. Default: neither.
@@ -124,6 +237,9 @@ pub struct MayAdmit {
     /// Kind-33478 STUN service announcements for its networks (§1 as amended 2026-11-19,
     /// NFX-10 §1).
     pub stun_announcements: bool,
+    /// Kind-20465 seeder lookup, asks and tells (NFX-17 §5). A scoped relay may list the kind
+    /// only once NFX-04 is amended to allow it, so nothing turns this on by default.
+    pub seeder_lookup: bool,
 }
 
 /// NFX-04 §1 admission and §2 publish limits.
@@ -145,6 +261,7 @@ struct Admission {
 enum Admitted {
     Beacon,
     Signal,
+    Lookup,
     /// A STUN announcement, and the expired ones (operator, server, `created_at`) to drop
     /// from the store.
     Stun(Vec<(String, String, u64)>),
@@ -375,6 +492,105 @@ impl Admission {
         Ok(Admitted::Stun(gone))
     }
 
+    /// A kind-20465 seeder lookup event (NFX-17 §5). Until it is verified, nothing it says is
+    /// authenticated, so only its size, its shape and its connection's budget apply. Limits keyed
+    /// on a key or a video are checked together and charged after full verification.
+    fn admit_lookup(
+        &self,
+        event: &ns::Event,
+        addr: &SocketAddr,
+        now: u64,
+    ) -> Result<Admitted, Refusal> {
+        use ns::MachineReadablePrefix::{Blocked, Duplicate, Invalid, RateLimited};
+        let size = event.as_json().len();
+        if size > lookup::MAX_TELL_BYTES {
+            return Err((Invalid, "lookup event over 36 KiB".into()));
+        }
+        let id = event.id.to_hex();
+        {
+            let mut limits = self.limits.lock().unwrap_or_else(PoisonError::into_inner);
+            let l = &mut limits.lookup;
+            l.sweep(now);
+            if l.seen.contains(&id) {
+                return Err((Duplicate, "already carried".into()));
+            }
+            let times = l.connections.get(addr);
+            if !has_room(times, now, LOOKUP_WINDOW_SECS, LOOKUPS_PER_CONNECTION) {
+                return Err((RateLimited, "lookup events per 10 s".into()));
+            }
+            if times.is_none() && l.keys() >= MAX_LOOKUP_KEYS {
+                return Err((RateLimited, "too many lookups at once".into()));
+            }
+            charge(
+                l.connections.entry(*addr).or_default(),
+                now,
+                LOOKUP_WINDOW_SECS,
+            );
+        }
+        let ev = from_nostr(event).map_err(|_| (Invalid, "unreadable event".to_owned()))?;
+        if !lookup::is_known_type(&ev) {
+            return Err((Blocked, "out of scope".into()));
+        }
+        let shape = lookup::shape(&ev, now).map_err(|e| (Invalid, e.to_string()))?;
+        if !self.namespaces.contains(&shape.namespace) {
+            return Err((Blocked, "out of scope".into()));
+        }
+        if self
+            .creators
+            .as_ref()
+            .is_some_and(|c| !c.contains(&shape.creator))
+        {
+            return Err((Blocked, "creator not allowed here".into()));
+        }
+        if !lookup::size_ok(shape.kind, size) {
+            return Err((Invalid, "ask over 1 KiB".into()));
+        }
+        let parsed = lookup::relayable(&ev, now).map_err(|e| (Invalid, e.to_string()))?;
+
+        let mut limits = self.limits.lock().unwrap_or_else(PoisonError::into_inner);
+        let l = &mut limits.lookup;
+        // Another connection may have carried it while this one verified.
+        if l.seen.contains(&id) {
+            return Err((Duplicate, "already carried".into()));
+        }
+        if l.keys() >= MAX_LOOKUP_KEYS {
+            return Err((RateLimited, "too many lookups at once".into()));
+        }
+        match parsed {
+            lookup::Parsed::Ask(ask) => {
+                let key = (ask.asker.clone(), ask.a.clone());
+                let w = LOOKUP_WINDOW_SECS;
+                if !has_room(l.asks.get(&key), now, w, ASKS_PER_KEY_AND_VIDEO) {
+                    return Err((RateLimited, "two asks per 10 s per video".into()));
+                }
+                if !has_room(l.asks_per_video.get(&ask.a), now, w, ASKS_PER_VIDEO) {
+                    return Err((RateLimited, "asks per 10 s for this video".into()));
+                }
+                charge(l.asks.entry(key).or_default(), now, w);
+                charge(l.asks_per_video.entry(ask.a.clone()).or_default(), now, w);
+            }
+            lookup::Parsed::Tell(tell) => {
+                let route = (tell.seeder.clone(), tell.asker.clone(), tell.a.clone());
+                let (w, wk) = (LOOKUP_WINDOW_SECS, TELLS_PER_KEY_WINDOW_SECS);
+                if !has_room(l.tells.get(&route), now, w, TELLS_PER_ROUTE) {
+                    return Err((RateLimited, "two tells per 10 s per viewer".into()));
+                }
+                if !has_room(l.tells_per_key.get(&tell.seeder), now, wk, TELLS_PER_KEY) {
+                    return Err((RateLimited, "tells per 30 s".into()));
+                }
+                charge(l.tells.entry(route).or_default(), now, w);
+                charge(
+                    l.tells_per_key.entry(tell.seeder.clone()).or_default(),
+                    now,
+                    wk,
+                );
+            }
+            lookup::Parsed::Ignored(_) => return Err((Blocked, "out of scope".into())),
+        }
+        l.remember(id, now);
+        Ok(Admitted::Lookup)
+    }
+
     /// Drop expired STUN announcements from the store: NIP-40 keeps them from every reader
     /// already, and this keeps them from holding room there.
     async fn drop_expired(&self, gone: &[(String, String, u64)]) {
@@ -458,11 +674,19 @@ impl ns::WritePolicy for Admission {
     fn admit_event<'a>(
         &'a self,
         event: &'a ns::Event,
-        _addr: &'a SocketAddr,
+        addr: &'a SocketAddr,
     ) -> BoxFuture<'a, ns::WritePolicyResult> {
         Box::pin(async move {
-            match self.admit(event, unix_now()) {
-                Ok(Admitted::Beacon | Admitted::Signal) => ns::WritePolicyResult::Accept,
+            let now = unix_now();
+            let admitted = if event.kind.as_u16() == KIND_LOOKUP && self.may.seeder_lookup {
+                self.admit_lookup(event, addr, now)
+            } else {
+                self.admit(event, now)
+            };
+            match admitted {
+                Ok(Admitted::Beacon | Admitted::Signal | Admitted::Lookup) => {
+                    ns::WritePolicyResult::Accept
+                }
                 Ok(Admitted::Stun(gone)) => {
                     self.drop_expired(&gone).await;
                     ns::WritePolicyResult::Accept
@@ -732,17 +956,29 @@ impl ScopedRelay {
             kinds.push(KIND_STUN_ANNOUNCEMENT);
             roles.push("stun");
         }
-        let description = match (may.mesh_signaling, may.stun_announcements) {
-            (false, false) => "NFX-04 scoped relay: NFX manifests and beacons only",
-            (true, false) => {
-                "NFX-04 scoped relay: NFX manifests and beacons, and NFX mesh signaling (kind 25050, nfx-mesh/1)"
+        if may.seeder_lookup {
+            kinds.push(KIND_LOOKUP);
+            roles.push("lookup");
+        }
+        let mut also = Vec::new();
+        if may.mesh_signaling {
+            also.push("NFX mesh signaling (kind 25050, nfx-mesh/1)");
+        }
+        if may.stun_announcements {
+            also.push("STUN service announcements (kind 33478)");
+        }
+        if may.seeder_lookup {
+            also.push("seeder lookup (kind 20465)");
+        }
+        let description = match also.split_last() {
+            None => "NFX-04 scoped relay: NFX manifests and beacons only".to_owned(),
+            Some((last, [])) => {
+                format!("NFX-04 scoped relay: NFX manifests and beacons, and {last}")
             }
-            (false, true) => {
-                "NFX-04 scoped relay: NFX manifests and beacons, and STUN service announcements (kind 33478)"
-            }
-            (true, true) => {
-                "NFX-04 scoped relay: NFX manifests and beacons, NFX mesh signaling (kind 25050, nfx-mesh/1) and STUN service announcements (kind 33478)"
-            }
+            Some((last, rest)) => format!(
+                "NFX-04 scoped relay: NFX manifests and beacons, {} and {last}",
+                rest.join(", ")
+            ),
         };
         let nip11 = serde_json::json!({
             "name": "nfx scoped relay",
@@ -920,6 +1156,230 @@ mod tests {
         )
         .unwrap();
         crate::nostr::to_nostr(&ev).unwrap()
+    }
+
+    /// A distinct connection for the lookup tests.
+    fn conn(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    fn to_ns(ev: &nfx_proto::event::Event) -> ns::Event {
+        ns::Event::from_json(serde_json::to_string(ev).unwrap()).unwrap()
+    }
+
+    /// What the lookup tests share, from the vectors.
+    struct LookupFixture {
+        now: u64,
+        a: String,
+        seeder: [u8; 32],
+        beacon: nfx_proto::event::Event,
+    }
+
+    fn lookup_fixture() -> LookupFixture {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../../spec/test-vectors/lookup.json")).unwrap();
+        let hex = v["secret_keys_DO_NOT_USE"]["seeder"].as_str().unwrap();
+        let mut seeder = [0u8; 32];
+        for (i, b) in seeder.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
+        }
+        LookupFixture {
+            now: v["now"].as_u64().unwrap(),
+            a: v["manifest_a"].as_str().unwrap().to_owned(),
+            seeder,
+            beacon: serde_json::from_value(v["beacon"].clone()).unwrap(),
+        }
+    }
+
+    const LOOKUP_ON: MayAdmit = MayAdmit {
+        mesh_signaling: false,
+        stun_announcements: false,
+        seeder_lookup: true,
+    };
+
+    /// NFX-17 §5 against the vectors: off, the kind is out of scope; on, every valid event is
+    /// carried and every other one refused, another type as out of scope.
+    #[test]
+    fn a_relay_admits_the_valid_lookup_events_and_refuses_the_rest() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../../spec/test-vectors/lookup.json")).unwrap();
+        let now = v["now"].as_u64().unwrap();
+        let net = ["nfx:mainnet:1"];
+        let off = admission(&net, MayAdmit::default());
+        let ask = ns::Event::from_json(v["ask"].to_string()).unwrap();
+        assert!(refused(off.admit(&ask, now)).starts_with("blocked: out of scope"));
+
+        for name in [
+            "ask",
+            "tell",
+            "ask_with_unknown_tag",
+            "tell_with_unknown_tag",
+        ] {
+            let ev = ns::Event::from_json(v[name].to_string()).unwrap();
+            let relay = admission(&net, LOOKUP_ON);
+            assert!(
+                matches!(relay.admit_lookup(&ev, &conn(1), now), Ok(Admitted::Lookup)),
+                "{name}"
+            );
+        }
+        for case in v["boundaries"].as_array().unwrap() {
+            let ev = ns::Event::from_json(case["event"].to_string()).unwrap();
+            let relay = admission(&net, LOOKUP_ON);
+            let r = relay.admit_lookup(&ev, &conn(1), now);
+            assert!(matches!(r, Ok(Admitted::Lookup)), "{}", case["name"]);
+        }
+
+        let bad: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../spec/test-vectors/lookup-invalid.json"
+        ))
+        .unwrap();
+        let now = bad["now"].as_u64().unwrap();
+        for case in bad["rejected"].as_array().unwrap() {
+            let ev = ns::Event::from_json(case["event"].to_string()).unwrap();
+            let relay = admission(&net, LOOKUP_ON);
+            assert!(
+                relay.admit_lookup(&ev, &conn(1), now).is_err(),
+                "{}",
+                case["name"]
+            );
+        }
+        for case in bad["ignored"].as_array().unwrap() {
+            let ev = ns::Event::from_json(case["event"].to_string()).unwrap();
+            let relay = admission(&net, LOOKUP_ON);
+            assert!(
+                refused(relay.admit_lookup(&ev, &conn(1), now))
+                    .starts_with("blocked: out of scope"),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    /// §5: an event that fails verification charges nothing keyed on what it claims, so a
+    /// forger cannot spend a viewer's or a seeder's budget.
+    #[test]
+    fn a_forged_lookup_event_spends_no_one_elses_budget() {
+        let f = lookup_fixture();
+        let relay = admission(&["nfx:mainnet:1"], LOOKUP_ON);
+        let viewer = [7u8; 32];
+        let forge = |ev: &nfx_proto::event::Event| {
+            let mut json = serde_json::to_value(ev).unwrap();
+            let sig = json["sig"].as_str().unwrap();
+            let flipped = if sig.starts_with('0') { "1" } else { "0" };
+            json["sig"] = format!("{flipped}{}", &sig[1..]).into();
+            ns::Event::from_json(json.to_string()).unwrap()
+        };
+        let ask = lookup::ask(&viewer, &f.a, f.now).unwrap();
+        for port in 1..=3 {
+            assert!(
+                refused(relay.admit_lookup(&forge(&ask), &conn(port), f.now))
+                    .starts_with("invalid:")
+            );
+        }
+        for at in [f.now, f.now - 1] {
+            let real = lookup::ask(&viewer, &f.a, at).unwrap();
+            assert!(relay.admit_lookup(&to_ns(&real), &conn(9), f.now).is_ok());
+        }
+        let tell = lookup::tell(&f.seeder, &f.beacon, &ask.pubkey, f.now).unwrap();
+        for port in 4..=6 {
+            assert!(
+                refused(relay.admit_lookup(&forge(&tell), &conn(port), f.now))
+                    .starts_with("invalid:")
+            );
+        }
+        assert!(relay.admit_lookup(&to_ns(&tell), &conn(9), f.now).is_ok());
+    }
+
+    /// §5's limits, each on its own key, and a replay that charges nothing.
+    #[test]
+    fn lookup_events_are_rate_limited() {
+        let f = lookup_fixture();
+        let net = ["nfx:mainnet:1"];
+        let admit = |r: &Admission, e: &nfx_proto::event::Event, port: u16, now: u64| {
+            r.admit_lookup(&to_ns(e), &conn(port), now)
+        };
+
+        // Two asks per (key, video) per 10 s; a replay is dropped and charges nothing.
+        let relay = admission(&net, LOOKUP_ON);
+        let first = lookup::ask(&[1; 32], &f.a, f.now).unwrap();
+        assert!(admit(&relay, &first, 1, f.now).is_ok());
+        for _ in 0..3 {
+            assert!(refused(admit(&relay, &first, 1, f.now)).starts_with("duplicate:"));
+        }
+        let second = lookup::ask(&[1; 32], &f.a, f.now - 1).unwrap();
+        assert!(
+            admit(&relay, &second, 1, f.now).is_ok(),
+            "the replays cost nothing"
+        );
+        let third = lookup::ask(&[1; 32], &f.a, f.now - 2).unwrap();
+        assert!(refused(admit(&relay, &third, 1, f.now)).starts_with("rate-limited:"));
+        let later = f.now + LOOKUP_WINDOW_SECS;
+        assert!(
+            admit(&relay, &third, 1, later).is_ok(),
+            "the window has passed"
+        );
+
+        // 30 asks per video per 10 s, whichever keys sign them.
+        let relay = admission(&net, LOOKUP_ON);
+        for i in 1..=ASKS_PER_VIDEO {
+            let ask = lookup::ask(&[u8::try_from(i).unwrap(); 32], &f.a, f.now).unwrap();
+            assert!(admit(&relay, &ask, 1, f.now).is_ok(), "{i}");
+        }
+        let over = lookup::ask(&[99; 32], &f.a, f.now).unwrap();
+        assert!(refused(admit(&relay, &over, 1, f.now)).starts_with("rate-limited:"));
+
+        // Two tells per (seeder, viewer, video) per 10 s; another viewer has its own.
+        let relay = admission(&net, LOOKUP_ON);
+        let viewer = "ab".repeat(32);
+        for at in [f.now, f.now - 1] {
+            let tell = lookup::tell(&f.seeder, &f.beacon, &viewer, at).unwrap();
+            assert!(admit(&relay, &tell, 1, f.now).is_ok());
+        }
+        let tell = lookup::tell(&f.seeder, &f.beacon, &viewer, f.now - 2).unwrap();
+        assert!(refused(admit(&relay, &tell, 1, f.now)).starts_with("rate-limited:"));
+        let other = lookup::tell(&f.seeder, &f.beacon, &"cd".repeat(32), f.now).unwrap();
+        assert!(admit(&relay, &other, 1, f.now).is_ok());
+
+        // 160 tells per seeder key per 30 s, across connections.
+        let relay = admission(&net, LOOKUP_ON);
+        for i in 0..TELLS_PER_KEY {
+            let tell = lookup::tell(&f.seeder, &f.beacon, &format!("{i:064x}"), f.now).unwrap();
+            let port = u16::try_from(1 + i / LOOKUPS_PER_CONNECTION).unwrap();
+            assert!(admit(&relay, &tell, port, f.now).is_ok(), "{i}");
+        }
+        let tell = lookup::tell(&f.seeder, &f.beacon, &"ef".repeat(32), f.now).unwrap();
+        assert!(refused(admit(&relay, &tell, 9, f.now)).starts_with("rate-limited:"));
+
+        // 96 lookup events per connection per 10 s, valid or not; another connection is free.
+        let relay = admission(&net, LOOKUP_ON);
+        let junk = lookup::ask(&[3; 32], &f.a, f.now + 3600).unwrap();
+        for i in 0..LOOKUPS_PER_CONNECTION {
+            assert!(
+                refused(admit(&relay, &junk, 1, f.now)).starts_with("invalid:"),
+                "{i}"
+            );
+        }
+        let good = lookup::ask(&[4; 32], &f.a, f.now).unwrap();
+        assert!(refused(admit(&relay, &good, 1, f.now)).contains("per 10 s"));
+        assert!(admit(&relay, &good, 2, f.now).is_ok());
+    }
+
+    /// §5: another network and a creator off the allow-list are out of scope.
+    #[test]
+    fn lookup_events_respect_the_relays_scope() {
+        let f = lookup_fixture();
+        let ask = to_ns(&lookup::ask(&[1; 32], &f.a, f.now).unwrap());
+        let elsewhere = admission(&["nfx:other:1"], LOOKUP_ON);
+        assert!(
+            refused(elsewhere.admit_lookup(&ask, &conn(1), f.now))
+                .starts_with("blocked: out of scope")
+        );
+        let mut listed = admission(&["nfx:mainnet:1"], LOOKUP_ON);
+        listed.creators = Some(BTreeSet::from(["00".repeat(32)]));
+        assert!(
+            refused(listed.admit_lookup(&ask, &conn(1), f.now))
+                .starts_with("blocked: creator not allowed")
+        );
     }
 
     fn refused(r: Result<Admitted, Refusal>) -> String {

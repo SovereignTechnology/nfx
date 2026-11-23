@@ -191,6 +191,10 @@ pub struct Config {
     /// 12 an hour per key, at most 1024 held, each kept until it expires
     /// (`nfx_node::relay::MayAdmit`). Off by default. Needs `embed_relay`.
     pub embed_relay_stun_ads: bool,
+    /// The embedded relay also carries kind-20465 seeder lookup, asks and tells (NFX-17 §5):
+    /// ephemeral, fully verified, rate-limited (`nfx_node::relay::MayAdmit`). Off by default.
+    /// Needs `embed_relay`.
+    pub embed_relay_lookup: bool,
     /// Join each video's gossip swarm (NFX-06 §4). Off by default: joining lets any swarm
     /// member point this node's endpoint at hosts of its choosing, because iroh-gossip
     /// feeds members' advertised addresses to it unfiltered (independent audit M1, M3).
@@ -774,6 +778,11 @@ impl Daemon {
                 "--embed-relay-stun-ads needs --embed-relay".into(),
             ));
         }
+        if cfg.embed_relay_lookup && cfg.embed_relay.is_none() {
+            return Err(Error::Config(
+                "--embed-relay-lookup needs --embed-relay".into(),
+            ));
+        }
         if cfg.relay_only && (cfg.gossip || !cfg.gossip_peers.is_empty()) {
             return Err(Error::Config(
                 "--gossip, --gossip-peer: a relay-only node does not gossip".into(),
@@ -944,6 +953,7 @@ impl Daemon {
                 let may = MayAdmit {
                     mesh_signaling: cfg.embed_relay_mesh,
                     stun_announcements: cfg.embed_relay_stun_ads,
+                    seeder_lookup: cfg.embed_relay_lookup,
                 };
                 let relay = Arc::new(
                     ScopedRelay::admitting(&namespaces, creators, may)

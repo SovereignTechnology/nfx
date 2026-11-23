@@ -186,6 +186,13 @@ pub fn size_ok(kind: Type, event_json_bytes: usize) -> bool {
         }
 }
 
+/// Whether the event is kind 20465 with exactly one `t`, naming a type this version uses. A
+/// scoped relay refuses every other kind-20465 event as out of scope (NFX-17 §5).
+#[must_use]
+pub fn is_known_type(ev: &Event) -> bool {
+    matches!(type_of(ev), Ok(Ok(_)))
+}
+
 /// The checks of a lookup event that need no cryptography. Another type is an error here.
 pub fn shape(ev: &Event, now: u64) -> Result<Shape> {
     let kind = type_of(ev)?.map_err(bad)?;

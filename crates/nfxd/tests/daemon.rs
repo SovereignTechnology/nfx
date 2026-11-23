@@ -238,6 +238,17 @@ async fn a_bad_https_url_is_refused_at_start_not_silently_every_minute() {
     .err()
     .expect("refused");
     assert!(err.to_string().contains("--embed-relay-stun-ads"), "{err}");
+    // So is seeder lookup.
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("relay-lookup-no-relay"),
+        embed_relay_lookup: true,
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(err.to_string().contains("--embed-relay-lookup"), "{err}");
     // Turning off STUN from Nostr means something only with the mesh endpoint.
     let err = Daemon::start(Config {
         keys: Some(Keys::generate()),
