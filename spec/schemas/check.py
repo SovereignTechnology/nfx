@@ -94,6 +94,12 @@ def main() -> int:
         got = conforms(json.loads(case["event"]["content"]), beacon_schema)
         expect(f"beacon-renditions/invalid/{case['name']}", got, False)
 
+    # NFX-17: the beacon a tell carries is an ordinary beacon.
+    lookup = json.loads((VECTORS / "lookup.json").read_text())
+    embedded = json.loads(lookup["tell"]["content"])
+    expect("lookup.json tell's embedded beacon is the vector's", embedded == lookup["beacon"], True)
+    expect("lookup.json embedded beacon content", conforms(json.loads(embedded["content"]), beacon_schema), True)
+
     if failures:
         print(f"\n{len(failures)} schema/vector disagreement(s)", file=sys.stderr)
         return 1

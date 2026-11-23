@@ -14,6 +14,7 @@ use nfx_proto::canon;
 use nfx_proto::event::{Event, public_key_hex};
 use nfx_proto::gossip::{Envelope, Op};
 use nfx_proto::hashlist::{HashList, Role, verify_file};
+use nfx_proto::lookup;
 use nfx_proto::manifest::{License, Manifest};
 use nfx_proto::namespace::{Namespace, VideoAddr, validate_video_id};
 use nfx_proto::nip44;
@@ -1058,4 +1059,107 @@ fn a_relay_admits_what_a_reader_would_and_needs_no_session() {
     }
     assert_eq!(refused + carried, 36 + 7);
     assert!(refused >= 30, "refused only {refused}");
+}
+
+/// NFX-17: an ask and a tell reproduce byte for byte from the throwaway keys, and the tell
+/// delivers exactly the signed beacon.
+#[test]
+fn lookup_events_reproduce_and_verify() {
+    let v = vector!("lookup.json");
+    let now = v["now"].as_u64().unwrap();
+    let a = str_of(&v, "manifest_a");
+    let (asker, seeder) = (secret(&v, "asker"), secret(&v, "seeder"));
+    assert_eq!(public_key_hex(&asker).unwrap(), str_of(&v, "asker"));
+    assert_eq!(public_key_hex(&seeder).unwrap(), str_of(&v, "seeder"));
+
+    let want_ask = event(&v["ask"]);
+    let ask = lookup::ask(&asker, a, want_ask.created_at).unwrap();
+    assert_eq!(ask, want_ask);
+    let lookup::Parsed::Ask(read_ask) = lookup::read(&ask, now).unwrap() else {
+        panic!("an ask")
+    };
+    assert_eq!(read_ask.asker, str_of(&v, "asker"));
+    assert_eq!(read_ask.a, a);
+
+    let beacon = event(&v["beacon"]);
+    Beacon::from_event(&beacon, now).unwrap();
+    let want_tell = event(&v["tell"]);
+    let tell = lookup::tell(&seeder, &beacon, &read_ask.asker, want_tell.created_at).unwrap();
+    assert_eq!(tell, want_tell);
+    let lookup::Parsed::Tell(told) = lookup::read(&tell, now).unwrap() else {
+        panic!("a tell")
+    };
+    assert_eq!(told.asker, read_ask.asker);
+    assert_eq!(told.seeder, str_of(&v, "seeder"));
+    assert_eq!(told.event, beacon, "the beacon arrives as it was signed");
+
+    for name in ["ask_with_unknown_tag", "tell_with_unknown_tag"] {
+        lookup::read(&event(&v[name]), now).unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+    let boundaries = v["boundaries"].as_array().unwrap();
+    assert_eq!(boundaries.len(), 7);
+    for case in boundaries {
+        let name = str_of(case, "name");
+        let ev = event(&case["event"]);
+        lookup::read(&ev, now).unwrap_or_else(|e| panic!("{name}: {e}"));
+        lookup::relayable(&ev, now).unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+}
+
+/// NFX-17 §2: every rejected event is refused by a reader and by a relay; another type is ignored
+/// by a reader and refused by a relay.
+#[test]
+fn lookup_events_that_must_be_refused_are() {
+    let v = vector!("lookup-invalid.json");
+    let now = v["now"].as_u64().unwrap();
+    let mut rejected = 0;
+    for case in v["rejected"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        let ev = event(&case["event"]);
+        assert!(lookup::read(&ev, now).is_err(), "{name} must be rejected");
+        assert!(
+            lookup::relayable(&ev, now).is_err(),
+            "{name} must be refused by a relay"
+        );
+        rejected += 1;
+    }
+    let mut ignored = 0;
+    for case in v["ignored"].as_array().unwrap() {
+        let name = str_of(case, "name");
+        let ev = event(&case["event"]);
+        ev.verify().unwrap();
+        assert!(
+            matches!(lookup::read(&ev, now), Ok(lookup::Parsed::Ignored(_))),
+            "{name} must be ignored"
+        );
+        assert!(
+            lookup::relayable(&ev, now).is_err(),
+            "{name}: another type is out of scope for a relay"
+        );
+        ignored += 1;
+    }
+    assert_eq!((rejected, ignored), (52, 1));
+}
+
+/// A relay admits what a reader accepts, and its pre-signature check agrees on who asked.
+#[test]
+fn a_relay_admits_valid_lookup_events() {
+    let v = vector!("lookup.json");
+    let now = v["now"].as_u64().unwrap();
+    let asker = str_of(&v, "asker");
+    for (name, kind) in [
+        ("ask", lookup::Type::Ask),
+        ("tell", lookup::Type::Tell),
+        ("ask_with_unknown_tag", lookup::Type::Ask),
+        ("tell_with_unknown_tag", lookup::Type::Tell),
+    ] {
+        let ev = event(&v[name]);
+        lookup::relayable(&ev, now).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let s = lookup::shape(&ev, now).unwrap();
+        assert_eq!((s.kind, s.asker.as_str()), (kind, asker), "{name}");
+        assert_eq!(s.a, str_of(&v, "manifest_a"), "{name}");
+    }
+    let size = |e: &Event| serde_json::to_string(e).unwrap().len();
+    assert!(size(&event(&v["ask"])) <= lookup::MAX_ASK_BYTES);
+    assert!(size(&event(&v["tell"])) <= lookup::MAX_TELL_BYTES);
 }

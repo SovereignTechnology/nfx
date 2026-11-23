@@ -40,6 +40,7 @@ MAX_SAFE_INT = 2**53 - 1
 from pay1 import pay1_vectors  # noqa: E402  (pinned with the money code: crates/ci/check-locked.sh)
 from ratings import ratings_vectors  # noqa: E402  (NFX-16)
 from meshsig import meshsig_vectors  # noqa: E402  (NFX-10 §6)
+from lookup import lookup_vectors  # noqa: E402  (NFX-17)
 
 
 def uvarint(n: int) -> bytes:
@@ -952,6 +953,7 @@ def main() -> int:
             "invalid": stun_invalid,
         },
         **meshsig_vectors(keypair, schnorr_id_pubkey, nostr_event),
+        **lookup_vectors(keypair, schnorr_id_pubkey, nostr_event, secrets, a_tag, beacon_content),
         "files1.json": files1,
         "canon.json": {
             "description": "NFX-11 §9 canonical JSON. 'input' is received JSON text; 'canon' "

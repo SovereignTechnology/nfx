@@ -38,6 +38,7 @@ desktop shell.
 | NFX-11 | Registry, schemas, test vectors, conformance | Living | per-milestone |
 | NFX-12 | HyperDHT transport profile (optional) | Draft | later |
 | NFX-16 | Seeder ratings (kind 7368; optional) | Draft | — |
+| NFX-17 | Seeder lookup (kind 20465; optional) | Draft | — |
 
 NFX-13 to NFX-15 are reserved for documents not yet written: creator-managed mode
 (ADR 0100), the creator share (ADR 0102) and channel payments (ADR 0104).
@@ -101,3 +102,7 @@ the repository license. Rationale and full context: `docs/decisions/0006-*` (f).
   and optional: no artifact or reader changes, and a relay that does not admit it is as
   conformant as before. Decided by the maintainer (sovtech) over a `specver` bump, which would have changed
   every room key and republished every manifest. Record: issue #96 and NFX-04's changelog.
+- 2026-11-22 — NFX-17 (seeder lookup) added as Draft, optional, after ADR 0105: a viewer asks
+  who seeds a video and seeders answer at once with their signed beacon (kind 20465). No frozen
+  document changes in this entry; a scoped relay can carry the kind only after a separate in-place
+  amendment to NFX-04. New vectors `lookup*.json`. Issue #113.
