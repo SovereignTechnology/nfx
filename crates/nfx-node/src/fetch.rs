@@ -170,6 +170,7 @@ impl Node {
                 anchor.segs.saturating_add(1),
                 false,
                 &deadline,
+                anchor.root,
             )
             .await?;
         let first = *members
@@ -178,7 +179,7 @@ impl Node {
         let list_bytes = match stored(dest, anchor.root) {
             Some(bytes) => Bytes::from(bytes),
             None => {
-                self.fetch_member(&conn, first, MAX_HASH_LIST_BYTES, &deadline)
+                self.fetch_member(&conn, first, MAX_HASH_LIST_BYTES, &deadline, anchor.root)
                     .await?
             }
         };
@@ -216,7 +217,7 @@ impl Node {
                 continue;
             }
             let bytes = self
-                .fetch_member(&conn, *hash, entry.size, &deadline)
+                .fetch_member(&conn, *hash, entry.size, &deadline, anchor.root)
                 .await?;
             check_sha(&bytes, sha, &format!("meta member {i}"))?;
             if playlist {
@@ -252,14 +253,16 @@ impl Node {
             }
             let count = u64::try_from(expected.len()).map_err(NodeError::transport)?;
             let members = self
-                .fetch_seq(&conn, ticket.hash(), count, true, &deadline)
+                .fetch_seq(&conn, ticket.hash(), count, true, &deadline, anchor.root)
                 .await?;
             for (i, (hash, sha)) in members.iter().zip(&expected).enumerate() {
                 if dest.has(sha) {
                     continue; // verified when it was stored
                 }
                 let size = listed(&index, sha)?.size;
-                let bytes = self.fetch_member(&conn, *hash, size, &deadline).await?;
+                let bytes = self
+                    .fetch_member(&conn, *hash, size, &deadline, anchor.root)
+                    .await?;
                 check_sha(&bytes, sha, &format!("{id} member {i}"))?;
                 dest.put_verified(sha, &bytes)?;
             }
@@ -285,9 +288,10 @@ impl Node {
         max_members: u64,
         exact: bool,
         deadline: &Deadline,
+        root: &str,
     ) -> Result<Vec<Hash>> {
         let bytes = self
-            .fetch_member(conn, hash, max_members.saturating_mul(32), deadline)
+            .fetch_member(conn, hash, max_members.saturating_mul(32), deadline, root)
             .await?;
         let seq = HashSeq::try_from(bytes).map_err(NodeError::transport)?;
         let members: Vec<Hash> = seq.iter().collect();
@@ -304,12 +308,15 @@ impl Node {
     /// size stays incomplete and is refused. A temp tag keeps it from garbage collection
     /// until it has been read; after that it is untagged and collected. It must arrive
     /// within the member limit and before the transfer's deadline, whichever is sooner.
+    /// The payload bytes read are counted against `conn`'s seeder for the video `root`
+    /// ([`Node::transfers`], nfx #99).
     async fn fetch_member(
         &self,
         conn: &Connection,
         hash: Hash,
         cap: u64,
         deadline: &Deadline,
+        root: &str,
     ) -> Result<Bytes> {
         let _hold = self
             .blobs()
@@ -331,7 +338,7 @@ impl Node {
             let wait = deadline.limits.member.min(left);
             let chunks = cap.div_ceil(CHUNK).max(1);
             let request = GetRequest::blob_ranges(hash, ChunkRanges::chunks(..chunks));
-            tokio::time::timeout(
+            let got = tokio::time::timeout(
                 wait,
                 self.blobs().remote().execute_get(conn.clone(), request),
             )
@@ -344,6 +351,7 @@ impl Node {
                 }
             })?
             .map_err(NodeError::transport)?;
+            self.transfers().record(root, conn, got.payload_bytes_read);
         }
         let status = self
             .blobs()
@@ -620,6 +628,45 @@ mod tests {
         for f in &list.files {
             dest.get(&f.sha256).unwrap();
         }
+        seed.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_transfer_log_counts_each_seeders_bytes_and_the_path_they_took() {
+        use crate::transfers::PeerPath;
+
+        let (seed, seeded, manifest, list) = seeder("log-seed").await;
+        let node = fetcher().await;
+        let dest = FsStore::open(tmp("log-dest")).unwrap();
+        let root = manifest.root_hex();
+        assert!(node.transfers().peers(&root).is_empty());
+        fetch_all(&node, &seeded, &manifest, &dest, Limits::default())
+            .await
+            .unwrap();
+        let peers = node.transfers().peers(&root);
+        assert_eq!(peers.len(), 1, "{peers:?}");
+        let p = &peers[0];
+        assert_eq!(p.peer, seed.endpoint().id().to_string());
+        // Every file of the video, the hash list and the collections came from it.
+        let files: u64 = list.files.iter().map(|f| f.size).sum();
+        assert!(p.bytes >= files, "{} < {files}", p.bytes);
+        assert!(p.blobs > list.files.len() as u64, "{p:?}");
+        assert!(p.last_ms > 0);
+        // Over loopback, straight to the seeder's socket.
+        let routes = node.transfers().routes(&root);
+        assert_eq!(routes.len(), 1, "{routes:?}");
+        let want = on_loopback(seed.endpoint()).addrs.into_iter().next();
+        match (&routes[0].path, want) {
+            (PeerPath::Direct(got), Some(TransportAddr::Ip(want))) => assert_eq!(*got, want),
+            other => panic!("not direct to the seeder: {other:?}"),
+        }
+        // Fetched again, nothing moves: every file is held.
+        fetch_all(&node, &seeded, &manifest, &dest, Limits::default())
+            .await
+            .unwrap();
+        assert_eq!(node.transfers().peers(&root)[0].bytes, p.bytes);
+        assert!(node.transfers().peers(&"0".repeat(64)).is_empty());
+        node.shutdown().await.unwrap();
         seed.shutdown().await.unwrap();
     }
 

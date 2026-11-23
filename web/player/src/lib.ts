@@ -38,6 +38,7 @@ import type {
   Level,
   MeshStats,
   OpenOptions,
+  PeerAddress,
   PlayerEvent,
   Rejection,
   RemoteCandidates,
@@ -63,6 +64,7 @@ import { MAX_RENDITIONS as LEVELS_MAX_RENDITIONS, checkRenditions, cutMaster, or
 import {
   MAX_RELAYS as MESH_MAX_RELAYS,
   MAX_TRACKERS as MESH_MAX_TRACKERS,
+  PeerBook,
   meshConfig,
   relayUrl as meshRelayUrl,
   trackerUrl as meshTrackerUrl,
@@ -368,6 +370,7 @@ function start(
 ): Session {
   let dead = false;
   let verified = 0;
+  let originBytes = 0;
   let playing = false;
   let levels: Level[] = [];
   const rejected: Rejection[] = [];
@@ -394,8 +397,9 @@ function start(
   const base = {
     loader: verifyingLoader(
       anchor,
-      (sha256, url) => {
+      (sha256, url, bytes) => {
         verified += 1;
+        originBytes += bytes;
         emit({ type: 'verified', sha256, url });
       },
       reject,
@@ -405,18 +409,32 @@ function start(
   };
   let hls: Hls;
   let mesh: MeshStats | null = null;
+  const book = new PeerBook();
   let nostr: NostrSignaler | undefined;
   let engine: string;
   if (o.signaling !== null) {
     const signaling = o.signaling;
-    mesh = { signaling: signaling.kind, trackers: [], relays: [], swarms: [], bytes: { http: 0, p2p: 0 }, uploaded: 0, peers: 0, rejected: [] };
+    mesh = {
+      signaling: signaling.kind,
+      trackers: [],
+      relays: [],
+      swarms: [],
+      bytes: { http: 0, p2p: 0 },
+      uploaded: 0,
+      peers: 0,
+      rejected: [],
+      connected: 0,
+      segments: { http: 0, p2p: 0 },
+      peerList: [],
+      signal: null,
+    };
     const HlsWithP2P = HlsJsP2PEngine.injectMixin(Hls);
     const tuning = o.httpWindow === undefined ? {} : { httpWindow: o.httpWindow };
     if (signaling.kind === 'nostr') {
       const fallback = signaling.stunFallback ? new StunFallbackBook(signaling.stunFallback, o.iceServers.flatMap((i) => i.urls)) : null;
       nostr = new NostrSignaler(signaling.relays, log, signaling.remoteCandidates ?? 'all', fallback);
     }
-    hls = new HlsWithP2P({ ...base, ...meshConfig(anchor, signaling, o.iceServers, mesh, log, tuning, nostr) } as never);
+    hls = new HlsWithP2P({ ...base, ...meshConfig(anchor, signaling, o.iceServers, mesh, log, tuning, nostr, book) } as never);
     engine = `hls.js ${Hls.version} + ${P2P_ENGINE}`;
     const filtered = nostr?.remoteCandidates === 'global' ? ' (remote candidates: global unicast UDP only)' : '';
     log(`mesh: ${signaling.kind} ${(signaling.kind === 'nostr' ? signaling.relays : signaling.urls).join(' ')}${filtered}`);
@@ -473,6 +491,7 @@ function start(
     // disconnects). Then the Nostr signaler closes its relay sockets.
     hls.destroy();
     nostr?.destroy();
+    book.release();
     if (el.src.startsWith('blob:')) {
       el.removeAttribute('src');
       el.load();
@@ -505,8 +524,26 @@ function start(
         levels: levels.map((l) => ({ ...l })),
         level: dead ? -1 : hls.currentLevel,
         playing,
-        mesh: mesh === null ? null : structuredClone(mesh),
+        mesh:
+          mesh === null
+            ? null
+            : {
+                ...structuredClone(mesh),
+                connected: dead ? 0 : book.connected(),
+                peerList: book.list(),
+                signal:
+                  nostr === undefined
+                    ? null
+                    : { open: dead ? 0 : nostr.pool.openCount, ...nostr.stats },
+              },
+        originBytes,
+        bandwidthEstimate: dead ? 0 : hls.bandwidthEstimate,
       };
+    },
+    async addresses(): Promise<PeerAddress[]> {
+      if (dead || mesh === null) return [];
+      const found = await book.addresses();
+      return dead ? [] : found;
     },
     destroy,
   };
@@ -518,7 +555,7 @@ function start(
  */
 function verifyingLoader(
   anchor: Anchor,
-  onVerified: (sha256: string, url: string) => void,
+  onVerified: (sha256: string, url: string, bytes: number) => void,
   onRejected: (r: Rejection) => void,
   masterText: (url: string, text: string) => string,
 ): new (config: HlsConfig) => Loader<LoaderContext> {
@@ -554,7 +591,7 @@ function verifyingLoader(
             callbacks.onError({ code: 0, text: `nfx: ${why}` }, ctx, details, stats);
             return;
           }
-          onVerified(sha, ctx.url);
+          onVerified(sha, ctx.url, bytes.byteLength);
           let data: string | ArrayBuffer = bytes;
           try {
             if (wantText) {

@@ -5,3 +5,21 @@ form { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 input { flex: 1 1 18rem; min-width: 0; padding: 6px; background: #222; color: #eee; border: 1px solid #444; }
 video { width: 100%; max-width: 960px; background: #000; }
 pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+
+/* Stats for nerds (src/nerd.ts): over the video, top left, as text. */
+.stage { position: relative; max-width: 960px; }
+.nerd { position: absolute; top: 8px; left: 8px; right: 8px; max-height: calc(100% - 16px); overflow: auto;
+  background: rgba(0, 0, 0, 0.82); color: #eee; font: 12px/1.35 ui-monospace, monospace; padding: 8px; border-radius: 4px; z-index: 2; }
+.nerd__head { display: flex; gap: 12px; align-items: center; margin-bottom: 6px; }
+.nerd__head strong { flex: 1; }
+.nerd__show { white-space: nowrap; }
+.nerd button, .nerd-menu button { background: #333; color: #eee; border: 1px solid #555; padding: 2px 8px; cursor: pointer; }
+.nerd__banner { margin: 4px 0; padding: 4px 6px; background: #5a3b00; color: #ffd27a; }
+.nerd table { border-collapse: collapse; margin-bottom: 6px; }
+.nerd th, .nerd td { text-align: left; padding: 1px 8px 1px 0; vertical-align: top; }
+.nerd__rows th { color: #aaa; font-weight: normal; white-space: nowrap; }
+.nerd__sources th { color: #aaa; font-weight: normal; border-bottom: 1px solid #444; }
+.nerd__closed { color: #888; }
+.nerd__id, .nerd__addr { word-break: break-all; }
+.nerd__status { margin: 0; color: #aaa; }
+.nerd-menu { position: absolute; z-index: 3; background: #222; border: 1px solid #555; padding: 2px; }

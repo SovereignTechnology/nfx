@@ -21,7 +21,10 @@
   <input id="root" name="root" placeholder="root (64 hex), without an address" autocomplete="off" pattern="[0-9a-f]{64}">
   <button>Play</button>
 </form>
-<video id="v" controls muted playsinline></video>
+<div id="stage" class="stage">
+  <video id="v" controls muted playsinline></video>
+</div>
+<p><button id="nerd-toggle" type="button" aria-pressed="false" title="Stats for nerds (n, or right-click the video)">Stats for nerds</button></p>
 <pre id="log"></pre>
 <script type="module" src="out/player.js"></script>
 </html>
