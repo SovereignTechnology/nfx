@@ -749,7 +749,10 @@ impl ScopedRelay {
         let dir = dir.to_owned();
         // Reads and verifies up to the whole store: not on the async workers.
         let (store, events, mut reload) = tokio::task::spawn_blocking(move || {
-            relay_store::open(&dir, MAX_STORED_EVENTS, |e| rules.readmits(e, unix_now()))
+            // One clock for the whole load, so that what it keeps cannot depend on the order
+            // it reads the files in.
+            let now = unix_now();
+            relay_store::open(&dir, MAX_STORED_EVENTS, |e| rules.readmits(e, now))
         })
         .await
         .map_err(crate::NodeError::relay)?;

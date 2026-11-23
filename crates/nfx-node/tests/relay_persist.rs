@@ -351,6 +351,42 @@ async fn an_expired_manifest_is_not_served_after_a_reload() {
     run.stop().await;
 }
 
+/// A stored revision the rules refuse (here one dated ahead of this clock) does not stop the
+/// relay taking an older one. That one is served from memory and not written: the stored file
+/// is untouched, and a restart in that window leaves the address unserved, never wrong.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_older_revision_is_served_from_memory_while_the_stored_one_is_refused() {
+    let dir = tmp("refused");
+    let keys = Keys::generate();
+    let now = unix_now();
+    let stored = signed(&keys, "persist-ahead", now - 10).await;
+    let ahead = signed(&keys, "persist-ahead", now + 365 * 86_400).await;
+    let older = signed(&keys, "persist-ahead", now - 100).await;
+    let (run, _) = boot(&dir).await;
+    run.publish(&stored).await.unwrap();
+    run.stop().await;
+    let record = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| std::fs::read_to_string(p).unwrap().contains(&stored.id))
+        .unwrap();
+    let bytes = serde_json::to_string(&ahead).unwrap();
+    std::fs::write(&record, &bytes).unwrap();
+
+    let (run, reload) = boot(&dir).await;
+    assert_eq!((reload.served, reload.refused), (0, 1), "{reload}");
+    run.publish(&older).await.unwrap();
+    assert_eq!(run.served().await, ids(&[&older]));
+    assert_eq!(std::fs::read_to_string(&record).unwrap(), bytes);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    run.stop().await;
+
+    let (run, reload) = boot(&dir).await;
+    assert_eq!((reload.served, reload.refused), (0, 1), "{reload}");
+    assert!(run.served().await.is_empty());
+    run.stop().await;
+}
+
 /// Only manifests reach the disk. A relay taking every kind it can (beacons, mesh signaling,
 /// STUN announcements) writes one file here: the manifest.
 #[tokio::test(flavor = "multi_thread")]

@@ -12,25 +12,23 @@
 //!   needs to go on refusing the revisions it withdrew. An expired revision sets it too, so
 //!   that the older one it replaced cannot be re-sent in its place. A line can only ever take
 //!   a manifest away.
-//! - `<same stem>.fallback` (0600), rarely: when the current rules refuse the stored revision
-//!   (a clock set back, say) and accept an older one, the older one is kept here so that it
-//!   survives a restart. The refused record stays where it is and wins again as soon as the
-//!   rules take it; a deletion or a newer revision ends both.
 //!
 //! One writer at a time: the store holds an exclusive lock on the directory from before it
 //! reads anything until its writer exits. A relay that cannot get it runs in memory.
 //!
 //! **A file grants nothing.** On load every event is re-verified (id and signature) and run
 //! through the relay's current admission, so a creator taken off the allow-list is not served.
-//! Such a file stays on disk, in case the operator puts the creator back. Beacons and
-//! signaling never come here: only kind 38504 does ([`ManifestStore::put`]).
+//! Such a file stays on disk, in case the operator puts the creator back, and wins again as
+//! soon as the rules admit it. An older revision accepted meanwhile is served from memory and
+//! not written, so a restart in that window leaves the address unserved rather than wrong.
+//! Beacons and signaling never come here: only kind 38504 does ([`ManifestStore::put`]).
 //!
-//! The limits are the memory store's: [`MAX_STORED_EVENTS`] files in all, of at most
+//! The limits are the memory store's: [`MAX_STORED_EVENTS`] files of at most
 //! [`MAX_MANIFEST_BYTES`], the oldest going first. Nothing here can stop the relay: a file
 //! that cannot be used is logged and passed over, and a write that fails leaves the manifest
 //! served from memory until the next restart.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read as _, Write as _};
@@ -50,7 +48,6 @@ use crate::unix_now;
 
 const DELETIONS: &str = "deletions.jsonl";
 const TEMP_PREFIX: &str = ".tmp-";
-const FALLBACK_SUFFIX: &str = ".fallback";
 /// A line of `deletions.jsonl`: the longest `a` tag (192 bytes: kind, key, namespace, id) and
 /// its `until`, in JSON.
 const MAX_DELETION_LINE: usize = 256;
@@ -67,7 +64,7 @@ const WARN_EVERY_SECS: u64 = 60;
 /// How long a start waits for the directory's lock, for a writer that is just finishing.
 const LOCK_WAIT: Duration = Duration::from_secs(5);
 const LOCK_POLL: Duration = Duration::from_millis(25);
-/// A failed write of the deletions is retried after this, doubling up to [`RETRY_MAX`].
+/// What failed on disk is retried after this, doubling up to [`RETRY_MAX`].
 const RETRY_MIN: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(300);
 /// File-by-file lines in a [`Reload`]; the counts always cover every file.
@@ -81,8 +78,7 @@ static LAST_WARNED: AtomicU64 = AtomicU64::new(0);
 pub struct Reload {
     /// Manifests verified, admitted under the current rules and served.
     pub served: usize,
-    /// Addresses whose newest revision the current rules refuse: kept on disk and not served.
-    /// An older revision they accept may be served in its place.
+    /// Valid records the current rules refuse: kept on disk, not served.
     pub refused: usize,
     /// Past their NIP-40 `expiration`: removed.
     pub expired: usize,
@@ -91,7 +87,8 @@ pub struct Reload {
     /// Files that were not a valid record (corrupt, truncated, oversized, a bad signature):
     /// removed.
     pub corrupt: usize,
-    /// Files passed over and left in place (unreadable, not a regular file).
+    /// Files passed over and left in place (unreadable, not a regular file, or past the limit
+    /// and not removable).
     pub skipped: usize,
     /// Valid records older than the newest the limit allows: removed.
     pub excess: usize,
@@ -248,9 +245,32 @@ pub(crate) fn open(
 }
 
 /// Runs until every sender is gone and the queue is drained. The [`Disk`] goes with it, and
-/// with it the directory's lock.
+/// with it the directory's lock. It sleeps on the queue, and while a failed write is pending
+/// it also wakes when the retry is due.
 fn write_loop(mut disk: Disk, mut queue: mpsc::Receiver<Queued>) {
-    while let Some(first) = queue.blocking_recv() {
+    // A clock and nothing else. Without one, a retry waits for the next job.
+    let timer = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build();
+    loop {
+        let next = match (disk.retry_at, &timer) {
+            (Some(at), Ok(timer)) => {
+                // Made inside `block_on`: a timeout needs the runtime's clock when it is created.
+                let waited = timer
+                    .block_on(async { tokio::time::timeout_at(at.into(), queue.recv()).await });
+                match waited {
+                    Ok(next) => next,
+                    Err(_) => {
+                        disk.retry();
+                        continue;
+                    }
+                }
+            }
+            _ => queue.blocking_recv(),
+        };
+        let Some(first) = next else {
+            break;
+        };
         let mut batch = vec![first];
         while batch.len() < MAX_BATCH {
             match queue.try_recv() {
@@ -262,6 +282,9 @@ fn write_loop(mut disk: Disk, mut queue: mpsc::Receiver<Queued>) {
         for (_, done) in batch {
             let _ = done.send(());
         }
+    }
+    if disk.pending() {
+        disk.retry();
     }
 }
 
@@ -307,30 +330,20 @@ impl Rev {
     }
 }
 
-/// What the directory holds for one address.
+/// What the directory holds for one address, in `<stem>.json`.
 #[derive(Clone, Copy)]
 struct Held {
-    /// The newest revision, in `<stem>.json`.
     top: Rev,
     /// The rules of this run refused `top` at load. It stays, not served.
     refused: bool,
-    /// An older revision accepted while `top` is refused, in `<stem>.fallback`.
-    fallback: Option<Rev>,
 }
 
 impl Held {
-    /// Eviction order: an address with nothing to serve first, then the oldest.
+    /// Eviction order: a revision the rules refuse first, then the oldest. A total order that
+    /// depends on this record alone, so that keeping the highest `cap` gives one result
+    /// whatever order the records are read in.
     fn rank(&self, stem: &str) -> (bool, u64, String) {
-        let serving = if self.refused {
-            self.fallback
-        } else {
-            Some(self.top)
-        };
-        (
-            serving.is_some(),
-            serving.unwrap_or(self.top).created_at,
-            stem.to_owned(),
-        )
+        (!self.refused, self.top.created_at, stem.to_owned())
     }
 }
 
@@ -338,20 +351,27 @@ impl Held {
 struct Disk {
     dir: PathBuf,
     cap: usize,
-    /// File stem → what is held for that address.
+    /// File stem → the revision in that file.
     held: HashMap<String, Held>,
     /// [`Held::rank`], to find what goes first.
     order: BTreeSet<(bool, u64, String)>,
-    /// How many addresses have a fallback file: each counts against `cap`.
-    fallbacks: usize,
+    /// Records that are on disk with a revision the index does not know: unreadable at load,
+    /// or evicted and not removable. Never written over this run, since what they hold could
+    /// be newer than what would replace them.
+    stuck: HashSet<String>,
     deleted: Deleted,
     /// Deletions not yet durably in the file.
     unsaved: bool,
-    /// When a failed write of the deletions is next tried, and the wait after that one.
+    /// When what failed is next tried, and the wait after that. `None` when nothing is
+    /// pending, so that an idle writer stays asleep.
     retry_at: Option<Instant>,
     retry_wait: Duration,
-    /// A rename went through but the directory sync after it failed.
+    /// A rename or a removal went through but the directory sync after it failed.
     unsynced: bool,
+    /// Parents of a directory created at this start whose sync failed.
+    unsynced_parents: Vec<PathBuf>,
+    /// The line about an older revision kept in memory only has been logged.
+    memory_only_logged: bool,
     /// The deletions file exists and could not be read: it is not overwritten this run, since
     /// that would lose what it holds.
     deletions_unread: bool,
@@ -381,28 +401,25 @@ impl Disk {
             trim_oldest(&mut map, self.cap);
         }
         self.unsaved |= changed;
-        // The record first: a crash before the removal is then undone at the next load. A
-        // write that failed earlier is tried again here, whatever this batch holds.
-        if self.unsaved && (changed || self.retry_at.is_none_or(|at| Instant::now() >= at)) {
+        // The record first: a crash before the removal is then undone at the next load.
+        if changed {
             self.save_deletions();
+        }
+        if self.retry_at.is_some_and(|at| Instant::now() >= at) {
+            self.retry();
         }
         if !withdrawn.is_empty() || self.unsynced {
             for (a, until) in withdrawn {
                 self.forget(a, until);
             }
-            match sync_dir(&self.dir) {
-                Ok(()) => self.unsynced = false,
-                Err(e) => {
-                    self.unsynced = true;
-                    warn(&format!("cannot sync the directory: {e}"));
-                }
-            }
+            self.sync_directory();
         }
         for (job, _) in batch {
             if let Job::Put(event) = job {
                 self.put(event);
             }
         }
+        self.schedule();
     }
 
     fn put(&mut self, event: &ns::Event) {
@@ -417,127 +434,105 @@ impl Disk {
             return;
         }
         let stem = key(&a);
-        let (name, entry) = match self.held.get(&stem).copied() {
+        if self.stuck.contains(&stem) {
+            warn("cannot keep a manifest: the file of its address cannot be read or removed");
+            return;
+        }
+        let entry = Held {
+            top: rev,
+            refused: false,
+        };
+        match self.held.get(&stem).copied() {
             // The revision already here, accepted again: the rules take it now.
             Some(h) if rev == h.top => {
                 if h.refused {
-                    let entry = Held {
-                        refused: false,
-                        fallback: None,
-                        ..h
-                    };
-                    self.index(stem.clone(), entry);
-                    let _ = fs::remove_file(self.dir.join(fallback_name(&stem)));
+                    self.index(stem, entry);
                 }
                 return;
             }
-            Some(h) if rev.replaces(h.top) => (
-                file_name(&stem),
-                Held {
-                    top: rev,
-                    refused: false,
-                    fallback: None,
-                },
-            ),
+            Some(h) if rev.replaces(h.top) => {}
             Some(Held { refused: false, .. }) => return,
-            // Older than a revision the rules refuse: it is what this run serves, so it is
-            // kept beside that one, which still wins once the rules take it.
-            Some(h) => {
-                if h.fallback.is_some_and(|f| f == rev || f.replaces(rev)) {
-                    return;
-                }
-                let entry = Held {
-                    fallback: Some(rev),
-                    ..h
-                };
-                (fallback_name(&stem), entry)
+            // Older than a revision the rules refuse. The relay serves it from memory; the
+            // file stays, and wins as soon as the rules take it.
+            Some(_) => {
+                self.log_memory_only();
+                return;
             }
-            None => {
-                // Full, and older than all it serves: the memory store would not keep it.
-                if self.files() >= self.cap
-                    && self
-                        .order
-                        .first()
-                        .is_some_and(|(serving, t, _)| *serving && rev.created_at < *t)
-                {
-                    return;
-                }
-                (
-                    file_name(&stem),
-                    Held {
-                        top: rev,
-                        refused: false,
-                        fallback: None,
-                    },
-                )
+            // Full, and below everything held: it would be the first to go.
+            None if self.held.len() >= self.cap
+                && self
+                    .order
+                    .first()
+                    .is_some_and(|lowest| entry.rank(&stem) < *lowest) =>
+            {
+                return;
             }
-        };
+            // These are still on disk, so they bound what a failing disk can accumulate.
+            None if self.stuck.len() >= self.cap => {
+                warn("cannot keep a manifest: too many files cannot be read or removed");
+                return;
+            }
+            None => {}
+        }
         let json = event.as_json();
         if json.len() > MAX_MANIFEST_BYTES {
             return;
         }
-        if !self.write_record(&name, &json) {
-            return;
-        }
-        let new_top = entry.top == rev;
-        self.index(stem.clone(), entry);
-        if new_top {
-            // Whatever waited beside the old revision is older than this one.
-            let _ = fs::remove_file(self.dir.join(fallback_name(&stem)));
-        }
-        self.evict();
-    }
-
-    /// Whether the new content is in place. Once the rename has happened it is, even if the
-    /// directory sync after it failed: the index must then follow the file.
-    fn write_record(&mut self, name: &str, json: &str) -> bool {
-        match write_atomic(&self.dir, name, json.as_bytes()) {
-            Ok(None) => {
-                self.unsynced = false;
-                true
-            }
+        // Once the rename has happened the new content is in place, even if the directory
+        // sync after it failed, so the index follows it. If it did not happen, nothing changed.
+        match write_atomic(&self.dir, &file_name(&stem), json.as_bytes()) {
+            Ok(None) => self.unsynced = false,
             Ok(Some(e)) => {
                 self.unsynced = true;
                 warn(&format!("cannot sync the directory: {e}"));
-                true
             }
             Err(e) => {
                 warn(&format!("cannot keep a manifest: {e}"));
-                false
+                return;
             }
         }
+        self.index(stem, entry);
+        self.evict();
     }
 
-    fn files(&self) -> usize {
-        self.held.len() + self.fallbacks
+    /// Once a run, whatever else has been logged lately.
+    fn log_memory_only(&mut self) {
+        if !self.memory_only_logged {
+            self.memory_only_logged = true;
+            let _ = writeln!(
+                io::stderr(),
+                "relay store: an older revision was accepted while the stored one is refused by \
+                 the current rules. It is served from memory and not written: after a restart \
+                 its address is unserved until it is sent again or the rules admit the stored one"
+            );
+        }
     }
 
     fn index(&mut self, stem: String, entry: Held) {
         self.unindex(&stem);
         self.order.insert(entry.rank(&stem));
-        self.fallbacks += usize::from(entry.fallback.is_some());
         self.held.insert(stem, entry);
     }
 
     fn unindex(&mut self, stem: &str) {
         if let Some(old) = self.held.remove(stem) {
             self.order.remove(&old.rank(stem));
-            self.fallbacks -= usize::from(old.fallback.is_some());
         }
     }
 
-    /// Past the limit, what goes first by [`Held::rank`] goes, with its files. Returns the
-    /// stems removed.
+    /// Past the limit, the lowest by [`Held::rank`] goes, with its file. Returns the stems
+    /// evicted.
     fn evict(&mut self) -> Vec<String> {
         let mut gone = Vec::new();
-        while self.files() > self.cap {
+        while self.held.len() > self.cap {
             let Some(stem) = self.order.first().map(|(_, _, stem)| stem.clone()) else {
                 break;
             };
             self.unindex(&stem);
-            // The fallback first: left alone by a crash, it would take the record's place.
-            let _ = fs::remove_file(self.dir.join(fallback_name(&stem)));
-            let _ = fs::remove_file(self.dir.join(file_name(&stem)));
+            if let Err(e) = remove_record(&self.dir.join(file_name(&stem))) {
+                warn(&format!("cannot remove an evicted manifest: {e}"));
+                self.stuck.insert(stem.clone());
+            }
             gone.push(stem);
         }
         gone
@@ -545,29 +540,18 @@ impl Disk {
 
     fn forget(&mut self, a: &str, until: u64) {
         let stem = key(a);
-        let Some(h) = self.held.get(&stem).copied() else {
+        if !self
+            .held
+            .get(&stem)
+            .is_some_and(|h| h.top.created_at <= until)
+        {
             return;
-        };
-        if h.top.created_at <= until {
-            self.unindex(&stem);
-            // Older than `top`, so withdrawn with it. First: left alone by a crash, it would
-            // take the record's place.
-            let _ = fs::remove_file(self.dir.join(fallback_name(&stem)));
-            match fs::remove_file(self.dir.join(file_name(&stem))) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                    warn(&format!("cannot remove a withdrawn manifest: {e}"));
-                }
-                _ => {}
-            }
-        } else if h.fallback.is_some_and(|f| f.created_at <= until) {
-            self.index(
-                stem.clone(),
-                Held {
-                    fallback: None,
-                    ..h
-                },
-            );
-            let _ = fs::remove_file(self.dir.join(fallback_name(&stem)));
+        }
+        match remove_record(&self.dir.join(file_name(&stem))) {
+            Ok(()) => self.unindex(&stem),
+            // Still there, so still indexed: a newer revision replaces it, and the next load
+            // removes it under the recorded cutoff.
+            Err(e) => warn(&format!("cannot remove a withdrawn manifest: {e}")),
         }
     }
 
@@ -589,13 +573,12 @@ impl Disk {
         self.unsaved = true;
         if self.save_deletions() {
             for (_, _, path) in lapsed {
-                let _ = fs::remove_file(path);
+                let _ = remove_record(path);
             }
         }
     }
 
-    /// Write the deletions, and on failure set when to try again, waiting twice as long each
-    /// time up to [`RETRY_MAX`]. True once they are durably on disk.
+    /// Write the deletions. True once they are durably on disk.
     fn save_deletions(&mut self) -> bool {
         let failed = match self.write_deletions() {
             Ok(None) => None,
@@ -604,13 +587,9 @@ impl Disk {
         };
         let Some(e) = failed else {
             self.unsaved = false;
-            self.retry_at = None;
-            self.retry_wait = RETRY_MIN;
             return true;
         };
         warn(&format!("cannot record a deletion: {e}"));
-        self.retry_at = Some(Instant::now() + self.retry_wait);
-        self.retry_wait = (self.retry_wait * 2).min(RETRY_MAX);
         false
     }
 
@@ -630,80 +609,72 @@ impl Disk {
         write_atomic(&self.dir, DELETIONS, out.as_bytes())
     }
 
-    /// Everything stored for one address, its record and any fallback together, so that the
-    /// outcome does not depend on the order the directory lists them in.
-    fn load_address<F: Fn(&ns::Event) -> bool>(&mut self, stem: &str, scan: &mut Scan<'_, F>) {
-        let main = self.dir.join(file_name(stem));
-        let spare = self.dir.join(fallback_name(stem));
-        match self.check(&main, stem, scan) {
-            // Nothing is known about it, so neither file is touched.
-            Found::Unreadable => {}
-            // A fallback is older than its record, so it ends with it.
-            Found::Ended => {
-                if fs::remove_file(&spare).is_ok() {
-                    scan.reload.withdrawn += 1;
-                }
-            }
-            // The record is lost: a fallback, if there is one, is now the newest there is.
-            Found::Lost => {
-                let regular = fs::symlink_metadata(&spare).is_ok_and(|m| m.file_type().is_file());
-                if regular && fs::rename(&spare, &main).is_ok() {
-                    self.load_address(stem, scan);
-                }
-            }
-            Found::Valid(event) => {
-                let top = Rev::of(&event);
-                let refused = !(scan.admits)(&event);
-                let mut fallback = None;
-                if refused {
-                    if let Found::Valid(older) = self.check(&spare, stem, scan) {
-                        if top.replaces(Rev::of(&older)) {
-                            fallback = Some(Rev::of(&older));
-                            if (scan.admits)(&older) {
-                                scan.events.insert(stem.to_owned(), older);
-                            }
-                        } else {
-                            let _ = fs::remove_file(&spare);
-                        }
-                    }
-                } else {
-                    let _ = fs::remove_file(&spare);
-                    scan.events.insert(stem.to_owned(), event);
-                }
-                self.index(
-                    stem.to_owned(),
-                    Held {
-                        top,
-                        refused,
-                        fallback,
-                    },
-                );
-                // Each record seen is valid and settled, so what falls past the limit here
-                // is confirmed excess, whatever comes later.
-                for gone in self.evict() {
-                    scan.events.remove(&gone);
-                    scan.reload.excess += 1;
-                }
+    fn sync_directory(&mut self) {
+        match sync_dir(&self.dir) {
+            Ok(()) => self.unsynced = false,
+            Err(e) => {
+                self.unsynced = true;
+                warn(&format!("cannot sync the directory: {e}"));
             }
         }
     }
 
-    /// Read one file and apply what no rule can override: damage, a deletion, an expiry.
-    fn check<F>(&self, path: &Path, stem: &str, scan: &mut Scan<'_, F>) -> Found {
-        let name = path.file_name().unwrap_or_default().display();
-        let event = match read_record(path, stem) {
+    /// Whether a retry could still achieve something. A deletions file left alone because it
+    /// could not be read cannot: that lasts the whole run.
+    fn pending(&self) -> bool {
+        (self.unsaved && !self.deletions_unread)
+            || self.unsynced
+            || !self.unsynced_parents.is_empty()
+    }
+
+    /// Try again everything that failed, then set when to try next.
+    fn retry(&mut self) {
+        self.retry_at = None;
+        self.unsynced_parents.retain(|p| sync_dir(p).is_err());
+        if self.unsynced {
+            self.sync_directory();
+        }
+        if self.unsaved && !self.deletions_unread {
+            self.save_deletions();
+        }
+        self.schedule();
+    }
+
+    /// While something is pending there is a retry time, waiting twice as long each round up
+    /// to [`RETRY_MAX`]. A time already set stands, so that steady traffic cannot defer it.
+    fn schedule(&mut self) {
+        if !self.pending() {
+            self.retry_at = None;
+            self.retry_wait = RETRY_MIN;
+        } else if self.retry_at.is_none() {
+            self.retry_at = Some(Instant::now() + self.retry_wait);
+            self.retry_wait = (self.retry_wait * 2).min(RETRY_MAX);
+        }
+    }
+
+    /// One record. What it adds to the index depends on its own content alone, and everything
+    /// indexed stays valid for the rest of the load, so a record evicted here has `cap` others
+    /// above it for good: it is confirmed excess whatever is read next.
+    fn load_record<F: Fn(&ns::Event) -> bool>(&mut self, stem: &str, scan: &mut Scan<'_, F>) {
+        let path = self.dir.join(file_name(stem));
+        let name = file_name(stem);
+        let event = match read_record(&path, stem) {
             Ok(event) => event,
-            Err(Damage::Gone) => return Found::Lost,
+            Err(Damage::Gone) => return,
             Err(Damage::Unreadable(why)) => {
                 scan.reload.skipped += 1;
                 scan.reload.note(format!("{name}: {why}; left in place"));
-                return Found::Unreadable;
+                self.stuck.insert(stem.to_owned());
+                return;
             }
             Err(Damage::Invalid(why)) => {
                 scan.reload.corrupt += 1;
-                scan.reload.note(format!("{name}: {why}; removed"));
-                let _ = fs::remove_file(path);
-                return Found::Lost;
+                let outcome = match remove_record(&path) {
+                    Ok(()) => "removed",
+                    Err(_) => "could not be removed",
+                };
+                scan.reload.note(format!("{name}: {why}; {outcome}"));
+                return;
             }
         };
         let created_at = event.created_at.as_secs();
@@ -714,17 +685,35 @@ impl Disk {
         });
         if withdrawn {
             scan.reload.withdrawn += 1;
-            let _ = fs::remove_file(path);
-            return Found::Ended;
+            let _ = remove_record(&path);
+            return;
         }
         if event.is_expired_at(ns::Timestamp::from_secs(scan.now)) {
             scan.reload.expired += 1;
             if let Some(a) = address(&event) {
-                scan.lapsed.push((a, created_at, path.to_owned()));
+                scan.lapsed.push((a, created_at, path));
             }
-            return Found::Ended;
+            return;
         }
-        Found::Valid(event)
+        let refused = !(scan.admits)(&event);
+        self.index(
+            stem.to_owned(),
+            Held {
+                top: Rev::of(&event),
+                refused,
+            },
+        );
+        if !refused {
+            scan.events.insert(stem.to_owned(), event);
+        }
+        for gone in self.evict() {
+            scan.events.remove(&gone);
+            if self.stuck.contains(&gone) {
+                scan.reload.skipped += 1;
+            } else {
+                scan.reload.excess += 1;
+            }
+        }
     }
 }
 
@@ -738,41 +727,39 @@ struct Scan<'a, F> {
     reload: Reload,
 }
 
-enum Found {
-    Valid(ns::Event),
-    /// Withdrawn or expired: anything older of its address goes too.
-    Ended,
-    /// Damaged and removed, or not there.
-    Lost,
-    /// There, and could not be read.
-    Unreadable,
-}
-
 fn load(
     dir: &Path,
     cap: usize,
     admits: &impl Fn(&ns::Event) -> bool,
 ) -> io::Result<(Disk, Vec<ns::Event>, Reload)> {
-    prepare(dir)?;
+    let unsynced_parents = prepare(dir)?;
     // Before anything is read or removed: a second relay must not act on this directory.
     let dir_lock = claim(dir)?;
     let mut reload = Reload::default();
+    if !unsynced_parents.is_empty() {
+        reload.note(format!(
+            "cannot sync the parent of {}; trying again",
+            dir.display()
+        ));
+    }
     let (deleted, deletions_unread) = read_deletions(dir, cap, &mut reload);
     let mut disk = Disk {
         dir: dir.to_owned(),
         cap,
         held: HashMap::new(),
         order: BTreeSet::new(),
-        fallbacks: 0,
+        stuck: HashSet::new(),
         deleted: Arc::new(Mutex::new(deleted)),
         unsaved: false,
         retry_at: None,
         retry_wait: RETRY_MIN,
         unsynced: false,
+        unsynced_parents,
+        memory_only_logged: false,
         deletions_unread,
         _lock: dir_lock,
     };
-    let mut names = Vec::new();
+    let mut stems = Vec::new();
     for entry in fs::read_dir(dir)? {
         let Ok(entry) = entry else {
             reload.skipped += 1;
@@ -788,8 +775,8 @@ fn load(
             if entry.file_type().is_ok_and(|t| t.is_file()) {
                 let _ = fs::remove_file(entry.path());
             }
-        } else if record_stem(name).or_else(|| fallback_stem(name)).is_some() {
-            names.push(name.to_owned());
+        } else if let Some(stem) = record_stem(name) {
+            stems.push(stem.to_owned());
         }
     }
     let mut scan = Scan {
@@ -799,15 +786,8 @@ fn load(
         lapsed: Vec::new(),
         reload,
     };
-    for name in &names {
-        if let Some(stem) = record_stem(name) {
-            disk.load_address(stem, &mut scan);
-        } else if let Some(stem) = fallback_stem(name) {
-            // Read with its record. Alone, it takes the record's place.
-            if fs::symlink_metadata(dir.join(file_name(stem))).is_err() {
-                disk.load_address(stem, &mut scan);
-            }
-        }
+    for stem in &stems {
+        disk.load_record(stem, &mut scan);
     }
     let Scan {
         events,
@@ -816,7 +796,8 @@ fn load(
         ..
     } = scan;
     disk.retire_expired(&lapsed);
-    let _ = sync_dir(dir);
+    disk.sync_directory();
+    disk.schedule();
     if reload.excess > 0 {
         reload.note(format!(
             "{} older records past the limit of {cap}; removed",
@@ -929,19 +910,8 @@ fn file_name(stem: &str) -> String {
     format!("{stem}.json")
 }
 
-fn fallback_name(stem: &str) -> String {
-    format!("{stem}{FALLBACK_SUFFIX}")
-}
-
 fn record_stem(name: &str) -> Option<&str> {
-    hex_stem(name.strip_suffix(".json")?)
-}
-
-fn fallback_stem(name: &str) -> Option<&str> {
-    hex_stem(name.strip_suffix(FALLBACK_SUFFIX)?)
-}
-
-fn hex_stem(stem: &str) -> Option<&str> {
+    let stem = name.strip_suffix(".json")?;
     (stem.len() == 64 && stem.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
         .then_some(stem)
 }
@@ -963,8 +933,50 @@ fn warn(message: &str) {
     }
 }
 
+/// Remove a record. Anything but a regular file is left alone and reported, and a file already
+/// gone is not an error.
+fn remove_record(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_file() => fs::remove_file(path),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        )),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// The directories whose entries name `dir` and any ancestor about to be created: its parent,
+/// then up through those that do not exist yet to the first that does.
+fn holders(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut at = dir.parent();
+    while let Some(path) = at {
+        let path = if path.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            path
+        };
+        found.push(path.to_owned());
+        if path.exists() {
+            break;
+        }
+        at = path.parent();
+    }
+    found
+}
+
 /// Create `dir` private, or make it so. A symlink or a file in its place is an error.
-fn prepare(dir: &Path) -> io::Result<()> {
+///
+/// A new directory survives a power loss only once its parent is synced, and so on up through
+/// any new ancestors. That is done here, once a start, so that no publish pays for it. Returns
+/// the parents of a directory created now whose sync failed, for the writer to retry. A
+/// directory that was already there gets one best-effort sync of its parent, in case the run
+/// that created it died first.
+fn prepare(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let existed = fs::symlink_metadata(dir).is_ok();
+    let parents = holders(dir);
     if let Some(parent) = dir.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -992,7 +1004,11 @@ fn prepare(dir: &Path) -> io::Result<()> {
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
         }
     }
-    Ok(())
+    let failed: Vec<PathBuf> = parents
+        .into_iter()
+        .filter(|parent| sync_dir(parent).is_err())
+        .collect();
+    Ok(if existed { Vec::new() } else { failed })
 }
 
 /// Up to `max` bytes of the regular file at `path`, never following a symlink, and whether
@@ -1035,24 +1051,35 @@ fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<Option<io::E
         std::process::id(),
         TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    let placed = (|| {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&tmp, dir.join(name))
-    })();
-    if let Err(e) = placed {
+    let target = dir.join(name);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    // Created here or not at all: an entry already at this name is not this call's to remove.
+    let file = options.open(&tmp)?;
+    if let Err(e) = fill_and_place(file, bytes, &tmp, &target) {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
     Ok(sync_dir(dir).err())
+}
+
+fn fill_and_place(mut file: File, bytes: &[u8], tmp: &Path, target: &Path) -> io::Result<()> {
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    // A link or a directory in its place is left alone, as a load leaves it.
+    if fs::symlink_metadata(target).is_ok_and(|m| !m.file_type().is_file()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    fs::rename(tmp, target)
 }
 
 #[cfg(test)]
@@ -1416,10 +1443,6 @@ mod tests {
         })
     }
 
-    fn spare(dir: &Path, event: &ns::Event) -> PathBuf {
-        dir.join(fallback_name(&key(&address(event).unwrap())))
-    }
-
     fn created(events: &[ns::Event]) -> Vec<u64> {
         let mut at: Vec<u64> = events.iter().map(|e| e.created_at.as_secs()).collect();
         at.sort_unstable();
@@ -1472,7 +1495,7 @@ mod tests {
         let other = manifest(&keys, "nfx:testnet:1:retry-other", 100, "");
         let third = manifest(&keys, "nfx:testnet:1:retry-third", 100, "");
         let (mut disk, _, _) = load(&dir, 10, &all).unwrap();
-        // A directory in the way makes the rename fail.
+        // A directory in the way makes the write fail.
         fs::create_dir(dir.join(DELETIONS)).unwrap();
         disk.apply(&[withdraw_job(&gone, 150)]);
         assert!(disk.unsaved && disk.retry_at.is_some());
@@ -1487,21 +1510,52 @@ mod tests {
         assert!(!disk.unsaved && disk.retry_at.is_none());
         assert_eq!(disk.retry_wait, RETRY_MIN);
         drop(disk);
-        let (disk, _, reload) = load(&dir, 10, &all).unwrap();
+        let (mut disk, _, reload) = load(&dir, 10, &all).unwrap();
         assert_eq!(reload.deletions, 1, "the cutoff survives a restart");
         assert_eq!(
             lock(&disk.deleted).get(&address(&gone).unwrap()),
             Some(&150)
         );
 
-        let mut disk = disk;
         fs::remove_file(dir.join(DELETIONS)).unwrap();
         fs::create_dir(dir.join(DELETIONS)).unwrap();
         disk.unsaved = true;
         for _ in 0..16 {
-            assert!(!disk.save_deletions());
+            disk.retry_at = Some(Instant::now());
+            disk.retry();
         }
+        assert!(disk.unsaved && disk.retry_at.is_some());
         assert_eq!(disk.retry_wait, RETRY_MAX);
+    }
+
+    /// With no job at all, the writer wakes for a pending cutoff and gets it on disk. With
+    /// nothing pending it has no retry time, so it sleeps on the queue alone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_idle_relay_retries_a_failed_cutoff_write() {
+        let dir = tmp("retry-idle");
+        let keys = ns::Keys::generate();
+        let d = "nfx:testnet:1:retry-idle";
+        let (store, _, _) = open(&dir, 10, all);
+        let store = store.unwrap();
+        fs::create_dir(dir.join(DELETIONS)).unwrap();
+        store
+            .withdraw(&Deletion {
+                author: keys.public_key().to_hex(),
+                created_at: 150,
+                addresses: vec![nfx_proto::namespace::VideoAddr::parse(d).unwrap()],
+            })
+            .await;
+        fs::remove_dir(dir.join(DELETIONS)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !dir.join(DELETIONS).is_file() {
+            assert!(Instant::now() < deadline, "the idle writer never retried");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        drop(store);
+
+        let idle = tmp("retry-none");
+        let (disk, _, _) = load(&idle, 10, &all).unwrap();
+        assert_eq!(disk.retry_at, None, "nothing pending, nothing to wake for");
     }
 
     /// A failed directory sync comes after the rename, so the index follows the file: a later
@@ -1531,8 +1585,122 @@ mod tests {
         assert_eq!(events.iter().map(|e| e.id).collect::<Vec<_>>(), [new.id]);
     }
 
-    /// Over the limit after an interrupted write, a load keeps the newest whatever order the
-    /// directory lists them in, removes only the valid excess, and leaves unreadable files.
+    /// A removal that fails leaves the index telling the truth. A withdrawn file still there
+    /// stays indexed. An evicted one is no longer tracked, so nothing is written over it.
+    #[test]
+    fn a_removal_that_fails_leaves_the_index_on_the_file() {
+        let dir = tmp("remove-fails");
+        let keys = ns::Keys::generate();
+        let (d, other) = ("nfx:testnet:1:remove-one", "nfx:testnet:1:remove-two");
+        let event = manifest(&keys, d, 100, "");
+        let stem = key(&address(&event).unwrap());
+        let (mut disk, _, _) = load(&dir, 10, &all).unwrap();
+        disk.put(&event);
+        // Swapped for a directory, which is not removed as a record.
+        let path = stored(&dir, &event);
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+
+        disk.apply(&[withdraw_job(&event, 150)]);
+        assert!(disk.held.contains_key(&stem), "it is still there");
+        assert!(path.is_dir());
+
+        disk.cap = 1;
+        disk.put(&manifest(&keys, other, 200, ""));
+        assert!(!disk.held.contains_key(&stem) && disk.stuck.contains(&stem));
+        disk.put(&manifest(&keys, d, 300, ""));
+        assert!(path.is_dir(), "not written over");
+        assert!(!disk.held.contains_key(&stem));
+
+        let third = manifest(&keys, "nfx:testnet:1:remove-three", 400, "");
+        disk.put(&third);
+        assert!(
+            !stored(&dir, &third).exists(),
+            "stuck files count as a limit"
+        );
+    }
+
+    /// A link or a directory in a record's place is never followed, removed or replaced, by a
+    /// write, a deletion or an eviction.
+    #[test]
+    fn a_link_or_directory_in_a_records_place_is_never_touched() {
+        let dir = tmp("non-regular");
+        fs::create_dir_all(&dir).unwrap();
+        let keys = ns::Keys::generate();
+        let linked = manifest(&keys, "nfx:testnet:1:odd-link", 100, "");
+        let folder = manifest(&keys, "nfx:testnet:1:odd-folder", 100, "");
+        let target = dir.with_file_name("operator-file");
+        fs::write(&target, b"an operator's file").unwrap();
+        std::os::unix::fs::symlink(&target, stored(&dir, &linked)).unwrap();
+        fs::create_dir(stored(&dir, &folder)).unwrap();
+
+        let (mut disk, events, reload) = load(&dir, 10, &all).unwrap();
+        assert!(events.is_empty());
+        assert_eq!(reload.skipped, 2, "{reload:?}");
+        disk.apply(&[put_job(&linked), put_job(&folder)]);
+        disk.apply(&[withdraw_job(&linked, 150), withdraw_job(&folder, 150)]);
+        let later = manifest(&keys, "nfx:testnet:1:odd-link", 200, "");
+        disk.apply(&[put_job(&later)]);
+
+        let link = fs::symlink_metadata(stored(&dir, &linked)).unwrap();
+        assert!(link.file_type().is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), b"an operator's file");
+        assert!(stored(&dir, &folder).is_dir());
+
+        // Nor by the write itself, whatever put it there.
+        let name = file_name(&key(&address(&linked).unwrap()));
+        assert!(write_atomic(&dir, &name, b"replaced").is_err());
+        assert!(
+            fs::symlink_metadata(stored(&dir, &linked))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!fs::read_dir(&dir).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(TEMP_PREFIX)
+        }));
+    }
+
+    /// A directory this creates has its name made durable: its parent is synced, and so is
+    /// each new ancestor's, up to the first that already existed. A failed sync is retried.
+    #[test]
+    fn a_new_directory_is_synced_into_its_parents() {
+        let root = tmp("parents");
+        let base = root.parent().unwrap().to_owned();
+        let dir = base.join("a").join("b").join("relay-manifests");
+        assert_eq!(
+            holders(&dir),
+            [base.join("a").join("b"), base.join("a"), base.clone()]
+        );
+        assert_eq!(
+            holders(Path::new("relay-manifests")),
+            [PathBuf::from(".")],
+            "a bare relative path"
+        );
+
+        FAIL_DIR_SYNC.set(true);
+        let loaded = load(&dir, 10, &all);
+        FAIL_DIR_SYNC.set(false);
+        let (mut disk, _, reload) = loaded.unwrap();
+        assert_eq!(disk.unsynced_parents.len(), 3);
+        assert!(reload.notes.iter().any(|n| n.contains("parent")));
+        assert!(disk.retry_at.is_some());
+        disk.retry();
+        assert!(disk.unsynced_parents.is_empty() && disk.retry_at.is_none());
+        drop(disk);
+
+        // Already there: nothing to retry even if the sync fails.
+        FAIL_DIR_SYNC.set(true);
+        let loaded = load(&dir, 10, &all);
+        FAIL_DIR_SYNC.set(false);
+        assert!(loaded.unwrap().0.unsynced_parents.is_empty());
+    }
+
+    /// Over the limit after an interrupted write, a load keeps the newest, removes only the
+    /// valid excess, and leaves unreadable files.
     #[test]
     fn a_reload_over_the_limit_keeps_the_newest() {
         let dir = tmp("over");
@@ -1552,28 +1720,66 @@ mod tests {
         assert!(unreadable.is_dir());
     }
 
-    /// A fallback whose record was lost takes its place. One that is not a regular file is
-    /// neither moved nor removed.
+    /// The same directory, read in every rotation and its reverse, keeps the same records: the
+    /// top `cap` of one order, served before refused and then newest first.
     #[test]
-    fn a_lone_fallback_takes_the_place_of_a_lost_record() {
-        let dir = tmp("lone");
-        fs::create_dir_all(&dir).unwrap();
+    fn a_load_keeps_the_same_records_in_any_order() {
         let keys = ns::Keys::generate();
-        let lone = manifest(&keys, "nfx:testnet:1:lone-one", 100, "");
-        fs::write(spare(&dir, &lone), lone.as_json()).unwrap();
-        let odd = manifest(&keys, "nfx:testnet:1:lone-odd", 100, "");
-        fs::create_dir(spare(&dir, &odd)).unwrap();
-
-        let (_, events, _) = open(&dir, 10, all);
-        assert_eq!(events.iter().map(|e| e.id).collect::<Vec<_>>(), [lone.id]);
-        assert!(stored(&dir, &lone).exists() && !spare(&dir, &lone).exists());
-        assert!(spare(&dir, &odd).is_dir() && !stored(&dir, &odd).exists());
+        // Refused from 400 on: newer than all that is served, and still the first to go.
+        let rule = |e: &ns::Event| e.created_at.as_secs() < 400;
+        let events: Vec<ns::Event> = [100u64, 200, 300, 400, 500, 600]
+            .iter()
+            .map(|at| manifest(&keys, &format!("nfx:testnet:1:order-{at}"), *at, ""))
+            .collect();
+        let stems: Vec<String> = events.iter().map(|e| key(&address(e).unwrap())).collect();
+        let expected: [(usize, &[u64], usize); 3] = [
+            (2, &[200, 300], 2),
+            (3, &[100, 200, 300], 3),
+            (5, &[100, 200, 300, 500, 600], 3),
+        ];
+        for (cap, kept, served) in expected {
+            for turn in 0..stems.len() {
+                for reversed in [false, true] {
+                    let dir = tmp(&format!("order-{cap}-{turn}-{reversed}"));
+                    let (mut disk, _, _) = load(&dir, cap, &rule).unwrap();
+                    for e in &events {
+                        fs::write(stored(&dir, e), e.as_json()).unwrap();
+                    }
+                    let mut reading = stems.clone();
+                    reading.rotate_left(turn);
+                    if reversed {
+                        reading.reverse();
+                    }
+                    let mut scan = Scan {
+                        admits: &rule,
+                        now: unix_now(),
+                        events: HashMap::new(),
+                        lapsed: Vec::new(),
+                        reload: Reload::default(),
+                    };
+                    for stem in &reading {
+                        disk.load_record(stem, &mut scan);
+                    }
+                    let mut on_disk: Vec<u64> = events
+                        .iter()
+                        .filter(|e| stored(&dir, e).exists())
+                        .map(|e| e.created_at.as_secs())
+                        .collect();
+                    on_disk.sort_unstable();
+                    assert_eq!(on_disk, kept, "cap {cap}, turn {turn}, reversed {reversed}");
+                    assert_eq!(disk.held.len(), cap);
+                    assert_eq!(scan.events.len(), served);
+                    assert_eq!(scan.reload.excess, events.len() - cap);
+                }
+            }
+        }
     }
 
-    /// A stored revision the rules refuse does not stop an older accepted one from being kept.
-    /// The refused file stays, and wins as soon as the rules take it.
+    /// An older revision accepted while the stored one is refused is not written. The refused
+    /// file stays byte for byte and wins as soon as the rules take it. A restart in between
+    /// leaves the address unserved, and never serves the wrong revision.
     #[tokio::test]
-    async fn a_refused_revision_does_not_block_an_older_accepted_one() {
+    async fn an_older_accepted_revision_leaves_the_refused_file_alone() {
         let dir = tmp("refused");
         let keys = ns::Keys::generate();
         let d = "nfx:testnet:1:refused-one";
@@ -1586,18 +1792,20 @@ mod tests {
         let store = store.unwrap();
         store.put(&newer).await;
         drop(store);
+        let before = fs::read(stored(&dir, &newer)).unwrap();
 
         let (store, events, reload) = open(&dir, 10, behind);
         assert!(events.is_empty());
         assert_eq!(reload.refused, 1);
         let store = store.unwrap();
         store.put(&older).await;
+        assert_eq!(fs::read(stored(&dir, &newer)).unwrap(), before);
+        assert_eq!(records(&dir), 1);
         drop(store);
 
         let (store, events, reload) = open(&dir, 10, behind);
-        assert_eq!(created(&events), [100], "the older one survives a restart");
-        assert_eq!((reload.served, reload.refused), (1, 1));
-        assert!(stored(&dir, &newer).exists(), "the refused file stays");
+        assert!(events.is_empty(), "unserved, not served wrong");
+        assert_eq!((reload.served, reload.refused), (0, 1));
         drop(store);
 
         let (_, events, _) = open(&dir, 10, all);
@@ -1606,7 +1814,6 @@ mod tests {
             [200],
             "the newest wins once it is admitted"
         );
-        assert!(!spare(&dir, &older).exists(), "the older copy is spent");
     }
 
     /// Nothing the store let go of comes back when the clock catches up: a deletion or a newer
@@ -1620,7 +1827,7 @@ mod tests {
             manifest(&keys, d, 200, "new"),
         );
         let behind = |e: &ns::Event| e.created_at.as_secs() <= 150;
-        let parked = |name: &'static str| {
+        let refused = |name: &'static str| {
             let dir = tmp(name);
             let (older, newer) = (older.clone(), newer.clone());
             async move {
@@ -1629,7 +1836,6 @@ mod tests {
                 let (store, _, _) = open(&dir, 10, behind);
                 let store = store.unwrap();
                 store.put(&older).await;
-                assert!(spare(&dir, &older).exists());
                 (dir, store)
             }
         };
@@ -1639,31 +1845,32 @@ mod tests {
             addresses: vec![nfx_proto::namespace::VideoAddr::parse(d).unwrap()],
         };
 
-        // A deletion past both ends both.
-        let (dir, store) = parked("refused-del-all").await;
+        // A deletion past the refused revision ends it.
+        let (dir, store) = refused("refused-del-all").await;
         store.withdraw(&deletion(250)).await;
+        assert!(!stored(&dir, &newer).exists());
         drop(store);
         let (_, events, reload) = open(&dir, 10, all);
         assert!(events.is_empty(), "{reload:?}");
-        assert!(!stored(&dir, &newer).exists() && !spare(&dir, &older).exists());
 
-        // A deletion between them ends the older; the refused one is newer than it and stays.
-        let (dir, store) = parked("refused-del-old").await;
+        // A deletion before it leaves it, and the older revision stays withdrawn.
+        let (dir, store) = refused("refused-del-old").await;
         store.withdraw(&deletion(150)).await;
-        assert!(!spare(&dir, &older).exists());
+        assert!(stored(&dir, &newer).exists());
+        store.put(&older).await;
         drop(store);
         let (store, events, _) = open(&dir, 10, behind);
-        assert!(events.is_empty(), "the withdrawn fallback is not served");
+        assert!(events.is_empty());
         drop(store);
         let (_, events, _) = open(&dir, 10, all);
         assert_eq!(created(&events), [200]);
 
-        // A newer accepted revision replaces both: neither can return under any rule.
-        let (dir, store) = parked("refused-replaced").await;
+        // A newer accepted revision replaces it: nothing older can return under any rule.
+        let (dir, store) = refused("refused-replaced").await;
         let newest = manifest(&keys, d, 300, "newest");
         store.put(&newest).await;
         drop(store);
-        assert!(!spare(&dir, &older).exists());
+        assert_eq!(records(&dir), 1);
         let (store, events, reload) = open(&dir, 10, |e| e.created_at.as_secs() <= 250);
         assert!(events.is_empty(), "no older copy stands in: {reload:?}");
         drop(store);
