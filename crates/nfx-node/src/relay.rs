@@ -667,6 +667,7 @@ impl ns::NostrDatabase for TitleSearch {
 pub struct ScopedRelay {
     local: ns::LocalRelay,
     nip11: Bytes,
+    store: Option<Arc<ManifestStore>>,
 }
 
 impl ScopedRelay {
@@ -790,7 +791,7 @@ impl ScopedRelay {
                 may,
                 limits: Mutex::new(Limits::default()),
                 db: database,
-                store,
+                store: store.clone(),
             })
             .query_policy(QueryLimits)
             .rate_limit(ns::RateLimit {
@@ -845,6 +846,7 @@ impl ScopedRelay {
             Self {
                 local,
                 nip11: Bytes::from(nip11.to_string()),
+                store,
             },
             search,
         )
@@ -957,6 +959,9 @@ impl ScopedRelay {
 
     pub fn shutdown(&self) {
         self.local.shutdown();
+        if let Some(store) = &self.store {
+            store.close();
+        }
     }
 }
 

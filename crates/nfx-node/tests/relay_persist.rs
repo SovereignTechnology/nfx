@@ -282,6 +282,10 @@ async fn a_honoured_deletion_survives_a_restart() {
 /// NIP-40: a manifest that expires while the relay is down is not served after, and its file
 /// goes. The one that has not expired stays. The older revision the expired one replaced
 /// cannot be re-sent in its place; a newer one can.
+///
+/// Nothing here waits on the clock. The revision is published with a far expiry, and while the
+/// relay is down its record is swapped for the same revision's signed twin already past its
+/// expiry, which is what the disk holds once the time has passed.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_expired_manifest_is_not_served_after_a_reload() {
     let dir = tmp("expired");
@@ -306,11 +310,12 @@ async fn an_expired_manifest_is_not_served_after_a_reload() {
         }
     };
     let replaced = signed(&keys, "persist-soon", now - 10).await;
-    let soon = expiring("persist-soon", now + 3).await;
+    let live = expiring("persist-soon", now + 3600).await;
+    let lapsed = expiring("persist-soon", now - 1).await;
     let later = expiring("persist-later", now + 3600).await;
     let (run, _) = boot(&dir).await;
     run.publish(&replaced).await.unwrap();
-    run.publish(&soon).await.unwrap();
+    run.publish(&live).await.unwrap();
     run.publish(&later).await.unwrap();
     run.stop().await;
     let records = || {
@@ -324,9 +329,13 @@ async fn an_expired_manifest_is_not_served_after_a_reload() {
     };
     assert_eq!(records(), 2);
 
-    while unix_now() <= now + 3 {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    let record = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| std::fs::read_to_string(p).unwrap().contains(&live.id))
+        .unwrap();
+    std::fs::write(&record, serde_json::to_string(&lapsed).unwrap()).unwrap();
+
     let (run, reload) = boot(&dir).await;
     assert_eq!((reload.served, reload.expired), (1, 1), "{reload}");
     assert_eq!(run.served().await, ids(&[&later]));

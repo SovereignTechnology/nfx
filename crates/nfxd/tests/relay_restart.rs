@@ -62,21 +62,23 @@ impl Nfxd {
             cmd.arg("--state").arg(state);
         }
         let log = File::create(root.join(log)).unwrap();
-        let mut child = cmd
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(log))
-            .spawn()
-            .unwrap();
+        // Guarded from here on: a failed assertion below must not leave it running.
+        let mut nfxd = Self(
+            cmd.stdout(Stdio::null())
+                .stderr(Stdio::from(log))
+                .spawn()
+                .unwrap(),
+        );
         let deadline = Instant::now() + WAIT;
         while TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err() {
             assert!(
-                child.try_wait().unwrap().is_none(),
+                nfxd.0.try_wait().unwrap().is_none(),
                 "nfxd exited before listening"
             );
             assert!(Instant::now() < deadline, "nfxd did not listen in time");
             std::thread::sleep(Duration::from_millis(50));
         }
-        Self(child)
+        nfxd
     }
 
     /// SIGKILL: no shutdown path gets to run.
@@ -122,9 +124,10 @@ async fn a_manifest_outlives_a_killed_nfxd_on_the_same_state() {
         .await
         .unwrap();
     assert_eq!(publisher.publish(&event).await.unwrap(), 1);
-    publisher.shutdown().await;
-    // Killed the moment the relay said OK: an OK means it is on disk.
+    // Killed the moment the relay said OK, before anything else can give it time to finish a
+    // write: an OK means it is on disk.
     nfxd.kill();
+    publisher.shutdown().await;
 
     let dir = state.join("relay-manifests");
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
