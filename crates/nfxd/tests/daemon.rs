@@ -2141,6 +2141,108 @@ async fn next_signal(
     }
 }
 
+/// Ask on `url` who seeds `a`, re-asking as a viewer does, until a tell arrives or `limit` passes.
+async fn ask_until_told(url: &str, a: &str, key: u8, limit: Duration) -> Option<Event> {
+    use n0_future::StreamExt as _;
+    use nfx_proto::lookup::{self, KIND_LOOKUP};
+    use nostr_sdk::prelude as ns;
+
+    let secret = [key; 32];
+    let viewer = ns::Client::default();
+    viewer.add_relay(url).await.unwrap();
+    viewer.connect().and_wait(Duration::from_secs(5)).await;
+    let me = lookup::ask(&secret, a, unix_now()).unwrap().pubkey;
+    let mut notes = viewer.notifications();
+    viewer
+        .subscribe(
+            ns::Filter::new()
+                .kind(ns::Kind::from(KIND_LOOKUP))
+                .custom_tag(ns::SingleLetterTag::LOWERCASE_P, me.as_str()),
+        )
+        .await
+        .unwrap();
+    let told = tokio::time::timeout(limit, async {
+        let mut at = unix_now();
+        loop {
+            let ask = lookup::ask(&secret, a, at).unwrap();
+            let sent = ns::Event::from_json(serde_json::to_string(&ask).unwrap()).unwrap();
+            let _ = viewer.send_event(&sent).await;
+            let heard = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match notes.next().await {
+                        Some(ns::ClientNotification::Event { event, .. }) => return Some(event),
+                        Some(_) => {}
+                        None => return None,
+                    }
+                }
+            })
+            .await;
+            if let Ok(Some(event)) = heard {
+                return serde_json::from_str::<Event>(&event.as_json()).unwrap();
+            }
+            at = unix_now().max(at + 1);
+        }
+    })
+    .await
+    .ok();
+    viewer.shutdown().await;
+    told
+}
+
+/// NFX-17 §3 through the daemon: a seeder answers an ask with the 60 s beacon it announces, and
+/// with `--no-lookup` it does not answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seeder_answers_a_lookup_unless_told_not_to() {
+    use nfx_proto::lookup::{self, Parsed};
+
+    for no_lookup in [false, true] {
+        let dir = tmp(&format!("lookup-{no_lookup}"));
+        let (event, manifest, _) = vector_package(&dir);
+        let a = manifest.a_tag();
+        let keys = Keys::generate();
+        let seeder = Daemon::start(Config {
+            keys: Some(keys.clone()),
+            store: dir.join("store"),
+            seed: vec![a.clone()],
+            embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+            embed_relay_lookup: true,
+            no_lookup,
+            no_portmapper: true,
+            ..Config::default()
+        })
+        .await
+        .unwrap();
+        let url = seeder.relay_url.clone().unwrap();
+        let relays = Relays::connect(std::slice::from_ref(&url), Duration::from_secs(10))
+            .await
+            .unwrap();
+        relays.publish(&event).await.unwrap();
+        until_state(&seeder, &a, &VideoState::Seeding).await;
+
+        if no_lookup {
+            // Longer than the answerer takes to subscribe, with a re-ask after it would have.
+            let told = ask_until_told(&url, &a, 41, Duration::from_secs(7)).await;
+            assert!(told.is_none(), "--no-lookup does not answer");
+        } else {
+            let told = ask_until_told(&url, &a, 42, Duration::from_secs(20))
+                .await
+                .expect("an answer");
+            let Parsed::Tell(tell) = lookup::read(&told, unix_now()).unwrap() else {
+                panic!("a tell")
+            };
+            assert_eq!(tell.seeder, keys.public_key().to_hex());
+            assert_eq!(tell.a, a);
+            assert_eq!(
+                tell.beacon.expiration - tell.beacon.created_at,
+                60,
+                "the beacon lasts 60 s"
+            );
+        }
+        relays.shutdown().await;
+        seeder.shutdown().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_seeder_with_the_mesh_is_present_in_its_room_and_leaves_it_on_shutdown() {
     use nostr_sdk::prelude as ns;

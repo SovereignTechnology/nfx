@@ -25,7 +25,7 @@ use nostr_sdk::prelude::{AsyncGetPublicKey, AsyncSignEvent, FinalizeEventAsync a
 use crate::{NodeError, Result, unix_now};
 
 /// Beacon lifetime used by [`Relays::announce`]; republish every `BEACON_TTL / 2` (NFX-03 §3).
-pub const BEACON_TTL: u64 = 120;
+pub const BEACON_TTL: u64 = 60;
 
 /// Most (seeder, manifest) entries a [`BeaconWatch`] holds. Keys are free to mint, so a
 /// flood of valid beacons must not grow the table without bound: past the cap, the entry

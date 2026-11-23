@@ -92,6 +92,11 @@
 //! verification, rate-limited. `--allow-creator` narrows it to those creators' videos. Off by
 //! default.
 //!
+//! A node with a key answers seeder lookups (NFX-17 §3): when a viewer asks who seeds a video
+//! it is announcing, it answers at once with its signed beacon, within a budget per viewer,
+//! per video and overall. `--no-lookup` turns that off, and viewers then wait for the periodic
+//! beacon.
+//!
 //! `--embed-tracker` serves the NFX-10 browser mesh (plain `ws`), and `--bridge` joins it
 //! as a native WebRTC peer. In public, put the tracker behind a TLS proxy (browsers need
 //! `wss://`, and `--tracker-url` names that URL). A proxy on the same host must set
@@ -199,6 +204,8 @@ const USAGE: &str = "usage:
   networks: checked, rate-limited per key, kept until they expire. Off by default.
   --embed-relay-lookup lets it carry seeder lookup (kind 20465): a viewer's ask and a seeder's
   answer, verified, rate-limited, never stored. Off by default.
+  --no-lookup stops this node answering viewers who ask who seeds a video; they then wait for
+  its periodic beacon.
 
   stun runs a STUN server and nothing else (RFC 8489 Binding only, rate-limited, nothing about
   a client logged) on --bind; --public names the address clients reach behind a DNAT. With
@@ -362,6 +369,7 @@ async fn run(args: &[String]) -> Result<()> {
     let embed_relay_mesh = args.iter().any(|a| a == "--embed-relay-mesh");
     let embed_relay_stun_ads = args.iter().any(|a| a == "--embed-relay-stun-ads");
     let embed_relay_lookup = args.iter().any(|a| a == "--embed-relay-lookup");
+    let no_lookup = args.iter().any(|a| a == "--no-lookup");
     // On by default; `--mesh-stun-from-nostr=true` says so, `=false` turns it off.
     let no_mesh_stun_from_nostr = args.iter().any(|a| a == "--mesh-stun-from-nostr=false");
     let bare = [
@@ -370,6 +378,7 @@ async fn run(args: &[String]) -> Result<()> {
         "--embed-relay-mesh",
         "--embed-relay-stun-ads",
         "--embed-relay-lookup",
+        "--no-lookup",
         "--mesh-stun-from-nostr=false",
         "--mesh-stun-from-nostr=true",
     ];
@@ -486,6 +495,7 @@ async fn run(args: &[String]) -> Result<()> {
         embed_relay_mesh,
         embed_relay_stun_ads,
         embed_relay_lookup,
+        no_lookup,
         no_mesh_stun_from_nostr,
         gossip,
         gossip_peers: gossip_peers(&all(&f, "gossip-peer"))?,

@@ -12,6 +12,7 @@ mod error;
 pub mod fetch;
 pub mod gossip;
 pub mod limit;
+pub mod lookup;
 pub mod mesh;
 pub mod node;
 pub mod nostr;
