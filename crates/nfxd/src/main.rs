@@ -87,6 +87,12 @@
 //! held at once, each kept until it expires; `--allow-creator` does not narrow them, since they
 //! name no video. Off by default.
 //!
+//! With `--state`, the embedded relay keeps the manifests it accepts in
+//! `<state>/relay-manifests` (private to the user) and serves them again after a restart,
+//! each re-verified and re-admitted under this run's flags: a creator no longer on
+//! `--allow-creator` is not served. A deletion it honoured stays honoured. Only manifests are
+//! kept, never beacons or signaling. Without `--state` they live in memory only.
+//!
 //! `--embed-tracker` serves the NFX-10 browser mesh (plain `ws`), and `--bridge` joins it
 //! as a native WebRTC peer. In public, put the tracker behind a TLS proxy (browsers need
 //! `wss://`, and `--tracker-url` names that URL). A proxy on the same host must set
@@ -192,6 +198,9 @@ const USAGE: &str = "usage:
   too: ephemeral, room proof checked, rate-limited per sender. Off by default.
   --embed-relay-stun-ads lets it carry STUN service announcements (kind 33478) for its
   networks: checked, rate-limited per key, kept until they expire. Off by default.
+  With --state, the embedded relay keeps the manifests it accepts in <state>/relay-manifests
+  and serves them after a restart, re-verified and re-admitted under this run's flags. Only
+  manifests are kept. Without --state they live in memory only.
 
   stun runs a STUN server and nothing else (RFC 8489 Binding only, rate-limited, nothing about
   a client logged) on --bind; --public names the address clients reach behind a DNAT. With

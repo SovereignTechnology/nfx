@@ -20,6 +20,7 @@ pub mod origin_pay;
 pub mod p2pml;
 pub mod pay;
 pub mod relay;
+mod relay_store;
 mod rtc_serve;
 pub mod seed;
 pub mod store;
