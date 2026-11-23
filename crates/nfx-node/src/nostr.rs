@@ -1,5 +1,6 @@
-//! Manifests (NFX-02) and beacons (NFX-03) over Nostr relays, through nostr-sdk, and the
-//! inputs of seeder ratings (NFX-16) from general relays.
+//! Manifests (NFX-02), beacons (NFX-03) and STUN service announcements (NFX-10 §1) over
+//! Nostr relays, through nostr-sdk, and the inputs of seeder ratings (NFX-16) from general
+//! relays.
 //!
 //! Signing is nostr-sdk's: any async signer, a local key today and NIP-46 later. Every
 //! event is parsed back through `nfx-proto` before it is sent, so nothing leaves that a
@@ -135,6 +136,32 @@ where
     let tags = nfx_proto::beacon::tags(manifest_a, created_at, ttl)?;
     let event = sign(signer, KIND_BEACON, tags, content.to_content(), created_at).await?;
     Beacon::from_event(&event, created_at)?;
+    Ok(event)
+}
+
+/// Sign a kind-33478 STUN service announcement (NFX-10 §1): the STUN server at `addr`
+/// (global unicast `ip:port`, canonical form) serves `networks`, for `ttl` seconds (at most
+/// 24 h). Checked as a reader checks it before it is returned.
+pub async fn sign_stun_announcement<S>(
+    signer: &S,
+    addr: &str,
+    networks: &[Namespace],
+    created_at: u64,
+    ttl: u64,
+) -> Result<Event>
+where
+    S: AsyncGetPublicKey + AsyncSignEvent,
+{
+    let tags = nfx_proto::stun::tags(addr, networks, created_at, ttl)?;
+    let event = sign(
+        signer,
+        nfx_proto::KIND_STUN_ANNOUNCEMENT,
+        tags,
+        String::new(),
+        created_at,
+    )
+    .await?;
+    nfx_proto::stun::StunAnnouncement::from_event(&event, created_at)?;
     Ok(event)
 }
 

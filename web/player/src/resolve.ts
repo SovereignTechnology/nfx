@@ -7,8 +7,14 @@
  *   operator's hint. Those are hints only: every byte is still checked against the anchor.
  */
 import type { Endpoints, ResolvedManifest } from './api';
-import { parseATag, verifyBeacon, verifyDeletion, verifyManifest } from '../out/wasm/nfx_wasm.js';
-import { EndpointBook, type VerifiedBeacon } from './endpoints';
+import {
+  parseATag,
+  verifyBeacon,
+  verifyDeletion,
+  verifyManifest,
+  verifyStunAnnouncement,
+} from '../out/wasm/nfx_wasm.js';
+import { EndpointBook, type VerifiedBeacon, type VerifiedStunAnnouncement } from './endpoints';
 import { query, subscribe } from './nostr';
 import { loadWasm } from './verify';
 
@@ -75,7 +81,9 @@ export async function resolveManifest(a: string, relays: string[], timeoutMs = 8
  * (`Endpoints`) each time that changes: `https` origins (with the renditions claimed for each),
  * `webrtc` trackers, `stun` servers, and which renditions the seeders hold, from the newest
  * unexpired beacon of each seeder (./endpoints.ts). Beacons are ephemeral, so a
- * fresh subscription hears each seeder at its next republish (≤ TTL/2). Returns `stop`.
+ * fresh subscription hears each seeder at its next republish (≤ TTL/2). STUN service
+ * announcements for `namespace` (kind 33478, NFX-10 §1) name STUN servers too: they are
+ * stored, so a fresh subscription hears them at once. Returns `stop`.
  */
 export function watchEndpoints(
   a: string,
@@ -84,28 +92,48 @@ export function watchEndpoints(
   onChange: (endpoints: Endpoints) => void,
 ): () => void {
   const filter = { kinds: [20464], '#n': [namespace], '#a': [a] };
+  const announcements = { kinds: [33478], '#n': [namespace], limit: 256 };
   const book = new EndpointBook();
   let last = '';
   let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // Report what the book names now, if it changed, and look again when the next thing held
+  // expires: an announcement may live 24 h with nothing new heard meanwhile.
+  const report = (): void => {
+    if (stopped) return;
+    const t = now();
+    const snapshot = book.snapshot(t);
+    const key = JSON.stringify(snapshot);
+    if (key !== last) {
+      last = key;
+      onChange(snapshot);
+    }
+    clearTimeout(timer);
+    const next = book.nextExpiration(t);
+    if (next !== null) timer = setTimeout(report, Math.min(Math.max(next - t, 1), 3600) * 1000);
+  };
   const hear = (json: string): void => {
     if (stopped) return;
-    let b: VerifiedBeacon;
+    let changed: boolean;
     try {
-      b = JSON.parse(verifyBeacon(json, now())) as VerifiedBeacon;
+      const kind = (JSON.parse(json) as { kind?: unknown }).kind;
+      if (kind === 33478) {
+        const s = JSON.parse(verifyStunAnnouncement(json, now())) as VerifiedStunAnnouncement;
+        changed = s.networks.includes(namespace) && book.addAnnouncement(s, now());
+      } else {
+        const b = JSON.parse(verifyBeacon(json, now())) as VerifiedBeacon;
+        changed = b.a === a && book.add(b, now());
+      }
     } catch {
-      return; // fails NFX-03: not a beacon
+      return; // fails NFX-03 or NFX-10 §1: neither a beacon nor an announcement
     }
-    if (b.a !== a || !book.add(b, now())) return;
-    const snapshot = book.snapshot(now());
-    const key = JSON.stringify(snapshot);
-    if (key === last) return;
-    last = key;
-    onChange(snapshot);
+    if (changed) report();
   };
   const subs = relays.map((r) =>
     subscribe(
       r,
-      filter,
+      // One REQ, two filters: beacons for `a`, announcements for its network.
+      [filter, announcements],
       // Events can arrive before the WASM has loaded only if the caller skipped init().
       (json) => void loadWasm().then(() => hear(json), () => {}),
       () => {},
@@ -114,6 +142,7 @@ export function watchEndpoints(
   );
   return () => {
     stopped = true;
+    clearTimeout(timer);
     subs.forEach((s) => s.close());
   };
 }

@@ -134,6 +134,38 @@ fn key_files_are_private_and_never_overwritten() {
     );
 }
 
+/// The real binary, with the reading end of the pipe closed before it starts, so the result
+/// does not depend on scheduling.
+#[test]
+fn a_closed_stdout_or_stderr_is_not_a_panic() {
+    let dir = tmp("closed-pipe");
+    let path = dir.join("node.key");
+    key::create(&path).unwrap();
+
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nfxd"))
+        .args(["key", "show"])
+        .arg(&path)
+        .stdout(writer)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nfxd"))
+        .stderr(writer)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "the usage exit, not a panic");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bad_https_url_is_refused_at_start_not_silently_every_minute() {
     let err = Daemon::start(Config {
@@ -195,6 +227,32 @@ async fn a_bad_https_url_is_refused_at_start_not_silently_every_minute() {
     .err()
     .expect("refused");
     assert!(err.to_string().contains("--embed-relay-mesh"), "{err}");
+    // So are STUN announcements.
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("relay-stun-no-relay"),
+        embed_relay_stun_ads: true,
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(err.to_string().contains("--embed-relay-stun-ads"), "{err}");
+    // Turning off STUN from Nostr means something only with the mesh endpoint.
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("mesh-stun-nostr-no-mesh"),
+        no_mesh_stun_from_nostr: true,
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(
+        err.to_string()
+            .contains("--mesh-stun-from-nostr=false needs --mesh-relay"),
+        "{err}"
+    );
 
     // Gossip peers: a relay-only node does not gossip, and a peer reachable only through a
     // relay this network does not run would be dropped at every join.

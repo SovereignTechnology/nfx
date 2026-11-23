@@ -10,32 +10,50 @@
  * (`beacon.json`, `beacon-renditions.json`) run through nfx-wasm into the book, so the shape
  * `verifyBeacon` returns is the shape the book reads, and the hash list vector through
  * nfx-wasm into what `open()` reads of it; the NFX-10 §6 vectors run through nfx-wasm's
- * MeshSession, which builds and reads every signaling event in the browser.
+ * MeshSession, which builds and reads every signaling event in the browser; and the stats
+ * panel's per-peer book and candidate-pair reader (nfx #99). The NFX-10 §1 STUN vectors run
+ * through nfx-wasm (announcements) and the selection rules (`stun-select.json`), the verdicts
+ * nfx-proto and the generator give.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import initWasm, { MeshRoom, MeshSession, VerifiedHashList, sha256Hex, verifyBeacon } from './out/wasm/nfx_wasm.js';
+import initWasm, {
+  MeshRoom,
+  MeshSession,
+  VerifiedHashList,
+  sha256Hex,
+  verifyBeacon,
+  verifyStunAnnouncement,
+} from './out/wasm/nfx_wasm.js';
 import type { OriginSource, RemoteCandidates, Signaling } from './src/api';
 import {
   EndpointBook,
+  MAX_ICE_SERVERS,
   MAX_ORIGINS,
   MAX_SEEDERS,
   type VerifiedBeacon,
+  type VerifiedStunAnnouncement,
   beaconStun,
   beaconTracker,
   checkIceServers,
   checkOriginSources,
   checkOrigins,
   checkSignaling,
+  checkStunFallbackServers,
   checkTrackers,
   globalUnicast,
   ipFamily,
   originBase,
   checkRelays,
   pageOrigin,
+  rankNamed,
+  selectStun,
+  selectStunFallback,
+  stunHost,
 } from './src/endpoints';
+import { StunFallbackBook } from './src/stun-fallback';
 import {
   MAX_RENDITIONS,
   checkRenditions,
@@ -47,7 +65,8 @@ import {
   probeOrder,
   sessionRenditions,
 } from './src/levels';
-import { MAX_RELAYS, relayUrl } from './src/mesh';
+import { MAX_PEERS_LISTED, MAX_RELAYS, PeerBook, printable, relayUrl, selectedPair } from './src/mesh';
+import { addressText, formatBytes, nerdView, pathText, shortId, typingInto } from './src/nerd';
 import {
   PROBE_CONCURRENCY,
   PROBE_MAX_BYTES,
@@ -122,8 +141,15 @@ const trackers: [string, string | null][] = [
 for (const [input, want] of trackers) eq(`beaconTracker(${input})`, beaconTracker(input), want);
 
 const stuns: [string, string | null][] = [
-  ['203.0.113.10:3478', 'stun:203.0.113.10:3478'],
-  ['[2001:db8::1]:3478', 'stun:[2001:db8::1]:3478'],
+  ['1.1.1.1:3478', 'stun:1.1.1.1:3478'],
+  ['[2606:4700::1111]:3478', 'stun:[2606:4700::1111]:3478'],
+  ['203.0.113.10:3478', null], // documentation (RFC 5737): routes nowhere
+  ['198.51.100.7:3478', null],
+  ['192.0.2.1:3478', null],
+  ['[2001:db8::1]:3478', null], // documentation (RFC 3849)
+  ['[2001:db9::1]:3478', 'stun:[2001:db9::1]:3478'], // just past it
+  ['[3fff::1]:3478', null], // documentation (RFC 9637)
+  ['[3fff:fff:ffff::1]:3478', null],
   ['127.0.0.1:3478', null], // loopback
   ['10.1.2.3:3478', null], // private
   ['172.20.0.1:3478', null],
@@ -168,6 +194,8 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     originSources: [{ url: 'https://a.example' }],
     trackers: ['wss://t1.example'],
     stunServers: [],
+    stunNamed: [],
+    stunSeeders: [],
     seeders: 1,
     availability: allOf(1),
   });
@@ -181,11 +209,13 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     originSources: [{ url: 'https://b.example' }],
     trackers: [],
     stunServers: [],
+    stunNamed: [],
+    stunSeeders: [],
     seeders: 1,
     availability: allOf(1),
   });
   // It expires at NOW + 121.
-  eq('expired out', book.snapshot(NOW + 121), { origins: [], originSources: [], trackers: [], stunServers: [], seeders: 0, availability: allOf(0) });
+  eq('expired out', book.snapshot(NOW + 121), { origins: [], originSources: [], trackers: [], stunServers: [], stunNamed: [], stunSeeders: [], seeders: 0, availability: allOf(0) });
   eq('an expired beacon is refused', book.add(beacon(S(2), NOW, [https('https://c.example')]), NOW + 200), false);
 }
 {
@@ -208,6 +238,8 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     originSources: [],
     trackers: ['wss://ok.example'],
     stunServers: [],
+    stunNamed: [],
+    stunSeeders: [],
     seeders: 1,
     availability: allOf(1),
   });
@@ -227,24 +259,96 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     originSources: [{ url: 'https://two.example' }, { url: 'https://one.example' }],
     trackers: ['wss://shared.example', 'wss://lonely.example'],
     stunServers: [],
+    stunNamed: [],
+    stunSeeders: [],
     seeders: 3,
     availability: allOf(3),
   });
 }
 {
-  // STUN servers: global unicast only, ranked like the rest, at most 4 in all.
+  // STUN servers (NFX-10 §1): global unicast only, ranked by distinct keys; one named by a
+  // lone key only when none has two; at most 4 in all.
   const stun = (...addrs: unknown[]) => ({ t: 'stun', addrs });
   const book = new EndpointBook();
-  book.add(beacon(S(1), NOW, [stun('203.0.113.1:3478', '127.0.0.1:3478', '192.168.0.2:3478')]), NOW);
-  book.add(beacon(S(2), NOW, [stun('198.51.100.2:3478', '203.0.113.1:3478'), stun(7, null)]), NOW);
-  book.add(beacon(S(3), NOW, [{ t: 'stun', addrs: '203.0.113.9:3478' }, stun('[2001:db8::5]:3478')]), NOW);
-  eq('stun ranked and filtered', book.snapshot(NOW).stunServers, [
-    'stun:203.0.113.1:3478',
-    'stun:198.51.100.2:3478',
-    'stun:[2001:db8::5]:3478',
+  book.add(beacon(S(1), NOW, [stun('1.1.1.1:3478', '127.0.0.1:3478', '192.168.0.2:3478')]), NOW);
+  eq('a lone key, nothing better', book.snapshot(NOW).stunServers, ['stun:1.1.1.1:3478']);
+  book.add(beacon(S(2), NOW, [stun('1.0.0.2:3478', '1.1.1.1:3478'), stun(7, null)]), NOW);
+  book.add(beacon(S(3), NOW, [{ t: 'stun', addrs: '1.1.1.9:3478' }, stun('[2606:4700::5]:3478')]), NOW);
+  eq('stun named, ranked and filtered', book.snapshot(NOW).stunNamed, [
+    { url: 'stun:1.1.1.1:3478', keys: 2 },
+    { url: 'stun:1.0.0.2:3478', keys: 1 },
+    { url: 'stun:[2606:4700::5]:3478', keys: 1 },
   ]);
-  for (let i = 4; i < 10; i++) book.add(beacon(S(i), NOW, [stun(`198.51.100.${i}:3478`)]), NOW);
-  eq('stun cap', book.snapshot(NOW).stunServers.length, 4);
+  eq('lone keys give way to a corroborated one', book.snapshot(NOW).stunServers, ['stun:1.1.1.1:3478']);
+  for (let i = 4; i < 10; i++) {
+    book.add(beacon(S(i), NOW, [stun(`1.0.0.${i}:3478`, `1.0.0.${i + 1}:3478`)]), NOW);
+  }
+  eq('stun cap, ties in the order first named', book.snapshot(NOW).stunServers, [
+    'stun:1.1.1.1:3478',
+    'stun:1.0.0.5:3478',
+    'stun:1.0.0.6:3478',
+    'stun:1.0.0.7:3478',
+  ]);
+}
+{
+  // STUN service announcements (NFX-10 §1) count with beacons, by distinct key.
+  const ann = (operator: string, addr: string, createdAt: number, ttl = 3600): VerifiedStunAnnouncement => ({
+    operator,
+    addr,
+    networks: ['nfx:mainnet:1'],
+    created_at: createdAt,
+    expiration: createdAt + ttl,
+  });
+  const book = new EndpointBook();
+  eq('announcement taken', book.addAnnouncement(ann(S(1), '1.1.1.7:3478', NOW), NOW), true);
+  eq('a lone operator, nothing better', book.snapshot(NOW).stunServers, ['stun:1.1.1.7:3478']);
+  eq('the same again', book.addAnnouncement(ann(S(1), '1.1.1.7:3478', NOW), NOW), false);
+  eq('an older one', book.addAnnouncement(ann(S(1), '1.1.1.7:3478', NOW - 5), NOW), false);
+  eq('a private server', book.addAnnouncement(ann(S(2), '10.0.0.1:3478', NOW), NOW), false);
+  eq('a documentation server', book.addAnnouncement(ann(S(2), '203.0.113.1:3478', NOW), NOW), false);
+  eq('expired', book.addAnnouncement(ann(S(2), '1.1.1.8:3478', NOW - 10, 5), NOW), false);
+  // A seeder's beacon names the same server: two keys.
+  book.add(beacon(S(3), NOW, [{ t: 'stun', addrs: ['1.1.1.7:3478'] }]), NOW);
+  book.addAnnouncement(ann(S(4), '1.1.1.8:3478', NOW), NOW);
+  eq('beacon and announcement together', book.snapshot(NOW).stunNamed, [
+    { url: 'stun:1.1.1.7:3478', keys: 2 },
+    { url: 'stun:1.1.1.8:3478', keys: 1 },
+  ]);
+  eq('the corroborated one only', book.snapshot(NOW).stunServers, ['stun:1.1.1.7:3478']);
+  // A key counts once, whether it seeds or announces.
+  book.addAnnouncement(ann(S(3), '1.1.1.8:3478', NOW), NOW);
+  book.add(beacon(S(4), NOW + 1, [{ t: 'stun', addrs: ['1.1.1.8:3478'] }]), NOW + 1);
+  eq('one key, counted once', book.snapshot(NOW + 1).stunNamed[1], { url: 'stun:1.1.1.8:3478', keys: 2 });
+  // An operator holds at most 8; announcements expire.
+  for (let i = 0; i < 12; i++) book.addAnnouncement(ann(S(9), `1.0.0.${i + 1}:3478`, NOW), NOW);
+  eq('per operator cap', book.snapshot(NOW).stunNamed.filter((n) => n.url.startsWith('stun:1.0.0.')).length, 8);
+  eq('announcements expire', book.snapshot(NOW + 3601).stunNamed, []);
+  eq('nothing left to expire', book.nextExpiration(NOW + 3601), null);
+}
+{
+  // Ties go to the server first heard, whether a beacon or an announcement named it; the book
+  // says when what it holds next expires, so a watcher can look again then.
+  const book = new EndpointBook();
+  book.addAnnouncement({ operator: S(1), addr: '1.1.1.1:3478', networks: ['nfx:mainnet:1'], created_at: NOW, expiration: NOW + 600 }, NOW);
+  book.add(beacon(S(2), NOW, [{ t: 'stun', addrs: ['1.1.1.2:3478', '1.1.1.3:3478'] }]), NOW);
+  eq('first heard first, across sources', book.snapshot(NOW).stunServers, [
+    'stun:1.1.1.1:3478',
+    'stun:1.1.1.2:3478',
+    'stun:1.1.1.3:3478',
+  ]);
+  eq('next expiration', book.nextExpiration(NOW), NOW + 120);
+  eq('then the announcement', book.nextExpiration(NOW + 120), NOW + 600);
+}
+{
+  // selectStun: the page's own first, then the named ones by the same rules.
+  const named = [
+    { url: 'stun:1.1.1.1:3478', keys: 1 },
+    { url: 'stun:1.1.1.2:3478', keys: 3 },
+  ];
+  eq('own first, lone keys out', selectStun(['stun:stun.example:3478'], named), ['stun:stun.example:3478', 'stun:1.1.1.2:3478']);
+  eq('own counts once', selectStun(['stun:1.1.1.2:3478', 'stun:1.1.1.2:3478'], named), ['stun:1.1.1.2:3478']);
+  eq('at most 4', selectStun(['stun:a:1', 'stun:b:1', 'stun:c:1', 'stun:d:1', 'stun:e:1'], named).length, 4);
+  eq('nothing at all', selectStun([], []), []);
 }
 {
   // Caps: per beacon, and overall.
@@ -256,6 +360,8 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     originSources: [0, 1, 2, 3].map((i) => ({ url: `https://o${i}.example` })),
     trackers: ['wss://t0.example', 'wss://t1.example', 'wss://t2.example', 'wss://t3.example'],
     stunServers: [],
+    stunNamed: [],
+    stunSeeders: [],
     seeders: 1,
     availability: allOf(1),
   });
@@ -895,14 +1001,19 @@ eq('remote candidates all with trackers', checkSignaling({ kind: 'trackers', url
 });
 eq('ipFamily', ['1.2.3.4', '2a00::1', '01.2.3.4', '2A00::1', 'host.local', '::ffff:1.2.3.4', ''].map(ipFamily), [4, 6, null, null, null, null, null]);
 eq(
-  'documentation blocks: global for a beacon, not for ICE',
-  ['192.0.2.1', '198.51.100.1', '203.0.113.1', '2001:db8::1'].map((a) => [globalUnicast(a, 'beacon'), globalUnicast(a, 'ice')]),
+  'documentation blocks: refused for a STUN server and for ICE',
+  ['192.0.2.1', '198.51.100.1', '203.0.113.1', '2001:db8::1'].map((a) => [globalUnicast(a, 'stun'), globalUnicast(a, 'ice')]),
   [
-    [true, false],
-    [true, false],
-    [true, false],
-    [true, false],
+    [false, false],
+    [false, false],
+    [false, false],
+    [false, false],
   ],
+);
+eq(
+  '3fff::/20: refused for a STUN server',
+  ['3fff::1', '3fff:fff:ffff::1'].map((a) => globalUnicast(a, 'stun')),
+  [false, false],
 );
 throws('filterRemoteSdp: another mode', () => filterRemoteSdp('v=0\r\n', 'none' as RemoteCandidates));
 throws('filterRemoteSdp: not a string', () => filterRemoteSdp(null as unknown as string, 'global'));
@@ -941,6 +1052,8 @@ const verified = JSON.parse(verifyBeacon(JSON.stringify(vector.event), vector.no
     originSources: [{ url: 'https://seed.example/nfx' }],
     trackers: ['wss://tracker.example/announce'],
     stunServers: [],
+    stunNamed: [],
+    stunSeeders: [],
     seeders: 1,
     availability: allOf(1),
   });
@@ -1072,6 +1185,295 @@ throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(ve
     eq(`ignored vector ${c.name}`, typeof r.ignored, 'string');
   }
   eq('vector counts', [bad.rejected.length, bad.ignored.length], [36, 7]);
+}
+
+// ---- STUN servers named over Nostr: the NFX-10 §1 vectors ----------------------------------
+{
+  // Announcements, through nfx-wasm.
+  const v = JSON.parse(readFileSync(join(here, '../../spec/test-vectors/stun-announcement.json'), 'utf8')) as {
+    now: number;
+    valid: { name: string; event: unknown; reads_as: unknown }[];
+    invalid: { name: string; event: unknown }[];
+  };
+  for (const c of v.valid) {
+    // nfx-wasm writes the keys sorted; the vector, in its own order: compare field by field.
+    const r = JSON.parse(verifyStunAnnouncement(JSON.stringify(c.event), v.now)) as VerifiedStunAnnouncement;
+    const want = c.reads_as as VerifiedStunAnnouncement;
+    eq(
+      `announcement ${c.name}`,
+      [r.operator, r.addr, r.networks, r.created_at, r.expiration],
+      [want.operator, want.addr, want.networks, want.created_at, want.expiration],
+    );
+  }
+  for (const c of v.invalid) throws(`announcement ${c.name}`, () => verifyStunAnnouncement(JSON.stringify(c.event), v.now));
+  eq('announcement vector counts', [v.valid.length, v.invalid.length], [5, 38]);
+  // One into the book, as the page takes it.
+  const book = new EndpointBook();
+  const a = JSON.parse(verifyStunAnnouncement(JSON.stringify(v.valid[0]?.event), v.now)) as VerifiedStunAnnouncement;
+  eq('vector announcement taken', book.addAnnouncement(a, v.now), true);
+  eq('vector announcement named', book.snapshot(v.now).stunServers, ['stun:1.1.1.1:3478']);
+}
+{
+  // Selection: the same verdicts as nfx-proto (Rust) and the generator (Python).
+  const v = JSON.parse(readFileSync(join(here, '../../spec/test-vectors/stun-select.json'), 'utf8')) as {
+    max: number;
+    cases: { name: string; own: string[]; named: [string, string][]; selected: string[] }[];
+    fallback: {
+      name: string;
+      own: string[];
+      in_use: string[];
+      mapped: boolean;
+      beacons: [string, string][];
+      signaling: string[];
+      selected: string[];
+    }[];
+    global_unicast: { yes: string[]; no: string[] };
+  };
+  eq('max', v.max, MAX_ICE_SERVERS);
+  for (const c of v.cases) {
+    const pairs = c.named.flatMap(([key, addr]): [string, string][] => {
+      const url = beaconStun(addr);
+      return url === null ? [] : [[key, url]];
+    });
+    const got = selectStun(
+      c.own.map((a) => `stun:${a}`),
+      rankNamed(pairs),
+      v.max,
+    );
+    eq(`select ${c.name}`, got, c.selected.map((a) => `stun:${a}`));
+  }
+  for (const a of v.global_unicast.yes) eq(`global unicast ${a}`, beaconStun(a) !== null, true);
+  for (const a of v.global_unicast.no) eq(`not global unicast ${a}`, beaconStun(a), null);
+  // The fallback: the same verdicts, and an announcement is not even an input.
+  const url = (a: string): string => `stun:${a}`;
+  for (const c of v.fallback) {
+    const seeders: { seeder: string; urls: string[] }[] = [];
+    for (const [seeder, addr] of c.beacons) {
+      const held = seeders.find((s) => s.seeder === seeder);
+      if (held) held.urls.push(url(addr));
+      else seeders.push({ seeder, urls: [url(addr)] });
+    }
+    const got = selectStunFallback(c.own.map(url), c.in_use.map(url), c.mapped, seeders, c.signaling, v.max);
+    eq(`fallback ${c.name}`, got.map((p) => p.url), c.selected.map(url));
+  }
+  eq('fallback vector count', v.fallback.length, 17);
+}
+{
+  // The fallback as one session's state (NFX-10 §1).
+  const X = 'stun:1.1.1.1:3478';
+  const Y = 'stun:1.0.0.1:3478';
+  const OWN = 'stun:9.9.9.9:3478';
+  const sdpAt = (ip: string): string => `v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=candidate:1 1 udp 2122260223 ${ip} 50000 typ host\r\n`;
+  const noMapping = 'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=candidate:1 1 udp 2122260223 abcd.local 50000 typ host\r\n';
+  const mapping = `${noMapping}a=candidate:2 1 udp 1686052607 1.2.3.4 41000 typ srflx raddr 0.0.0.0 rport 0\r\n`;
+  const seeders = [
+    { seeder: 's1', urls: [X], expiration: 1000 },
+    { seeder: 's2', urls: [Y], expiration: 2000 },
+  ];
+  const book = new StunFallbackBook({ own: [OWN], seeders: () => seeders }, [OWN]);
+  book.signaled('p1', sdpAt('1.1.1.1'));
+  eq('fallback: off until a gathering found no mapping', book.serversFor('p1', 500), []);
+  book.gathered(mapping);
+  eq('fallback: off while a mapping came back', book.serversFor('p1', 500), []);
+  book.gathered(noMapping);
+  eq('fallback: the seeder at this peer\'s address', book.serversFor('p1', 500), [X]);
+  eq('fallback: the same server again, for the same peer', book.serversFor('p1', 500), [X]);
+  eq('fallback: not a peer it never heard an SDP from', book.serversFor('p2', 500), []);
+  book.signaled('p3', sdpAt('8.8.8.8'));
+  eq('fallback: not a peer at no seeder\'s address', book.serversFor('p3', 500), []);
+  eq('fallback: an expired beacon names nothing', book.serversFor('p1', 1000), []);
+  book.forget('p1');
+  eq('fallback: not after the peer left', book.serversFor('p1', 500), []);
+  const before = 'v=0\r\na=candidate:1 1 udp 2122260223 1.1.1.1 50000 typ host\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n';
+  book.signaled('p4', before);
+  eq('fallback: a candidate outside any media section counts for nothing', book.serversFor('p4', 500), []);
+  book.gathered(mapping);
+  book.signaled('p1', sdpAt('1.1.1.1'));
+  eq('fallback: off again once a mapping came back', book.serversFor('p1', 500), []);
+
+  // At most 4 in the whole session, its own included, across peers.
+  const many = [1, 2, 3, 4].map((i) => ({ seeder: `s${i}`, urls: [`stun:1.1.1.${i}:3478`], expiration: 1000 }));
+  const capped = new StunFallbackBook({ own: [OWN], seeders: () => many }, [OWN, 'stun:9.9.9.10:3478']);
+  capped.gathered(noMapping);
+  const asked = [1, 2, 3, 4].flatMap((i) => {
+    capped.signaled(`p${i}`, sdpAt(`1.1.1.${i}`));
+    return capped.serversFor(`p${i}`, 500);
+  });
+  eq('fallback: two of its own, so two more in the session', asked, ['stun:1.1.1.1:3478', 'stun:1.1.1.2:3478']);
+
+  const broken = new StunFallbackBook({ own: [OWN], seeders: () => { throw new Error('page'); } }, [OWN]);
+  broken.gathered(noMapping);
+  broken.signaled('p1', sdpAt('1.1.1.1'));
+  eq('fallback: a page function that throws means none', broken.serversFor('p1', 500), []);
+
+  eq('stunHost', [X, 'stun:[2606:4700::1111]:3478', 'stun:10.0.0.1:3478', 'stuns:1.1.1.1:3478'].map(stunHost), ['1.1.1.1', '2606:4700::1111', null, null]);
+  const seedersFn = (): typeof seeders => seeders;
+  eq(
+    'checkSignaling keeps stunFallback',
+    checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], stunFallback: { own: [OWN], seeders: seedersFn } }),
+    { kind: 'nostr', relays: ['wss://r.example'], stunFallback: { own: [OWN], seeders: seedersFn } },
+  );
+  throws('stunFallback needs nostr', () => checkSignaling({ kind: 'trackers', urls: ['wss://t.example'], stunFallback: { own: [OWN], seeders: seedersFn } } as unknown as Signaling));
+  throws('stunFallback.own empty', () => checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], stunFallback: { own: [], seeders: seedersFn } }));
+  throws('stunFallback.own not STUN', () => checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], stunFallback: { own: ['https://x.example'], seeders: seedersFn } }));
+  throws('stunFallback.seeders not a function', () => checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], stunFallback: { own: [OWN], seeders: [] as never } }));
+  const withFallback: Signaling = { kind: 'nostr', relays: ['wss://r.example'], stunFallback: { own: [OWN], seeders: seedersFn } };
+  throws('stunFallback.own must be among iceServers', () => checkStunFallbackServers(withFallback, [{ urls: [X] }]));
+  checkStunFallbackServers(withFallback, [{ urls: [OWN] }]);
+}
+{
+  // The stats panel's sources (nfx #99): per-peer counters from the engine's events, and the
+  // selected candidate pair of each open connection, read only when asked.
+  type Stat = Record<string, unknown>;
+  const report = (stats: Stat[]) => ({ forEach: (cb: (s: Stat) => void) => stats.forEach(cb) });
+  const conn = (stats: Stat[], state = 'connected') => ({ connectionState: state, getStats: async () => report(stats) });
+  const chrome: Stat[] = [
+    { id: 'T1', type: 'transport', selectedCandidatePairId: 'P2' },
+    { id: 'P1', type: 'candidate-pair', nominated: true, state: 'succeeded', localCandidateId: 'L1', remoteCandidateId: 'R1' },
+    { id: 'P2', type: 'candidate-pair', nominated: true, state: 'succeeded', localCandidateId: 'L1', remoteCandidateId: 'R2', currentRoundTripTime: 0.0234 },
+    { id: 'L1', type: 'local-candidate', candidateType: 'srflx', address: '198.51.100.7', port: 50000, protocol: 'udp' },
+    { id: 'R1', type: 'remote-candidate', candidateType: 'host', address: 'x.local', port: 1, protocol: 'udp' },
+    { id: 'R2', type: 'remote-candidate', candidateType: 'srflx', address: '203.0.113.9', port: 61234, protocol: 'udp' },
+  ];
+  eq('pair: the transport names it', selectedPair(report(chrome)), {
+    address: '203.0.113.9', port: 61234, remoteType: 'srflx', localType: 'srflx', protocol: 'udp', path: 'direct', rttMs: 23,
+  });
+  eq('pair: a TURN relay on either side is relayed', selectedPair(report([
+    { id: 'P', type: 'candidate-pair', selected: true, localCandidateId: 'L', remoteCandidateId: 'R' },
+    { id: 'L', type: 'local-candidate', candidateType: 'relay' },
+    { id: 'R', type: 'remote-candidate', candidateType: 'host', ip: '192.0.2.1', port: 9, protocol: 'tcp' },
+  ])), { address: '192.0.2.1', port: 9, remoteType: 'host', localType: 'relay', protocol: 'tcp', path: 'relayed', rttMs: null });
+  eq('pair: none selected yet', selectedPair(report([
+    { id: 'P', type: 'candidate-pair', nominated: true, state: 'in-progress', localCandidateId: 'L', remoteCandidateId: 'R' },
+  ])).path, 'unknown');
+  eq('pair: hostile values are bounded', selectedPair(report([
+    { id: 'T', type: 'transport', selectedCandidatePairId: 'P' },
+    { id: 'P', type: 'candidate-pair', localCandidateId: 'L', remoteCandidateId: 'R', currentRoundTripTime: -1 },
+    { id: 'L', type: 'local-candidate', candidateType: '<b>' },
+    { id: 'R', type: 'remote-candidate', candidateType: 'evil', address: `a\u0000<script>${'9'.repeat(100)}`, port: 70000, protocol: 'sctp' },
+  ])), { address: `a?<script>${'9'.repeat(54)}`, port: null, remoteType: '', localType: '', protocol: '', path: 'direct', rttMs: null });
+  eq('printable: control and non-ASCII characters', printable('-NX0100-\u0007é', 64), '-NX0100-??');
+  eq('printable: not a string', printable(42, 64), '');
+
+  let t = 1000;
+  const book = new PeerBook(() => t);
+  const a = conn(chrome);
+  book.connect({ peerId: 'peerA', infoHash: 'h720', trackerUrl: 'nostr:wss://relay.example', connection: a });
+  book.connect({ peerId: 'peerA', infoHash: 'h360', trackerUrl: 'nostr:wss://relay.example', connection: conn(chrome) });
+  book.connect({ peerId: 'peerB', infoHash: 'h720', trackerUrl: 'wss://tracker.example', connection: conn([], 'closed') });
+  t = 2000;
+  book.received('peerA', 1000);
+  book.received('peerA', 500);
+  book.segment('peerA');
+  book.sent('peerB', 70);
+  book.received('stranger', 5); // bytes before (or without) a connect still count
+  eq('connected: closed connections do not count', book.connected(), 2);
+  eq('peer list: open first, then most bytes', book.list().map((p) => [p.id, p.connected, p.down, p.up, p.segments]), [
+    ['peerA', true, 1500, 0, 1],
+    ['peerB', false, 0, 70, 0],
+    ['stranger', false, 5, 0, 0],
+  ]);
+  eq('peer list: via and times', (({ via, since, last }) => ({ via, since, last }))(book.list()[0]!), { via: 'nostr:wss://relay.example', since: 1000, last: 2000 });
+  book.close({ peerId: 'peerA', infoHash: 'h360' });
+  eq('close: one swarm of two', book.connected(), 1);
+  const released = new PeerBook(() => t);
+  released.connect({ peerId: 'r', infoHash: 'h', trackerUrl: '', connection: conn(chrome) });
+  released.received('r', 9);
+  released.release();
+  eq('release: connections dropped, counters kept', [released.connected(), released.list()[0]?.down], [0, 9]);
+  const asked: string[] = [];
+  const spied = { connectionState: 'connected', getStats: async () => (asked.push('x'), report(chrome)) };
+  const quiet = new PeerBook(() => t);
+  quiet.connect({ peerId: 'p', infoHash: 'h', trackerUrl: '', connection: spied });
+  quiet.received('p', 1);
+  void quiet.list();
+  void quiet.connected();
+  eq('getStats is never called but by addresses()', asked.length, 0);
+  eq('addresses: one per open peer', await book.addresses(), [{
+    id: 'peerA', address: '203.0.113.9', port: 61234, remoteType: 'srflx', localType: 'srflx', protocol: 'udp', path: 'direct', rttMs: 23,
+  }]);
+  const broken = new PeerBook(() => t);
+  broken.connect({ peerId: 'q', infoHash: 'h', trackerUrl: '', connection: { connectionState: 'connected', getStats: async () => { throw new Error('closed'); } } });
+  eq('addresses: a failing getStats is unknown', (await broken.addresses())[0]?.path, 'unknown');
+  const many = new PeerBook(() => t);
+  for (let i = 0; i < 300; i += 1) many.received(`p${i}`, i + 1);
+  eq('peer list: bounded', [many.list().length, many.list()[0]?.id], [MAX_PEERS_LISTED, 'p299']);
+  const ids = new PeerBook(() => t);
+  ids.received('x'.repeat(100), 1);
+  eq('peer ids: cut to 64', ids.list()[0]?.id.length, 64);
+  const twins = new PeerBook(() => t);
+  twins.received('-WW0100-abcdefghijk\u0001', 1);
+  twins.received('-WW0100-abcdefghijk\u0002', 2);
+  eq('peer ids that print the same stay two peers', twins.list().map((p) => [p.id, p.down]), [
+    ['-WW0100-abcdefghijk?', 2],
+    ['-WW0100-abcdefghijk?', 1],
+  ]);
+}
+
+{
+  // The test page's panel (src/nerd.ts): its rows and sources, pure.
+  const base = {
+    engine: 'hls.js 1.7.4 + p2p-media-loader 4.0.0',
+    origin: 'https://origin.example/nfx',
+    root: 'ab'.repeat(32),
+    video: 'ns:vid',
+    verified: 7,
+    rejected: [],
+    levels: [{ index: 0, id: '720p', width: 1280, height: 720, bitrate: 2_500_000 }],
+    level: 0,
+    playing: true,
+    originBytes: 4096,
+    bandwidthEstimate: 12_340_000,
+  };
+  const sample = { width: 1280, height: 720, bufferAhead: 12.34, dropped: 3, frames: 900 };
+  const lone = nerdView({ ...base, mesh: null }, sample, 'Big Buck');
+  eq('panel: no mesh says so', lone.rows.find(([k]) => k === 'Mesh')?.[1], 'off: every byte from the origin');
+  eq('panel: one source, the origin, its segments not counted', lone.sources.map((x) => [x.kind, x.id, x.down, x.segments]), [['origin', 'origin.example', 4096, null]]);
+  eq('panel: playback rows', ['Resolution', 'Rendition', 'Bandwidth estimate', 'Buffer health', 'Dropped frames'].map((k) => lone.rows.find(([r]) => r === k)?.[1]), [
+    '1280x720', '720p (2500 kb/s)', '12.34 Mb/s', '12.3 s', '3 of 900',
+  ]);
+  const key = 'cd'.repeat(32);
+  const meshed = nerdView({
+    ...base,
+    mesh: {
+      signaling: 'nostr', trackers: [], relays: ['wss://relay.example', 'wss://r2.example'], swarms: [],
+      bytes: { http: 1000, p2p: 3000 }, uploaded: 500, peers: 3, rejected: [], connected: 2,
+      segments: { http: 1, p2p: 3 },
+      peerList: [
+        { id: key, via: 'nostr:wss://relay.example', down: 3000, up: 0, segments: 3, connected: true, since: 1, last: 2 },
+        { id: '-NX0100-abcdefghijkl', via: 'wss://tracker.example/announce', down: 0, up: 500, segments: 0, connected: false, since: 1, last: 2 },
+      ],
+      signal: { open: 1, sent: 4, received: 9, offers: 1, answers: 1 },
+    },
+  }, sample, null);
+  eq('panel: share from peers', meshed.rows.find(([k]) => k === 'From peers')?.[1], '75% (2.93 KiB of 3.91 KiB of segments)');
+  eq('panel: signaling', meshed.rows.find(([k]) => k === 'Signaling')?.[1], 'Nostr, 1 of 2 relays open');
+  eq('panel: sources', meshed.sources.map((x) => [x.kind, x.id, x.label, x.via, x.down, x.up, x.connected]), [
+    ['origin', 'origin.example', 'HTTPS origin', '', 5096, 0, true],
+    ['webrtc', 'cdcdcdcd', 'peer', 'nostr', 3000, 0, true],
+    ['webrtc', '-NX0100-abcdefghijkl', 'nfxd bridge?', 'tracker.example', 0, 500, false],
+  ]);
+  eq('shortId: a session key', shortId(key), 'cdcdcdcd');
+  eq('shortId: anything else', shortId('x'.repeat(40)).length, 20);
+  eq('formatBytes', [0, 1023, 1024, 10 * 1024 * 1024, -1].map(formatBytes), ['0 B', '1023 B', '1.00 KiB', '10.0 MiB', '–']);
+  const at = (o: Partial<Parameters<typeof addressText>[0] & object>) => ({
+    id: 'p', address: '203.0.113.9', port: 443, remoteType: 'srflx', localType: 'host', protocol: 'udp', path: 'direct' as const, rttMs: 20, ...o,
+  });
+  eq('address: IPv4', addressText(at({})), '203.0.113.9:443');
+  eq('address: IPv6', addressText(at({ address: '2001:db8::1' })), '[2001:db8::1]:443');
+  eq('address: hidden', addressText(at({ address: '' })), 'hidden by browser');
+  eq('address: mDNS', addressText(at({ address: 'f1e2.local' })), 'hidden by browser (mDNS)');
+  eq('address: none', addressText(undefined), '–');
+  eq('path: direct', pathText(at({})), 'direct (srflx/udp, 20 ms)');
+  eq('path: unknown', pathText(at({ path: 'unknown' })), '–');
+  eq('n is a shortcut on a checkbox or button, text in a field', [
+    typingInto({ tagName: 'INPUT', type: 'checkbox' }),
+    typingInto({ tagName: 'BUTTON' }),
+    typingInto({ tagName: 'INPUT', type: 'text' }),
+    typingInto({ tagName: 'INPUT' }),
+    typingInto({ tagName: 'TEXTAREA' }),
+    typingInto({ tagName: 'DIV', isContentEditable: true }),
+  ], [false, false, true, true, true, true]);
 }
 
 console.log(`unit: ${ran - bad}/${ran} ok`);

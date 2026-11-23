@@ -111,15 +111,66 @@ export interface Endpoints {
   /** `wss://` trackers from `webrtc` endpoints (NFX-10 §2), at most 4, most-named first. */
   trackers: string[];
   /**
-   * `stun:<ip>:<port>` URLs from `stun` endpoints (NFX-10 §1), global unicast addresses
-   * only, at most 4, most-named first: for `iceServers`, after the page's own. Such a
-   * server learns each viewer's address, and beacons come from any key.
+   * The STUN servers NFX-10 §1's rules pick for a page with none of its own
+   * (`selectStun([], stunNamed)`), as `stun:<ip>:<port>` URLs, at most 4: from `stunNamed`,
+   * those named by two keys or more, most-named first, or failing any, those named by one.
+   * A page with servers of its own calls `selectStun(own, stunNamed)` instead. Such a server
+   * learns each viewer's address, and beacons and announcements come from any key.
    */
   stunServers: string[];
+  /**
+   * Every STUN server named over Nostr (NFX-10 §1): by live beacons' `stun` endpoints (their
+   * seeders) and by live STUN service announcements for the network (kind 33478, their
+   * operators); `stun:<ip>:<port>` URLs of global unicast addresses only, each with the number
+   * of distinct keys that name it, most first (ties: first heard), at most 16.
+   */
+  stunNamed: StunNamed[];
+  /**
+   * The STUN servers each live beacon's seeder names, in the order first heard, at most 4 per
+   * seeder: what `NostrSignaling.stunFallback` may draw on. Never an announcement's.
+   */
+  stunSeeders: SeederStun[];
   /** How many seeders' beacons these come from. */
   seeders: number;
   /** Which renditions those seeders hold, and how many hold each. */
   availability: RenditionAvailability;
+}
+
+/** A STUN server named over Nostr, and by how many distinct keys (`Endpoints.stunNamed`). */
+export interface StunNamed {
+  url: string;
+  keys: number;
+}
+
+/** The STUN servers one seeder's live, verified beacon names (`Endpoints.stunSeeders`). */
+export interface SeederStun {
+  /** The key that signed the beacon. */
+  seeder: string;
+  /** `stun:<ip>:<port>` URLs of global unicast addresses, at most 4. */
+  urls: string[];
+  /** When the beacon expires (unix seconds); after it, this names nothing. */
+  expiration: number;
+}
+
+/**
+ * The fallback for when a session's own STUN fails (NFX-10 §1), for `NostrSignaling`.
+ *
+ * Once a gathering with the session's `iceServers` ends with no server-reflexive candidate,
+ * a later connection to a peer also asks one STUN server per seeder, on that connection only,
+ * if a live beacon of this video names it and its IP address is among the candidates of an
+ * SDP that same peer has sent. A session key says nothing of who signed a beacon (NFX-10
+ * §6.4), so the address is the test: the ICE agent is sent to it anyway, and no other party
+ * learns the viewer's address. So the first attempt with a peer never uses it when this
+ * session offers (the answer is what names the address); a retry does. Never a server only
+ * an announcement names; always global unicast, on a port of 1024 or above; at most 4 STUN
+ * servers in the whole session,
+ * `iceServers` included.
+ */
+export interface StunFallback {
+  /** The page's own STUN URLs, 1 to 4, each among `iceServers`. */
+  own: string[];
+  /** The seeders' servers now, read at each new connection: `() => endpoints.stunSeeders`. */
+  seeders: () => readonly SeederStun[];
 }
 
 /** One rendition as hls.js parsed it from the master playlist. */
@@ -153,11 +204,84 @@ export interface MeshStats {
   /** Its relays, for the `nostr` kind. */
   relays: string[];
   swarms: { rendition: string | null; swarm: string }[];
+  /** Segment bytes as they arrived, by where from: the origin over HTTP, or peers. */
   bytes: { http: number; p2p: number };
+  /** Segment bytes sent to peers. */
   uploaded: number;
+  /** Every peer connection made since the session started (never goes down: `connected` does). */
   peers: number;
   /** `<http|p2p>:<url>` of each segment a validator refused. */
   rejected: string[];
+  /** Peer connections open now, across the session's swarms. */
+  connected: number;
+  /** Segments loaded whole, by where from. */
+  segments: { http: number; p2p: number };
+  /**
+   * Each peer this session has exchanged a connection or bytes with (`MeshPeer`): open
+   * connections first, then most bytes. At most 64; a peer that closed is the first to go.
+   */
+  peerList: MeshPeer[];
+  /** The Nostr kind's signaling counters, and how many of its relay sockets are open; null for trackers. */
+  signal: { open: number; sent: number; received: number; offers: number; answers: number } | null;
+}
+
+/**
+ * One mesh peer, as the engine knows it. Its id and `via` come from the network (a peer or
+ * a tracker chose them): show them as text only.
+ */
+export interface MeshPeer {
+  /**
+   * The engine's id for it: for the Nostr kind, the peer's session key (64 hex, fresh each
+   * session, never a user's key); for trackers, its WebTorrent peer id (nfxd's bridge uses
+   * the prefix `-NX0100-`, which anyone can copy). Non-printable characters become `?`; at
+   * most 64 characters.
+   */
+  id: string;
+  /** Where it was found: the tracker's URL, or `nostr:` and the relays. At most 256 characters. */
+  via: string;
+  /** Segment bytes received from it, as they arrived. */
+  down: number;
+  /** Segment bytes sent to it. */
+  up: number;
+  /** Segments it delivered whole. */
+  segments: number;
+  /** Whether a connection to it is open now. */
+  connected: boolean;
+  /** When it last connected, and when bytes last moved either way (ms since the epoch; 0: never). */
+  since: number;
+  last: number;
+}
+
+/**
+ * Where an open mesh peer's connection goes, by the browser's own statistics of its selected
+ * ICE candidate pair (`Session.addresses()`). One per peer: a peer connected in several swarms
+ * (renditions) is reported by its first open connection.
+ *
+ * **These are other viewers' IP addresses.** A page shows them only when its user asks,
+ * and never logs, stores or sends them.
+ */
+export interface PeerAddress {
+  /** `MeshPeer.id`. */
+  id: string;
+  /**
+   * The remote candidate's address as the browser reports it: an IP address, an mDNS
+   * `.local` name (a browser on the same network hiding its LAN address), or `''` when the
+   * browser does not reveal it (some report none for a peer-reflexive candidate).
+   */
+  address: string;
+  port: number | null;
+  /** The remote and local candidate types: `host`, `srflx`, `prflx` or `relay`; `''` unknown. */
+  remoteType: string;
+  localType: string;
+  /** `udp` or `tcp`; `''` unknown. */
+  protocol: string;
+  /**
+   * `relayed` when either candidate is a TURN relay, `direct` when a pair is selected and
+   * neither is, `unknown` when none is selected yet.
+   */
+  path: 'direct' | 'relayed' | 'unknown';
+  /** The pair's current round-trip time in milliseconds, when the browser has measured it. */
+  rttMs: number | null;
 }
 
 /**
@@ -197,6 +321,8 @@ export interface NostrSignaling {
    * Default `all`.
    */
   remoteCandidates?: RemoteCandidates;
+  /** Off unless given: what to try when this session's own STUN fails (`StunFallback`). */
+  stunFallback?: StunFallback;
 }
 
 /**
@@ -289,7 +415,9 @@ export interface OpenCommon {
   signaling?: Signaling;
   /**
    * STUN servers for the mesh (`stun:` or `stuns:` URLs only), at most 4. Default none.
-   * A page may take them from beacons (`stun` endpoints, NFX-10 §1) as well as its own.
+   * A page may take them from Nostr as well as its own (beacons' `stun` endpoints and STUN
+   * service announcements, NFX-10 §1): `selectStun(own, endpoints.stunNamed)` applies the
+   * rules every NFX client uses.
    */
   iceServers?: RTCIceServer[];
   onEvent?: (event: PlayerEvent) => void;
@@ -335,6 +463,14 @@ export interface Stats {
   level: number;
   playing: boolean;
   mesh: MeshStats | null;
+  /**
+   * Bytes of the files the player's own loader took from `origin` and verified: playlists
+   * and inits, and segments too when there is no mesh. With a mesh, segments come through
+   * it: those fetched over HTTP are `mesh.bytes.http`.
+   */
+  originBytes: number;
+  /** hls.js's bandwidth estimate, in bits per second (its default until it has measured). */
+  bandwidthEstimate: number;
 }
 
 /** One video playing in one element. */
@@ -347,6 +483,13 @@ export interface Session {
   /** Play `index` from now on, or -1 to let hls.js pick. */
   setLevel(index: number): void;
   stats(): Stats;
+  /**
+   * Where each open mesh peer's connection goes (`PeerAddress`, one per peer), read from the
+   * browser's `getStats()` when called, and only then. Empty without a mesh, or once destroyed.
+   * At most 64. These are other viewers' IP addresses: call it only when the user asks to see
+   * them.
+   */
+  addresses(): Promise<PeerAddress[]>;
   /**
    * Stop everything this session started: hls.js and its worker, the p2p loader, its
    * tracker or relay sockets and peer connections, and the element's media source.

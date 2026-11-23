@@ -1,12 +1,24 @@
 //! The headless NFX node (ADR 0008): one process that seeds videos over iroh, fetches
 //! videos it is told to watch, serves an NFX-05 §6 origin with swarm pull-through, and
 //! can embed an NFX-04 scoped relay (§7). Everything here is wiring; the protocol lives
-//! in `nfx-node` and `nfx-proto`, but for [`stun`], a minimal STUN Binding responder.
+//! in `nfx-node` and `nfx-proto`, but for [`stun`], a minimal STUN Binding responder, which
+//! [`stun_server`] also runs on its own (`nfxd stun`), announced over Nostr if asked.
+
+/// A status line on stderr. Unlike `eprintln!` it never panics: a journal or pipe that has
+/// gone away must not end a seeding node.
+#[macro_export]
+macro_rules! status {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr(), $($arg)*);
+    }};
+}
 
 pub mod daemon;
 pub mod key;
 pub mod package;
 pub mod stun;
+pub mod stun_server;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

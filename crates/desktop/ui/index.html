@@ -26,6 +26,21 @@
   label.check { display: flex; gap: 8px; align-items: center; color: var(--text); font-size: 14px; margin-top: 10px; }
   label.check input { width: auto; }
   .note { color: var(--muted); font-size: 12px; margin: 2px 0 0; }
+  /* Stats for nerds (nfx #99): over the video, as text. */
+  .stage { position: relative; }
+  .nerd { position: absolute; top: 8px; left: 8px; right: 8px; max-height: calc(100% - 16px); overflow: auto; z-index: 2;
+    background: rgba(0, 0, 0, 0.82); color: var(--text); font: 12px/1.35 ui-monospace, monospace; padding: 8px; border-radius: 6px; }
+  .nerd-head { display: flex; gap: 12px; align-items: center; margin-bottom: 6px; }
+  .nerd-head strong { flex: 1; }
+  .nerd button, .nerd-menu button { margin: 0; padding: 2px 8px; background: #333; color: var(--text); font-weight: 400; }
+  .nerd label.check { margin: 0; font-size: 12px; }
+  .nerd-banner { margin: 4px 0; padding: 4px 6px; background: #5a3b00; color: #ffd27a; }
+  .nerd table { border-collapse: collapse; margin-bottom: 6px; }
+  .nerd th, .nerd td { text-align: left; padding: 1px 8px 1px 0; vertical-align: top; }
+  .nerd th { color: var(--muted); font-weight: 400; white-space: nowrap; }
+  .nerd .closed { color: var(--muted); }
+  .nerd-menu { position: absolute; z-index: 3; background: var(--panel); border: 1px solid var(--line); padding: 2px; }
+  .tools { display: flex; gap: 8px; }
 </style>
 <main>
   <h1>NFX</h1>
@@ -39,7 +54,23 @@
     </div>
     <p id="title"></p>
     <p id="msg"></p>
-    <video id="v" controls playsinline></video>
+    <div class="stage" id="stage">
+      <video id="v" controls playsinline></video>
+      <div class="nerd" id="nerd" role="dialog" aria-label="Stats for nerds" hidden>
+        <div class="nerd-head">
+          <strong>Stats for nerds</strong>
+          <label class="check"><input type="checkbox" id="nerd-addresses"> Show addresses</label>
+          <button id="nerd-copy" type="button">Copy</button>
+          <button id="nerd-close" type="button" aria-label="Close stats">×</button>
+        </div>
+        <p class="nerd-banner" id="nerd-banner" hidden>Addresses visible: these are other hosts' IP addresses. Don't share screenshots.</p>
+        <table id="nerd-rows"></table>
+        <table id="nerd-sources"></table>
+        <p class="note" id="nerd-status"></p>
+      </div>
+      <div class="nerd-menu" id="nerd-menu" role="menu" hidden><button id="nerd-item" type="button" role="menuitem">Stats for nerds</button></div>
+    </div>
+    <div class="tools"><button id="nerd-toggle" type="button" aria-pressed="false" title="Stats for nerds (n, or right-click the video)">Stats for nerds</button></div>
   </section>
   <section>
     <label>Videos on this node</label>

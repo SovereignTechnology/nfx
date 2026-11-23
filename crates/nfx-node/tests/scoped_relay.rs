@@ -1,5 +1,6 @@
-//! The NFX-04 scoped relay: NIP-11, admission, the §2 limits, and ephemeral beacons,
-//! exercised through a real WebSocket client.
+//! The NFX-04 scoped relay: NIP-11, admission, the §2 limits, ephemeral beacons, and its
+//! MAYs (mesh signaling, STUN service announcements), exercised through a real WebSocket
+//! client.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -627,6 +628,129 @@ async fn a_relay_with_mesh_signaling_carries_nfx_mesh_only() {
 
     watcher.shutdown().await;
     sender.shutdown().await;
+    relay.shutdown();
+    server.abort();
+}
+
+/// NFX-04 §1 as amended 2026-11-19: without STUN announcements kind 33478 stays out of scope;
+/// with them, a valid announcement for one of the relay's networks is admitted, stored (the
+/// newest per operator and server) and returned to a later REQ until it expires; one for
+/// another network, or that fails a reader's checks, is refused; and a key is held to 12 an
+/// hour.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_with_stun_announcements_admits_rate_limits_and_expires_them() {
+    use nfx_node::nostr::sign_stun_announcement;
+    use nfx_node::relay::{MayAdmit, STUN_ANNOUNCEMENTS_PER_HOUR};
+    use nfx_proto::stun::{KIND_STUN_ANNOUNCEMENT, StunAnnouncement};
+    use nostr_sdk::prelude as ns;
+
+    let net = Namespace::parse("nfx:testnet:1").unwrap();
+    let operator = Keys::generate();
+    let nets = std::slice::from_ref(&net);
+    let sign = |ttl: u64| sign_stun_announcement(&operator, "1.1.1.1:3478", nets, unix_now(), ttl);
+    let ad = sign(600).await.unwrap();
+
+    // Off (the default): out of scope, and not advertised.
+    let (off, url, addr, server) = start(ScopedRelay::new(nets)).await;
+    assert_eq!(
+        nip11(addr).await["nfx"]["kinds"],
+        serde_json::json!([38504, 20464, 5])
+    );
+    let c = client(&url).await;
+    assert!(refusal(&c, &ad).await.starts_with("blocked: out of scope"));
+    c.shutdown().await;
+    off.shutdown();
+    server.abort();
+
+    // On, beside mesh signaling.
+    let may = MayAdmit {
+        mesh_signaling: true,
+        stun_announcements: true,
+    };
+    let (relay, url, addr, server) = start(ScopedRelay::admitting(nets, None, may).unwrap()).await;
+    let doc = nip11(addr).await;
+    assert_eq!(
+        doc["nfx"]["kinds"],
+        serde_json::json!([38504, 20464, 5, 25050, 33478])
+    );
+    assert_eq!(
+        doc["nfx"]["roles"],
+        serde_json::json!(["catalog", "availability", "signaling", "stun"])
+    );
+    let c = client(&url).await;
+    // Short-lived, signed just before it is sent: it expires during the test.
+    let ad = sign(5).await.unwrap();
+    let signed = std::time::Instant::now();
+    assert!(accepted(&c, &ad).await, "a valid announcement");
+    let stored = |c: Client| async move {
+        let found = c
+            .fetch_events(ns::Filter::new().kind(ns::Kind::from(KIND_STUN_ANNOUNCEMENT)))
+            .timeout(WAIT)
+            .await
+            .unwrap();
+        found.iter().map(|e| e.id.to_hex()).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        stored(c.clone()).await,
+        vec![ad.id.clone()],
+        "stored, as addressable"
+    );
+
+    // Another network only: out of scope. A private server: refused by a reader's checks.
+    let mainnet = Namespace::parse("nfx:mainnet:1").unwrap();
+    let foreign = sign_stun_announcement(
+        &operator,
+        "1.0.0.1:3478",
+        std::slice::from_ref(&mainnet),
+        unix_now(),
+        600,
+    )
+    .await
+    .unwrap();
+    assert!(
+        refusal(&c, &foreign)
+            .await
+            .starts_with("blocked: out of scope")
+    );
+    let now = unix_now();
+    let private = EventBuilder::new(Kind::from(KIND_STUN_ANNOUNCEMENT), "")
+        .tags([
+            ns::Tag::parse(["d", "192.168.1.2:3478"]).unwrap(),
+            ns::Tag::parse(["n", "nfx:testnet:1"]).unwrap(),
+            ns::Tag::parse(["expiration", (now + 600).to_string().as_str()]).unwrap(),
+        ])
+        .finalize(&operator)
+        .unwrap();
+    let private: Event = serde_json::from_str(&private.as_json()).unwrap();
+    assert!(refusal(&c, &private).await.starts_with("invalid:"));
+    let read = StunAnnouncement::from_event(&ad, ad.created_at).unwrap();
+    assert_eq!(read.addr, "1.1.1.1:3478");
+
+    // 12 an hour per key: the first was one of them.
+    for i in 1..STUN_ANNOUNCEMENTS_PER_HOUR {
+        let more = sign_stun_announcement(
+            &operator,
+            &format!("1.1.1.{}:3478", 10 + i),
+            nets,
+            unix_now(),
+            600,
+        )
+        .await
+        .unwrap();
+        assert!(accepted(&c, &more).await, "{i}");
+    }
+    let over = sign_stun_announcement(&operator, "1.1.1.99:3478", nets, unix_now(), 600)
+        .await
+        .unwrap();
+    assert!(refusal(&c, &over).await.starts_with("rate-limited:"));
+
+    // Expired (NIP-40): never returned again.
+    tokio::time::sleep(Duration::from_secs(7).saturating_sub(signed.elapsed())).await;
+    let left = stored(c.clone()).await;
+    assert_eq!(left.len(), STUN_ANNOUNCEMENTS_PER_HOUR - 1);
+    assert!(!left.contains(&ad.id), "the expired one is gone");
+
+    c.shutdown().await;
     relay.shutdown();
     server.abort();
 }

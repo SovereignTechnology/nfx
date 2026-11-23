@@ -55,6 +55,22 @@
        rtcConfig: () => this.#config.rtcConfig,
        socketPool: this.#webTorrentSocketPool,
        maxPeers: () => this.#config.p2pMaxPeers,
+@@ -259,6 +261,7 @@
+ 
+   #onPeerConnectedWebTorrent = (event: {
+     peerId: string;
++    connection: RTCPeerConnection;
+     channel: RTCDataChannel;
+     trackerUrl: string;
+     close: (error?: PeerError) => void;
+@@ -316,6 +319,7 @@
+       infoHash: this.#stream.infoHash,
+       streamType: this.#stream.type,
+       trackerUrl: event.trackerUrl,
++      connection: event.connection,
+     });
+ 
+     if (this.#config.isP2PUploadDisabled) return;
 --- a/src/types.ts
 +++ b/src/types.ts
 @@ -510,6 +510,27 @@
@@ -174,6 +190,33 @@
  /** The stream identity data passed to a custom `streamSwarmIdBuilder`. */
  export type StreamSwarmIdBuilderContext = {
    /** The swarm ID of the stream: the configured `swarmId` or the manifest response URL. */
+@@ -745,6 +848,17 @@
+   trackerUrl: string;
+ };
+ 
++/**
++ * The details of a peer that has just connected: `PeerDetails` and its
++ * `RTCPeerConnection`, so an application can read the connection's statistics
++ * (`getStats()`, e.g. the selected candidate pair). The connection belongs to the
++ * core: read it, never close or change it.
++ */
++export type PeerConnectDetails = PeerDetails & {
++  /** The peer's WebRTC connection. */
++  connection: RTCPeerConnection;
++};
++
+ /** Represents the types of errors that can occur during a peer connection. */
+ export type PeerErrorType =
+   | "transport-error"
+@@ -943,7 +1057,7 @@
+    *
+    * @param params - Contains details about the peer that the event is about.
+    */
+-  onPeerConnect: (params: PeerDetails) => void;
++  onPeerConnect: (params: PeerConnectDetails) => void;
+ 
+   /**
+    * Triggered when an error occurs while establishing a peer-to-peer connection.
 --- a/src/webtorrent/webtorrent-manager/index.ts
 +++ b/src/webtorrent/webtorrent-manager/index.ts
 @@ -3,6 +3,8 @@

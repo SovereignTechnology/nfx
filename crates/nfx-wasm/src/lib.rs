@@ -2,7 +2,8 @@
 //! (NFX-02), beacons (NFX-03), hash lists, playlists and files (NFX-05), with sha256
 //! from RustCrypto, so verification does not depend on WebCrypto and its secure-context
 //! rule (spike S3). The mesh's Nostr signaling (NFX-10 §6) is built and read here too:
-//! [`MeshRoom`] and [`MeshSession`].
+//! [`MeshRoom`] and [`MeshSession`]; and STUN service announcements (NFX-10 §1) are read
+//! here ([`stun_announcement_json`]).
 //!
 //! The logic lives in plain functions returning `Result<_, String>` (tested natively);
 //! the `#[wasm_bindgen]` wrappers only convert errors to `JsError`. Integers cross as
@@ -15,6 +16,7 @@ use nfx_proto::hashlist::{HashList, Role};
 use nfx_proto::manifest::{License, Manifest};
 use nfx_proto::namespace::VideoAddr;
 use nfx_proto::signal::{self, Parsed, Received, Room, Session, Signal};
+use nfx_proto::stun::StunAnnouncement;
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 
@@ -90,6 +92,22 @@ pub fn beacon_json(event_json: &str, now: u64) -> Result<String, String> {
         "expiration": b.expiration,
         "a": format!("{}:{}:{}", nfx_proto::KIND_MANIFEST, b.creator, b.content.video),
         "content": content,
+    })
+    .to_string())
+}
+
+/// A STUN service announcement (kind 33478, NFX-10 §1) at `now`, as JSON:
+/// `{operator, addr, networks, created_at, expiration}`. Whether it serves the reader's
+/// network is the reader's to check (`networks`).
+pub fn stun_announcement_json(event_json: &str, now: u64) -> Result<String, String> {
+    let a =
+        StunAnnouncement::from_event(&parse_event(event_json)?, now).map_err(|e| e.to_string())?;
+    Ok(json!({
+        "operator": a.operator,
+        "addr": a.addr,
+        "networks": a.networks.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "created_at": a.created_at,
+        "expiration": a.expiration,
     })
     .to_string())
 }
@@ -300,6 +318,13 @@ pub fn js_parse_a_tag(a: &str) -> Result<String, JsError> {
 pub fn js_verify_beacon(event_json: &str, now: f64) -> Result<String, JsError> {
     let now = safe_u64(now, "now").map_err(|e| JsError::new(&e))?;
     beacon_json(event_json, now).map_err(|e| JsError::new(&e))
+}
+
+/// `verifyStunAnnouncement(eventJson, now)`: the announcement as JSON, or a thrown error.
+#[wasm_bindgen(js_name = verifyStunAnnouncement)]
+pub fn js_verify_stun_announcement(event_json: &str, now: f64) -> Result<String, JsError> {
+    let now = safe_u64(now, "now").map_err(|e| JsError::new(&e))?;
+    stun_announcement_json(event_json, now).map_err(|e| JsError::new(&e))
 }
 
 /// A mesh room (NFX-10 §6.1): one stream swarm's key pair.
@@ -583,6 +608,30 @@ mod tests {
         for case in v["cases"].as_array().unwrap() {
             assert!(deletion_json(&case["event"].to_string()).is_err());
         }
+    }
+
+    #[test]
+    fn stun_announcements_verify_and_summarise() {
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../spec/test-vectors/stun-announcement.json"
+        ))
+        .unwrap();
+        let now = v["now"].as_u64().unwrap();
+        for case in v["valid"].as_array().unwrap() {
+            let out: serde_json::Value = serde_json::from_str(
+                &stun_announcement_json(&case["event"].to_string(), now).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(out, case["reads_as"], "{}", case["name"]);
+        }
+        for case in v["invalid"].as_array().unwrap() {
+            assert!(
+                stun_announcement_json(&case["event"].to_string(), now).is_err(),
+                "{}",
+                case["name"]
+            );
+        }
+        assert!(stun_announcement_json("{}", now).is_err());
     }
 
     #[test]

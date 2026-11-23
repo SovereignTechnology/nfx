@@ -6,7 +6,9 @@
  * - `resolveManifest(a, relays)`: the current signed manifest of a video (NFX-02), over
  *   Nostr, with deletions applied (NFX-02 §6);
  * - `watchEndpoints(a, namespace, relays, onChange)`: origins and trackers named by
- *   seeders' live beacons (NFX-03), validated and capped;
+ *   seeders' live beacons (NFX-03), and STUN servers named by beacons and STUN service
+ *   announcements (NFX-10 §1), validated and capped; `selectStun(own, named)` picks a
+ *   session's STUN servers by NFX-10 §1's rules;
  * - `open(videoElement, options)`: verify the manifest again, fetch the hash list from the
  *   first origin whose copy verifies and that answers for an allowed rendition's init (the
  *   origin is asked; beacons' claims only order the asking), and play with hls.js behind a
@@ -36,6 +38,7 @@ import type {
   Level,
   MeshStats,
   OpenOptions,
+  PeerAddress,
   PlayerEvent,
   Rejection,
   RemoteCandidates,
@@ -44,18 +47,24 @@ import type {
   Session,
   Signaling,
   Stats,
+  SeederStun,
+  StunNamed,
 } from './api';
 import {
   MAX_ICE_SERVERS as ENDPOINTS_MAX_ICE_SERVERS,
   checkIceServers,
   checkOriginSources,
   checkSignaling as checkSignalingOption,
+  checkStunFallbackServers,
   originBase as beaconOrigin,
+  selectStun as selectStunServers,
+  selectStunFallback as selectFallbackServers,
 } from './endpoints';
 import { MAX_RENDITIONS as LEVELS_MAX_RENDITIONS, checkRenditions, cutMaster, originOrder } from './levels';
 import {
   MAX_RELAYS as MESH_MAX_RELAYS,
   MAX_TRACKERS as MESH_MAX_TRACKERS,
+  PeerBook,
   meshConfig,
   relayUrl as meshRelayUrl,
   trackerUrl as meshTrackerUrl,
@@ -63,6 +72,7 @@ import {
 import { type Probe, type Selection, describe as describeProbes, initUrl, probeStatus, selectRenditions } from './probe';
 import { MAX_REMOTE_CANDIDATES as SDP_MAX_REMOTE_CANDIDATES, filterRemoteSdp as filterSdp } from './remote-sdp';
 import { NostrSignaler } from './signal-nostr';
+import { StunFallbackBook } from './stun-fallback';
 import { resolveManifest as resolveOverRelays, watchEndpoints as watchBeacons } from './resolve';
 import { Anchor, MAX_HASH_LIST_BYTES, type ManifestBinding, loadWasm } from './verify';
 
@@ -114,6 +124,38 @@ export function originBase(url: string): string | null {
   return beaconOrigin(url);
 }
 
+/**
+ * The STUN servers a session uses (NFX-10 §1), as `stun:` URLs for `iceServers`, at most 4:
+ * the page's own (`own`) first, then those named over Nostr (`watchEndpoints`'s `stunNamed`)
+ * by two keys or more, most-named first; one named by a lone key only when the page has none
+ * of its own and none is named by two. Every NFX client picks by these rules, so Nostr never
+ * makes a viewer ask more than 4 STUN servers, or one at an address that is not global
+ * unicast. Each server named learns the viewer's address: a page that must not tell strangers
+ * who watches passes `own` alone to `open()`.
+ */
+export function selectStun(own: readonly string[], named: readonly StunNamed[]): string[] {
+  return selectStunServers(own, named);
+}
+
+/**
+ * The fallback when a client's own STUN failed (NFX-10 §1), as a pure function: the servers
+ * it may also ask, each with its seeder. Nothing unless it has servers of its own (`own`) and
+ * none it asks (`inUse`, its own included) returned a mapping (`mapped` false). Then at most
+ * one per seeder of `seeders` (`Endpoints.stunSeeders`, never an announcement): global unicast,
+ * on a port of 1024 or above, not asked yet, whose IP address is in `signaling` (the candidate addresses of the peers it
+ * is signaling with), at most 4 STUN servers in all. `open()` applies it for you when
+ * Nostr signaling is given `stunFallback`.
+ */
+export function selectStunFallback(
+  own: readonly string[],
+  inUse: readonly string[],
+  mapped: boolean,
+  seeders: readonly Pick<SeederStun, 'seeder' | 'urls'>[],
+  signaling: readonly string[],
+): { seeder: string; url: string }[] {
+  return selectFallbackServers(own, inUse, mapped, seeders, signaling);
+}
+
 /** Most candidates `remoteCandidates: 'global'` keeps from one SDP. */
 export const MAX_REMOTE_CANDIDATES: number = SDP_MAX_REMOTE_CANDIDATES;
 
@@ -146,8 +188,10 @@ export function resolveManifest(a: string, relays: string[], options: ResolveOpt
  * which renditions they hold, each time that changes (the newest unexpired beacon per
  * seeder counts, at most 64 seeders; `https://` origins only, at most 8, with the
  * renditions beacons claim each serves, a hint for `open()`; `wss://` trackers only, at
- * most 4; global unicast STUN addresses only, at most 4; `availability`). Returns `stop`,
- * which closes the subscriptions.
+ * most 4; `availability`). STUN servers come from beacons' `stun` endpoints and from STUN
+ * service announcements for `namespace` (kind 33478, NFX-10 §1), global unicast addresses
+ * only, each counted once per key (`stunNamed`, and `stunServers`, what `selectStun` picks
+ * for a page with none of its own). Returns `stop`, which closes the subscriptions.
  */
 export function watchEndpoints(
   a: string,
@@ -181,6 +225,7 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
   const wanted = checkRenditions(options.renditions);
   const signaling = checkSignalingOption(options.signaling);
   const iceServers = checkIceServers(options.iceServers ?? []);
+  checkStunFallbackServers(signaling, iceServers);
   const autoplay = options.autoplay ?? true;
   const level = options.level;
   const httpWindow = options.httpWindow;
@@ -325,6 +370,7 @@ function start(
 ): Session {
   let dead = false;
   let verified = 0;
+  let originBytes = 0;
   let playing = false;
   let levels: Level[] = [];
   const rejected: Rejection[] = [];
@@ -351,8 +397,9 @@ function start(
   const base = {
     loader: verifyingLoader(
       anchor,
-      (sha256, url) => {
+      (sha256, url, bytes) => {
         verified += 1;
+        originBytes += bytes;
         emit({ type: 'verified', sha256, url });
       },
       reject,
@@ -362,15 +409,32 @@ function start(
   };
   let hls: Hls;
   let mesh: MeshStats | null = null;
+  const book = new PeerBook();
   let nostr: NostrSignaler | undefined;
   let engine: string;
   if (o.signaling !== null) {
     const signaling = o.signaling;
-    mesh = { signaling: signaling.kind, trackers: [], relays: [], swarms: [], bytes: { http: 0, p2p: 0 }, uploaded: 0, peers: 0, rejected: [] };
+    mesh = {
+      signaling: signaling.kind,
+      trackers: [],
+      relays: [],
+      swarms: [],
+      bytes: { http: 0, p2p: 0 },
+      uploaded: 0,
+      peers: 0,
+      rejected: [],
+      connected: 0,
+      segments: { http: 0, p2p: 0 },
+      peerList: [],
+      signal: null,
+    };
     const HlsWithP2P = HlsJsP2PEngine.injectMixin(Hls);
     const tuning = o.httpWindow === undefined ? {} : { httpWindow: o.httpWindow };
-    if (signaling.kind === 'nostr') nostr = new NostrSignaler(signaling.relays, log, signaling.remoteCandidates ?? 'all');
-    hls = new HlsWithP2P({ ...base, ...meshConfig(anchor, signaling, o.iceServers, mesh, log, tuning, nostr) } as never);
+    if (signaling.kind === 'nostr') {
+      const fallback = signaling.stunFallback ? new StunFallbackBook(signaling.stunFallback, o.iceServers.flatMap((i) => i.urls)) : null;
+      nostr = new NostrSignaler(signaling.relays, log, signaling.remoteCandidates ?? 'all', fallback);
+    }
+    hls = new HlsWithP2P({ ...base, ...meshConfig(anchor, signaling, o.iceServers, mesh, log, tuning, nostr, book) } as never);
     engine = `hls.js ${Hls.version} + ${P2P_ENGINE}`;
     const filtered = nostr?.remoteCandidates === 'global' ? ' (remote candidates: global unicast UDP only)' : '';
     log(`mesh: ${signaling.kind} ${(signaling.kind === 'nostr' ? signaling.relays : signaling.urls).join(' ')}${filtered}`);
@@ -427,6 +491,7 @@ function start(
     // disconnects). Then the Nostr signaler closes its relay sockets.
     hls.destroy();
     nostr?.destroy();
+    book.release();
     if (el.src.startsWith('blob:')) {
       el.removeAttribute('src');
       el.load();
@@ -459,8 +524,26 @@ function start(
         levels: levels.map((l) => ({ ...l })),
         level: dead ? -1 : hls.currentLevel,
         playing,
-        mesh: mesh === null ? null : structuredClone(mesh),
+        mesh:
+          mesh === null
+            ? null
+            : {
+                ...structuredClone(mesh),
+                connected: dead ? 0 : book.connected(),
+                peerList: book.list(),
+                signal:
+                  nostr === undefined
+                    ? null
+                    : { open: dead ? 0 : nostr.pool.openCount, ...nostr.stats },
+              },
+        originBytes,
+        bandwidthEstimate: dead ? 0 : hls.bandwidthEstimate,
       };
+    },
+    async addresses(): Promise<PeerAddress[]> {
+      if (dead || mesh === null) return [];
+      const found = await book.addresses();
+      return dead ? [] : found;
     },
     destroy,
   };
@@ -472,7 +555,7 @@ function start(
  */
 function verifyingLoader(
   anchor: Anchor,
-  onVerified: (sha256: string, url: string) => void,
+  onVerified: (sha256: string, url: string, bytes: number) => void,
   onRejected: (r: Rejection) => void,
   masterText: (url: string, text: string) => string,
 ): new (config: HlsConfig) => Loader<LoaderContext> {
@@ -508,7 +591,7 @@ function verifyingLoader(
             callbacks.onError({ code: 0, text: `nfx: ${why}` }, ctx, details, stats);
             return;
           }
-          onVerified(sha, ctx.url);
+          onVerified(sha, ctx.url, bytes.byteLength);
           let data: string | ArrayBuffer = bytes;
           try {
             if (wantText) {

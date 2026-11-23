@@ -10,15 +10,16 @@ amended 2026-11-09); nfx imports nothing from it.
 ## The library
 
 ```ts
-import { init, resolveManifest, watchEndpoints, open } from './player.js';
+import { init, resolveManifest, watchEndpoints, selectStun, open } from './player.js';
 
 await init();                                   // or init({ wasmUrl }) if the WASM is elsewhere
 const m = await resolveManifest(a, relays);     // NFX-02 over Nostr, deletions applied
 const stop = watchEndpoints(a, m.namespace, relays, (e) => {
-  // e.origins: https bases, e.trackers: wss trackers, e.stunServers: stun: URLs,
-  // from the newest live beacon per seeder; e.originSources: the origins with the
-  // renditions beacons claim each serves (hints); e.availability: how many seeders
-  // hold each rendition
+  // e.origins: https bases, e.trackers: wss trackers, from the newest live beacon per
+  // seeder; e.stunNamed: stun: URLs named by beacons and STUN service announcements, with
+  // how many keys name each; e.originSources: the origins with the renditions beacons
+  // claim each serves (hints); e.availability: how many seeders hold each rendition
+  // selectStun(own, e.stunNamed): the STUN servers to use (NFX-10 §1's rules)
 });
 const session = await open(videoElement, {
   manifestJson: m.event,                        // verified again in WASM
@@ -31,11 +32,35 @@ const session = await open(videoElement, {
   signal,                                       // optional: aborts open(), or ends the session
 });
 session.levels; session.setLevel(-1); session.stats(); // each level has its rendition `id`
+await session.addresses();                      // only when the user asks: peers' IP addresses
 session.destroy();                              // hls.js, its worker, the p2p loader, sockets, peers
 ```
 
 The types are in `src/api.ts`. `open()` also takes a bare `root` (with `video` and `segs` to
 bind the hash list) instead of `manifestJson`.
+
+### Where the bytes come from (stats for nerds, nfx #99)
+
+`stats()` is a snapshot a page may poll. Besides the origin, levels and what was verified or
+refused, it says where the bytes came from:
+- `originBytes`: what the player's own loader took from the origin (playlists and inits,
+  and segments when there is no mesh), and `bandwidthEstimate`, hls.js's estimate;
+- `mesh.bytes` and `mesh.segments`: segment bytes and whole segments over HTTP and from
+  peers, `mesh.uploaded`, `mesh.connected` (open now) beside `mesh.peers` (every connect);
+- `mesh.peerList`: each peer (`MeshPeer`, at most 64, open ones first): the engine's id for
+  it (a Nostr peer's session key, or a tracker peer's WebTorrent id), where it was found,
+  bytes each way and whole segments. Ids and `via` come from the network, so a page shows
+  them as text only;
+- `mesh.signal`: the Nostr kind's counters (events sent and received, offers, answers) and
+  how many of its relay sockets are open.
+
+`addresses()` reads the selected ICE candidate pair of each open peer (one per peer: its first
+open connection, when it is connected in several swarms) from the browser's `getStats()`
+(`PeerAddress`: the remote address and port as the browser reports
+them, both candidate types, `direct` or `relayed` through TURN, the round-trip time). It
+runs only when called. **These are other viewers' IP addresses**: a page asks only when its
+user asks to see them, and never logs, stores or sends them. The test page shows them behind
+a "Show addresses" switch that is off each time the panel opens.
 
 A seeder may hold only some renditions of a video (NFX-03 §4), so a session offers only
 levels some source it uses can deliver (NFX-10 §1, `src/levels.ts`, `src/probe.ts`). It
@@ -58,6 +83,26 @@ first, and the renditions it names are asked for first), and never removes an or
 level. `availability` (who holds which rendition, by distinct seeder key, newest beacon
 each, at most 64) lets a page rank renditions; the test page shows it and leaves the levels
 to `open()`.
+
+STUN servers come from Nostr too (NFX-10 §1): from the `stun` endpoints of live beacons and
+from STUN service announcements for the video's network (kind 33478: an operator who runs a
+STUN server, `nfxd stun --announce` say, signs one with its own key). `watchEndpoints` reads
+both on the page's relays and counts each server once per key. `selectStun(own, named)`
+picks a session's servers by the rules every NFX client uses: the page's own first, then
+named servers that are global unicast, most keys first; one named by a lone key only when
+the page has none of its own and none is named by two; at most 4 in all. So Nostr never
+makes a viewer ask more than 4 STUN servers, or one at an address that is not public. Every
+STUN server learns the viewer's address, and keys are free: a page that must not tell
+strangers who watches passes only its own servers to `open()`.
+
+If the page's own STUN fails, Nostr signaling can fall back, when asked to:
+`signaling: { kind: 'nostr', relays, stunFallback: { own, seeders: () => endpoints.stunSeeders } }`.
+Once a gathering ends with no server-reflexive candidate, a later connection to a peer also
+asks one STUN server per seeder, for that connection only, if a live beacon names it and its
+IP address is among the candidates that same peer's SDP gave (a session key is not linked
+to a beacon key, so the address is the test). Never a server only an announcement names or on
+a port below 1024, and at most 4 STUN servers in the session. `selectStunFallback` is the same rule as a pure
+function.
 
 `signaling` is how mesh peers find each other and exchange offers, answers and ICE
 candidates, wired into the engine in one place (`src/mesh.ts` `engineSignaling`). Two kinds:
@@ -132,8 +177,10 @@ patch, `engine/p2p-media-loader-core-4.0.0.patch`: `signalingClientFactory`, a s
 configuration hook through which a swarm takes a signaling client the page supplies (here
 the Nostr one) instead of WebTorrent tracker clients. The engine keeps its peer
 de-duplication and limits (`claimPeer`, `shouldGenerateOffers`), its `peerConnected`
-contract and its teardown; with no factory it behaves as published. It is written to go
-upstream as it is.
+contract and its teardown; with no factory it behaves as published. The same patch adds
+the peer's `RTCPeerConnection` to `onPeerConnect`'s details (`PeerConnectDetails`, nfx #99), so
+`Session.addresses()` can read each connection's selected candidate pair; the engine still
+owns the connection. It is written to go upstream as it is.
 
 `npm run engine` (part of every build) runs `engine/patch.mjs`, which checks before it
 writes anything: that `package-lock.json` pins the npm tarball at the integrity

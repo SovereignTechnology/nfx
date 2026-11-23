@@ -41,7 +41,7 @@ use nfx_node::mesh::{Mesh, MeshConfig, MeshStatus};
 use nfx_node::node::{Node, NodeConfig};
 use nfx_node::nostr::{BEACON_TTL, ManifestQuery, Relays};
 use nfx_node::origin::{Origin, SwarmPull, serve};
-use nfx_node::relay::ScopedRelay;
+use nfx_node::relay::{MayAdmit, ScopedRelay};
 use nfx_node::seed::Seeded;
 use nfx_node::store::{ContentStore as _, FsStore};
 use nfx_node::tracker::Tracker;
@@ -164,6 +164,11 @@ pub struct Config {
     /// Connections it holds at once (`--mesh-max-peers`, 1 to 1024; each may queue 16 MiB).
     /// Default: `nfx_node::mesh::MAX_PEERS` (16). Needs `mesh_relays`.
     pub mesh_max_peers: Option<usize>,
+    /// Do not learn STUN servers from Nostr (`--mesh-stun-from-nostr=false`). By default the
+    /// mesh endpoint reads, on `mesh_relays`, the beacons of the videos it serves and the STUN
+    /// service announcements for their networks, and asks the servers NFX-10 §1's rules pick
+    /// after `mesh_stun` (`nfx_node::mesh::MeshConfig::stun_from_nostr`). Needs `mesh_relays`.
+    pub no_mesh_stun_from_nostr: bool,
     /// The public address of a DNAT that forwards to `mesh_bind`'s port (`--mesh-public`),
     /// for a node whose public address STUN cannot report: offered as a host candidate, what
     /// arrives is taken as sent to it, and no candidate address that is not public is offered
@@ -181,6 +186,11 @@ pub struct Config {
     /// 2026-11-18, NFX-10 §6): nfx-mesh/1 only, ephemeral, room proof checked, rate-limited
     /// (`nfx_node::relay::ScopedRelay::with_options`). Off by default. Needs `embed_relay`.
     pub embed_relay_mesh: bool,
+    /// The embedded relay also carries kind-33478 STUN service announcements for its
+    /// networks (NFX-04 §1 as amended 2026-11-19, NFX-10 §1): a reader's checks at arrival,
+    /// 12 an hour per key, at most 1024 held, each kept until it expires
+    /// (`nfx_node::relay::MayAdmit`). Off by default. Needs `embed_relay`.
+    pub embed_relay_stun_ads: bool,
     /// Join each video's gossip swarm (NFX-06 §4). Off by default: joining lets any swarm
     /// member point this node's endpoint at hosts of its choosing, because iroh-gossip
     /// feeds members' advertised addresses to it unfiltered (independent audit M1, M3).
@@ -376,9 +386,11 @@ impl Shared {
                     .insert(manifest.a_tag(), renditions);
             }
         }
-        // The mesh joins the rooms of the renditions held, as the bridge their swarms.
+        // The mesh joins the rooms of the renditions held, as the bridge their swarms, and
+        // counts the STUN servers the video's beacons name (NFX-10 §1).
         if let Some(mesh) = &self.mesh {
             let _ = mesh.serve(&list, &*self.store, only).await;
+            let _ = mesh.stun_from_beacons_of(&manifest.a_tag()).await;
         }
     }
 
@@ -757,6 +769,11 @@ impl Daemon {
                 "--embed-relay-mesh needs --embed-relay".into(),
             ));
         }
+        if cfg.embed_relay_stun_ads && cfg.embed_relay.is_none() {
+            return Err(Error::Config(
+                "--embed-relay-stun-ads needs --embed-relay".into(),
+            ));
+        }
         if cfg.relay_only && (cfg.gossip || !cfg.gossip_peers.is_empty()) {
             return Err(Error::Config(
                 "--gossip, --gossip-peer: a relay-only node does not gossip".into(),
@@ -924,8 +941,12 @@ impl Daemon {
                     local.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
                 }
                 let creators = (!cfg.allow_creators.is_empty()).then_some(&cfg.allow_creators[..]);
+                let may = MayAdmit {
+                    mesh_signaling: cfg.embed_relay_mesh,
+                    stun_announcements: cfg.embed_relay_stun_ads,
+                };
                 let relay = Arc::new(
-                    ScopedRelay::with_options(&namespaces, creators, cfg.embed_relay_mesh)
+                    ScopedRelay::admitting(&namespaces, creators, may)
                         .map_err(|e| Error::Config(format!("--allow-creator: {e}")))?,
                 );
                 tasks.push(tokio::spawn(relay.clone().serve(listener)));
@@ -1006,6 +1027,7 @@ impl Daemon {
                 portmapper: !cfg.no_portmapper,
                 bind: cfg.mesh_bind.unwrap_or(MeshConfig::new(vec![]).bind),
                 public: cfg.mesh_public,
+                stun_from_nostr: !cfg.no_mesh_stun_from_nostr,
                 ..MeshConfig::new(cfg.mesh_relays.clone())
             };
             Some(Arc::new(
@@ -1348,6 +1370,7 @@ fn check_mesh(cfg: &Config) -> Result<()> {
             (!cfg.mesh_stun.is_empty(), "--mesh-stun"),
             (cfg.mesh_max_peers.is_some(), "--mesh-max-peers"),
             (cfg.mesh_public.is_some(), "--mesh-public"),
+            (cfg.no_mesh_stun_from_nostr, "--mesh-stun-from-nostr=false"),
         ] {
             if set {
                 return Err(Error::Config(format!("{flag} needs --mesh-relay")));
@@ -1461,13 +1484,13 @@ async fn come_online(node: Arc<Node>, status: watch::Sender<Option<String>>, rel
         .is_ok();
     status.send_replace(None);
     if !reached {
-        eprintln!(
+        crate::status!(
             "nfxd: warning: iroh relay {relays} not reached in {} s; seeding without it \
              (beacons name it once it connects)",
             RELAY_WAIT.as_secs()
         );
         node.endpoint().online().await;
-        eprintln!("nfxd: iroh relay reached; the next beacons name it");
+        crate::status!("nfxd: iroh relay reached; the next beacons name it");
     }
 }
 

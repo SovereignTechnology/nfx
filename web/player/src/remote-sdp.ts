@@ -105,3 +105,28 @@ export function filterRemoteSdpCounted(sdp: string, mode: RemoteCandidates): Fil
 export function filterRemoteSdp(sdp: string, mode: RemoteCandidates): string {
   return filterRemoteSdpCounted(sdp, mode).sdp;
 }
+
+/**
+ * The distinct IP addresses of the candidates in a peer's SDP that this session's ICE agent
+ * will check, for the STUN fallback (NFX-10 §1): only lines in the strict form above, of a
+ * media section (a candidate before the first `m=` line belongs to none), among the first
+ * `MAX_REMOTE_CANDIDATES`. Whatever this is not sure of counts for nothing.
+ */
+export function candidateAddresses(sdp: string): string[] {
+  const out: string[] = [];
+  let media = false;
+  let kept = 0;
+  for (const line of sdp.split(/\r\n|\n|\r/)) {
+    if (line.startsWith('m=')) media = true;
+    if (!candidateLike(line) || kept >= MAX_REMOTE_CANDIDATES || !keepsCandidate(line)) continue;
+    kept += 1;
+    const address = line.split(' ')[4] ?? '';
+    if (media && !out.includes(address)) out.push(address);
+  }
+  return out;
+}
+
+/** Whether a local SDP carries a server-reflexive candidate: some STUN server answered. */
+export function hasServerReflexive(sdp: string): boolean {
+  return sdp.split(/\r\n|\n|\r/).some((l) => /^a=candidate:\S+ \d+ \S+ \d+ \S+ \d+ typ srflx(?: |$)/i.test(l));
+}

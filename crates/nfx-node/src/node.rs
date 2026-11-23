@@ -2,6 +2,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use iroh::address_lookup::MemoryLookup;
@@ -17,6 +18,7 @@ use iroh_gossip::Gossip;
 pub use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::{PemObject, SectionKind};
 
+use crate::transfers::TransferLog;
 use crate::{GOSSIP_ALPN, NodeError, Result};
 
 /// At most this many CA certificates (`NodeConfig::relay_cas`), as the nutflix-pear iroh
@@ -210,6 +212,8 @@ pub struct Node {
     book: MemoryLookup,
     /// `NodeConfig::external_addrs`: with any, only public direct addresses are advertised.
     external: Vec<SocketAddr>,
+    /// Where fetched bytes came from, per video and seeder (nfx #99).
+    transfers: Arc<TransferLog>,
 }
 
 impl Node {
@@ -294,7 +298,14 @@ impl Node {
             relay_only: cfg.relay_only,
             book,
             external: cfg.external_addrs,
+            transfers: Arc::default(),
         })
+    }
+
+    /// Where this node's fetched bytes came from, per video and seeder: what a viewer's
+    /// "stats for nerds" shows (nfx #99). Read on request only.
+    pub fn transfers(&self) -> &TransferLog {
+        &self.transfers
     }
 
     /// Dial `addr` for `alpn`, within [`CONNECT_TIMEOUT`]. Only direct IP addresses and

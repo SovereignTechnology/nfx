@@ -1,5 +1,6 @@
 //! Unit tests of the mesh endpoint's signaling rules, driven event by event with no relay:
-//! the glare rule, the bounds, failure and backoff, and leaving a room.
+//! the glare rule, the bounds, failure and backoff, and leaving a room; and the STUN servers it
+//! learns from beacons and announcements (NFX-10 §1).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -15,7 +16,10 @@ use str0m::{Candidate, Rtc};
 use tokio::net::UdpSocket;
 
 use super::book::{OfferBackoff, PENDING_OFFERS_PER_ROOM, PresenceBook, SeenIds, SenderLimiter};
-use super::{Control, MAX_PEERS_PER_ROOM, MeshStatus, RoomState, State, Stun};
+use super::{
+    Control, MAX_PEERS_PER_ROOM, MeshStatus, NAMED_PER_KEY, NostrStun, RoomState, State, Stun,
+    StunFallback,
+};
 use crate::nostr::to_nostr;
 use crate::rtc_serve::{Swarm, Uploader};
 use crate::unix_now;
@@ -41,6 +45,8 @@ async fn state(max_peers: usize) -> State {
         base,
         public: None,
         stun: Stun::new(vec![], now),
+        nostr_stun: None,
+        fallback: StunFallback::default(),
         portmapped: None,
         gathered: true,
         started: now,
@@ -73,6 +79,8 @@ async fn state(max_peers: usize) -> State {
             limiter: SenderLimiter::default(),
             backoff: OfferBackoff::default(),
             reannounce_at: now,
+            network: "nfx:mainnet:1".into(),
+            video: "nfx:mainnet:1:salt-flats-dusk".into(),
         },
     );
     s
@@ -266,8 +274,11 @@ async fn leaving_a_room_says_so_and_drops_its_connections() {
     let mut s = state(16).await;
     feed(&mut s, &hi[0].connect(&room(), unix_now()).unwrap());
     assert_eq!(s.links.len(), 1);
-    s.control(Control::Forget(vec![room().pubkey().to_owned()]))
-        .await;
+    s.control(Control::Forget(
+        vec![room().pubkey().to_owned()],
+        "nfx:mainnet:1:salt-flats-dusk".into(),
+    ))
+    .await;
     assert!(s.rooms.is_empty());
     let bye = s.sent.last().unwrap();
     assert_eq!(tag(bye, "t"), Some("disconnect"));
@@ -280,8 +291,10 @@ async fn leaving_a_room_says_so_and_drops_its_connections() {
 #[tokio::test]
 async fn gathering_offers_the_mapping_a_stun_server_reports() {
     let mut s = state(16).await;
+    // A configured server (`--mesh-stun`): trusted with what it reports.
     let server: SocketAddr = "127.0.0.1:3478".parse().unwrap();
     s.stun.servers = vec![server];
+    s.stun.configured = vec![server];
     let now = Instant::now();
     s.stun_send(server, 0, now);
     let (&tid, _) = s.stun.pending.iter().next().unwrap();
@@ -648,4 +661,463 @@ async fn behind_a_dnat_full_ice_connects_through_the_public_address_it_is_told()
     let mut a = dnat(node, &s);
     let mut b = Natted::new(web, web_local, web_public);
     assert!(!punch(&mut a, &mut b));
+}
+
+// ---- STUN from Nostr (NFX-10 §1) -----------------------------------------------------------
+
+/// The manifest address the STUN tests watch (the room's video, `SWARM`).
+fn watched_a() -> String {
+    let creator = nfx_proto::event::public_key_hex(&[0x51; 32]).unwrap();
+    format!("38504:{creator}:nfx:mainnet:1:salt-flats-dusk")
+}
+
+/// A beacon for the watched video by seeder `k`, with an `https` endpoint and, when `stun` is
+/// not empty, a `stun` endpoint naming it.
+fn beacon(k: u8, stun: &[&str], created_at: u64) -> Event {
+    use nfx_proto::beacon::{BeaconContent, Chunks, Endpoint};
+    use nfx_proto::namespace::VideoAddr;
+    let mut endpoints = vec![Endpoint::Https {
+        url: "https://seed.example/nfx".into(),
+        renditions: vec![],
+    }];
+    if !stun.is_empty() {
+        endpoints.push(Endpoint::Stun {
+            addrs: stun.iter().map(ToString::to_string).collect(),
+        });
+    }
+    let content = BeaconContent {
+        v: 1,
+        video: VideoAddr::parse("nfx:mainnet:1:salt-flats-dusk").unwrap(),
+        endpoints,
+        skipped: vec![],
+        chunks: Chunks::All,
+        price_hint: 0,
+        accepts_mints: vec![],
+        free: true,
+    };
+    let tags = nfx_proto::beacon::tags(&watched_a(), created_at, 120).unwrap();
+    Event::sign(
+        &[k; 32],
+        created_at,
+        nfx_proto::KIND_BEACON,
+        tags,
+        content.to_content(),
+    )
+    .unwrap()
+}
+
+/// An announcement of `addr` for `network` by operator `k`.
+fn announcement(k: u8, addr: &str, network: &str, created_at: u64) -> Event {
+    let nets = [nfx_proto::namespace::Namespace::parse(network).unwrap()];
+    let tags = nfx_proto::stun::tags(addr, &nets, created_at, 3600).unwrap();
+    Event::sign(
+        &[k; 32],
+        created_at,
+        nfx_proto::KIND_STUN_ANNOUNCEMENT,
+        tags,
+        String::new(),
+    )
+    .unwrap()
+}
+
+fn servers(s: &State) -> Vec<String> {
+    s.stun.servers.iter().map(ToString::to_string).collect()
+}
+
+/// Beacons of a watched video and announcements for the room's network name STUN servers;
+/// the endpoint asks those NFX-10 §1's rules pick: ranked by distinct keys, a lone key only
+/// when nothing better exists, global unicast and of its family only, at most 4, the
+/// configured ones first.
+#[tokio::test]
+async fn stun_servers_named_over_nostr_are_picked_by_the_rules() {
+    let mut s = state(16).await;
+    s.nostr_stun = Some(NostrStun::default());
+    s.nostr_stun.as_mut().unwrap().watched.insert(watched_a());
+    let now = unix_now();
+    let (x, y) = ("1.1.1.1:3478", "1.0.0.1:3478");
+
+    // A lone seeder's beacon: nothing better exists, so it is used.
+    feed(&mut s, &beacon(1, &[x], now));
+    assert_eq!(servers(&s), [x]);
+    // Asked at once.
+    assert!(
+        s.stun
+            .pending
+            .values()
+            .any(|(server, _, _)| server.to_string() == x)
+    );
+    // Two operators announce another: the corroborated one wins, the lone one is dropped.
+    feed(&mut s, &announcement(2, y, "nfx:mainnet:1", now));
+    feed(&mut s, &announcement(3, y, "nfx:mainnet:1", now));
+    assert_eq!(servers(&s), [y]);
+    // A second key for the first: both are corroborated, first heard first.
+    feed(&mut s, &announcement(4, x, "nfx:mainnet:1", now));
+    assert_eq!(servers(&s), [x, y]);
+    // Ignored: another network's announcement; a beacon of a video not watched (it is
+    // checked by its `a` before its signature); a private server however many keys name it
+    // (a beacon may name one; NFX-10 §1 refuses it as a client); another family.
+    let z = "8.8.8.8:3478";
+    feed(&mut s, &announcement(5, z, "nfx:testnet:1", now));
+    feed(&mut s, &announcement(6, z, "nfx:testnet:1", now));
+    let mut other = beacon(7, &[z], now);
+    other.tags[1][1] = other.tags[1][1].replace("salt-flats-dusk", "other");
+    feed(&mut s, &other);
+    feed(&mut s, &beacon(8, &["10.0.0.1:3478"], now));
+    feed(&mut s, &beacon(9, &["10.0.0.1:3478"], now));
+    feed(
+        &mut s,
+        &announcement(10, "[2606:4700::1111]:3478", "nfx:mainnet:1", now),
+    );
+    feed(
+        &mut s,
+        &announcement(11, "[2606:4700::1111]:3478", "nfx:mainnet:1", now),
+    );
+    assert_eq!(servers(&s), [x, y]);
+    // A seeder's newer beacon without a `stun` endpoint withdraws what it named: x is down
+    // to one key, so it goes beside y, which still has two.
+    feed(&mut s, &beacon(1, &[], now + 1));
+    assert_eq!(servers(&s), [y]);
+    // ...and its older beacon, replayed, changes nothing.
+    feed(&mut s, &beacon(1, &[x], now - 5));
+    assert_eq!(servers(&s), [y]);
+    // At most 4 in all, the configured ones first: with one of its own, lone keys add nothing.
+    let own: SocketAddr = "9.9.9.9:3478".parse().unwrap();
+    s.stun.configured = vec![own];
+    for (k, a) in [
+        (20, "1.1.1.21:3478"),
+        (22, "1.1.1.22:3478"),
+        (24, "1.1.1.23:3478"),
+    ] {
+        feed(&mut s, &announcement(k, a, "nfx:mainnet:1", now));
+        feed(&mut s, &announcement(k + 1, a, "nfx:mainnet:1", now));
+    }
+    let got = servers(&s);
+    assert_eq!(got.len(), 4, "{got:?}");
+    assert_eq!(got[0], own.to_string());
+    assert!(
+        !got.iter().any(|a| a == x),
+        "x is named by one key alone: {got:?}"
+    );
+    assert_eq!(s.status.lock().unwrap().stun, got, "the status names them");
+
+    // One key holds at most NAMED_PER_KEY sources.
+    let n = s.nostr_stun.as_mut().unwrap();
+    let before = n.named.len();
+    let mut kept = 0;
+    for i in 0..20u8 {
+        let a = format!("1.0.0.{}:3478", 100 + i);
+        if n.note(
+            "k",
+            format!("announcement {a}"),
+            super::Named {
+                created_at: now,
+                expiration: now + 60,
+                heard: 0,
+                addrs: vec![a],
+                networks: None,
+            },
+            now,
+        ) {
+            kept += 1;
+        }
+    }
+    assert_eq!(kept, NAMED_PER_KEY);
+    assert_eq!(n.named.len(), before + NAMED_PER_KEY);
+    // And what expires is no longer counted.
+    assert!(
+        n.pairs(now + 61, &std::collections::BTreeSet::new())
+            .iter()
+            .all(|(k, _)| k != "k")
+    );
+}
+
+/// A mapping a server learnt over Nostr reports is offered only if it is global unicast: a
+/// lying server cannot point peers at a private address. A configured server is trusted.
+#[tokio::test]
+async fn a_learnt_server_s_private_mapping_is_never_offered() {
+    let mut s = state(16).await;
+    let learnt: SocketAddr = "1.1.1.1:3478".parse().unwrap();
+    let configured: SocketAddr = "127.0.0.1:3478".parse().unwrap();
+    s.stun.configured = vec![configured];
+    s.stun.servers = vec![configured, learnt];
+    let respond = |s: &mut State, server: SocketAddr, mapped: [u8; 4], port: u16| {
+        s.stun_send(server, 0, Instant::now());
+        let (&tid, _) = s
+            .stun
+            .pending
+            .iter()
+            .find(|(_, (srv, _, _))| *srv == server)
+            .unwrap();
+        let mut resp = super::stun::binding_request(&tid).to_vec();
+        resp[0..2].copy_from_slice(&0x0101u16.to_be_bytes());
+        resp[3] = 12;
+        resp.extend_from_slice(&[0x00, 0x20, 0x00, 0x08, 0, 1]);
+        resp.extend_from_slice(&(port ^ 0x2112).to_be_bytes());
+        resp.extend(
+            mapped
+                .iter()
+                .zip([0x21u8, 0x12, 0xa4, 0x42])
+                .map(|(a, b)| a ^ b),
+        );
+        assert!(s.stun_response(&resp, server));
+    };
+    respond(&mut s, learnt, [192, 168, 1, 2], 40000);
+    respond(&mut s, configured, [10, 0, 0, 7], 40001);
+    let kinds: Vec<String> = s
+        .candidates()
+        .iter()
+        .map(|c| format!("{} {}", c.kind(), c.addr()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            format!("host {}", s.base),
+            "srflx 10.0.0.7:40001".to_owned()
+        ]
+    );
+    // Nor a documentation address, which routes nowhere.
+    respond(&mut s, learnt, [203, 0, 113, 99], 40003);
+    assert_eq!(s.candidates().len(), 2);
+    // A global unicast one from the same learnt server is offered.
+    respond(&mut s, learnt, [1, 1, 1, 99], 40002);
+    assert!(
+        s.candidates()
+            .iter()
+            .any(|c| c.addr() == "1.1.1.99:40002".parse::<SocketAddr>().unwrap())
+    );
+}
+
+/// Forgetting a video stops reading its beacons and drops what they named, and what
+/// announcements for its network (no other room's) named.
+#[tokio::test]
+async fn forgetting_a_video_drops_the_stun_servers_its_beacons_named() {
+    let mut s = state(16).await;
+    s.nostr_stun = Some(NostrStun::default());
+    s.control(Control::Beacons(watched_a())).await;
+    assert!(
+        s.nostr_stun
+            .as_ref()
+            .unwrap()
+            .watched
+            .contains(&watched_a())
+    );
+    let now = unix_now();
+    feed(&mut s, &beacon(1, &["1.1.1.1:3478"], now));
+    assert_eq!(servers(&s), ["1.1.1.1:3478"]);
+    feed(
+        &mut s,
+        &announcement(2, "1.0.0.1:3478", "nfx:mainnet:1", now),
+    );
+    feed(
+        &mut s,
+        &announcement(3, "1.0.0.1:3478", "nfx:mainnet:1", now),
+    );
+    assert_eq!(servers(&s), ["1.0.0.1:3478"]);
+    s.control(Control::Forget(
+        vec![room().pubkey().to_owned()],
+        "nfx:mainnet:1:salt-flats-dusk".into(),
+    ))
+    .await;
+    assert!(s.nostr_stun.as_ref().unwrap().watched.is_empty());
+    assert!(servers(&s).is_empty());
+}
+
+/// A seeder's first beacon heard may name no STUN server: it is kept until it expires, so its
+/// older beacon, replayed, does not name one again. A beacon with more `stun` endpoints than
+/// one counts at most 4 addresses.
+#[tokio::test]
+async fn a_withdrawal_heard_first_holds_and_a_beacon_names_at_most_four() {
+    use nfx_proto::beacon::{BeaconContent, Chunks, Endpoint};
+    use nfx_proto::namespace::VideoAddr;
+    let mut s = state(16).await;
+    s.nostr_stun = Some(NostrStun::default());
+    s.nostr_stun.as_mut().unwrap().watched.insert(watched_a());
+    let now = unix_now();
+    feed(&mut s, &beacon(1, &[], now));
+    feed(&mut s, &beacon(1, &["1.1.1.1:3478"], now - 5));
+    assert!(servers(&s).is_empty());
+    // Many endpoints in one beacon: the first 4 distinct addresses count, no more.
+    let endpoints: Vec<Endpoint> = (0..6u8)
+        .map(|i| Endpoint::Stun {
+            addrs: vec![format!("1.1.1.{}:3478", i + 31)],
+        })
+        .collect();
+    let content = BeaconContent {
+        v: 1,
+        video: VideoAddr::parse("nfx:mainnet:1:salt-flats-dusk").unwrap(),
+        endpoints,
+        skipped: vec![],
+        chunks: Chunks::All,
+        price_hint: 0,
+        accepts_mints: vec![],
+        free: true,
+    };
+    let tags = nfx_proto::beacon::tags(&watched_a(), now, 120).unwrap();
+    let many = Event::sign(
+        &[2; 32],
+        now,
+        nfx_proto::KIND_BEACON,
+        tags,
+        content.to_content(),
+    )
+    .unwrap();
+    feed(&mut s, &many);
+    let held = s
+        .nostr_stun
+        .as_mut()
+        .unwrap()
+        .pairs(now, &std::collections::BTreeSet::new());
+    assert_eq!(held.len(), super::MAX_STUN_ADDRS, "{held:?}");
+}
+
+/// An offer from `peer` whose one candidate is at `candidate`.
+fn offer_at(peer: &Session, candidate: &str, at: u64, nonce: u8) -> Event {
+    let mut rtc = Rtc::builder().build(Instant::now());
+    rtc.add_local_candidate(Candidate::host(candidate.parse().unwrap(), "udp").unwrap());
+    let mut api = rtc.sdp_api();
+    api.add_channel("webtorrent".into());
+    let (offer, _pending) = api.apply().unwrap();
+    let me = Session::new(ME, [9; 16]).unwrap();
+    peer.offer(
+        &room(),
+        me.pubkey(),
+        &offer.to_sdp_string(),
+        &[nonce; 32],
+        at,
+    )
+    .unwrap()
+}
+
+/// A Binding success from `server` for the request pending to it, reporting `mapped`.
+fn stun_reply(s: &mut State, server: SocketAddr, mapped: [u8; 4], port: u16) {
+    let (&tid, _) = s
+        .stun
+        .pending
+        .iter()
+        .find(|(_, (srv, _, _))| *srv == server)
+        .expect("a request to that server");
+    let mut resp = super::stun::binding_request(&tid).to_vec();
+    resp[0..2].copy_from_slice(&0x0101u16.to_be_bytes());
+    resp[3] = 12;
+    resp.extend_from_slice(&[0x00, 0x20, 0x00, 0x08, 0, 1]);
+    resp.extend_from_slice(&(port ^ 0x2112).to_be_bytes());
+    resp.extend(
+        mapped
+            .iter()
+            .zip([0x21u8, 0x12, 0xa4, 0x42])
+            .map(|(a, b)| a ^ b),
+    );
+    assert!(s.stun_response(&resp, server));
+}
+
+fn asks(s: &State, server: SocketAddr) -> bool {
+    s.stun.pending.values().any(|(a, _, _)| *a == server)
+}
+
+/// NFX-10 §1's fallback: with its own STUN silent, the node asks the server of a seeder's
+/// beacon only at the address of a peer it is signaling with, never one an announcement
+/// alone names; the mapping goes to that peer's connection only; and its own server's mapping
+/// ends it.
+#[tokio::test]
+async fn own_stun_failing_falls_back_only_to_a_signaled_seeder_s_server() {
+    let mut s = state(16).await;
+    s.base = "192.168.1.5:40000".parse().unwrap();
+    s.nostr_stun = Some(NostrStun::default());
+    s.nostr_stun.as_mut().unwrap().watched.insert(watched_a());
+    let own: SocketAddr = "9.9.9.9:3478".parse().unwrap();
+    s.stun.configured = vec![own];
+    s.stun.servers = vec![own];
+    let now = unix_now();
+    let key = room().pubkey().to_owned();
+    let (seeder, announced): (SocketAddr, SocketAddr) = (
+        "1.1.1.1:3478".parse().unwrap(),
+        "8.8.8.8:3478".parse().unwrap(),
+    );
+    let (_, lo) = peers();
+
+    // A beacon names one server, an operator announces another; rule 3 adds neither.
+    feed(&mut s, &beacon(1, &["1.1.1.1:3478"], now));
+    feed(
+        &mut s,
+        &announcement(2, "8.8.8.8:3478", "nfx:mainnet:1", now),
+    );
+    assert_eq!(servers(&s), [own.to_string()]);
+
+    // A peer at the announced server's address: an announcement alone is never taken.
+    feed(&mut s, &offer_at(&lo[0], "8.8.8.8:50000", now, 1));
+    assert!(s.fallback.servers.is_empty() && !asks(&s, announced));
+    // A peer at another address: that seeder is not one it is signaling with.
+    feed(&mut s, &offer_at(&lo[1], "1.0.0.1:50000", now, 2));
+    assert!(s.fallback.servers.is_empty() && !asks(&s, seeder));
+
+    // A peer at the beacon's address, but in a room of another video: not a seeder of this one.
+    s.rooms.get_mut(&key).unwrap().video = "nfx:mainnet:1:another-video".into();
+    feed(&mut s, &offer_at(&lo[2], "1.1.1.1:50000", now, 3));
+    assert!(s.fallback.servers.is_empty() && !asks(&s, seeder));
+    s.rooms.get_mut(&key).unwrap().video = "nfx:mainnet:1:salt-flats-dusk".into();
+
+    // A peer at the beacon's address: asked at once, one server, counted in the status.
+    s.select_fallback(Instant::now(), true);
+    assert_eq!(s.fallback.servers.len(), 1);
+    assert_eq!(s.fallback.servers[0].1, seeder);
+    assert!(asks(&s, seeder));
+    assert!(s.status.lock().unwrap().stun.contains(&seeder.to_string()));
+
+    // Its mapping is for that peer's connection alone, never every SDP.
+    stun_reply(&mut s, seeder, [1, 2, 3, 4], 41000);
+    let mapping: SocketAddr = "1.2.3.4:41000".parse().unwrap();
+    assert!(!s.candidates().iter().any(|c| c.addr() == mapping));
+    assert_eq!(s.fallback_mappings(&key, lo[2].pubkey()), [mapping]);
+    assert!(s.fallback_mappings(&key, lo[1].pubkey()).is_empty());
+    assert!(s.no_mapping(), "a fallback's mapping is not its own");
+
+    // A mapping from its own server ends the fallback, and what it reported.
+    s.stun_send(own, 0, Instant::now());
+    stun_reply(&mut s, own, [5, 6, 7, 8], 42000);
+    assert!(s.fallback.servers.is_empty() && s.fallback.mapped.is_empty());
+    assert!(s.fallback_mappings(&key, lo[2].pubkey()).is_empty());
+}
+
+/// The fallback keeps to 4 STUN servers in all, one per seeder, and stops asking a server
+/// once no peer it signals with is at its address.
+#[tokio::test]
+async fn the_fallback_keeps_to_four_servers_and_to_peers_still_there() {
+    let mut s = state(16).await;
+    s.base = "192.168.1.5:40000".parse().unwrap();
+    s.nostr_stun = Some(NostrStun::default());
+    s.nostr_stun.as_mut().unwrap().watched.insert(watched_a());
+    let own: Vec<SocketAddr> = ["9.9.9.9:3478", "9.9.9.10:3478"]
+        .iter()
+        .map(|a| a.parse().unwrap())
+        .collect();
+    s.stun.configured.clone_from(&own);
+    s.stun.servers.clone_from(&own);
+    let now = unix_now();
+    let (_, lo) = peers();
+    // Three seeders, the first naming two servers at its address.
+    feed(&mut s, &beacon(1, &["1.1.1.1:3478", "1.1.1.1:19302"], now));
+    feed(&mut s, &beacon(2, &["1.0.0.1:3478"], now));
+    feed(&mut s, &beacon(3, &["8.8.8.8:3478"], now));
+    for (i, addr) in ["1.1.1.1:50000", "1.0.0.1:50000", "8.8.8.8:50000"]
+        .iter()
+        .enumerate()
+    {
+        let n = u8::try_from(i).unwrap();
+        feed(&mut s, &offer_at(&lo[i], addr, now, n + 1));
+    }
+    let got: Vec<String> = s
+        .fallback
+        .servers
+        .iter()
+        .map(|(_, a)| a.to_string())
+        .collect();
+    assert_eq!(got.len(), 2, "two of its own, so two more: {got:?}");
+    assert_eq!(got[0], "1.1.1.1:3478", "one per seeder");
+
+    // The peers go: their links die and they hold no presence, so the servers are dropped.
+    for l in &mut s.links {
+        l.conn.dead = true;
+    }
+    s.select_fallback(Instant::now(), false);
+    assert!(s.fallback.peers.is_empty() && s.fallback.servers.is_empty());
 }
