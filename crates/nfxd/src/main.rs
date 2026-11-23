@@ -9,12 +9,15 @@
 //! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--iroh-relay-ca <pem>]… [--relay-only]
 //!          [--iroh-bind <ip:port> [--iroh-external <ip:port>]…]
 //!          [--seed <a>[#<id>,…]]… [--fetch <a>[#<id>,…]]… [--pull <a>[#<id>,…]]… [--origin <addr:port>]
-//!          [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh]]
+//!          [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads]]
 //!          [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]…
 //!          [--stun <ip:port> [--stun-public <ip:port>]]
-//!          [--mesh-relay <wss url>… [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]… [--mesh-max-peers <n>]]
+//!          [--mesh-relay <wss url>… [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]… [--mesh-max-peers <n>]
+//!           [--mesh-stun-from-nostr=false]]
 //!          [--allow-creator <hex>]… [--gossip [--gossip-peer <id>@<ip:port|relay-url>]…]
 //!          [--rating-root <npub|hex> --general-relay <url>… [--rating-trusted <npub|hex>]…]
+//! nfxd stun --bind <ip:port> [--public <ip:port>]
+//!           [--announce --key <file> --relay <url>… --network <ns>…]   a STUN server, nothing else
 //! ```
 //!
 //! `<a>` is a manifest address, `38504:<creator-hex>:<namespace>:<video-id>`, as
@@ -77,6 +80,13 @@
 //! signaling. A relay cannot tell which network or video a room is (kind 25050 carries no
 //! `n`), so `--allow-creator` does not narrow it. Off by default.
 //!
+//! `--embed-relay-stun-ads` lets the embedded relay carry STUN service announcements too (kind
+//! 33478, NFX-04 §1 as amended 2026-11-19, NFX-10 §1): an operator's signed note that a STUN
+//! server serves some networks. Admitted only for the relay's own networks, after a reader's
+//! checks (a global unicast server, an expiration at most 24 h on), 12 an hour per key and 1024
+//! held at once, each kept until it expires; `--allow-creator` does not narrow them, since they
+//! name no video. Off by default.
+//!
 //! `--embed-tracker` serves the NFX-10 browser mesh (plain `ws`), and `--bridge` joins it
 //! as a native WebRTC peer. In public, put the tracker behind a TLS proxy (browsers need
 //! `wss://`, and `--tracker-url` names that URL). A proxy on the same host must set
@@ -116,6 +126,15 @@
 //! address and public mappings included, as a tracker's swarm would; relays see the room keys
 //! (which the catalog maps back to videos) and who signals whom, never the SDP.
 //!
+//! The mesh endpoint learns STUN servers from Nostr too (NFX-10 §1), unless
+//! `--mesh-stun-from-nostr=false`: on its `--mesh-relay`s it reads the beacons of the videos it
+//! serves for their `stun` endpoints, and the STUN service announcements for their networks,
+//! and asks, after its own `--mesh-stun`, the servers NFX-10 §1's rules pick: global unicast
+//! ones only, ranked by how many distinct keys name them, one named by a lone key only when
+//! it has none of its own and no better one is named, at most 4 in all. Such a server learns
+//! this node's address; a mapping it reports is offered only if it is global unicast, so one
+//! that lies costs a candidate, nothing more.
+//!
 //! Behind a DNAT, where STUN cannot report the public address (the STUN server is the node's
 //! own, which a UDP hairpin would need) and no gateway maps a port, `--mesh-public <ip:port>`
 //! names the DNAT's public address and port, forwarded to `--mesh-bind`'s port, which must
@@ -124,6 +143,17 @@
 //! host's address behind the DNAT never reaches a peer. It must be a public unicast address of
 //! `--mesh-bind`'s family. `--mesh-stun` stays optional beside it: a mapping that equals it is
 //! offered once, one that is not public not at all.
+//!
+//! `nfxd stun` runs a STUN server and nothing else, for anyone who wants to give a network one:
+//! no store, no videos, no iroh, the same Binding responder and rate limits as `--stun`, and
+//! nothing about a client logged. `--bind` is the UDP address it answers on; on a host with
+//! several addresses bind the one clients reach, and behind a DNAT name the public address as
+//! `--public`. With `--announce`, it signs a STUN service announcement with `--key` (kind
+//! 33478, NFX-10 §1: the public `ip:port` for each `--network`, 1 to 8, living 24 h) and sends
+//! it to the `--relay`s (1 to 8) at once and every 12 h, so clients of those networks find it
+//! over Nostr. The announced address must be global unicast. **Privacy:** the operator learns
+//! every client's IP address and when it asked, and the announcement ties the server's address
+//! to the key, publicly.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -134,6 +164,7 @@ use nfx_node::unix_now;
 use nfx_proto::namespace::Namespace;
 use nfxd::daemon::{Config, Daemon};
 use nfxd::package::Package;
+use nfxd::stun_server::{Announce, StunConfig, StunServer};
 use nfxd::{Error, Result, key, status};
 use nostr_sdk::prelude::ToBech32 as _;
 
@@ -142,7 +173,8 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh]] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]... [--mesh-max-peers <n>]]
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads]] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]... [--mesh-max-peers <n>] [--mesh-stun-from-nostr=false]]
+  nfxd stun --bind <ip:port> [--public <ip:port>] [--announce --key <file> --relay <url>... --network <ns>...]
 
   --mesh-relay runs the mesh endpoint (NFX-10 §6): browsers meet this node in the rooms of
   the renditions it holds, signaling only through those Nostr relays, and fetch verified
@@ -152,8 +184,20 @@ const USAGE: &str = "usage:
   a room tells anyone who announces presence there this node's candidate addresses, public
   ones included.
 
+  It also learns STUN servers from Nostr (NFX-10 §1): those the beacons of its videos and
+  STUN service announcements for their networks name, picked by NFX-10's rules after
+  --mesh-stun (global unicast only, at most 4); --mesh-stun-from-nostr=false turns that off.
+
   --embed-relay-mesh lets the embedded relay carry that signaling (kind 25050, nfx-mesh/1)
-  too: ephemeral, room proof checked, rate-limited per sender. Off by default.";
+  too: ephemeral, room proof checked, rate-limited per sender. Off by default.
+  --embed-relay-stun-ads lets it carry STUN service announcements (kind 33478) for its
+  networks: checked, rate-limited per key, kept until they expire. Off by default.
+
+  stun runs a STUN server and nothing else (RFC 8489 Binding only, rate-limited, nothing about
+  a client logged) on --bind; --public names the address clients reach behind a DNAT. With
+  --announce it signs, with --key, an announcement of that address for each --network and
+  sends it to the --relays now and every 12 h (it lives 24 h). Privacy: the operator learns
+  every client's IP address.";
 
 fn usage() -> ExitCode {
     status!("{USAGE}");
@@ -168,6 +212,7 @@ async fn main() -> ExitCode {
         Some("publish") => publish(&args[1..]).await,
         Some("delete") => delete(&args[1..]).await,
         Some("run") => run(&args[1..]).await,
+        Some("stun") => stun(&args[1..]).await,
         _ => return usage(),
     };
     match result {
@@ -308,9 +353,28 @@ async fn run(args: &[String]) -> Result<()> {
     let relay_only = args.iter().any(|a| a == "--relay-only");
     let gossip = args.iter().any(|a| a == "--gossip");
     let embed_relay_mesh = args.iter().any(|a| a == "--embed-relay-mesh");
+    let embed_relay_stun_ads = args.iter().any(|a| a == "--embed-relay-stun-ads");
+    // On by default; `--mesh-stun-from-nostr=true` says so, `=false` turns it off.
+    let no_mesh_stun_from_nostr = args.iter().any(|a| a == "--mesh-stun-from-nostr=false");
+    let bare = [
+        "--relay-only",
+        "--gossip",
+        "--embed-relay-mesh",
+        "--embed-relay-stun-ads",
+        "--mesh-stun-from-nostr=false",
+        "--mesh-stun-from-nostr=true",
+    ];
+    if args
+        .iter()
+        .filter(|a| a.starts_with("--mesh-stun-from-nostr"))
+        .count()
+        > 1
+    {
+        return Err(Error::Config("--mesh-stun-from-nostr given twice".into()));
+    }
     let args: Vec<String> = args
         .iter()
-        .filter(|a| *a != "--relay-only" && *a != "--gossip" && *a != "--embed-relay-mesh")
+        .filter(|a| !bare.contains(&a.as_str()))
         .cloned()
         .collect();
     let args = args.as_slice();
@@ -411,6 +475,8 @@ async fn run(args: &[String]) -> Result<()> {
         deletion_check_every: None,
         allow_creators: all(&f, "allow-creator"),
         embed_relay_mesh,
+        embed_relay_stun_ads,
+        no_mesh_stun_from_nostr,
         gossip,
         gossip_peers: gossip_peers(&all(&f, "gossip-peer"))?,
         rating_root: one(&f, "rating-root")?
@@ -497,6 +563,83 @@ async fn run(args: &[String]) -> Result<()> {
         }
     }
     daemon.shutdown().await;
+    Ok(())
+}
+
+/// `nfxd stun`: a STUN server, announced over Nostr with `--announce`.
+async fn stun(args: &[String]) -> Result<()> {
+    let announce = args.iter().any(|a| a == "--announce");
+    let args: Vec<String> = args
+        .iter()
+        .filter(|a| *a != "--announce")
+        .cloned()
+        .collect();
+    let f = flags(&args, &["bind", "public", "key", "relay", "network"])?;
+    let bind = ip_port(&f, "bind")?.ok_or_else(|| Error::Config("--bind is required".into()))?;
+    let public = ip_port(&f, "public")?;
+    let (relays, networks) = (all(&f, "relay"), all(&f, "network"));
+    let announce = if announce {
+        Some(Announce {
+            keys: key::load(Path::new(&required(&f, "key")?))?,
+            relays,
+            networks: networks
+                .iter()
+                .map(|n| Namespace::parse(n).map_err(Error::from))
+                .collect::<Result<_>>()?,
+        })
+    } else {
+        if one(&f, "key")?.is_some() || !relays.is_empty() || !networks.is_empty() {
+            return Err(Error::Config(
+                "--key, --relay and --network need --announce".into(),
+            ));
+        }
+        None
+    };
+    let server = StunServer::start(StunConfig {
+        bind,
+        public,
+        announce,
+        limits: nfxd::stun::Limits::default(),
+    })
+    .await?;
+    let addr = server.local_addr();
+    status!("stun: udp {addr}");
+    match server.public_addr() {
+        Some(p) if p != addr => status!("stun public: udp {p}"),
+        Some(_) => {}
+        None => status!(
+            "stun: no global unicast address to name (see --public); clients that are told this one can use it"
+        ),
+    }
+    let (mut last, mut last_failure) = (None, None);
+    let mut tick = tokio::time::interval(Duration::from_secs(2));
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            _ = term.recv() => break,
+            _ = tick.tick() => {
+                let now = server.announced();
+                if now != last
+                    && let (Some(a), Some(public)) = (now, server.public_addr())
+                {
+                    status!(
+                        "stun: announced {public} to {} relay(s), until {}",
+                        a.relays, a.expiration
+                    );
+                }
+                last = now;
+                let failure = server.announce_failure();
+                if failure != last_failure
+                    && let Some(why) = &failure
+                {
+                    status!("stun: announcing failed ({why}); trying again in 5 min");
+                }
+                last_failure = failure;
+            }
+        }
+    }
+    server.shutdown();
     Ok(())
 }
 
@@ -614,7 +757,7 @@ fn iroh_addrs(
 /// One line of what the mesh endpoint is doing, printed when it changes.
 fn mesh_line(s: &nfx_node::mesh::MeshStatus) -> String {
     format!(
-        "mesh: {} room(s), candidates [{}]{}, {} open, {} connecting; offers {}, answers {}, opened {}, failed {}, segments served {}",
+        "mesh: {} room(s), candidates [{}]{}, {} open, {} connecting; offers {}, answers {}, opened {}, failed {}, segments served {}; stun [{}]",
         s.rooms,
         s.candidates.join(", "),
         if s.gathered { "" } else { " (gathering)" },
@@ -625,6 +768,7 @@ fn mesh_line(s: &nfx_node::mesh::MeshStatus) -> String {
         s.opened,
         s.failed,
         s.served,
+        s.stun.join(", "),
     )
 }
 

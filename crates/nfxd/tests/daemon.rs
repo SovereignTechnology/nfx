@@ -227,6 +227,32 @@ async fn a_bad_https_url_is_refused_at_start_not_silently_every_minute() {
     .err()
     .expect("refused");
     assert!(err.to_string().contains("--embed-relay-mesh"), "{err}");
+    // So are STUN announcements.
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("relay-stun-no-relay"),
+        embed_relay_stun_ads: true,
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(err.to_string().contains("--embed-relay-stun-ads"), "{err}");
+    // Turning off STUN from Nostr means something only with the mesh endpoint.
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("mesh-stun-nostr-no-mesh"),
+        no_mesh_stun_from_nostr: true,
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(
+        err.to_string()
+            .contains("--mesh-stun-from-nostr=false needs --mesh-relay"),
+        "{err}"
+    );
 
     // Gossip peers: a relay-only node does not gossip, and a peer reachable only through a
     // relay this network does not run would be dropped at every join.

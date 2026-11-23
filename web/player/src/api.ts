@@ -111,15 +111,66 @@ export interface Endpoints {
   /** `wss://` trackers from `webrtc` endpoints (NFX-10 §2), at most 4, most-named first. */
   trackers: string[];
   /**
-   * `stun:<ip>:<port>` URLs from `stun` endpoints (NFX-10 §1), global unicast addresses
-   * only, at most 4, most-named first: for `iceServers`, after the page's own. Such a
-   * server learns each viewer's address, and beacons come from any key.
+   * The STUN servers NFX-10 §1's rules pick for a page with none of its own
+   * (`selectStun([], stunNamed)`), as `stun:<ip>:<port>` URLs, at most 4: from `stunNamed`,
+   * those named by two keys or more, most-named first, or failing any, those named by one.
+   * A page with servers of its own calls `selectStun(own, stunNamed)` instead. Such a server
+   * learns each viewer's address, and beacons and announcements come from any key.
    */
   stunServers: string[];
+  /**
+   * Every STUN server named over Nostr (NFX-10 §1): by live beacons' `stun` endpoints (their
+   * seeders) and by live STUN service announcements for the network (kind 33478, their
+   * operators); `stun:<ip>:<port>` URLs of global unicast addresses only, each with the number
+   * of distinct keys that name it, most first (ties: first heard), at most 16.
+   */
+  stunNamed: StunNamed[];
+  /**
+   * The STUN servers each live beacon's seeder names, in the order first heard, at most 4 per
+   * seeder: what `NostrSignaling.stunFallback` may draw on. Never an announcement's.
+   */
+  stunSeeders: SeederStun[];
   /** How many seeders' beacons these come from. */
   seeders: number;
   /** Which renditions those seeders hold, and how many hold each. */
   availability: RenditionAvailability;
+}
+
+/** A STUN server named over Nostr, and by how many distinct keys (`Endpoints.stunNamed`). */
+export interface StunNamed {
+  url: string;
+  keys: number;
+}
+
+/** The STUN servers one seeder's live, verified beacon names (`Endpoints.stunSeeders`). */
+export interface SeederStun {
+  /** The key that signed the beacon. */
+  seeder: string;
+  /** `stun:<ip>:<port>` URLs of global unicast addresses, at most 4. */
+  urls: string[];
+  /** When the beacon expires (unix seconds); after it, this names nothing. */
+  expiration: number;
+}
+
+/**
+ * The fallback for when a session's own STUN fails (NFX-10 §1), for `NostrSignaling`.
+ *
+ * Once a gathering with the session's `iceServers` ends with no server-reflexive candidate,
+ * a later connection to a peer also asks one STUN server per seeder, on that connection only,
+ * if a live beacon of this video names it and its IP address is among the candidates of an
+ * SDP that same peer has sent. A session key says nothing of who signed a beacon (NFX-10
+ * §6.4), so the address is the test: the ICE agent is sent to it anyway, and no other party
+ * learns the viewer's address. So the first attempt with a peer never uses it when this
+ * session offers (the answer is what names the address); a retry does. Never a server only
+ * an announcement names; always global unicast, on a port of 1024 or above; at most 4 STUN
+ * servers in the whole session,
+ * `iceServers` included.
+ */
+export interface StunFallback {
+  /** The page's own STUN URLs, 1 to 4, each among `iceServers`. */
+  own: string[];
+  /** The seeders' servers now, read at each new connection: `() => endpoints.stunSeeders`. */
+  seeders: () => readonly SeederStun[];
 }
 
 /** One rendition as hls.js parsed it from the master playlist. */
@@ -270,6 +321,8 @@ export interface NostrSignaling {
    * Default `all`.
    */
   remoteCandidates?: RemoteCandidates;
+  /** Off unless given: what to try when this session's own STUN fails (`StunFallback`). */
+  stunFallback?: StunFallback;
 }
 
 /**
@@ -362,7 +415,9 @@ export interface OpenCommon {
   signaling?: Signaling;
   /**
    * STUN servers for the mesh (`stun:` or `stuns:` URLs only), at most 4. Default none.
-   * A page may take them from beacons (`stun` endpoints, NFX-10 §1) as well as its own.
+   * A page may take them from Nostr as well as its own (beacons' `stun` endpoints and STUN
+   * service announcements, NFX-10 §1): `selectStun(own, endpoints.stunNamed)` applies the
+   * rules every NFX client uses.
    */
   iceServers?: RTCIceServer[];
   onEvent?: (event: PlayerEvent) => void;

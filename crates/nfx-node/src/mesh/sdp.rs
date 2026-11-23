@@ -71,6 +71,23 @@ pub fn filter_candidates(sdp: &str, local: SocketAddr) -> String {
     out
 }
 
+/// The distinct IP addresses of the candidates in `sdp`, as [`filter_candidates`] left it: the
+/// addresses this node's ICE agent will send checks to for that peer.
+#[must_use]
+pub fn candidate_ips(sdp: &str) -> Vec<IpAddr> {
+    let mut out = Vec::new();
+    for line in sdp.lines() {
+        if let Some(cand) = line.trim_end().strip_prefix("a=")
+            && cand.starts_with("candidate:")
+            && let Ok(c) = Candidate::from_sdp_string(cand)
+            && !out.contains(&c.addr().ip())
+        {
+            out.push(c.addr().ip());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +155,8 @@ mod tests {
         );
         assert!(out.starts_with("v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n"));
         assert!(out.ends_with("a=end-of-candidates\r\n"));
+        let ips = candidate_ips(&out);
+        assert_eq!(ips[0], "203.0.113.9".parse::<IpAddr>().unwrap());
+        assert_eq!(ips.len(), MAX_REMOTE_CANDIDATES, "each address once");
     }
 }

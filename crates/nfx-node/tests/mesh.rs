@@ -7,7 +7,8 @@
 //! channel, asks for a segment with p2p-media-loader's protocol and checks its sha256. The
 //! same behind a DNAT: the endpoint bound on loopback and told a public address, which the
 //! peer alone reaches, through a DNAT in the test. Then two endpoints in one room, which find
-//! and connect to each other the same way.
+//! and connect to each other the same way; and an endpoint with two STUN servers, one of which
+//! lies about its mapping, which a browser still reaches.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -253,10 +254,11 @@ impl Browser {
         }
     }
 
-    /// Where a datagram for `to` goes: there, or through the DNAT; `None` where it cannot.
+    /// Where a datagram for `to` goes: there, or through the DNAT; `None` where it cannot (off
+    /// loopback, where a candidate a lying STUN server reported may point).
     fn route_out(&mut self, to: SocketAddr) -> Option<SocketAddr> {
         match &mut self.dnat {
-            None => Some(to),
+            None => to.ip().is_loopback().then_some(to),
             Some(d) if to == d.public => {
                 d.opened = true;
                 Some(d.bind)
@@ -596,5 +598,99 @@ async fn a_stun_mapping_is_offered_and_settings_that_cannot_work_are_refused() {
             .to_string();
         assert!(err.contains(why), "{cfg:?}: {err}");
     }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A STUN server on loopback that answers every Binding request with `report`, or with the
+/// request's true source when `report` is `None` (IPv4 only).
+async fn stun_server(report: Option<SocketAddr>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let stun = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = stun.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut buf = [0u8; 512];
+        loop {
+            let Ok((n, from)) = stun.recv_from(&mut buf).await else {
+                return;
+            };
+            if n != 20 || buf[0..2] != [0, 1] {
+                continue;
+            }
+            let SocketAddr::V4(mapped) = report.unwrap_or(from) else {
+                continue;
+            };
+            let mut resp = buf[..20].to_vec();
+            resp[0..2].copy_from_slice(&[0x01, 0x01]);
+            resp[3] = 12;
+            resp.extend_from_slice(&[0x00, 0x20, 0x00, 0x08, 0, 1]);
+            resp.extend_from_slice(&(mapped.port() ^ 0x2112).to_be_bytes());
+            resp.extend(
+                mapped
+                    .ip()
+                    .octets()
+                    .iter()
+                    .zip([0x21u8, 0x12, 0xa4, 0x42])
+                    .map(|(a, b)| a ^ b),
+            );
+            let _ = stun.send_to(&resp, from).await;
+        }
+    });
+    (addr, task)
+}
+
+/// Two STUN servers, one honest and one that lies about the mapping: the endpoint offers the
+/// lie as one more candidate, ICE tries it and fails that pair only, and the browser still
+/// connects through the others and fetches a verified segment (NFX-10 §1: a lying server costs
+/// a failed pair).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lying_stun_server_costs_a_candidate_and_the_browser_still_connects() {
+    let (_relay, url) = relay().await;
+    let (honest, honest_task) = stun_server(None).await;
+    let lie: SocketAddr = "198.51.100.23:41000".parse().unwrap();
+    let (liar, liar_task) = stun_server(Some(lie)).await;
+    let d = dir("liar");
+    let (store, v) = common::vector_store(&d);
+    let store = Arc::new(store);
+    let mesh = Mesh::start(
+        store.clone(),
+        MeshConfig {
+            stun: vec![liar, honest],
+            ..config(&url)
+        },
+    )
+    .await
+    .unwrap();
+    mesh.serve(&v.list, &*store, None).await.unwrap();
+    let s = until(&mesh, "both servers answered", |s| {
+        s.gathered && s.rooms == 1 && s.candidates.len() == 2
+    })
+    .await;
+    // The honest mapping is the socket's own address, offered once; the lie is offered too.
+    assert_eq!(
+        s.candidates,
+        [
+            format!("host {}", mesh.local_addr()),
+            format!("srflx {lie}")
+        ]
+    );
+    assert_eq!(s.stun, [liar.to_string(), honest.to_string()]);
+
+    let video = VideoAddr::parse(&v.list.video).unwrap();
+    let room = Room::derive(&video.web_stream_swarm_id("720p"));
+    let session = Session::new(rand_bytes(), rand_bytes()).unwrap();
+    let mut browser = Browser::join(&url, room, session).await;
+    let (mut rtc, sdp) = browser.negotiate(mesh.session_key()).await;
+    assert!(
+        sdp.contains(&format!("{} {} typ srflx", lie.ip(), lie.port())),
+        "{sdp}"
+    );
+    let bytes = browser.fetch_segment_0(&mut rtc).await;
+    let want = first_segment(&v.list, &*store, "720p");
+    assert_eq!(hex::encode(nfx_proto::sha256(&bytes)), want);
+    let s = until(&mesh, "served", |s| s.served >= 1 && s.open >= 1).await;
+    assert_eq!(s.failed, 0);
+    mesh.shutdown().await;
+    browser.client.shutdown().await;
+    honest_task.abort();
+    liar_task.abort();
     let _ = std::fs::remove_dir_all(&d);
 }
