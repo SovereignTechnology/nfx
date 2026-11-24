@@ -147,17 +147,113 @@ it learned only from tells apart from what it heard broadcast:
 - A pool entry adds **no weight** to the counts NFX-03 §5 ranks renditions and origins by.
 - It uses **only a pool entry's `https` endpoints**. Trackers, STUN servers, iroh and HyperDHT
   endpoints named only by the pool MUST NOT be used: each would learn the viewer's address.
-- It tries sources in this order:
-  1. those named by **the creator's own beacon**: one whose signer (`pubkey`) is the creator named
-     in its `a`, however it arrived. The `a` tag alone proves nothing, since every beacon for the
-     video carries it;
-  2. those named by seeders heard broadcast, ranked as NFX-03 §5;
-  3. those named only by the pool, in random order, each origin URL once however many keys name it.
-- It tries **at most 3** pool sources, each for **at most 8 s** to serve a hash list that verifies,
-  and drops a pool attempt as soon as a creator-signed or broadcast source is known. A failure never
-  ends the viewer's wait.
+- Pool entries are **open** sources, ordered and capped by §4.2 and fetched from by §4.3. A viewer
+  drops a pool attempt as soon as a source in tier 1 or 2 of §4.2 is known.
 - A viewer SHOULD settle on a starting source within 700 ms of the first tell and within 2.5 s of
   the ask, and SHOULD keep collecting beacons afterwards.
+
+### 4.2 Choosing sources
+
+Keys are free, and an ask tells anyone watching which video is starting. So a viewer learns nothing
+it can trust from a beacon's key, from when the beacon arrived, from which relay carried it, or from
+how many keys name an origin. It orders sources by what it can check instead.
+
+A **source** is an origin URL of an `https` endpoint (NFX-05 §6). Its **host** is the URL's scheme,
+host and port. A source takes the highest tier of any key that names it. It may be asked for any
+rendition a key of that tier claims for it, and its **firm claim** is what all those keys claim in
+common. Peers (NFX-10) are not sources here; §4.3 says how their bytes are treated.
+
+A viewer tries sources in these tiers, in this order:
+
+1. sources named by **the creator's own beacon**: one whose signer (`pubkey`) is the creator named
+   in its `a`, however it arrived. The `a` tag alone proves nothing, since every beacon for the video
+   carries it;
+2. sources named by keys with a positive trusted score (NFX-16 §4), highest score first;
+3. **open** sources: every other source named by a beacon, heard broadcast or through the pool
+   (§4.1). First come those whose host has delivered a file at real-time speed or faster in this
+   session (§4.3), in the order they first did. The rest follow in random order, one source per host
+   at a time. How many keys name a source adds nothing;
+4. sources the caller configured outside beacons, such as a page's own origin, as **a last resort**.
+
+It bounds what open sources can do:
+
+- It holds at most **64 keys per video**, and at most **16 first heard on any one relay**. The
+  creator's beacon, keys with a positive trusted score, and the first key to name a host that has
+  delivered a file are **protected**. A new key from a relay at its quota replaces a random
+  unprotected key first heard on that relay. When the whole table is full, a new key from a relay
+  under its quota replaces a random unprotected key first heard on the relay that holds the most
+  keys. If there is no such key, the new key is dropped.
+- It asks at most **3 open hosts for one file**. In one session it asks at most **6 open hosts** it
+  has not asked before, then **one more every 30 s**, preferring hosts first heard on a relay it has
+  not yet taken one from. Tier 4, when there is one, is tried before any host past the first 6.
+- For the ranking of NFX-03 §5, all keys that name only open sources count together as **one
+  seeder**. The same holds for STUN servers and trackers (NFX-10 §1): one named only by such keys
+  counts as named by one key.
+- It uses only the `https` endpoints of pool entries (§4.1).
+- It SHOULD open its beacon subscription when the video's page opens, without publishing anything,
+  so that beacons heard before Play are already in hand.
+
+### 4.3 Fetching from several sources
+
+A source that serves a hash list that verifies has proved only that it holds the hash list. It may
+then send nothing, send slowly, or send bytes that do not verify. Every file is named by its hash and
+has the same name at every source (NFX-05 §3), so any other source can supply it.
+
+A **media file** holds media time; the hash list, playlists and init segments do not. A media file's
+**rate** is its size from the hash list divided by the media time it holds, and a request for it
+runs at **real-time speed** when its body arrives at least that fast. The viewer's **link rate** is
+the fastest any one of its requests has received over 4 s in the last 60 s; it is unknown until a
+request has run for 4 s. The **floor** is 1 Mbit/s, or a quarter of the link rate when that is lower.
+A viewer:
+
+- keeps the sources of §4.2 for the whole session, and adds those it hears of while it plays. It
+  holds at most **32 open sources** at a time. One whose beacons have expired stays usable until a
+  newer one needs its place, and the least recently used goes first. Sources in tiers 1, 2 and 4 are
+  never dropped for room;
+- fetches each file from one source at a time, in §4.2's order. It starts with the source that
+  delivered the previous file only if that one delivered at real-time speed;
+- MUST **assemble each file from one source's bytes only**. A retry at another source starts the
+  file again from its first byte;
+- **gives up** on a request when:
+  - no byte has arrived for 4 s; or
+  - over the last 4 s its body has arrived slower than the floor; requests in flight to one host
+    count together; or
+  - it is to an open source, it is for a media file, the media buffered ahead of playback is under
+    4 s, and it has run longer than 4 s or twice the media time the file holds, whichever is longer;
+- **hedges**: a request that has run for 2 s is joined by a request for the same file from another
+  source when it has had no byte for 2 s, or when the media buffered ahead of playback is under 4 s
+  and the request is slower than half its fair share of the link rate (the link rate divided by the
+  requests in flight), or the link rate is unknown, and, for a media
+  file, also slower than the file's rate. A further hedge waits 2 s more. At most **3 sources** fetch
+  one file at once, and **the third is the best tier 1, 2 or 4 source** when there is one. The
+  viewer keeps the first copy that verifies and abandons the rest;
+- moves to another source after each outcome below, and stops on what it says:
+
+  | Outcome at a source | What follows |
+  |---|---|
+  | Bytes that do not verify | The source is **stopped for the session** (NFX-05 §4) |
+  | A network error, or an HTTP error other than the next row | A **strike** |
+  | `404` for a rendition outside the source's firm claim | Nothing: the viewer goes on to another source that claims it |
+  | A give-up (no bytes, or too slow) | The source moves to the end of its tier |
+
+- stops a source that has **2 strikes in its last 6 requests**. A source stopped once may be used
+  again after **30 s**, in its tier's place. One stopped twice, or for bytes that do not verify, is
+  never used again ahead of a source not yet asked;
+- when every source has failed a file, waits for a new source or for 10 s, whichever comes first,
+  then starts again with the sources stopped by strikes eligible;
+- sends **no `Referer`** to any source (`referrerPolicy: no-referrer`);
+- assembles a file that comes from a peer from that peer's bytes only, and drops a peer that sends
+  bytes that do not verify. Peers are bounded by the peer limits of NFX-10, not by §4.2.
+
+So a source that stops sending costs at most 4 s per file. One that sends slowly costs nothing while
+the buffer lasts; once it runs low, an open source gets at most 4 s, or twice the file's media time,
+and a hedge starts after 2 s. Because the third source fetching a file is the best tier 1, 2 or 4
+source, a creator's beacon, a rated key or a configured source is asked for any file that two other
+sources have struggled with for 4 s while the buffer is low. Open hosts cost at most 3 attempts per file. A session contacts
+at most 6 open hosts before a configured source is tried, and then at most one more every 30 s. With
+no creator's beacon, no rated key and no configured source, a determined attacker can hold off an
+honest open source for as long as it keeps answering asks from fresh keys (§6). These rules apply to every viewer, whether it
+asks or not.
 
 ## 5. Relays
 
@@ -219,13 +315,20 @@ instances without shared state MUST NOT, since the ask may have reached another 
 - **Reflection.** An honest seeder's tell goes only to a key that proved itself by signing the ask,
   so nobody can aim its answers at a third party's key. Anyone can still address their own tells to
   any key, which is what §4.1 bounds.
-- **Sybil answers.** An attacker who sees an ask can answer from many keys. For beacons that arrive
-  **in tells**, §4.1 keeps that from displacing seeders heard by broadcast, from steering rendition
-  and origin rankings, and from naming anything but an `https` origin. **This draft does not yet bound
-  ordinary beacons published from fresh keys in response to an ask** (§8). A pool origin can still
-  be tried, so if no creator-signed or broadcast source is known yet, **the viewer may contact an
-  attacker's origin, which learns its IP address and the video**. All payloads still verify (NFX-05).
-  The 8 s bound covers only the hash list; delivery after it is §8's.
+- **Sybil answers.** An attacker who sees an ask can answer from many keys, in tells or as ordinary
+  beacons, and a relay can add keys of its own to what it returns. §4.1 keeps tell-only keys to
+  `https` origins. §4.2 orders sources by the creator's signature, ratings and verified delivery,
+  never by key count, timing or relay, and caps how many open hosts a viewer contacts. §4.3 bounds
+  what a source that stops delivering costs. None of this tells an honest open source from a
+  dishonest one. **A viewer may contact up to 6 attackers' hosts in a session, and one more every
+  30 s after that.** With no creator's beacon, no rated key and no configured source, an attacker who
+  keeps answering asks from fresh keys can delay playback for as long as it keeps going. All payloads
+  still verify (NFX-05). A creator's beacon, a rated key or a configured source bounds that delay, since
+  one of them is asked for any file two other sources struggle with (§4.3).
+- **What a source learns.** Any source a viewer fetches from learns its IP address, the video, the
+  rendition (and so a bandwidth class), and from the timing of requests the play position, pauses,
+  seeks and when the viewer gives up. A browser also sends the embedding page's origin (`Origin`) on
+  a cross-origin request. A viewer sends no `Referer` (§4.3).
 - **Amplification.** One ask of about 0.5 KiB typically draws a tell of about 2.2 KiB from each
   seeder of a video, and at worst about 33 KiB (a 16 KiB beacon, its JSON escaped), about 65 times the
   ask, on each relay the ask reached. Each seeder's budgets (§3) bound what it sends. A scoped relay
@@ -247,14 +350,6 @@ checks both.
 
 ## 8. Open issues
 
-**Before any viewer implements this:**
-
-- A viewer MUST keep a burst of fresh keys that publish ordinary beacons from crowding out the
-  seeders it already knows. The pool of §4.1 covers only beacons that arrive in tells; the rule for
-  broadcast keys is not yet specified.
-- A viewer MUST be able to leave a source that verifies and then stops delivering, and move to
-  another, with a bound on how long that takes. This is not yet specified.
-
 **Before any freeze:**
 
 - Registering kind 20465 in `nostr-protocol/registry-of-kinds`. It was unclaimed in the NIPs table
@@ -275,3 +370,6 @@ checks both.
 - Draft 2026-11-22 — initial (issue #113, ADR 0105), revised the same day after an adversarial
   review: a separate pool for tell-only seeders, limits charged only after verification, a beacon
   may not be dated after its tell, one spelling for the embedded beacon.
+- Draft 2026-11-24 — §4.2 (choosing sources) and §4.3 (fetching from several sources) close the two
+  requirements §8 held open before any viewer implements this, after a review found that ordering
+  by arrival time, fixed deadlines and failures in a row could each be gamed.
