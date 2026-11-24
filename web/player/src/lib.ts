@@ -7,8 +7,10 @@
  *   Nostr, with deletions applied (NFX-02 §6);
  * - `watchEndpoints(a, namespace, relays, onChange)`: origins, trackers and STUN servers
  *   named by seeders' live beacons (NFX-03, NFX-10 §1), validated and capped;
- *   `selectStun(own, creator)` picks a session's STUN servers by NFX-10 §1's rules: its own,
- *   then those the video's creator names;
+ *   `selectStun(own, relays, creator)` picks a session's STUN servers by NFX-10 §1's rules:
+ *   its own, then those its relays name for themselves, then those the video's creator names
+ *   (`fetchRelayInfo` and `relayStunUrl` read a relay's; Nostr signaling's `relayStun` does
+ *   it for a session);
  * - `open(videoElement, options)`: verify the manifest again, fetch the hash list from the
  *   first origin whose copy verifies and that answers for an allowed rendition's init (the
  *   origin is asked; beacons' claims only order the asking), and play with hls.js behind a
@@ -41,6 +43,8 @@ import type {
   PeerAddress,
   PlayerEvent,
   Rejection,
+  RelayInfo,
+  RelayInfoOptions,
   RemoteCandidates,
   ResolveOptions,
   ResolvedManifest,
@@ -56,6 +60,7 @@ import {
   checkSignaling as checkSignalingOption,
   checkStunFallbackServers,
   originBase as beaconOrigin,
+  relayStunUrl as relayStunServer,
   selectStun as selectStunServers,
   selectStunFallback as selectFallbackServers,
 } from './endpoints';
@@ -69,6 +74,8 @@ import {
   trackerUrl as meshTrackerUrl,
 } from './mesh';
 import { type Probe, type Selection, describe as describeProbes, initUrl, probeStatus, selectRenditions } from './probe';
+import { fetchRelayInfo as fetchNip11, parseRelayInfo as parseNip11 } from './relay-info';
+import { RelayStunBook } from './relay-stun';
 import { MAX_REMOTE_CANDIDATES as SDP_MAX_REMOTE_CANDIDATES, filterRemoteSdp as filterSdp } from './remote-sdp';
 import { NostrSignaler } from './signal-nostr';
 import { StunFallbackBook } from './stun-fallback';
@@ -125,16 +132,52 @@ export function originBase(url: string): string | null {
 
 /**
  * The STUN servers a session uses (NFX-10 §1), as `stun:` URLs for `iceServers`, at most 4:
- * the page's own (`own`) first, then those the video's creator names (`watchEndpoints`'s
- * `stunCreator`: the `stun` endpoint of the creator's own live beacon), global unicast, on a
- * port of 1024 or above. No other key's beacon adds a server, however many keys name it, and
- * no STUN service announcement does. Every NFX client picks by these rules, so Nostr never
- * makes a viewer ask more than 4 STUN servers, or one the creator did not name. Each server
- * learns the viewer's address: a page that must not tell the creator's servers who watches
- * passes `own` alone to `open()`.
+ * the page's own (`own`) first; then those the relays it signals through name for themselves
+ * (`relays`: `relayStunUrl` of each, in the order of the relays); then those the video's
+ * creator names (`watchEndpoints`'s `stunCreator`: the `stun` endpoint of the creator's own
+ * live beacon), global unicast, on a port of 1024 or above; each once. No other key's beacon
+ * adds a server, however many keys name it, and no STUN service announcement does. Every NFX
+ * client picks by these rules, so Nostr never makes a viewer ask more than 4 STUN servers, or
+ * one that neither the creator nor one of its relays named. Each server learns the viewer's
+ * address: a page that must not tell the creator's servers who watches passes `[]` as
+ * `creator`. A session with Nostr signaling's `relayStun` applies the relays' part itself,
+ * with each relay's document as it comes; a page passes `selectStun(own, [], creator)` to
+ * `open()` then.
  */
-export function selectStun(own: readonly string[], creator: readonly string[]): string[] {
-  return selectStunServers(own, creator);
+export function selectStun(own: readonly string[], relays: readonly string[], creator: readonly string[]): string[] {
+  return selectStunServers(own, relays, creator);
+}
+
+/**
+ * The NIP-11 document of `relay` (a `wss:` or `ws:` URL), read as NIP-11 says (a `GET` of the
+ * relay's URL with `https:` for `wss:`, `http:` for `ws:`, and `Accept:
+ * application/nostr+json`), and what `parseRelayInfo` keeps of it; null on any failure (no
+ * answer within `timeoutMs`, default 3 s; a status other than 200; a redirect; over 64 KiB; not
+ * JSON; not an object). Never rejects. Nothing is cached: call it once per relay per session.
+ * The page's Content-Security-Policy must allow `connect-src` to that URL.
+ */
+export function fetchRelayInfo(relay: string, options: RelayInfoOptions = {}): Promise<RelayInfo | null> {
+  return fetchNip11(relay, options);
+}
+
+/**
+ * What a reader keeps of a relay's parsed NIP-11 document: its `nfx` object (NFX-04 §3), every
+ * field checked (`RelayNfx`). Null when `doc` is not a JSON object.
+ */
+export function parseRelayInfo(doc: unknown): RelayInfo | null {
+  return parseNip11(doc);
+}
+
+/**
+ * The STUN server a relay names for itself (NFX-10 §1), as a `stun:` URL, or null:
+ * `stun:<host of relay>:<stun_port>` when its NIP-11 `nfx.kinds` lists 25050 and its
+ * `nfx.stun_port` is 1024 to 65535. The host must not be an IP address that is not global
+ * unicast, `localhost`, or a name under `.localhost`. The relay sees the viewer's address on
+ * its WebSocket already: its STUN server learns only the viewer's UDP port. Not for a viewer
+ * who hides its address from the relay (a proxy, a VPN, Tor).
+ */
+export function relayStunUrl(relay: string, info: RelayInfo | null): string | null {
+  return relayStunServer(relay, info);
 }
 
 /**
@@ -434,12 +477,15 @@ function start(
     const tuning = o.httpWindow === undefined ? {} : { httpWindow: o.httpWindow };
     if (signaling.kind === 'nostr') {
       const fallback = signaling.stunFallback ? new StunFallbackBook(signaling.stunFallback, o.iceServers.flatMap((i) => i.urls)) : null;
-      nostr = new NostrSignaler(signaling.relays, log, signaling.remoteCandidates ?? 'all', fallback);
+      // The relays' documents are read beside their sockets; nothing waits for them.
+      const relayStun = signaling.relayStun ? new RelayStunBook(signaling.relayStun, signaling.relays, log) : null;
+      nostr = new NostrSignaler(signaling.relays, log, signaling.remoteCandidates ?? 'all', fallback, relayStun);
     }
     hls = new HlsWithP2P({ ...base, ...meshConfig(anchor, signaling, o.iceServers, mesh, log, tuning, nostr, book) } as never);
     engine = `hls.js ${Hls.version} + ${P2P_ENGINE}`;
     const filtered = nostr?.remoteCandidates === 'global' ? ' (remote candidates: global unicast UDP only)' : '';
-    log(`mesh: ${signaling.kind} ${(signaling.kind === 'nostr' ? signaling.relays : signaling.urls).join(' ')}${filtered}`);
+    const atRelays = nostr?.relayStun ? ' (STUN at its relays too)' : '';
+    log(`mesh: ${signaling.kind} ${(signaling.kind === 'nostr' ? signaling.relays : signaling.urls).join(' ')}${filtered}${atRelays}`);
   } else {
     hls = new Hls(base);
     engine = `hls.js ${Hls.version}`;

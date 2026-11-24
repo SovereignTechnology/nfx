@@ -1,0 +1,2181 @@
+{
+  "description": "NFX-10 §1 STUN at the relays a client signals through, from NFX-04 §3's 'nfx.stun_port'. In 'relays', 'relay' is a relay URL as a client holds it (a lowercase host; an IP address in canonical form, an IPv6 one in brackets) and 'nip11' its NIP-11 document as parsed JSON, or null when the client could not fetch or parse one. 'stun' is the STUN server the client may ask for that relay, a stun: URL, or null for none. A relay names one when its document's 'nfx' object has a 'kinds' list holding the integer 25050 and a 'stun_port' that is an integer from 1024 to 65535: stun:<host of the relay URL>:<stun_port>. The URL's own port and path are the relay's and play no part. A host that is an IP address must be global unicast, as in stun-select.json; a host name is taken as it is, except localhost and names under .localhost, which name none (a native client also resolves a name and asks only if every address is global unicast, which no vector can show). In 'cases', 'own' are the client's own STUN URLs, 'relays' the relays it signals through, in its order, each with its document, and 'creator' the stun: URLs of the servers the creator's own beacon names. 'selected' is what the client asks, in order: its own, each once; then each relay's server, in the order of its relays; then the creator's that are global unicast, on a port of 1024 or above; each stun: URL once, at most 'max' in all. No traffic is ever sent to an address or name of a vector.",
+  "max": 4,
+  "relays": [
+    {
+      "name": "name",
+      "reason": "a relay that carries signaling names a STUN port: its own host, on that port",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": "stun:relay.example:3478"
+    },
+    {
+      "name": "url-port-is-the-relay-s",
+      "reason": "the port in the relay URL is the relay's, not STUN's",
+      "relay": "wss://relay.example:7777",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": "stun:relay.example:3478"
+    },
+    {
+      "name": "url-path-is-the-relay-s",
+      "reason": "so is the path",
+      "relay": "wss://relay.example/nostr",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": "stun:relay.example:3478"
+    },
+    {
+      "name": "ws",
+      "reason": "a ws: relay names one the same way",
+      "relay": "ws://relay.example:8080",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": "stun:relay.example:3478"
+    },
+    {
+      "name": "lowest-port",
+      "reason": "1024 is the lowest",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 1024
+        }
+      },
+      "stun": "stun:relay.example:1024"
+    },
+    {
+      "name": "highest-port",
+      "reason": "65535 is the highest",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 65535
+        }
+      },
+      "stun": "stun:relay.example:65535"
+    },
+    {
+      "name": "unknown-fields",
+      "reason": "fields a reader does not know are ignored",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "software": "relay 9",
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478,
+          "x-future": {
+            "a": 1
+          }
+        }
+      },
+      "stun": "stun:relay.example:3478"
+    },
+    {
+      "name": "roles-do-not-count",
+      "reason": "kinds says it carries signaling; roles are not read",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [],
+          "stun_port": 3478
+        }
+      },
+      "stun": "stun:relay.example:3478"
+    },
+    {
+      "name": "no-document",
+      "reason": "no document could be fetched or parsed: none",
+      "relay": "wss://relay.example",
+      "nip11": null,
+      "stun": null
+    },
+    {
+      "name": "general-relay",
+      "reason": "a general relay has no nfx object: none",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "a general relay",
+        "supported_nips": [
+          1,
+          11,
+          40,
+          42
+        ]
+      },
+      "stun": null
+    },
+    {
+      "name": "nfx-not-an-object",
+      "reason": "nfx is an object",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "a general relay",
+        "supported_nips": [
+          1,
+          11,
+          40,
+          42
+        ],
+        "nfx": [
+          "stun_port",
+          3478
+        ]
+      },
+      "stun": null
+    },
+    {
+      "name": "no-stun-port",
+      "reason": "no stun_port: none",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ]
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "port-1023",
+      "reason": "below 1024: a client never asks a well-known port",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 1023
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "port-53",
+      "reason": "below 1024",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 53
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "port-0",
+      "reason": "below 1024",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 0
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "port-negative",
+      "reason": "an integer from 1024 to 65535",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": -3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "port-65536",
+      "reason": "above 65535",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 65536
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "port-a-string",
+      "reason": "an integer, not a string",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": "3478"
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "port-a-fraction",
+      "reason": "an integer",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478.5
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "port-true",
+      "reason": "an integer, not a boolean",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": true
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "port-null",
+      "reason": "an integer, not null",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": null
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "port-a-list",
+      "reason": "an integer, not a list",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": [
+            3478
+          ]
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "kinds-without-25050",
+      "reason": "a relay that does not carry signaling is not asked",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "kinds-missing",
+      "reason": "kinds must list 25050",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "kinds-not-a-list",
+      "reason": "kinds is a list",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": 25050,
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "kinds-25050-a-string",
+      "reason": "25050 the integer",
+      "relay": "wss://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            "25050"
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "ipv4",
+      "reason": "a host that is a global unicast IPv4 address",
+      "relay": "wss://1.1.1.1",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": "stun:1.1.1.1:3478"
+    },
+    {
+      "name": "ipv4-port-and-path",
+      "reason": "its port and path are the relay's too",
+      "relay": "wss://1.1.1.1:7447/r",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": "stun:1.1.1.1:3478"
+    },
+    {
+      "name": "ipv6",
+      "reason": "a global unicast IPv6 address keeps its brackets",
+      "relay": "wss://[2606:4700::1111]",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": "stun:[2606:4700::1111]:3478"
+    },
+    {
+      "name": "ipv4-private",
+      "reason": "an IP address must be global unicast",
+      "relay": "wss://10.0.0.5",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "ipv4-loopback",
+      "reason": "a test relay on loopback names none",
+      "relay": "ws://127.0.0.1:7447",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "ipv4-shared",
+      "reason": "global unicast only (100.64/10)",
+      "relay": "wss://100.64.0.1",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "ipv4-documentation",
+      "reason": "a documentation address routes nowhere (RFC 5737)",
+      "relay": "wss://203.0.113.7",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "ipv6-unique-local",
+      "reason": "global unicast only (2000::/3)",
+      "relay": "wss://[fd00::1]",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "ipv6-link-local",
+      "reason": "global unicast only (2000::/3)",
+      "relay": "wss://[fe80::1]",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "ipv6-documentation",
+      "reason": "a documentation address routes nowhere (RFC 3849)",
+      "relay": "wss://[2001:db8::1]",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "ipv6-documentation-3fff",
+      "reason": "a documentation address routes nowhere (RFC 9637)",
+      "relay": "wss://[3fff::1]",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "localhost",
+      "reason": "localhost is loopback, whatever it resolves to (RFC 6761)",
+      "relay": "ws://localhost:7447",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "under-localhost",
+      "reason": "so is every name under .localhost",
+      "relay": "wss://relay.localhost",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    },
+    {
+      "name": "not-a-relay-url",
+      "reason": "a relay URL is ws: or wss:",
+      "relay": "https://relay.example",
+      "nip11": {
+        "name": "nfx scoped relay",
+        "supported_nips": [
+          1,
+          11,
+          40
+        ],
+        "nfx": {
+          "networks": [
+            "nfx:mainnet:1"
+          ],
+          "kinds": [
+            38504,
+            20464,
+            5,
+            25050
+          ],
+          "roles": [
+            "catalog",
+            "availability",
+            "signaling"
+          ],
+          "stun_port": 3478
+        }
+      },
+      "stun": null
+    }
+  ],
+  "cases": [
+    {
+      "name": "relays-only",
+      "reason": "no server of its own: each relay's, in the order of its relays",
+      "own": [],
+      "relays": [
+        {
+          "relay": "wss://relay.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        },
+        {
+          "relay": "wss://relay2.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        }
+      ],
+      "creator": [],
+      "selected": [
+        "stun:relay.example:3478",
+        "stun:relay2.example:3478"
+      ]
+    },
+    {
+      "name": "relays-in-their-order",
+      "reason": "the client's order of its relays",
+      "own": [],
+      "relays": [
+        {
+          "relay": "wss://relay2.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        },
+        {
+          "relay": "wss://relay.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        }
+      ],
+      "creator": [],
+      "selected": [
+        "stun:relay2.example:3478",
+        "stun:relay.example:3478"
+      ]
+    },
+    {
+      "name": "own-then-relays",
+      "reason": "its own first",
+      "own": [
+        "stun:9.9.9.9:3478"
+      ],
+      "relays": [
+        {
+          "relay": "wss://relay.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        }
+      ],
+      "creator": [],
+      "selected": [
+        "stun:9.9.9.9:3478",
+        "stun:relay.example:3478"
+      ]
+    },
+    {
+      "name": "own-holds-a-relay-s",
+      "reason": "a server of its own that a relay names too is asked once, as its own",
+      "own": [
+        "stun:relay.example:3478"
+      ],
+      "relays": [
+        {
+          "relay": "wss://relay.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        },
+        {
+          "relay": "wss://relay2.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        }
+      ],
+      "creator": [],
+      "selected": [
+        "stun:relay.example:3478",
+        "stun:relay2.example:3478"
+      ]
+    },
+    {
+      "name": "own-then-relays-then-the-creator",
+      "reason": "its own, its relays', then the creator's",
+      "own": [
+        "stun:9.9.9.9:3478"
+      ],
+      "relays": [
+        {
+          "relay": "wss://relay.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        }
+      ],
+      "creator": [
+        "stun:1.0.0.1:3478"
+      ],
+      "selected": [
+        "stun:9.9.9.9:3478",
+        "stun:relay.example:3478",
+        "stun:1.0.0.1:3478"
+      ]
+    },
+    {
+      "name": "relays-before-the-creator",
+      "reason": "the relays' come before the creator's",
+      "own": [],
+      "relays": [
+        {
+          "relay": "wss://relay.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        },
+        {
+          "relay": "wss://relay2.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        }
+      ],
+      "creator": [
+        "stun:1.0.0.1:3478",
+        "stun:8.8.8.8:3478"
+      ],
+      "selected": [
+        "stun:relay.example:3478",
+        "stun:relay2.example:3478",
+        "stun:1.0.0.1:3478",
+        "stun:8.8.8.8:3478"
+      ]
+    },
+    {
+      "name": "at-most-four",
+      "reason": "at most 4 in all: the creator's come last, so they are left out",
+      "own": [
+        "stun:9.9.9.9:3478"
+      ],
+      "relays": [
+        {
+          "relay": "wss://relay.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        },
+        {
+          "relay": "wss://relay2.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        },
+        {
+          "relay": "wss://relay3.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        }
+      ],
+      "creator": [
+        "stun:1.0.0.1:3478",
+        "stun:8.8.8.8:3478"
+      ],
+      "selected": [
+        "stun:9.9.9.9:3478",
+        "stun:relay.example:3478",
+        "stun:relay2.example:3478",
+        "stun:relay3.example:3478"
+      ]
+    },
+    {
+      "name": "relays-past-four",
+      "reason": "at most 4 in all, relays' included",
+      "own": [],
+      "relays": [
+        {
+          "relay": "wss://relay3.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        },
+        {
+          "relay": "wss://relay4.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        },
+        {
+          "relay": "wss://relay5.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        },
+        {
+          "relay": "wss://relay6.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        },
+        {
+          "relay": "wss://relay7.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        }
+      ],
+      "creator": [],
+      "selected": [
+        "stun:relay3.example:3478",
+        "stun:relay4.example:3478",
+        "stun:relay5.example:3478",
+        "stun:relay6.example:3478"
+      ]
+    },
+    {
+      "name": "one-host-two-relays",
+      "reason": "two relays on one host name one server: asked once",
+      "own": [],
+      "relays": [
+        {
+          "relay": "wss://relay.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        },
+        {
+          "relay": "wss://relay.example:7777/other",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        }
+      ],
+      "creator": [],
+      "selected": [
+        "stun:relay.example:3478"
+      ]
+    },
+    {
+      "name": "one-host-two-ports",
+      "reason": "the same host on two ports is two servers",
+      "own": [],
+      "relays": [
+        {
+          "relay": "wss://relay.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        },
+        {
+          "relay": "wss://relay.example/b",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3479
+            }
+          }
+        }
+      ],
+      "creator": [],
+      "selected": [
+        "stun:relay.example:3478",
+        "stun:relay.example:3479"
+      ]
+    },
+    {
+      "name": "a-relay-that-names-none",
+      "reason": "a relay that names no server adds none; the next does",
+      "own": [],
+      "relays": [
+        {
+          "relay": "wss://relay.example",
+          "nip11": {
+            "name": "a general relay",
+            "supported_nips": [
+              1,
+              11,
+              40,
+              42
+            ]
+          }
+        },
+        {
+          "relay": "wss://relay2.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ]
+            }
+          }
+        },
+        {
+          "relay": "wss://relay3.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        }
+      ],
+      "creator": [
+        "stun:1.0.0.1:3478"
+      ],
+      "selected": [
+        "stun:relay3.example:3478",
+        "stun:1.0.0.1:3478"
+      ]
+    },
+    {
+      "name": "no-document-yet",
+      "reason": "a relay whose document has not come names nothing yet",
+      "own": [
+        "stun:9.9.9.9:3478"
+      ],
+      "relays": [
+        {
+          "relay": "wss://relay.example",
+          "nip11": null
+        }
+      ],
+      "creator": [
+        "stun:1.0.0.1:3478"
+      ],
+      "selected": [
+        "stun:9.9.9.9:3478",
+        "stun:1.0.0.1:3478"
+      ]
+    },
+    {
+      "name": "creator-equal-to-a-relay-s",
+      "reason": "a server the creator names that a relay names too is asked once, as the relay's",
+      "own": [],
+      "relays": [
+        {
+          "relay": "wss://1.1.1.1",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        }
+      ],
+      "creator": [
+        "stun:1.1.1.1:3478",
+        "stun:1.0.0.1:3478"
+      ],
+      "selected": [
+        "stun:1.1.1.1:3478",
+        "stun:1.0.0.1:3478"
+      ]
+    },
+    {
+      "name": "the-creator-s-rules-stay",
+      "reason": "the creator's servers still need global unicast and a port of 1024 or above",
+      "own": [],
+      "relays": [
+        {
+          "relay": "wss://relay.example",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        }
+      ],
+      "creator": [
+        "stun:1.0.0.1:53",
+        "stun:10.0.0.1:3478",
+        "stun:203.0.113.1:3478",
+        "stun:1.0.0.1:3478"
+      ],
+      "selected": [
+        "stun:relay.example:3478",
+        "stun:1.0.0.1:3478"
+      ]
+    },
+    {
+      "name": "no-relay",
+      "reason": "no relay names one: as stun-select.json",
+      "own": [
+        "stun:9.9.9.9:3478"
+      ],
+      "relays": [],
+      "creator": [
+        "stun:1.0.0.1:3478"
+      ],
+      "selected": [
+        "stun:9.9.9.9:3478",
+        "stun:1.0.0.1:3478"
+      ]
+    },
+    {
+      "name": "loopback-test-relay",
+      "reason": "a test relay on loopback names none",
+      "own": [],
+      "relays": [
+        {
+          "relay": "ws://127.0.0.1:7447",
+          "nip11": {
+            "name": "nfx scoped relay",
+            "supported_nips": [
+              1,
+              11,
+              40
+            ],
+            "nfx": {
+              "networks": [
+                "nfx:mainnet:1"
+              ],
+              "kinds": [
+                38504,
+                20464,
+                5,
+                25050
+              ],
+              "roles": [
+                "catalog",
+                "availability",
+                "signaling"
+              ],
+              "stun_port": 3478
+            }
+          }
+        }
+      ],
+      "creator": [],
+      "selected": []
+    }
+  ]
+}

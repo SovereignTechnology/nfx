@@ -50,8 +50,12 @@ export class StunFallbackBook {
     this.#peers.delete(peer);
   }
 
-  /** The extra STUN URLs for a new connection to `peer` at `now` (unix seconds), if any. */
-  serversFor(peer: string, now: number): string[] {
+  /**
+   * The extra STUN URLs for a new connection to `peer` at `now` (unix seconds), if any.
+   * `inUse`, when given, replaces the `iceServers` given at construction as what the session
+   * asks already: with `relayStun`, every server it has asked (./relay-stun.ts).
+   */
+  serversFor(peer: string, now: number, inUse: readonly string[] = this.#inUse): string[] {
     const ips = this.#peers.get(peer);
     if (!this.#noMapping || ips === undefined || ips.length === 0) return [];
     try {
@@ -63,7 +67,7 @@ export class StunFallbackBook {
       }
       const taken = new Set(this.#picked.values());
       const rest = seeders.filter((s) => !taken.has(s.seeder));
-      for (const { seeder, url } of selectStunFallback(this.#own, [...this.#inUse, ...this.#picked.keys()], false, rest, ips)) {
+      for (const { seeder, url } of selectStunFallback(this.#own, [...inUse, ...this.#picked.keys()], false, rest, ips)) {
         this.#picked.set(url, seeder);
         out.push(url);
       }

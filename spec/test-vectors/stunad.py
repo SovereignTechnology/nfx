@@ -4,8 +4,11 @@ announcements (kind 33478) and the reference selection rules, and the vectors th
 `read_announcement` is NFX-10 §1's validity check of an announcement, `usable` the check of
 an address a client may take from Nostr, `select` the rules by which a client picks its
 STUN servers (its own, then those the video's creator names), and `fallback` what it may add
-when no server it asks gave a mapping. No rule takes an announced server. Every vector's
-verdict below is checked against them when the vectors are generated.
+when no server it asks gave a mapping. `relay_stun` is the STUN server a relay the client
+signals through names in its NIP-11 document (`nfx.stun_port`, NFX-04 §3), and
+`select_with_relays` puts those between the client's own and the creator's. No rule takes an
+announced server. Every vector's verdict below is checked against them when the vectors are
+generated.
 """
 
 import hashlib
@@ -19,11 +22,17 @@ MAX_NETWORKS = 8
 MAX_SERVERS = 4
 FUTURE_SKEW = 15 * 60
 MIN_PORT = 1024
+MAX_PORT = 65535
+SIGNAL_KIND = 25050
 CREATED_AT = 1_790_000_000
 NOW = CREATED_AT + 10
 
 NAMESPACE_RE = re.compile(r"nfx:[a-z0-9-]{2,32}:(0|[1-9][0-9]{0,19})")
 UINT = re.compile(r"0|[1-9][0-9]*")
+# A relay URL as a client holds it: scheme, host, an optional port and path, nothing else.
+RELAY_URL = re.compile(r"wss?://(\[[0-9a-f:]+\]|[^/:?#@\[\]]+)(?::[0-9]{1,5})?(?:/[^?#]*)?")
+# A host name as a URL parser leaves it: lowercase labels of letters, digits and hyphens.
+HOST_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*")
 
 
 class Invalid(Exception):
@@ -206,6 +215,249 @@ def fallback(own, in_use, mapped, beacons, signaling, maximum=MAX_SERVERS):
             asked.add(addr)
             out.append(addr)
     return out
+
+
+def is_int(value) -> bool:
+    """A JSON integer: not a boolean, which Python counts as one."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def relay_host(relay):
+    """NFX-10 §1: the host of a relay URL (`wss://<host>[:<port>][/<path>]`, or `ws://`) at
+    which a client may ask the relay's STUN server: a host name as it is, but not `localhost`
+    or a name under `.localhost` (loopback, RFC 6761); or an IP address in canonical form
+    that is global unicast (an IPv6 one in brackets). None otherwise. The URL's own port and
+    path are the relay's. A native client also resolves a name and asks only if every
+    address is global unicast, which no vector can show."""
+    m = RELAY_URL.fullmatch(relay)
+    if m is None:
+        return None
+    host = m.group(1)
+    if host.startswith("["):
+        try:
+            ip = ipaddress.IPv6Address(host[1:-1])
+        except ValueError:
+            return None
+        return host if str(ip) == host[1:-1] and global_unicast(ip) else None
+    if re.fullmatch(r"[0-9.]+", host):
+        try:
+            ip = ipaddress.IPv4Address(host)
+        except ValueError:
+            return None
+        return host if str(ip) == host and global_unicast(ip) else None
+    if host == "localhost" or host.endswith(".localhost"):
+        return None
+    return host if HOST_NAME.fullmatch(host) else None
+
+
+def relay_stun(relay, nip11):
+    """NFX-10 §1: the STUN server, as a `stun:` URL, that a relay the client signals through
+    names in its NIP-11 document `nip11` (the parsed JSON; None when the client could not
+    fetch or parse it), or None. Its `nfx.kinds` must list 25050 and its `nfx.stun_port`
+    (NFX-04 §3) be an integer from 1024 to 65535; the server is at the host of the URL."""
+    nfx = nip11.get("nfx") if isinstance(nip11, dict) else None
+    if not isinstance(nfx, dict):
+        return None
+    kinds = nfx.get("kinds")
+    if not isinstance(kinds, list) or not any(is_int(k) and k == SIGNAL_KIND for k in kinds):
+        return None
+    port = nfx.get("stun_port")
+    if not is_int(port) or not MIN_PORT <= port <= MAX_PORT:
+        return None
+    host = relay_host(relay)
+    return None if host is None else f"stun:{host}:{port}"
+
+
+def select_with_relays(own, relays, creator, maximum=MAX_SERVERS):
+    """NFX-10 §1 in `stun:` URLs, with the relays': the client's own first, each once; then
+    the servers its relays name (`relays`: each relay's `relay_stun`, None for none, in the
+    order of its relays); then the creator's (`stun:<ip>:<port>`, as its beacon names them)
+    that are askable; each URL once, at most `maximum`."""
+    out = []
+    for url in own:
+        if len(out) < maximum and url not in out:
+            out.append(url)
+    for url in relays:
+        if len(out) >= maximum:
+            break
+        if url is not None and url not in out:
+            out.append(url)
+    for url in creator:
+        if len(out) >= maximum:
+            break
+        if url not in out and url.startswith("stun:") and askable(url[len("stun:"):]):
+            out.append(url)
+    return out
+
+
+def relay_stun_vectors() -> dict:
+    """NFX-10 §1 and NFX-04 §3: `relay-stun.json`."""
+
+    def doc(kinds=(38504, 20464, 5, 25050), stun_port=3478, nfx_extra=None, **top):
+        nfx = {"networks": ["nfx:mainnet:1"], "kinds": list(kinds),
+               "roles": ["catalog", "availability", "signaling"]}
+        if stun_port is not None:
+            nfx["stun_port"] = stun_port
+        nfx.update(nfx_extra or {})
+        return {"name": "nfx scoped relay", "supported_nips": [1, 11, 40], **top, "nfx": nfx}
+
+    def without(key, d):
+        return {k: v for k, v in d.items() if k != key}
+
+    general = {"name": "a general relay", "supported_nips": [1, 11, 40, 42]}
+    no_kinds = doc()
+    no_kinds["nfx"] = without("kinds", no_kinds["nfx"])
+    r1, r2 = "wss://relay.example", "wss://relay2.example"
+    s1, s2 = "stun:relay.example:3478", "stun:relay2.example:3478"
+    # name, reason, relay, nip11, stun
+    relays = [
+        ("name", "a relay that carries signaling names a STUN port: its own host, on that port",
+         r1, doc(), s1),
+        ("url-port-is-the-relay-s", "the port in the relay URL is the relay's, not STUN's",
+         "wss://relay.example:7777", doc(), s1),
+        ("url-path-is-the-relay-s", "so is the path", "wss://relay.example/nostr", doc(), s1),
+        ("ws", "a ws: relay names one the same way", "ws://relay.example:8080", doc(), s1),
+        ("lowest-port", "1024 is the lowest", r1, doc(stun_port=1024), "stun:relay.example:1024"),
+        ("highest-port", "65535 is the highest", r1, doc(stun_port=65535),
+         "stun:relay.example:65535"),
+        ("unknown-fields", "fields a reader does not know are ignored", r1,
+         doc(nfx_extra={"x-future": {"a": 1}}, software="relay 9"), s1),
+        ("roles-do-not-count", "kinds says it carries signaling; roles are not read", r1,
+         doc(nfx_extra={"roles": []}), s1),
+        ("no-document", "no document could be fetched or parsed: none", r1, None, None),
+        ("general-relay", "a general relay has no nfx object: none", r1, general, None),
+        ("nfx-not-an-object", "nfx is an object", r1, {**general, "nfx": ["stun_port", 3478]},
+         None),
+        ("no-stun-port", "no stun_port: none", r1, doc(stun_port=None), None),
+        ("port-1023", "below 1024: a client never asks a well-known port", r1,
+         doc(stun_port=1023), None),
+        ("port-53", "below 1024", r1, doc(stun_port=53), None),
+        ("port-0", "below 1024", r1, doc(stun_port=0), None),
+        ("port-negative", "an integer from 1024 to 65535", r1, doc(stun_port=-3478), None),
+        ("port-65536", "above 65535", r1, doc(stun_port=65536), None),
+        ("port-a-string", "an integer, not a string", r1, doc(stun_port="3478"), None),
+        ("port-a-fraction", "an integer", r1, doc(stun_port=3478.5), None),
+        ("port-true", "an integer, not a boolean", r1, doc(stun_port=True), None),
+        ("port-null", "an integer, not null", r1,
+         {**doc(), "nfx": {**doc()["nfx"], "stun_port": None}}, None),
+        ("port-a-list", "an integer, not a list", r1, doc(stun_port=[3478]), None),
+        ("kinds-without-25050", "a relay that does not carry signaling is not asked", r1,
+         doc(kinds=(38504, 20464, 5)), None),
+        ("kinds-missing", "kinds must list 25050", r1, no_kinds, None),
+        ("kinds-not-a-list", "kinds is a list", r1, doc(nfx_extra={"kinds": 25050}), None),
+        ("kinds-25050-a-string", "25050 the integer", r1, doc(kinds=("25050",)), None),
+        ("ipv4", "a host that is a global unicast IPv4 address", "wss://1.1.1.1",
+         doc(), "stun:1.1.1.1:3478"),
+        ("ipv4-port-and-path", "its port and path are the relay's too", "wss://1.1.1.1:7447/r",
+         doc(), "stun:1.1.1.1:3478"),
+        ("ipv6", "a global unicast IPv6 address keeps its brackets", "wss://[2606:4700::1111]",
+         doc(), "stun:[2606:4700::1111]:3478"),
+        ("ipv4-private", "an IP address must be global unicast", "wss://10.0.0.5", doc(), None),
+        ("ipv4-loopback", "a test relay on loopback names none", "ws://127.0.0.1:7447",
+         doc(), None),
+        ("ipv4-shared", "global unicast only (100.64/10)", "wss://100.64.0.1", doc(), None),
+        ("ipv4-documentation", "a documentation address routes nowhere (RFC 5737)",
+         "wss://203.0.113.7", doc(), None),
+        ("ipv6-unique-local", "global unicast only (2000::/3)", "wss://[fd00::1]", doc(), None),
+        ("ipv6-link-local", "global unicast only (2000::/3)", "wss://[fe80::1]", doc(), None),
+        ("ipv6-documentation", "a documentation address routes nowhere (RFC 3849)",
+         "wss://[2001:db8::1]", doc(), None),
+        ("ipv6-documentation-3fff", "a documentation address routes nowhere (RFC 9637)",
+         "wss://[3fff::1]", doc(), None),
+        ("localhost", "localhost is loopback, whatever it resolves to (RFC 6761)",
+         "ws://localhost:7447", doc(), None),
+        ("under-localhost", "so is every name under .localhost", "wss://relay.localhost",
+         doc(), None),
+        ("not-a-relay-url", "a relay URL is ws: or wss:", "https://relay.example", doc(), None),
+    ]
+    relay_out = []
+    for name, reason, relay, nip11, want in relays:
+        got = relay_stun(relay, nip11)
+        assert got == want, f"relay-stun {name}: {got} != {want}"
+        relay_out.append({"name": name, "reason": reason, "relay": relay, "nip11": nip11,
+                          "stun": want})
+
+    own_a = "stun:9.9.9.9:3478"
+    c1, c2 = "stun:1.0.0.1:3478", "stun:8.8.8.8:3478"
+    five = [f"wss://relay{i}.example" for i in range(3, 8)]
+
+    def at(url, nip11="doc"):
+        return {"relay": url, "nip11": doc() if nip11 == "doc" else nip11}
+
+    # name, reason, own, relays ([{relay, nip11}]), creator, selected
+    cases = [
+        ("relays-only", "no server of its own: each relay's, in the order of its relays", [],
+         [at(r1), at(r2)], [], [s1, s2]),
+        ("relays-in-their-order", "the client's order of its relays", [], [at(r2), at(r1)], [],
+         [s2, s1]),
+        ("own-then-relays", "its own first", [own_a], [at(r1)], [], [own_a, s1]),
+        ("own-holds-a-relay-s", "a server of its own that a relay names too is asked once, as "
+         "its own", [s1], [at(r1), at(r2)], [], [s1, s2]),
+        ("own-then-relays-then-the-creator", "its own, its relays', then the creator's", [own_a],
+         [at(r1)], [c1], [own_a, s1, c1]),
+        ("relays-before-the-creator", "the relays' come before the creator's", [],
+         [at(r1), at(r2)], [c1, c2], [s1, s2, c1, c2]),
+        ("at-most-four", "at most 4 in all: the creator's come last, so they are left out", [own_a],
+         [at(r1), at(r2), at("wss://relay3.example")], [c1, c2],
+         [own_a, s1, s2, "stun:relay3.example:3478"]),
+        ("relays-past-four", "at most 4 in all, relays' included", [], [at(u) for u in five], [],
+         [f"stun:relay{i}.example:3478" for i in range(3, 7)]),
+        ("one-host-two-relays", "two relays on one host name one server: asked once", [],
+         [at(r1), at("wss://relay.example:7777/other")], [], [s1]),
+        ("one-host-two-ports", "the same host on two ports is two servers", [],
+         [at(r1), at("wss://relay.example/b", doc(stun_port=3479))], [],
+         [s1, "stun:relay.example:3479"]),
+        ("a-relay-that-names-none", "a relay that names no server adds none; the next does", [],
+         [at(r1, general), at(r2, doc(stun_port=None)), at("wss://relay3.example")], [c1],
+         ["stun:relay3.example:3478", c1]),
+        ("no-document-yet", "a relay whose document has not come names nothing yet", [own_a],
+         [at(r1, None)], [c1], [own_a, c1]),
+        ("creator-equal-to-a-relay-s", "a server the creator names that a relay names too is "
+         "asked once, as the relay's", [], [at("wss://1.1.1.1")], ["stun:1.1.1.1:3478", c1],
+         ["stun:1.1.1.1:3478", c1]),
+        ("the-creator-s-rules-stay", "the creator's servers still need global unicast and a "
+         "port of 1024 or above", [], [at(r1)],
+         ["stun:1.0.0.1:53", "stun:10.0.0.1:3478", "stun:203.0.113.1:3478", c1], [s1, c1]),
+        ("no-relay", "no relay names one: as stun-select.json", [own_a], [], [c1], [own_a, c1]),
+        ("loopback-test-relay", "a test relay on loopback names none", [],
+         [at("ws://127.0.0.1:7447")], [], []),
+    ]
+    case_out = []
+    for name, reason, own, rels, creator, want in cases:
+        got = select_with_relays(own, [relay_stun(r["relay"], r["nip11"]) for r in rels], creator)
+        assert got == want, f"relay-stun case {name}: {got} != {want}"
+        case_out.append({"name": name, "reason": reason, "own": own, "relays": rels,
+                         "creator": creator, "selected": want})
+    # With no relay, it is stun-select.json's rule, in URLs.
+    assert select_with_relays([], [], ["stun:1.1.1.1:1024", "stun:1.1.1.1:1023"]) == \
+        ["stun:" + a for a in select([], ["1.1.1.1:1024", "1.1.1.1:1023"])]
+
+    return {
+        "description": "NFX-10 §1 STUN at the relays a client signals through, from NFX-04 §3's "
+                       "'nfx.stun_port'. In 'relays', 'relay' is a relay URL as a client holds it "
+                       "(a lowercase host; an IP address in canonical form, an IPv6 one in "
+                       "brackets) and 'nip11' its NIP-11 document as parsed JSON, or null when the "
+                       "client could not fetch or parse one. 'stun' is the STUN server the client "
+                       "may ask for that relay, a stun: URL, or null for none. A relay names one "
+                       "when its document's 'nfx' object has a 'kinds' list holding the integer "
+                       "25050 and a 'stun_port' that is an integer from 1024 to 65535: "
+                       "stun:<host of the relay URL>:<stun_port>. The URL's own port and path are "
+                       "the relay's and play no part. A host that is an IP address must be global "
+                       "unicast, as in stun-select.json; a host name is taken as it is, except "
+                       "localhost and names under .localhost, which name none (a native client "
+                       "also resolves a name and asks only if every address is global unicast, "
+                       "which no vector can show). In 'cases', 'own' are the client's own STUN "
+                       "URLs, 'relays' the relays it signals through, in its order, each with its "
+                       "document, and 'creator' the stun: URLs of the servers the creator's own "
+                       "beacon names. 'selected' is what the client asks, in order: its own, each "
+                       "once; then each relay's server, in the order of its relays; then the "
+                       "creator's that are global unicast, on a port of 1024 or above; each stun: "
+                       "URL once, at most 'max' in all. No traffic is ever sent to an address or "
+                       "name of a vector.",
+        "max": MAX_SERVERS,
+        "relays": relay_out,
+        "cases": case_out,
+    }
 
 
 def stunad_vectors(keypair, nostr_event) -> dict:
@@ -493,4 +745,5 @@ def stunad_vectors(keypair, nostr_event) -> dict:
             "fallback": fallback_out,
             "global_unicast": {"yes": yes, "no": no},
         },
+        "relay-stun.json": relay_stun_vectors(),
     }

@@ -11,9 +11,11 @@
  *   SDP reaches `setRemoteDescription` through the session's `remoteCandidates` filter
  *   (./remote-sdp.ts; `all`, the default, passes it as it is). When the session's STUN found
  *   no mapping (or it asks no server), a connection may also ask a seeder's STUN server at
- *   that peer's own address (`stunFallback`, ./stun-fallback.ts, NFX-10 §1). It claims a peer from the
- *   engine before negotiating and reports each peer connected or failed, so the engine
- *   keeps its peer de-duplication and limits.
+ *   that peer's own address (`stunFallback`, ./stun-fallback.ts, NFX-10 §1). With
+ *   `relayStun` (./relay-stun.ts), each connection also asks the STUN servers the session's
+ *   relays named for themselves so far, after the page's own and before the creator's. It
+ *   claims a peer from the engine before negotiating and reports each peer connected or
+ *   failed, so the engine keeps its peer de-duplication and limits.
  *
  * Every event is built, signed, checked and decrypted by nfx-proto in WASM (MeshSession,
  * MeshRoom), the same code native peers use. Every event is signed when it is sent: stock
@@ -27,6 +29,7 @@ import { PeerConnectError } from 'p2p-media-loader-core';
 import { MeshRoom, MeshSession } from '../out/wasm/nfx_wasm.js';
 
 import type { RemoteCandidates } from './api';
+import type { RelayStunBook } from './relay-stun';
 import { filterRemoteSdpCounted } from './remote-sdp';
 import type { StunFallbackBook } from './stun-fallback';
 import {
@@ -358,6 +361,8 @@ export class NostrSignaler {
     readonly remoteCandidates: RemoteCandidates = 'all',
     /** What to try when this session's own STUN fails; null (the default) for nothing. */
     readonly stunFallback: StunFallbackBook | null = null,
+    /** The STUN servers the relays name for themselves; null (the default): not asked. */
+    readonly relayStun: RelayStunBook | null = null,
   ) {
     this.session = newSession();
     this.pool = new RelayPool(relays, log);
@@ -380,6 +385,7 @@ export class NostrSignaler {
     this.#destroyed = true;
     for (const r of [...this.#rooms]) r.destroy();
     this.pool.destroy();
+    this.relayStun?.destroy();
     this.session.free();
   }
 }
@@ -609,8 +615,15 @@ export class RoomClient {
     let pc: RTCPeerConnection;
     let extra: string[] = [];
     try {
-      const config = this.#ctx.rtcConfig();
-      extra = this.#s.stunFallback?.serversFor(peer, nowSeconds()) ?? [];
+      let config = this.#ctx.rtcConfig();
+      const relayStun = this.#s.relayStun;
+      if (relayStun !== null) {
+        // Its own, then the relays' known so far, then the creator's; at most 4 in the session.
+        const configured = (config?.iceServers ?? []).flatMap((i) => (typeof i.urls === 'string' ? [i.urls] : i.urls));
+        config = { ...config, iceServers: relayStun.serversFor(configured).map((urls) => ({ urls })) };
+      }
+      extra = this.#s.stunFallback?.serversFor(peer, nowSeconds(), relayStun?.asked) ?? [];
+      relayStun?.noteAsked(extra);
       pc = new RTCPeerConnection(
         extra.length === 0 ? config : { ...config, iceServers: [...(config?.iceServers ?? []), ...extra.map((urls) => ({ urls }))] },
       );
