@@ -166,9 +166,10 @@ pub struct Config {
     /// Default: `nfx_node::mesh::MAX_PEERS` (16). Needs `mesh_relays`.
     pub mesh_max_peers: Option<usize>,
     /// Do not learn STUN servers from Nostr (`--mesh-stun-from-nostr=false`). By default the
-    /// mesh endpoint reads, on `mesh_relays`, the beacons of the videos it serves and the STUN
-    /// service announcements for their networks, and asks the servers NFX-10 §1's rules pick
-    /// after `mesh_stun` (`nfx_node::mesh::MeshConfig::stun_from_nostr`). Needs `mesh_relays`.
+    /// mesh endpoint reads, on `mesh_relays`, the beacons of the videos it serves, asks the
+    /// servers a beacon signed by the video's creator names after `mesh_stun`, and falls back
+    /// to a seeder's server when no server it asks gives a mapping, by NFX-10 §1's rules
+    /// (`nfx_node::mesh::MeshConfig::stun_from_nostr`). Needs `mesh_relays`.
     pub no_mesh_stun_from_nostr: bool,
     /// The public address of a DNAT that forwards to `mesh_bind`'s port (`--mesh-public`),
     /// for a node whose public address STUN cannot report: offered as a host candidate, what

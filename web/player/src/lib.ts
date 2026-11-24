@@ -5,10 +5,10 @@
  * - `init({ wasmUrl })`: load nfx-proto's WASM verifier once;
  * - `resolveManifest(a, relays)`: the current signed manifest of a video (NFX-02), over
  *   Nostr, with deletions applied (NFX-02 §6);
- * - `watchEndpoints(a, namespace, relays, onChange)`: origins and trackers named by
- *   seeders' live beacons (NFX-03), and STUN servers named by beacons and STUN service
- *   announcements (NFX-10 §1), validated and capped; `selectStun(own, named)` picks a
- *   session's STUN servers by NFX-10 §1's rules;
+ * - `watchEndpoints(a, namespace, relays, onChange)`: origins, trackers and STUN servers
+ *   named by seeders' live beacons (NFX-03, NFX-10 §1), validated and capped;
+ *   `selectStun(own, creator)` picks a session's STUN servers by NFX-10 §1's rules: its own,
+ *   then those the video's creator names;
  * - `open(videoElement, options)`: verify the manifest again, fetch the hash list from the
  *   first origin whose copy verifies and that answers for an allowed rendition's init (the
  *   origin is asked; beacons' claims only order the asking), and play with hls.js behind a
@@ -48,7 +48,6 @@ import type {
   Signaling,
   Stats,
   SeederStun,
-  StunNamed,
 } from './api';
 import {
   MAX_ICE_SERVERS as ENDPOINTS_MAX_ICE_SERVERS,
@@ -126,25 +125,27 @@ export function originBase(url: string): string | null {
 
 /**
  * The STUN servers a session uses (NFX-10 §1), as `stun:` URLs for `iceServers`, at most 4:
- * the page's own (`own`) first, then those named over Nostr (`watchEndpoints`'s `stunNamed`)
- * by two keys or more, most-named first; one named by a lone key only when the page has none
- * of its own and none is named by two. Every NFX client picks by these rules, so Nostr never
- * makes a viewer ask more than 4 STUN servers, or one at an address that is not global
- * unicast. Each server named learns the viewer's address: a page that must not tell strangers
- * who watches passes `own` alone to `open()`.
+ * the page's own (`own`) first, then those the video's creator names (`watchEndpoints`'s
+ * `stunCreator`: the `stun` endpoint of the creator's own live beacon), global unicast, on a
+ * port of 1024 or above. No other key's beacon adds a server, however many keys name it, and
+ * no STUN service announcement does. Every NFX client picks by these rules, so Nostr never
+ * makes a viewer ask more than 4 STUN servers, or one the creator did not name. Each server
+ * learns the viewer's address: a page that must not tell the creator's servers who watches
+ * passes `own` alone to `open()`.
  */
-export function selectStun(own: readonly string[], named: readonly StunNamed[]): string[] {
-  return selectStunServers(own, named);
+export function selectStun(own: readonly string[], creator: readonly string[]): string[] {
+  return selectStunServers(own, creator);
 }
 
 /**
- * The fallback when a client's own STUN failed (NFX-10 §1), as a pure function: the servers
- * it may also ask, each with its seeder. Nothing unless it has servers of its own (`own`) and
- * none it asks (`inUse`, its own included) returned a mapping (`mapped` false). Then at most
- * one per seeder of `seeders` (`Endpoints.stunSeeders`, never an announcement): global unicast,
- * on a port of 1024 or above, not asked yet, whose IP address is in `signaling` (the candidate addresses of the peers it
- * is signaling with), at most 4 STUN servers in all. `open()` applies it for you when
- * Nostr signaling is given `stunFallback`.
+ * The fallback when no STUN server a client asks returned a mapping (NFX-10 §1), as a pure
+ * function: the servers it may also ask, each with its seeder. Nothing once one of those it
+ * asks (`own` and `inUse`) returned a mapping (`mapped` true); a client that asks none (both
+ * empty) may fall back too. Then at most one per seeder of `seeders` (`Endpoints.stunSeeders`,
+ * never an announcement): global unicast, on a port of 1024 or above, not asked yet, whose IP
+ * address is in `signaling` (the candidate addresses of the peers it is signaling with), at
+ * most 4 STUN servers in all. `open()` applies it for you when Nostr signaling is given
+ * `stunFallback`.
  */
 export function selectStunFallback(
   own: readonly string[],
@@ -186,12 +187,13 @@ export function resolveManifest(a: string, relays: string[], options: ResolveOpt
 /**
  * Report the origins, trackers and STUN servers seeders' live beacons for `a` name, and
  * which renditions they hold, each time that changes (the newest unexpired beacon per
- * seeder counts, at most 64 seeders; `https://` origins only, at most 8, with the
- * renditions beacons claim each serves, a hint for `open()`; `wss://` trackers only, at
- * most 4; `availability`). STUN servers come from beacons' `stun` endpoints and from STUN
- * service announcements for `namespace` (kind 33478, NFX-10 §1), global unicast addresses
- * only, each counted once per key (`stunNamed`, and `stunServers`, what `selectStun` picks
- * for a page with none of its own). Returns `stop`, which closes the subscriptions.
+ * seeder counts, at most 64 seeders, the creator's own beacon always; `https://` origins
+ * only, at most 8, with the renditions beacons claim each serves, a hint for `open()`;
+ * `wss://` trackers only, at most 4; `availability`). STUN servers come from beacons' `stun`
+ * endpoints, global unicast addresses only: the creator's own beacon's (`stunCreator`, and
+ * `stunServers`, what `selectStun` picks for a page with none of its own), and every seeder's
+ * for the fallback (`stunSeeders`). STUN service announcements are not read. Returns `stop`,
+ * which closes the subscriptions.
  */
 export function watchEndpoints(
   a: string,

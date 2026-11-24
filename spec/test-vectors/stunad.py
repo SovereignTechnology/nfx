@@ -2,9 +2,10 @@
 announcements (kind 33478) and the reference selection rules, and the vectors they classify.
 
 `read_announcement` is NFX-10 §1's validity check of an announcement, `usable` the check of
-an address a client may take from Nostr, and `select` the rules by which a client picks its
-STUN servers. Every vector's verdict below is checked against them when the vectors are
-generated.
+an address a client may take from Nostr, `select` the rules by which a client picks its
+STUN servers (its own, then those the video's creator names), and `fallback` what it may add
+when no server it asks gave a mapping. No rule takes an announced server. Every vector's
+verdict below is checked against them when the vectors are generated.
 """
 
 import hashlib
@@ -17,7 +18,7 @@ MAX_TTL = 24 * 60 * 60
 MAX_NETWORKS = 8
 MAX_SERVERS = 4
 FUTURE_SKEW = 15 * 60
-MIN_FALLBACK_PORT = 1024
+MIN_PORT = 1024
 CREATED_AT = 1_790_000_000
 NOW = CREATED_AT + 10
 
@@ -79,6 +80,12 @@ def global_unicast(ip) -> bool:
 def usable(addr: str) -> bool:
     parsed = canonical_addr(addr)
     return parsed is not None and global_unicast(parsed[0])
+
+
+def askable(addr: str) -> bool:
+    """`usable`, on a port of 1024 or above: what a client may ask at an address named over
+    Nostr, so a beacon cannot aim it at a well-known service such as DNS."""
+    return usable(addr) and canonical_addr(addr)[1] >= MIN_PORT
 
 
 def verify_sig(event) -> bool:
@@ -154,37 +161,36 @@ def read_announcement(event, now):
             "created_at": created_at, "expiration": expiration}
 
 
-def select(own, named, maximum=MAX_SERVERS):
-    """NFX-10 §1: the client's own servers first; then usable named servers that are not its
-    own, ranked by distinct keys (ties: first named); a server named by one key only when
-    the client has none of its own and no named server has two keys; at most `maximum`."""
+def creator_named(creator, beacons):
+    """The addresses the video's creator names: those of `beacons` ([signer, address] of the
+    live, verified beacons of the video, in the order heard) signed by `creator`, the key in
+    the beacons' `a` tag and the manifest's author."""
+    return [addr for signer, addr in beacons if signer == creator]
+
+
+def select(own, creator_addrs, maximum=MAX_SERVERS):
+    """NFX-10 §1: the client's own servers first, each once; then the addresses the video's
+    creator names (`creator_named`), in the order heard, each once, askable and not its own;
+    at most `maximum`. No other key's beacon and no announcement adds a server."""
     out = []
     for s in own:
         if len(out) < maximum and s not in out:
             out.append(s)
-    ranked = {}  # dicts keep insertion order: first named first
-    for key, addr in named:
-        if not usable(addr) or addr in own:
-            continue
-        ranked.setdefault(addr, set()).add(key)
-    order = sorted(ranked.items(), key=lambda kv: -len(kv[1]))  # stable
-    corroborated = bool(order) and len(order[0][1]) >= 2
-    lone_ok = not own and not corroborated
-    for addr, keys in order:
+    for addr in creator_addrs:
         if len(out) >= maximum:
             break
-        if len(keys) >= 2 or lone_ok:
+        if addr not in out and addr not in own and askable(addr):
             out.append(addr)
     return out
 
 
 def fallback(own, in_use, mapped, beacons, signaling, maximum=MAX_SERVERS):
-    """NFX-10 §1, the fallback when a client's own STUN failed: nothing unless it has servers
-    of its own and got no mapping; then, in the order of `beacons` ([seeder, address] from
-    live beacons, never an announcement), at most one server per seeder, usable, on a port of
-    1024 or above, not asked yet, at an address in `signaling` (those of the candidates of the
+    """NFX-10 §1, the fallback when no server a client asks gave a mapping (`mapped` false),
+    with or without servers of its own: in the order of `beacons` ([seeder, address] from
+    live beacons, never an announcement), at most one server per seeder, askable, not asked
+    yet (`own` and `in_use`), at an address in `signaling` (those of the candidates of the
     peers it signals with), while it asks fewer than `maximum` in all."""
-    if not own or mapped:
+    if mapped:
         return []
     asked = set(own) | set(in_use)
     ips = {ipaddress.ip_address(s) for s in signaling}
@@ -192,10 +198,10 @@ def fallback(own, in_use, mapped, beacons, signaling, maximum=MAX_SERVERS):
     for seeder, addr in beacons:
         if len(asked) >= maximum:
             break
-        if seeder in seeders or addr in asked or not usable(addr):
+        if seeder in seeders or addr in asked or not askable(addr):
             continue
-        ip, port = canonical_addr(addr)
-        if port >= MIN_FALLBACK_PORT and ip in ips:
+        ip, _ = canonical_addr(addr)
+        if ip in ips:
             seeders.add(seeder)
             asked.add(addr)
             out.append(addr)
@@ -311,60 +317,85 @@ def stunad_vectors(keypair, nostr_event) -> dict:
                "[fe80::1]:3478", "[fd00::1]:3478", "[ff02::1]:3478",
                "1.1.1.01:3478", "[::ffff:1.1.1.1]:3478", "1.1.1.1:0",
                "stun.example:3478", "stun:1.1.1.1:3478"] + documentation
+    v6 = "[2606:4700::1111]:3478"
+    # The video's creator: the key in its beacons' `a` tag, the manifest's author. Every other
+    # key here ("k…", a seeder; "op…", an operator) is a stranger's, and keys are free.
+    creator = "creator"
+    # name, reason, own, beacons ([signer, address]), announced ([operator, address]), selected
     cases = [
-        ("nothing", "no server of its own and none named", [], [], []),
-        ("own-only", "its own servers, as given", [own_a, x], [], [own_a, x]),
-        ("own-repeated", "its own servers, each once", [own_a, own_a], [], [own_a]),
-        ("own-over-max", "at most 4 in all, its own first",
-         six[:5], [], six[:4]),
-        ("lone-key-alone", "a server named by one key, when nothing better exists", [],
-         [["k1", x]], [x]),
-        ("lone-key-twice", "a key counts once, however often it names a server", [],
-         [["k1", x], ["k1", x], ["k1", y]], [x, y]),
-        ("lone-key-beside-own", "one key adds no server beside the client's own", [own_a],
-         [["k1", x]], [own_a]),
-        ("lone-key-beside-corroborated", "one key adds no server beside one named by two", [],
-         [["k1", x], ["k2", y], ["k3", y]], [y]),
-        ("corroborated-beside-own", "a server named by two keys comes after the client's own",
-         [own_a], [["k1", x], ["k2", x], ["k3", y]], [own_a, x]),
-        ("ranked-by-distinct-keys", "most keys first; ties in the order first named", [],
-         [["k1", x], ["k1", y], ["k2", y], ["k3", y], ["k2", x], ["k4", z], ["k5", z], ["k6", z],
-          ["k6", z]], [y, z, x]),
-        ("at-most-four", "at most 4 in all", [own_a],
-         [[f"k{j}-{i}", a] for i, a in enumerate(six) for j in (1, 2)], [own_a] + six[:3]),
-        ("named-equal-to-own", "a named server that is the client's own is its own, once", [x],
-         [["k1", x], ["k2", x], ["k3", y], ["k4", y]], [x, y]),
-        ("ipv6", "a global unicast IPv6 server", [],
-         [["k1", "[2606:4700::1111]:3478"], ["k2", "[2606:4700::1111]:3478"]], ["[2606:4700::1111]:3478"]),
-        ("documentation-refused", "documentation addresses (RFC 5737, RFC 3849, RFC 9637) route nowhere: never "
-         "taken from Nostr, however many keys name them, and a lone key's routable server is "
-         "taken instead", [],
-         [[k, a] for a in documentation for k in ("k1", "k2")] + [["k3", x]], [x]),
+        ("nothing", "no server of its own and none named", [], [], [], []),
+        ("own-only", "its own servers, as given", [own_a, x], [], [], [own_a, x]),
+        ("own-repeated", "its own servers, each once", [own_a, own_a], [], [], [own_a]),
+        ("own-over-max", "at most 4 in all, its own first", six[:5], [], [], six[:4]),
+        ("own-any-port", "the port floor is for servers named over Nostr: the client's own are "
+         "its choice", ["9.9.9.9:53"], [], [], ["9.9.9.9:53"]),
+        ("creator-alone", "the creator's beacon names a server: it is used", [],
+         [[creator, x]], [], [x]),
+        ("creator-beside-own", "the creator's server comes after the client's own", [own_a],
+         [[creator, x]], [], [own_a, x]),
+        ("creator-in-order-heard", "the creator's servers in the order heard, each once", [],
+         [[creator, y], [creator, x], [creator, y]], [], [y, x]),
+        ("creator-equal-to-own", "a server the creator names that is the client's own is its own, "
+         "once", [x], [[creator, x], [creator, y]], [], [x, y]),
+        ("creator-well-known-port-refused", "a named server's port is 1024 or above, even the "
+         "creator's: a beacon must not aim a client at a well-known service such as DNS", [],
+         [[creator, "1.1.1.1:53"], [creator, "1.1.1.1:1023"], [creator, "1.1.1.1:1024"]], [],
+         ["1.1.1.1:1024"]),
+        ("stranger-one-key", "a beacon signed by a key that is not the creator's adds no server, "
+         "even when nothing else is named", [], [["k1", x]], [], []),
+        ("strangers-two-keys", "two keys that are not the creator's add no server: keys are free, "
+         "so a count of them proves nothing", [], [["k1", x], ["k2", x]], [], []),
+        ("strangers-three-keys", "nor do three, or any number", [],
+         [["k1", y], ["k2", y], ["k3", y]], [], []),
+        ("strangers-beside-the-creator", "only the creator's server is used, however many other "
+         "keys name another", [own_a], [["k1", y], ["k2", y], ["k3", y], [creator, x]], [],
+         [own_a, x]),
+        ("announcement-only", "a server only announcements name is never used, however many "
+         "operators announce it", [], [], [["op1", x], ["op2", x], ["op3", x]], []),
+        ("announcement-by-the-creator", "an announcement is never used, even one the creator's "
+         "key signed", [], [], [[creator, x]], []),
+        ("announcement-beside-the-creator", "the creator's beacon counts; an announcement does "
+         "not", [], [[creator, x]], [["op1", y], ["op2", y]], [x]),
+        ("at-most-four", "at most 4 in all", [own_a], [[creator, a] for a in six], [],
+         [own_a] + six[:3]),
+        ("ipv6", "a global unicast IPv6 server", [], [[creator, v6]], [], [v6]),
+        ("documentation-refused", "documentation addresses (RFC 5737, RFC 3849, RFC 9637) route "
+         "nowhere: never taken from Nostr, even from the creator, whose routable server is taken",
+         [], [[creator, a] for a in documentation] + [[creator, x]], [], [x]),
         ("not-public-refused", "named addresses that are not global unicast, or not canonical, are "
-         "never taken, however many keys name them", [],
-         [[k, a] for a in refused for k in ("k1", "k2")], []),
-        ("not-public-beside-a-lone-key", "a refused address does not count as something better", [],
-         [["k1", "10.0.0.1:3478"], ["k2", "10.0.0.1:3478"], ["k3", x]], [x]),
+         "never taken, even from the creator", [], [[creator, a] for a in refused], [], []),
     ]
     select_out = []
-    for name, reason, own, named, want in cases:
-        got = select(own, [tuple(p) for p in named])
+    for name, reason, own, beacons, announced, want in cases:
+        # Announcements are not even an input: no rule reads them.
+        got = select(own, creator_named(creator, [tuple(p) for p in beacons]))
         assert got == want, f"stun-select {name}: {got} != {want}"
-        select_out.append({"name": name, "reason": reason, "own": own, "named": named,
-                           "selected": want})
+        select_out.append({"name": name, "reason": reason, "own": own, "creator": creator,
+                           "beacons": beacons, "announced": announced, "selected": want})
 
-    # ---- the fallback when a client's own STUN failed (NFX-10 §1) ----
+    # ---- the fallback when no server a client asks gave a mapping (NFX-10 §1) ----
     x_ip, y_ip, z_ip = "1.1.1.1", "1.0.0.1", "8.8.8.8"
     x_other_port = "1.1.1.1:19302"
-    v6 = "[2606:4700::1111]:3478"
     # name, reason, own, in_use, mapped, beacons, announced, signaling, selected
     fallback_cases = [
         ("trigger-on", "its own STUN gave no mapping, and a seeder it signals with names a server at "
          "that peer's address", [own_a], [own_a], False, [["s1", x]], [], [x_ip], [x]),
         ("trigger-off", "a mapping came back: no fallback", [own_a], [own_a], True,
          [["s1", x]], [], [x_ip], []),
-        ("no-server-of-its-own", "a client with none of its own has rule 3, not this", [], [], False,
-         [["s1", x]], [], [x_ip], []),
+        ("no-server-of-its-own", "a client that asks no STUN server at all has no mapping once "
+         "gathering ends: the fallback applies", [], [], False, [["s1", x]], [], [x_ip], [x]),
+        ("no-own-the-creator-s-failed", "none of its own, and the creator's server it asks gave no "
+         "mapping: that server is not added again, a seeder's may be", [], [z], False,
+         [[creator, z], ["s1", x]], [], [x_ip, z_ip], [x]),
+        ("no-own-announcement-only", "with none of its own, an announced server at a signaled "
+         "address is still never taken", [], [], False, [], [["op1", x], ["op2", x]], [x_ip], []),
+        ("no-own-seeder-not-signaled", "with none of its own, still only a seeder it signals with",
+         [], [], False, [["s1", x]], [], [y_ip], []),
+        ("no-own-well-known-port-refused", "with none of its own, still never a port below 1024",
+         [], [], False, [["s1", "1.1.1.1:53"]], [], [x_ip], []),
+        ("no-own-at-most-four", "with none of its own, at most 4 in all, one per seeder", [], [],
+         False, [[f"s{i}", a] for i, a in enumerate(six[:5])],
+         [], [a.rsplit(":", 1)[0] for a in six[:5]], six[:4]),
         ("seeder-not-signaled", "a live beacon's server at an address no peer it signals with gave",
          [own_a], [own_a], False, [["s1", x]], [], [y_ip], []),
         ("nobody-signaled", "not signaling with anyone", [own_a], [own_a], False, [["s1", x]], [], [], []),
@@ -433,25 +464,29 @@ def stunad_vectors(keypair, nostr_event) -> dict:
             "invalid": invalid_out,
         },
         "stun-select.json": {
-            "description": "NFX-10 §1 STUN server selection. 'own' are the client's own servers; 'named' "
-                           "are [key, address] pairs, in the order heard, from live beacons' stun endpoints "
-                           "(the beacon's signer) and live announcements (the operator). 'selected' is what "
-                           "the client uses, in order: its own first, each once; then the named addresses "
-                           "that are global unicast in canonical form and not its own, ranked by the number "
-                           "of distinct keys naming each (most first, ties in the order first named); an "
-                           "address named by one key only when the client has none of its own and no named "
-                           "address has two or more keys; at most 'max' in all. 'global_unicast' lists "
+            "description": "NFX-10 §1 STUN server selection. In 'cases', 'own' are the client's own "
+                           "servers; 'beacons' are [signer, address] pairs, in the order heard, from the stun "
+                           "endpoints of the live, verified beacons of the video; 'creator' is the video's "
+                           "creator, the key in those beacons' 'a' tag and the manifest's author; "
+                           "'announced' are [operator, address] pairs of live announcements for the "
+                           "network. 'selected' is what the client uses, in order: its own first, each "
+                           "once; then the addresses of the beacons the creator signed, in the order heard, "
+                           "each once, that are global unicast in canonical form, on a port of 1024 or "
+                           "above, and not its own; at most 'max' in all. A beacon signed by any other key "
+                           "adds nothing, however many keys name a server, and an announced server is never "
+                           "taken, whoever signed it. 'global_unicast' lists "
                            "addresses a client may and may not take from Nostr. Global unicast here also "
                            "excludes the documentation blocks (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, "
                            "2001:db8::/32, 3fff::/20), which route nowhere; beacons that name them in a stun endpoint "
                            "stay valid beacons (beacon-stun.json), and only this selection refuses them. "
-                           "'fallback' is what a client may add when its own STUN failed: nothing unless it "
-                           "has servers of its own ('own') and none it asks ('in_use', its own included) gave "
-                           "a mapping ('mapped' false); then, in the order of 'beacons' ([seeder, address] of "
-                           "live verified beacons of the video), at most one server per seeder, global "
-                           "unicast, on a port of 1024 or above, not asked yet, whose IP address is in 'signaling' (the addresses of the "
-                           "candidates of the peers it is signaling with), while it asks fewer than 'max' in "
-                           "all. 'announced' servers are never taken on their own. "
+                           "'fallback' is what a client may add when no server it asks ('in_use', its own "
+                           "included; none at all is allowed) gave a mapping ('mapped' false), whether or not "
+                           "it has servers of its own ('own'): in the order of 'beacons' ([seeder, address] "
+                           "of live verified beacons of the video, the creator's included), at most one "
+                           "server per seeder, global unicast, on a port of 1024 or above, not asked yet, "
+                           "whose IP address is in 'signaling' (the addresses of the candidates of the peers "
+                           "it is signaling with), while it asks fewer than 'max' in all. 'announced' "
+                           "servers are never taken. "
                            "No traffic is ever sent to an address of a vector.",
             "max": MAX_SERVERS,
             "cases": select_out,

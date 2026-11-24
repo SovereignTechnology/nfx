@@ -134,12 +134,15 @@
 //!
 //! The mesh endpoint learns STUN servers from Nostr too (NFX-10 §1), unless
 //! `--mesh-stun-from-nostr=false`: on its `--mesh-relay`s it reads the beacons of the videos it
-//! serves for their `stun` endpoints, and the STUN service announcements for their networks,
-//! and asks, after its own `--mesh-stun`, the servers NFX-10 §1's rules pick: global unicast
-//! ones only, ranked by how many distinct keys name them, one named by a lone key only when
-//! it has none of its own and no better one is named, at most 4 in all. Such a server learns
-//! this node's address; a mapping it reports is offered only if it is global unicast, so one
-//! that lies costs a candidate, nothing more.
+//! serves for their `stun` endpoints. After its own `--mesh-stun` it asks those that a beacon
+//! signed by the video's creator names: global unicast, on a port of 1024 or above, at most 4
+//! in all. A beacon signed by any other key adds none of these, however many keys name a
+//! server, and STUN service announcements are not read. If no server it asks gives a mapping
+//! (or it asks none), it also asks a server a seeder's beacon names, one per seeder and within
+//! the 4, when that server's IP is among the candidates of a peer it is signaling with, for
+//! that peer's connection only. Such a server learns this node's address; a mapping it
+//! reports is offered only if it is global unicast, so one that lies costs a candidate,
+//! nothing more.
 //!
 //! Behind a DNAT, where STUN cannot report the public address (the STUN server is the node's
 //! own, which a UDP hairpin would need) and no gateway maps a port, `--mesh-public <ip:port>`
@@ -156,8 +159,9 @@
 //! several addresses bind the one clients reach, and behind a DNAT name the public address as
 //! `--public`. With `--announce`, it signs a STUN service announcement with `--key` (kind
 //! 33478, NFX-10 §1: the public `ip:port` for each `--network`, 1 to 8, living 24 h) and sends
-//! it to the `--relay`s (1 to 8) at once and every 12 h, so clients of those networks find it
-//! over Nostr. The announced address must be global unicast. **Privacy:** the operator learns
+//! it to the `--relay`s (1 to 8) at once and every 12 h, so the people and operators of those
+//! networks can find it over Nostr and configure it. No client asks it just because it is
+//! announced. The announced address must be global unicast. **Privacy:** the operator learns
 //! every client's IP address and when it asked, and the announcement ties the server's address
 //! to the key, publicly.
 
@@ -190,9 +194,11 @@ const USAGE: &str = "usage:
   a room tells anyone who announces presence there this node's candidate addresses, public
   ones included.
 
-  It also learns STUN servers from Nostr (NFX-10 §1): those the beacons of its videos and
-  STUN service announcements for their networks name, picked by NFX-10's rules after
-  --mesh-stun (global unicast only, at most 4); --mesh-stun-from-nostr=false turns that off.
+  It also learns STUN servers from Nostr (NFX-10 §1): after --mesh-stun, those a beacon
+  signed by the video's own creator names (global unicast, port 1024 or above, at most 4 in
+  all), and, if no server it asks gives a mapping, a seeder's server at the address of a
+  peer it signals with. Never one only an announcement names. --mesh-stun-from-nostr=false
+  turns that off.
 
   --embed-relay-mesh lets the embedded relay carry that signaling (kind 25050, nfx-mesh/1)
   too: ephemeral, room proof checked, rate-limited per sender. Off by default.
@@ -205,8 +211,9 @@ const USAGE: &str = "usage:
   stun runs a STUN server and nothing else (RFC 8489 Binding only, rate-limited, nothing about
   a client logged) on --bind; --public names the address clients reach behind a DNAT. With
   --announce it signs, with --key, an announcement of that address for each --network and
-  sends it to the --relays now and every 12 h (it lives 24 h). Privacy: the operator learns
-  every client's IP address.";
+  sends it to the --relays now and every 12 h (it lives 24 h): a directory entry people and
+  operators read, which no client uses on its own. Privacy: the operator learns every
+  client's IP address.";
 
 fn usage() -> ExitCode {
     status!("{USAGE}");

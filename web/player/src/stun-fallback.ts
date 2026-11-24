@@ -1,7 +1,7 @@
 /**
- * The fallback for when a session's own STUN fails (NFX-10 §1), as one session's state:
- * whether its gatherings found a mapping, which addresses each peer's SDP named, and the
- * servers picked so far. Pure: no network, no WebRTC, no WASM.
+ * The fallback for when a session's STUN fails (NFX-10 §1), as one session's state: whether
+ * its gatherings found a mapping (with no STUN server at all, none does), which addresses each
+ * peer's SDP named, and the servers picked so far. Pure: no network, no WebRTC, no WASM.
  *
  * A peer's session key says nothing of who signed a beacon (NFX-10 §6.4), so "a seeder this
  * client is signaling with" is decided by address: a beacon's server counts for a peer only
