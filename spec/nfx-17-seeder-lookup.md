@@ -186,8 +186,6 @@ It bounds what open sources can do:
 - It asks at most **3 open hosts for one file**. In one session it asks at most **6 open hosts** it
   has not asked before, then **one more every 30 s**, preferring hosts first heard on a relay it has
   not yet taken one from. Tier 4, when there is one, is tried before any host past the first 6.
-- For the ranking of NFX-03 §5, all keys that name only open sources count together as **one
-  seeder**.
 - It uses only the `https` endpoints of pool entries (§4.1). STUN servers follow NFX-10 §1, which
   uses routinely only the one named by the creator's own beacon, so keys answering an ask cannot
   choose a viewer's STUN server.

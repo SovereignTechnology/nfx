@@ -9,9 +9,13 @@ import { MAX_RENDITIONS, beaconRenditionId } from './levels';
 import { MAX_RELAYS, MAX_TRACKERS, relayUrl, trackerUrl } from './mesh';
 
 /** Most distinct origins reported. */
-export const MAX_ORIGINS = 8;
+export const MAX_ORIGINS = 32;
 /** Most seeders held at once; a beacon from one more is ignored until one expires. */
 export const MAX_SEEDERS = 64;
+/** Keys first heard on any one relay (NFX-17 §4.2): one relay cannot fill the table. */
+export const MAX_SEEDERS_PER_RELAY = 16;
+/** Keys heard only through tells, held apart from the rest (NFX-17 §4.1). */
+export const MAX_POOL = 16;
 /** Most origins, and most trackers, taken from one beacon. */
 const PER_BEACON = 4;
 /** Most STUN servers one session takes, its own included (NFX-10 §1's abuse bound). */
@@ -247,6 +251,8 @@ interface Entry {
   expiration: number;
   /** Whether the seeder is the video's creator: only then are its `stun` servers used routinely. */
   creator: boolean;
+  /** The relay it was first heard on, or '' when the caller did not say. */
+  relay: string;
   origins: NamedOrigin[];
   trackers: string[];
   stun: string[];
@@ -286,23 +292,93 @@ function narrow(a: string[] | null, b: string[] | null): string[] | null {
  */
 export class EndpointBook {
   readonly #seeders = new Map<string, Entry>();
+  readonly #random: () => number;
+  /** Keys with a positive trusted score (NFX-16 §4): tier 2, and never refused for room. */
+  readonly #rated: ReadonlySet<string>;
+  /** Hosts that have delivered a file this session, and the first key that named each. */
+  readonly #delivered = new Map<string, string | null>();
+  /** Drawn once: the order of open origins, unknown to whoever names them. */
+  readonly #salt: number;
+  /** Seeders heard only through tells (NFX-17 §4.1): their `https` origins, nothing else. */
+  readonly #pool = new Map<string, { expiration: number; origins: NamedOrigin[] }>();
+
+  constructor(o: { random?: () => number; rated?: ReadonlySet<string> } = {}) {
+    this.#random = o.random ?? Math.random;
+    this.#rated = o.rated ?? new Set();
+    this.#salt = Math.floor(this.#random() * 0x7fffffff);
+  }
+
+  /** A key that is never replaced: the creator's, a rated one, or the first to name a host that delivered. */
+  #protected(seeder: string, e: Pick<Entry, 'creator'>): boolean {
+    if (e.creator || this.#rated.has(seeder)) return true;
+    for (const first of this.#delivered.values()) if (first === seeder) return true;
+    return false;
+  }
+
+  /** Drop a random unprotected key first heard on `relay`; false if there is none. */
+  #replace(relay: string): boolean {
+    const victims = [...this.#seeders].filter(([k, e]) => e.relay === relay && !this.#protected(k, e)).map(([k]) => k);
+    if (victims.length === 0) return false;
+    const k = victims[Math.min(victims.length - 1, Math.floor(this.#random() * victims.length))];
+    if (k !== undefined) this.#seeders.delete(k);
+    return true;
+  }
+
+  #countFrom(relay: string): number {
+    let n = 0;
+    for (const e of this.#seeders.values()) if (e.relay === relay) n += 1;
+    return n;
+  }
 
   /**
-   * Take `b` in at time `now` (unix seconds). True if it changed what the book holds. At most
-   * `MAX_SEEDERS` are held, but the creator's own beacon is always taken: strangers' keys
-   * cannot crowd it out.
+   * Note that `url`'s host delivered a file (NFX-17 §4.2): the first key that named it is
+   * protected from replacement from now on.
    */
-  add(b: VerifiedBeacon, now: number): boolean {
+  delivered(url: string): void {
+    const host = originHost(url);
+    if (host === null || this.#delivered.has(host)) return;
+    let first: string | null = null;
+    for (const [k, e] of this.#seeders) {
+      if (e.origins.some((o) => originHost(o.url) === host)) {
+        first = k;
+        break;
+      }
+    }
+    this.#delivered.set(host, first);
+  }
+
+  /**
+   * Take `b`, heard on `relay`, in at time `now` (unix seconds). True if it changed what the
+   * book holds. At most `MAX_SEEDERS` are held, and at most `MAX_SEEDERS_PER_RELAY` first heard
+   * on one relay (NFX-17 §4.2). The creator's own beacon and rated keys are always taken. A new
+   * key from a relay at its quota replaces a random unprotected key of that relay; when the
+   * table is full, one from a relay under its quota replaces a random unprotected key of the
+   * relay holding the most. A key heard with no relay named is refused when the table is full.
+   */
+  add(b: VerifiedBeacon, now: number, relay = ''): boolean {
     if (typeof b.seeder !== 'string' || !Number.isSafeInteger(b.created_at) || !Number.isSafeInteger(b.expiration)) {
       return false;
     }
     if (b.expiration <= now) return false;
+    // A key heard broadcast leaves the tell pool (NFX-17 §4.1).
+    this.#pool.delete(b.seeder);
     const creator = b.seeder === b.creator;
     const held = this.#seeders.get(b.seeder);
     if (held && held.created_at >= b.created_at) return false;
-    if (!held && !creator && this.#seeders.size >= MAX_SEEDERS) {
-      this.#prune(now);
-      if (this.#seeders.size >= MAX_SEEDERS) return false;
+    if (!held && !this.#protected(b.seeder, { creator })) {
+      if (relay !== '' && this.#countFrom(relay) >= MAX_SEEDERS_PER_RELAY) {
+        this.#prune(now);
+        if (this.#countFrom(relay) >= MAX_SEEDERS_PER_RELAY && !this.#replace(relay)) return false;
+      } else if (this.#seeders.size >= MAX_SEEDERS) {
+        this.#prune(now);
+        if (this.#seeders.size >= MAX_SEEDERS) {
+          if (relay === '') return false;
+          const counts = new Map<string, number>();
+          for (const e of this.#seeders.values()) if (e.relay !== '') counts.set(e.relay, (counts.get(e.relay) ?? 0) + 1);
+          const top = [...counts].sort((x, y) => y[1] - x[1])[0]?.[0];
+          if (top === undefined || !this.#replace(top)) return false;
+        }
+      }
     }
     const origins: NamedOrigin[] = [];
     const trackers: string[] = [];
@@ -352,17 +428,20 @@ export class EndpointBook {
     }
     const holds = all ? 'all' : ids;
     // Map#set on a held key keeps its place: seeders stay in first-heard order.
-    this.#seeders.set(b.seeder, { created_at: b.created_at, expiration: b.expiration, creator, origins, trackers, stun, holds });
+    this.#seeders.set(b.seeder, { created_at: b.created_at, expiration: b.expiration, creator, relay: held?.relay ?? relay, origins, trackers, stun, holds });
     return true;
   }
 
   /**
-   * What the unexpired beacons name at `now`, each list ranked by how many seeders name
-   * an entry, ties in the order first heard; the STUN servers the creator names; and who
-   * holds which renditions.
+   * What the unexpired beacons name at `now` (NFX-17 §4.2): origins in tiers (those the
+   * creator's beacon names, then a rated key's, then the rest, the open ones, in an order
+   * drawn for this book; how many keys name an origin never ranks it), each with its tier and
+   * the renditions its tier's keys claim for it; trackers ranked by how many seeders name
+   * them; the STUN servers the creator names; and who holds which renditions (NFX-03 §5).
    */
   snapshot(now: number): Endpoints {
-    const origins = new Map<string, { n: number; renditions: string[] | null }>();
+    type Named = { tier: 1 | 2 | 3; renditions: string[] | null };
+    const origins = new Map<string, Named>();
     const trackers = new Map<string, number>();
     const stunCreator: string[] = [];
     const named = new Map<string, number>();
@@ -373,12 +452,11 @@ export class EndpointBook {
     for (const [seeder, e] of this.#seeders) {
       if (e.expiration <= now) continue;
       seeders += 1;
+      const tier: 1 | 2 | 3 = e.creator ? 1 : this.#rated.has(seeder) ? 2 : 3;
       for (const o of e.origins) {
         const c = origins.get(o.url);
-        if (c) {
-          c.n += 1;
-          c.renditions = narrow(c.renditions, o.renditions);
-        } else origins.set(o.url, { n: 1, renditions: o.renditions === null ? null : [...o.renditions] });
+        if (!c || tier < c.tier) origins.set(o.url, { tier, renditions: o.renditions === null ? null : [...o.renditions] });
+        else if (tier === c.tier) c.renditions = narrow(c.renditions, o.renditions);
       }
       for (const t of e.trackers) trackers.set(t, (trackers.get(t) ?? 0) + 1);
       // One seeder is the creator, and its beacon names at most 4 (PER_BEACON).
@@ -392,9 +470,21 @@ export class EndpointBook {
         for (const id of e.holds) named.set(id, (named.get(id) ?? 0) + 1);
       }
     }
+    // Tell-only seeders' origins (NFX-17 §4.1): open sources, and nothing else.
+    for (const e of this.#pool.values()) {
+      if (e.expiration <= now) continue;
+      for (const o of e.origins) {
+        const c = origins.get(o.url);
+        if (!c) origins.set(o.url, { tier: 3, renditions: o.renditions === null ? null : [...o.renditions] });
+        else if (c.tier === 3) c.renditions = narrow(c.renditions, o.renditions);
+      }
+    }
     // Array#sort is stable, so equal counts keep first-heard order.
     const ranked = (m: Map<string, number>): string[] => [...m].sort((x, y) => y[1] - x[1]).map(([u]) => u);
-    const originsRanked = [...origins].sort((x, y) => y[1].n - x[1].n).slice(0, MAX_ORIGINS);
+    const order = (url: string): number => mix(this.#salt, url);
+    const originsRanked = [...origins]
+      .sort((x, y) => x[1].tier - y[1].tier || (x[1].tier === 3 ? order(x[0]) - order(y[0]) : 0))
+      .slice(0, MAX_ORIGINS);
     const availability: RenditionAvailability = {
       seeders: holders,
       all,
@@ -405,7 +495,9 @@ export class EndpointBook {
     };
     return {
       origins: originsRanked.map(([u]) => u),
-      originSources: originsRanked.map(([url, c]): OriginSource => (c.renditions === null ? { url } : { url, renditions: c.renditions })),
+      originSources: originsRanked.map(([url, c]): OriginSource =>
+        c.renditions === null ? { url, tier: c.tier } : { url, renditions: c.renditions, tier: c.tier },
+      ),
       trackers: ranked(trackers).slice(0, MAX_TRACKERS),
       stunServers: selectStun([], stunCreator),
       stunCreator,
@@ -416,12 +508,45 @@ export class EndpointBook {
   }
 
   /**
+   * Take in a beacon that arrived only in a tell (NFX-17 §4.1), already verified, at `now`:
+   * held in a pool of at most `MAX_POOL` keys, apart from the seeders heard broadcast, which it
+   * never displaces. Only its `https` origins are used, as open sources (§4.2), and it adds no
+   * weight to any count. True if it changed what the book holds.
+   */
+  addTold(b: VerifiedBeacon, now: number): boolean {
+    if (typeof b.seeder !== 'string' || !Number.isSafeInteger(b.expiration) || b.expiration <= now) return false;
+    if (this.#seeders.has(b.seeder)) return false;
+    const origins: NamedOrigin[] = [];
+    const endpoints = Array.isArray(b.content?.endpoints) ? (b.content.endpoints as unknown[]) : [];
+    for (const e of endpoints) {
+      if (e === null || typeof e !== 'object') continue;
+      const { t, url, renditions } = e as { t?: unknown; url?: unknown; renditions?: unknown };
+      if (t !== 'https' || typeof url !== 'string') continue;
+      const r = endpointRenditions(renditions);
+      const o = originBase(url);
+      if (r === null || o === null || origins.some((x) => x.url === o) || origins.length >= PER_BEACON) continue;
+      origins.push({ url: o, renditions: r === 'all' ? null : r });
+    }
+    const held = this.#pool.get(b.seeder);
+    if (!held && this.#pool.size >= MAX_POOL) {
+      for (const [k, e] of this.#pool) if (e.expiration <= now) this.#pool.delete(k);
+      if (this.#pool.size >= MAX_POOL) {
+        const keys = [...this.#pool.keys()];
+        const k = keys[Math.min(keys.length - 1, Math.floor(this.#random() * keys.length))];
+        if (k !== undefined) this.#pool.delete(k);
+      }
+    }
+    this.#pool.set(b.seeder, { expiration: b.expiration, origins });
+    return true;
+  }
+
+  /**
    * When the next beacon held expires (unix seconds), or null when none is live: what the
    * book names may change then with nothing new heard.
    */
   nextExpiration(now: number): number | null {
     let next: number | null = null;
-    for (const e of this.#seeders.values()) {
+    for (const e of [...this.#seeders.values(), ...this.#pool.values()]) {
       if (e.expiration > now && (next === null || e.expiration < next)) next = e.expiration;
     }
     return next;
@@ -431,6 +556,23 @@ export class EndpointBook {
     for (const [k, e] of this.#seeders) if (e.expiration <= now) this.#seeders.delete(k);
   }
 
+}
+
+/** The scheme, host and port of an origin URL, or null. */
+function originHost(url: string): string | null {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return null;
+  }
+}
+
+/** A 31-bit FNV-1a hash of `s` under `salt`: an order only this book knows. */
+function mix(salt: number, s: string): number {
+  let h = (0x811c9dc5 ^ salt) >>> 0;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0;
+  return h & 0x7fffffff;
 }
 
 /** The trackers a session may use, normalised; throws on any it may not. */
@@ -531,6 +673,8 @@ export function checkIceServers(list: readonly RTCIceServer[]): RTCIceServer[] {
 export interface CheckedOrigin {
   url: string;
   renditions: string[] | null;
+  /** NFX-17 §4.2's tier; 4 (configured by the caller) when the caller names none. */
+  tier: 1 | 2 | 3 | 4;
 }
 
 /**
@@ -554,7 +698,10 @@ export function checkOriginSources(list: readonly (string | OriginSource)[]): Ch
       }
       renditions = [...new Set(r as string[])];
     }
-    if (!out.some((o) => o.url === url)) out.push({ url, renditions });
+    const t: unknown = src?.tier;
+    if (t !== undefined && t !== 1 && t !== 2 && t !== 3 && t !== 4) throw new TypeError(`nfx: the tier of ${url} must be 1, 2, 3 or 4`);
+    const tier = (t ?? 4) as 1 | 2 | 3 | 4;
+    if (!out.some((o) => o.url === url)) out.push({ url, renditions, tier });
     if (out.length > MAX_ORIGINS + 8) throw new TypeError(`nfx: at most ${MAX_ORIGINS + 8} origins`);
   }
   if (out.length === 0) throw new TypeError('nfx: no origin to try');

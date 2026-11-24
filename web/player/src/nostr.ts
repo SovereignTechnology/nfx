@@ -100,3 +100,49 @@ export function query(url: string, filter: Filter, timeoutMs: number): Promise<s
     const sub = subscribe(url, filter, (e) => events.push(e), done, done);
   });
 }
+
+/**
+ * Publish a signed event (as JSON) to `url` and wait for the relay's `OK`: whether it took the
+ * event, and its message (`blocked: …`, `rate-limited: …`, NIP-01). A relay that does not
+ * answer within `timeoutMs` counts as not taking it.
+ */
+export function publish(url: string, eventJson: string, timeoutMs: number): Promise<{ ok: boolean; message: string }> {
+  return new Promise((resolve) => {
+    let done = false;
+    let ws: WebSocket;
+    const finish = (ok: boolean, message: string): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        ws.close();
+      } catch {
+        // closing anyway
+      }
+      resolve({ ok, message });
+    };
+    const timer = setTimeout(() => finish(false, 'timeout'), timeoutMs);
+    let id: unknown;
+    try {
+      id = (JSON.parse(eventJson) as { id?: unknown }).id;
+      ws = new WebSocket(url);
+    } catch (e) {
+      queueMicrotask(() => finish(false, `bad relay URL or event: ${String(e)}`));
+      return;
+    }
+    ws.onopen = () => ws.send(`["EVENT",${eventJson}]`);
+    ws.onmessage = (m: MessageEvent) => {
+      const text = typeof m.data === 'string' ? m.data : '';
+      if (text.length === 0 || text.length > MAX_MESSAGE) return;
+      let msg: unknown;
+      try {
+        msg = JSON.parse(text);
+      } catch {
+        return;
+      }
+      if (Array.isArray(msg) && msg[0] === 'OK' && msg[1] === id) finish(msg[2] === true, typeof msg[3] === 'string' ? msg[3].slice(0, 200) : '');
+    };
+    ws.onerror = () => finish(false, 'websocket error');
+    ws.onclose = () => finish(false, 'websocket closed');
+  });
+}

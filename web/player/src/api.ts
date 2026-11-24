@@ -59,6 +59,14 @@ export interface OriginSource {
    * Ids the hash list does not name are ignored. At most 32.
    */
   renditions?: string[];
+  /**
+   * Where it ranks among the session's sources (NFX-17 §4.2): 1, named by the video creator's
+   * own beacon; 2, by a key the viewer rates; 3, by any other beacon (an **open** source);
+   * 4, configured by the caller outside beacons, tried as a last resort. Absent: 4. The
+   * session fetches every file from these, one source's bytes per file, leaving a source that
+   * stalls, runs slow or sends bytes that do not verify (§4.3).
+   */
+  tier?: 1 | 2 | 3 | 4;
 }
 
 /**
@@ -477,6 +485,11 @@ export interface Session {
   readonly levels: Level[];
   /** Play `index` from now on, or -1 to let hls.js pick. */
   setLevel(index: number): void;
+  /**
+   * Sources heard of while the session plays (bare bases or `OriginSource`s, as `origins`):
+   * the session keeps every source it knows and adds these (NFX-17 §4.3).
+   */
+  addSources(list: readonly (string | OriginSource)[]): void;
   stats(): Stats;
   /**
    * Where each open mesh peer's connection goes (`PeerAddress`, one per peer), read from the

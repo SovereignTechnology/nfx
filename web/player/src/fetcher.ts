@@ -88,6 +88,10 @@ export interface FetchDeps {
   /** Whether `bytes` are the file's (its hash). */
   verify: (bytes: Uint8Array) => boolean;
   log?: (message: string) => void;
+  /** Told of each source whose bytes did not verify. */
+  onReject?: (source: string) => void;
+  /** Reject once every source has failed the file, instead of waiting and trying again. */
+  once?: boolean;
 }
 
 interface Attempt {
@@ -220,6 +224,7 @@ export async function fetchFile(
             return { bytes, source: a.source.url };
           }
           sources.outcome(a.source.url, { kind: 'bad-bytes' }, now);
+          deps.onReject?.(a.source.url);
           deps.log?.(`${a.source.url}: ${file.path} did not verify; source stopped for the session`);
         } else if (a.status === 404 && file.rendition !== null) {
           sources.outcome(a.source.url, { kind: 'not-held', rendition: file.rendition }, now);
@@ -264,7 +269,9 @@ export async function fetchFile(
       if (live.length === 0) {
         const next = sources.next(plan, now);
         if (next) start(next);
-        else {
+        else if (deps.once) {
+          throw new Error(`every source failed ${file.path}`);
+        } else {
           deps.log?.(`every source failed ${file.path}; trying again in ${ALL_FAILED_WAIT_MS / 1000} s`);
           await pause(ALL_FAILED_WAIT_MS);
           sources.wake();

@@ -120,6 +120,30 @@ async function recorder(upstream: string): Promise<{ url: string; requests: stri
   return { url: `http://127.0.0.1:${port}`, requests };
 }
 
+/**
+ * A withholding origin (NFX-17 §4.3): proxies `upstream`, but for every listed segment sends
+ * headers and then nothing, holding the connection open.
+ */
+async function withholder(upstream: string, segments: Set<string>): Promise<string> {
+  const port = await listen(
+    createServer((req, res) => {
+      const name = (req.url ?? '').split('/').pop() ?? '';
+      if (segments.has(name.split('.')[0] ?? '')) {
+        res.writeHead(200, { 'content-type': 'video/mp4', 'access-control-allow-origin': '*' });
+        res.flushHeaders();
+        return; // never a byte of the body
+      }
+      const up = httpRequest(`${upstream}${req.url}`, { method: req.method }, (r) => {
+        res.writeHead(r.statusCode ?? 502, r.headers);
+        r.pipe(res);
+      });
+      up.on('error', () => res.writeHead(502).end());
+      up.end();
+    }),
+  );
+  return `http://127.0.0.1:${port}`;
+}
+
 /** A lying origin: proxies `upstream`, flipping the first byte of every listed segment. */
 async function liar(upstream: string, segments: Set<string>): Promise<string> {
   const port = await listen(
@@ -364,6 +388,7 @@ async function main(): Promise<void> {
   const segments = new Set(list.files.filter((f) => f.role === 'segment').map((f) => f.sha256));
   const player = await playerServer();
   const lying = await liar(origin, segments);
+  const holding = await withholder(origin, segments);
 
   const browser = await chromium.launch({
     headless: true,
@@ -574,6 +599,22 @@ async function main(): Promise<void> {
     results.liar = { ...lied, rejected: lied.rejected.length };
     const allSegments = lied.rejected.every((sha: string | null) => sha !== null && segments.has(sha));
     if (lied.playing || lied.t !== 0 || lied.rejected.length === 0 || !allSegments) throw new Error(`lying origin: ${JSON.stringify(lied)}`);
+
+    // NFX-17 §4.3: with an honest origin beside it, the liar is left after its first bad
+    // segment and the video plays; a withholding origin, which serves the hash list and then
+    // sends nothing, is left after 4 s and the video plays too.
+    for (const [name, bad] of [['liarThenHonest', lying], ['withholderThenHonest', holding]] as const) {
+      const p = await context.newPage();
+      await p.goto(`${player}/?origin=${encodeURIComponent(bad)}&origin=${encodeURIComponent(origin)}&root=${meta.root}`);
+      await p.waitForFunction(() => (window as any).__nfx.playing && (document.querySelector('video') as HTMLVideoElement).currentTime > 2, null, { timeout: 90_000 });
+      const got = await p.evaluate(() => {
+        const s = (window as any).__nfx;
+        return { playing: s.playing, verified: s.verified.length, rejected: s.rejected.length, errors: s.errors, t: (document.querySelector('video') as HTMLVideoElement).currentTime };
+      });
+      results[name] = got;
+      if (!got.playing || got.t <= 2 || got.errors.length > 0) throw new Error(`${name}: ${JSON.stringify(got)}`);
+      await p.close();
+    }
     // The creator withdraws the video (NFX-02 §6): resolving it now fails, never plays.
     run(bin('nfxd'), ['delete', '--key', key, '--relay', relay, '--a', a]);
     const gone = await context.newPage();
