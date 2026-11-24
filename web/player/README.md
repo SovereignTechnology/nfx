@@ -94,10 +94,11 @@ creator's that are global unicast and on a port of 1024 or above; each once, at 
 all. A beacon signed by any other key adds none, however many keys name a server: keys
 are free, so a count proves nothing. STUN service announcements (kind 33478, which `nfxd
 stun --announce` signs) are a directory for people and operators; the player never reads
-them. So Nostr never makes a viewer ask more than 4 STUN servers, or one that neither the
-creator nor one of its relays named. Every STUN server learns the viewer's address: a page
-that must not tell the creator's servers who watches passes only its own servers to
-`open()`.
+them. So routine selection never makes a viewer ask more than 4 STUN servers, or one that
+neither the creator nor one of its relays named. The fallback below, only when the page asks
+for it, adds a seeder's server at the address of a peer it already signals with. Every STUN
+server learns the viewer's address: a page that must tell no one but its own servers who
+watches passes only its own servers to `open()`, no `relayStun` and no `stunFallback`.
 
 If no STUN server the session asks finds a mapping, or it asks none, Nostr signaling can
 fall back, when asked to:
