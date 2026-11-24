@@ -256,6 +256,9 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
   });
   const tried = new Set<string>();
   let pending = hint ? [hint] : [];
+  // Once playing, the watch stays for the page's life: the fallback reads fresh beacons
+  // (they live 60 to 120 s) for every later connection.
+  let playing = false;
   try {
     const deadline = Date.now() + ORIGIN_WAIT_MS;
     for (;;) {
@@ -277,6 +280,7 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
         const stunFallback: StunFallback = { own: ownStun, seeders: () => heard.stunSeeders };
         try {
           await play({ ...common, iceServers: stun, manifestJson: m.event, origins, renditions: urlRenditions, signaling: trackerSignaling(trackers, stunFallback) });
+          playing = true;
           return;
         } catch (e) {
           log(e instanceof Error ? e.message : String(e));
@@ -295,7 +299,7 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
       wake = null;
     }
   } finally {
-    stop();
+    if (!playing) stop();
   }
 }
 
