@@ -208,7 +208,7 @@ impl ManifestStore {
 pub(crate) fn open(
     dir: &Path,
     cap: usize,
-    admits: impl Fn(&ns::Event) -> bool,
+    admits: impl Fn(&ns::Event, u64) -> bool,
 ) -> (Option<ManifestStore>, Vec<ns::Event>, Reload) {
     let off = |e: &dyn fmt::Display| Reload {
         off: Some(format!("cannot use {}: {e}", dir.display())),
@@ -408,7 +408,8 @@ impl Disk {
         if self.retry_at.is_some_and(|at| Instant::now() >= at) {
             self.retry();
         }
-        if !withdrawn.is_empty() || self.unsynced {
+        // A sync still pending from earlier waits for `retry`, so that it keeps its backoff.
+        if !withdrawn.is_empty() {
             for (a, until) in withdrawn {
                 self.forget(a, until);
             }
@@ -492,7 +493,10 @@ impl Disk {
             }
         }
         self.index(stem, entry);
-        self.evict();
+        // An unlink lasts only once the directory holding it is synced.
+        if !self.evict().is_empty() {
+            self.sync_directory();
+        }
     }
 
     /// Once a run, whatever else has been logged lately.
@@ -655,7 +659,7 @@ impl Disk {
     /// One record. What it adds to the index depends on its own content alone, and everything
     /// indexed stays valid for the rest of the load, so a record evicted here has `cap` others
     /// above it for good: it is confirmed excess whatever is read next.
-    fn load_record<F: Fn(&ns::Event) -> bool>(&mut self, stem: &str, scan: &mut Scan<'_, F>) {
+    fn load_record<F: Fn(&ns::Event, u64) -> bool>(&mut self, stem: &str, scan: &mut Scan<'_, F>) {
         let path = self.dir.join(file_name(stem));
         let name = file_name(stem);
         let event = match read_record(&path, stem) {
@@ -695,7 +699,7 @@ impl Disk {
             }
             return;
         }
-        let refused = !(scan.admits)(&event);
+        let refused = !(scan.admits)(&event, scan.now);
         self.index(
             stem.to_owned(),
             Held {
@@ -730,7 +734,7 @@ struct Scan<'a, F> {
 fn load(
     dir: &Path,
     cap: usize,
-    admits: &impl Fn(&ns::Event) -> bool,
+    admits: &impl Fn(&ns::Event, u64) -> bool,
 ) -> io::Result<(Disk, Vec<ns::Event>, Reload)> {
     let unsynced_parents = prepare(dir)?;
     // Before anything is read or removed: a second relay must not act on this directory.
@@ -781,6 +785,8 @@ fn load(
     }
     let mut scan = Scan {
         admits,
+        // One clock for admission and expiry across the whole load, so that what it keeps
+        // cannot depend on the order it reads the files in.
         now: unix_now(),
         events: HashMap::new(),
         lapsed: Vec::new(),
@@ -1086,12 +1092,17 @@ fn fill_and_place(mut file: File, bytes: &[u8], tmp: &Path, target: &Path) -> io
 thread_local! {
     /// Makes [`sync_dir`] fail on this thread: no filesystem fails an fsync on request.
     static FAIL_DIR_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// How many directory syncs this thread has asked for.
+    static DIR_SYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn sync_dir(dir: &Path) -> io::Result<()> {
     #[cfg(test)]
-    if FAIL_DIR_SYNC.get() {
-        return Err(io::Error::other("injected directory sync failure"));
+    {
+        DIR_SYNCS.set(DIR_SYNCS.get() + 1);
+        if FAIL_DIR_SYNC.get() {
+            return Err(io::Error::other("injected directory sync failure"));
+        }
     }
     File::open(dir)?.sync_all()
 }
@@ -1121,7 +1132,7 @@ mod tests {
             .unwrap()
     }
 
-    fn all(_: &ns::Event) -> bool {
+    fn all(_: &ns::Event, _: u64) -> bool {
         true
     }
 
@@ -1585,6 +1596,50 @@ mod tests {
         assert_eq!(events.iter().map(|e| e.id).collect::<Vec<_>>(), [new.id]);
     }
 
+    /// A pending directory sync waits for its retry: a batch that changes nothing on disk does
+    /// not bypass the backoff.
+    #[test]
+    fn a_batch_that_changes_nothing_waits_for_the_sync_retry() {
+        let dir = tmp("sync-backoff");
+        let keys = ns::Keys::generate();
+        let event = manifest(&keys, "nfx:testnet:1:backoff-one", 100, "");
+        let (mut disk, _, _) = load(&dir, 10, &all).unwrap();
+        FAIL_DIR_SYNC.set(true);
+        disk.apply(&[put_job(&event)]);
+        FAIL_DIR_SYNC.set(false);
+        assert!(disk.unsynced && disk.retry_at.is_some());
+        disk.retry_at = Some(Instant::now() + Duration::from_secs(3600));
+
+        let before = DIR_SYNCS.get();
+        disk.apply(&[put_job(&event)]);
+        assert_eq!(DIR_SYNCS.get(), before, "the backoff holds");
+        assert!(disk.unsynced);
+
+        disk.retry_at = Some(Instant::now());
+        disk.apply(&[put_job(&event)]);
+        assert!(!disk.unsynced && disk.retry_at.is_none());
+    }
+
+    /// A capacity eviction changes the directory, so it is synced too. A put that evicts
+    /// nothing pays no extra sync.
+    #[test]
+    fn an_eviction_is_synced_into_the_directory() {
+        let dir = tmp("evict-sync");
+        let keys = ns::Keys::generate();
+        let (first, second) = (
+            manifest(&keys, "nfx:testnet:1:evict-one", 100, ""),
+            manifest(&keys, "nfx:testnet:1:evict-two", 200, ""),
+        );
+        let (mut disk, _, _) = load(&dir, 1, &all).unwrap();
+        let before = DIR_SYNCS.get();
+        disk.put(&first);
+        assert_eq!(DIR_SYNCS.get(), before + 1, "no eviction, no extra sync");
+        disk.put(&second);
+        assert_eq!(DIR_SYNCS.get(), before + 3, "the write and the eviction");
+        assert!(!stored(&dir, &first).exists());
+        assert!(!disk.unsynced);
+    }
+
     /// A removal that fails leaves the index telling the truth. A withdrawn file still there
     /// stays indexed. An evicted one is no longer tracked, so nothing is written over it.
     #[test]
@@ -1726,7 +1781,7 @@ mod tests {
     fn a_load_keeps_the_same_records_in_any_order() {
         let keys = ns::Keys::generate();
         // Refused from 400 on: newer than all that is served, and still the first to go.
-        let rule = |e: &ns::Event| e.created_at.as_secs() < 400;
+        let rule = |e: &ns::Event, _: u64| e.created_at.as_secs() < 400;
         let events: Vec<ns::Event> = [100u64, 200, 300, 400, 500, 600]
             .iter()
             .map(|at| manifest(&keys, &format!("nfx:testnet:1:order-{at}"), *at, ""))
@@ -1787,7 +1842,7 @@ mod tests {
             manifest(&keys, d, 100, "old"),
             manifest(&keys, d, 200, "new"),
         );
-        let behind = |e: &ns::Event| e.created_at.as_secs() <= 150;
+        let behind = |e: &ns::Event, _: u64| e.created_at.as_secs() <= 150;
         let (store, _, _) = open(&dir, 10, all);
         let store = store.unwrap();
         store.put(&newer).await;
@@ -1826,7 +1881,7 @@ mod tests {
             manifest(&keys, d, 100, "old"),
             manifest(&keys, d, 200, "new"),
         );
-        let behind = |e: &ns::Event| e.created_at.as_secs() <= 150;
+        let behind = |e: &ns::Event, _: u64| e.created_at.as_secs() <= 150;
         let refused = |name: &'static str| {
             let dir = tmp(name);
             let (older, newer) = (older.clone(), newer.clone());
@@ -1871,7 +1926,7 @@ mod tests {
         store.put(&newest).await;
         drop(store);
         assert_eq!(records(&dir), 1);
-        let (store, events, reload) = open(&dir, 10, |e| e.created_at.as_secs() <= 250);
+        let (store, events, reload) = open(&dir, 10, |e, _| e.created_at.as_secs() <= 250);
         assert!(events.is_empty(), "no older copy stands in: {reload:?}");
         drop(store);
         let (_, events, _) = open(&dir, 10, all);
