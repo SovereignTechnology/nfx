@@ -42,10 +42,12 @@ Proposed 2026-11-23, with issue #114 and its PR.
 6. **Writes are durable and bounded.** Temp file, fsync, rename, directory fsync, on one writer
    thread. A newly created directory is also synced into its parent, as is each new ancestor,
    once at start, so the first acknowledged publish survives a power loss. `OK` waits for the
-   disk for up to 5 seconds. At most 20,000 files of 64 KiB each, the same limits as the memory
-   store. Past the limit, revisions the rules refuse go first, then the oldest. With one file
-   per address that is a total order, so a load keeps the same records whatever order the
-   directory lists them in, and removes only confirmed excess.
+   disk for up to 5 seconds. The index holds at most 20,000 manifests and no new file passes
+   64 KiB, the same limits as the memory store. Unreadable entries and files that could not be
+   removed stay beside them, so the directory can hold more. Past the limit, revisions the
+   rules refuse go first, then the oldest. With one file per address that is a total order, so
+   a load keeps the same records whatever order the directory lists them in, and removes only
+   confirmed excess.
 7. **Damage never stops a start.** Corrupt, truncated, oversized or badly signed files are logged
    and removed. Unreadable or non-regular files are logged and left alone: only a regular file
    is ever removed or replaced, and a file that could not be read is not written over, since it
