@@ -35,21 +35,21 @@
 //!   node meet only on a relay both use.
 //! - **STUN from Nostr** ([`MeshConfig::stun_from_nostr`], on by default): on its relays, the
 //!   endpoint also reads the live beacons of the videos it serves
-//!   ([`Mesh::stun_from_beacons_of`]), for their `stun` endpoints, and the STUN service
-//!   announcements (kind 33478) for the networks of the rooms it joins (NFX-10 §1). It asks
-//!   the servers NFX-10 §1's rules pick (`nfx_proto::stun::select`): the configured ones
-//!   first; then global unicast ones of its family, ranked by how many distinct keys name
-//!   them; one named by a lone key only when nothing better exists; at most [`MAX_STUN`] in
-//!   all. A mapping such a server reports is offered only if it is global unicast, so a lying
-//!   server can add at most one useless candidate, never point peers at a private address.
-//!   It keeps [`MAX_NAMED`] sources of names at most, [`NAMED_PER_KEY`] per key.
-//! - **The fallback when its own STUN fails** (NFX-10 §1): with servers configured and no
-//!   mapping from any server after gathering, it also asks the server a live beacon of a
+//!   ([`Mesh::stun_from_beacons_of`]), for their `stun` endpoints (NFX-10 §1). It asks the
+//!   servers NFX-10 §1's rules pick (`nfx_proto::stun::select`): the configured ones first;
+//!   then those a beacon signed by the video's own creator names, global unicast, on a port
+//!   of 1024 or above and of its family; at most [`MAX_STUN`] in all. A beacon signed by any
+//!   other key adds no server this way, however many keys name it, and STUN service
+//!   announcements (kind 33478) are not read at all. A mapping such a server reports is
+//!   offered only if it is global unicast, so a lying server can add at most one useless
+//!   candidate, never point peers at a private address. It keeps [`MAX_NAMED`] sources of
+//!   names at most, [`NAMED_PER_KEY`] per key, beside one per watched video from its creator.
+//! - **The fallback when its STUN fails** (NFX-10 §1): with no mapping from any server after
+//!   gathering, or no server to ask at all, it also asks the server a live beacon of a
 //!   watched video names, one per seeder and within [`MAX_STUN`] in all, when that server's
 //!   IP address is among the candidates of a peer it is signaling with (a session key says
 //!   nothing of who signed a beacon, so the address is the test: its ICE agent is sent there
-//!   anyway). Never a server only an announcement names. The mapping goes only into the SDP
-//!   of that peer's next connection.
+//!   anyway). The mapping goes only into the SDP of that peer's next connection.
 //!
 //! Hardening:
 //! - A full agent sends checks to the addresses a peer's SDP names. Only
@@ -85,7 +85,6 @@ use nfx_proto::event::Event;
 use nfx_proto::hashlist::HashList;
 use nfx_proto::namespace::VideoAddr;
 use nfx_proto::signal::{self, Parsed, Received, Room, Session, Signal};
-use nfx_proto::stun::{KIND_STUN_ANNOUNCEMENT, StunAnnouncement};
 use nfx_proto::{KIND_BEACON, KIND_MANIFEST};
 use nostr_sdk::prelude as ns;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
@@ -150,21 +149,20 @@ const REFRESH_EVERY: Duration = Duration::from_secs(10);
 /// A room's presence is sent again, out of turn, at most this often: when a new peer whose
 /// key is lower (so it is the one to offer) appears, so it need not wait for the next round.
 const REANNOUNCE_EVERY: Duration = Duration::from_secs(5);
-/// STUN from Nostr: the sources of names held at most (a beacon per signer and video, an
-/// announcement per operator and server). Keys are free: past it, a new source is ignored
-/// until one expires.
+/// STUN from Nostr: the sources of names held at most (a beacon per signer and video). Keys
+/// are free: past it, a new source is ignored until one expires. A creator's beacon of its
+/// own video is always kept: there is at most one per video watched.
 pub const MAX_NAMED: usize = 1024;
-/// STUN from Nostr: the sources one key may hold, so one key cannot fill the table.
+/// STUN from Nostr: the sources one key may hold, so one key cannot fill the table (a
+/// creator's beacons of its own videos aside).
 pub const NAMED_PER_KEY: usize = 8;
 /// STUN from Nostr: the addresses one source names, at most (a `stun` endpoint's limit;
 /// a beacon may carry several endpoints). The rest are not counted.
 pub const MAX_STUN_ADDRS: usize = nfx_proto::beacon::MAX_STUN_ADDRS;
 /// The fallback (NFX-10 §1): peers whose candidate addresses are held at most.
 const MAX_FALLBACK_PEERS: usize = 256;
-/// Manifest addresses (or networks) per subscription filter.
+/// Manifest addresses per subscription filter.
 const TAGS_PER_SUB: usize = 64;
-/// Stored announcements asked for per subscription.
-const ANNOUNCEMENTS_ASKED: usize = 512;
 
 /// Where the mesh endpoint listens, whom it asks for its public mapping, and which relays it
 /// signals through.
@@ -193,8 +191,9 @@ pub struct MeshConfig {
     /// `None`: none.
     pub public: Option<SocketAddr>,
     /// Learn STUN servers from Nostr (NFX-10 §1): beacons' `stun` endpoints for the videos
-    /// served ([`Mesh::stun_from_beacons_of`]) and STUN service announcements for the rooms'
-    /// networks, read on `relays`, picked by NFX-10 §1's rules after `stun`.
+    /// served ([`Mesh::stun_from_beacons_of`]), read on `relays`. Those of a beacon the
+    /// video's creator signed are picked by NFX-10 §1's rules after `stun`; any seeder's only
+    /// by the fallback, for a peer it signals with. Never a STUN service announcement.
     pub stun_from_nostr: bool,
 }
 
@@ -261,8 +260,6 @@ pub struct MeshStatus {
 struct RoomSpec {
     room: Room,
     segments: Vec<String>,
-    /// The video's network (its namespace): announcements for it count.
-    network: String,
     /// The video's address without its creator: the fallback scopes beacons by it.
     video: String,
 }
@@ -526,14 +523,12 @@ impl Mesh {
         only: Option<&[String]>,
     ) -> Result<Vec<String>> {
         let video = VideoAddr::parse(&list.video)?;
-        let network = video.namespace().to_string();
         let mut specs = Vec::new();
         let mut ids = Vec::new();
         for (id, segments) in crate::rtc_serve::vod_renditions(list, store, only) {
             specs.push(RoomSpec {
                 room: Room::derive(&video.web_stream_swarm_id(&id)),
                 segments,
-                network: network.clone(),
                 video: video.to_string(),
             });
             ids.push(id);
@@ -563,10 +558,11 @@ impl Mesh {
             .map_err(|_| NodeError::Transport("the mesh stopped".into()))
     }
 
-    /// Count the `stun` endpoints of the live beacons of `manifest_a` (a manifest address,
-    /// `38504:<creator>:<namespace>:<video-id>`) among the STUN servers named over Nostr
-    /// (NFX-10 §1), as read on the mesh's relays. Nothing when [`MeshConfig::stun_from_nostr`]
-    /// is off. [`Mesh::forget`] of the video stops it.
+    /// Read the `stun` endpoints of the live beacons of `manifest_a` (a manifest address,
+    /// `38504:<creator>:<namespace>:<video-id>`) on the mesh's relays (NFX-10 §1): those of
+    /// the creator's own beacon are asked beside the configured servers, and any seeder's may
+    /// be asked by the fallback. Nothing when [`MeshConfig::stun_from_nostr`] is off.
+    /// [`Mesh::forget`] of the video stops it.
     pub async fn stun_from_beacons_of(&self, manifest_a: &str) -> Result<()> {
         nfx_proto::beacon::parse_a_tag(manifest_a)?;
         self.control
@@ -611,7 +607,8 @@ impl Stun {
     }
 }
 
-/// NFX-10 §1's fallback for when no STUN server this node asks returned a mapping.
+/// NFX-10 §1's fallback for when no STUN server this node asks returned a mapping, or it asks
+/// none.
 #[derive(Debug, Default)]
 struct StunFallback {
     /// By (room key, peer's session key): the candidate addresses of its last SDP.
@@ -622,8 +619,7 @@ struct StunFallback {
     mapped: HashMap<SocketAddr, SocketAddr>,
 }
 
-/// One source of STUN server names: a signer's newest beacon for one video, or its newest
-/// announcement of one server.
+/// One source of STUN server names: a signer's newest beacon for one video.
 #[derive(Debug, Clone)]
 struct Named {
     created_at: u64,
@@ -632,9 +628,9 @@ struct Named {
     heard: u64,
     /// At most [`MAX_STUN_ADDRS`] (a beacon may carry more `stun` endpoints than one).
     addrs: Vec<String>,
-    /// An announcement's networks: it counts only while a room of one of them is joined.
-    /// `None` for a beacon, which counts while its video is watched.
-    networks: Option<Vec<String>>,
+    /// Whether the signer is the video's creator (the key in the beacon's `a` tag): only then
+    /// are its servers asked beside the configured ones. Any seeder's count for the fallback.
+    creator: bool,
 }
 
 /// STUN servers named over Nostr (NFX-10 §1): what to read, and what was read.
@@ -642,7 +638,7 @@ struct Named {
 struct NostrStun {
     /// The manifest addresses whose beacons count.
     watched: BTreeSet<String>,
-    /// By (signer, source): a source is `beacon <a>` or `announcement <server>`.
+    /// By (signer, manifest address).
     named: HashMap<(String, String), Named>,
     heard: u64,
     subs: Vec<(ns::SubscriptionId, ns::Filter)>,
@@ -653,12 +649,14 @@ impl NostrStun {
     /// Take what a source names now, if it is newer than what it named before. An empty
     /// list names nothing and is kept until it expires (within the same bounds), so an older
     /// event replayed later does not bring back what the newer one withdrew. False if
-    /// nothing changed.
-    fn note(&mut self, signer: &str, source: String, named: Named, now: u64) -> bool {
-        let key = (signer.to_owned(), source);
+    /// nothing changed. A creator's beacon is never refused for room: there is at most one
+    /// per watched video, so strangers' keys cannot crowd out the creator's servers.
+    fn note(&mut self, signer: &str, a: String, named: Named, now: u64) -> bool {
+        let key = (signer.to_owned(), a);
         match self.named.get(&key) {
             Some(held) if held.created_at >= named.created_at => return false,
             Some(_) => {}
+            None if named.creator => {}
             None => {
                 if self.named.len() >= MAX_NAMED {
                     self.named.retain(|_, n| n.expiration > now);
@@ -675,46 +673,35 @@ impl NostrStun {
         true
     }
 
-    /// The live (signer, address) pairs, in the order first heard: beacons', and those of
-    /// announcements for one of `networks`.
-    fn pairs(&mut self, now: u64, networks: &BTreeSet<String>) -> Vec<(String, String)> {
+    /// The addresses the live beacons their videos' creators signed name, in the order first
+    /// heard: the servers NFX-10 §1 asks beside the configured ones.
+    fn creator_named(&mut self, now: u64) -> Vec<String> {
         self.named.retain(|_, n| n.expiration > now);
-        let mut sources: Vec<(&(String, String), &Named)> = self
-            .named
-            .iter()
-            .filter(|(_, n)| {
-                n.networks
-                    .as_ref()
-                    .is_none_or(|nets| nets.iter().any(|x| networks.contains(x)))
-            })
-            .collect();
-        sources.sort_by_key(|(_, n)| n.heard);
+        let mut sources: Vec<&Named> = self.named.values().filter(|n| n.creator).collect();
+        sources.sort_by_key(|n| n.heard);
         sources
             .into_iter()
-            .flat_map(|((signer, _), n)| n.addrs.iter().map(move |a| (signer.clone(), a.clone())))
+            .flat_map(|n| n.addrs.iter().cloned())
             .collect()
     }
 
-    /// The live (video, seeder, address) triples of beacons alone, in the order first heard:
-    /// what the fallback may take from, never an announcement.
+    /// The live (video, seeder, address) triples of every beacon, the creators' included, in
+    /// the order first heard: what the fallback may take from.
     fn beacon_pairs(&self, now: u64) -> Vec<(String, String, String)> {
         let mut sources: Vec<(&(String, String), &Named)> = self
             .named
             .iter()
-            .filter(|(_, n)| n.networks.is_none() && n.expiration > now)
+            .filter(|(_, n)| n.expiration > now)
             .collect();
         sources.sort_by_key(|(_, n)| n.heard);
         sources
             .into_iter()
-            .flat_map(|((seeder, source), n)| {
-                let video = source
-                    .strip_prefix("beacon ")
-                    .and_then(|a| a.splitn(3, ':').nth(2))
-                    .unwrap_or_default()
-                    .to_owned();
+            .flat_map(|((seeder, a), n)| {
+                // `38504:<creator>:<video>`: the video without its creator, as rooms hold it.
+                let video = a.splitn(3, ':').nth(2).unwrap_or_default().to_owned();
                 n.addrs
                     .iter()
-                    .map(move |a| (video.clone(), seeder.clone(), a.clone()))
+                    .map(move |x| (video.clone(), seeder.clone(), x.clone()))
             })
             .collect()
     }
@@ -746,10 +733,8 @@ struct RoomState {
     backoff: OfferBackoff,
     /// When this room's presence may next go out of turn ([`REANNOUNCE_EVERY`]).
     reannounce_at: Instant,
-    /// The video's network (its namespace).
-    network: String,
-    /// The video's address without its creator (`<namespace>:<video-id>`), as a beacon's
-    /// source holds it: the fallback counts a beacon only for the peers of its own video.
+    /// The video's address without its creator (`<namespace>:<video-id>`), as a beacon's `a`
+    /// ends: the fallback counts a beacon only for the peers of its own video.
     video: String,
 }
 
@@ -1020,11 +1005,8 @@ impl State {
                     // `38504:<creator>:<video>`: the watched addresses of that video.
                     n.watched
                         .retain(|a| a.splitn(3, ':').nth(2) != Some(video.as_str()));
-                    n.named.retain(|(_, source), _| {
-                        source
-                            .strip_prefix("beacon ")
-                            .is_none_or(|a| a.splitn(3, ':').nth(2) != Some(video.as_str()))
-                    });
+                    n.named
+                        .retain(|(_, a), _| a.splitn(3, ':').nth(2) != Some(video.as_str()));
                 }
                 self.waiting
                     .retain(|s| !keys.iter().any(|k| k == s.room.pubkey()));
@@ -1045,16 +1027,7 @@ impl State {
                     self.resubscribe().await;
                 }
                 self.resubscribe_stun().await;
-                // What the video's beacons named, and announcements for a network no room is
-                // in any more, count no longer.
-                let networks = self.networks();
-                if let Some(n) = &mut self.nostr_stun {
-                    n.named.retain(|_, x| {
-                        x.networks
-                            .as_ref()
-                            .is_none_or(|nets| nets.iter().any(|y| networks.contains(y)))
-                    });
-                }
+                // What the video's beacons named counts no longer.
                 self.select_stun(Instant::now(), true);
             }
             Control::Shutdown(_) => {}
@@ -1082,7 +1055,6 @@ impl State {
                 limiter: SenderLimiter::default(),
                 backoff: OfferBackoff::default(),
                 reannounce_at: Instant::now(),
-                network: spec.network.clone(),
                 video: spec.video.clone(),
             });
             r.swarm = Swarm {
@@ -1139,34 +1111,19 @@ impl State {
         self.check_subscriptions().await;
     }
 
-    /// The networks of the rooms joined: announcements for them count.
-    fn networks(&self) -> BTreeSet<String> {
-        self.rooms.values().map(|r| r.network.clone()).collect()
-    }
-
-    /// Replace the subscriptions that learn STUN servers (NFX-10 §1) with ones for the videos
-    /// watched (their beacons) and the networks of the rooms joined (announcements).
+    /// Replace the subscriptions that learn STUN servers (NFX-10 §1) with ones for the beacons
+    /// of the videos watched.
     async fn resubscribe_stun(&mut self) {
-        let networks = self.networks();
         let Some(n) = &mut self.nostr_stun else {
             return;
         };
         let watched: Vec<String> = n.watched.iter().cloned().collect();
-        let networks: Vec<String> = networks.into_iter().collect();
         let mut filters = Vec::new();
         for chunk in watched.chunks(TAGS_PER_SUB) {
             filters.push(
                 ns::Filter::new()
                     .kind(ns::Kind::from(KIND_BEACON))
                     .custom_tags(ns::SingleLetterTag::LOWERCASE_A, chunk.iter().cloned()),
-            );
-        }
-        for chunk in networks.chunks(TAGS_PER_SUB) {
-            filters.push(
-                ns::Filter::new()
-                    .kind(ns::Kind::from(KIND_STUN_ANNOUNCEMENT))
-                    .custom_tags(ns::SingleLetterTag::LOWERCASE_N, chunk.iter().cloned())
-                    .limit(ANNOUNCEMENTS_ASKED),
             );
         }
         if n.subs.iter().map(|(_, f)| f).eq(filters.iter()) {
@@ -1278,19 +1235,19 @@ impl State {
             .insert(tid, (server, tries + 1, now + STUN_RTO * (1 << tries)));
     }
 
-    /// The servers to ask (NFX-10 §1): the configured ones, then those Nostr names that the
-    /// rules pick, of the socket's family. A server picked anew is asked at once (with `ask`;
-    /// else at the round about to start); one no longer picked is forgotten, with its mapping.
+    /// The servers to ask (NFX-10 §1): the configured ones, then those the creators of the
+    /// watched videos name that the rules pick, of the socket's family. A server picked anew is
+    /// asked at once (with `ask`; else at the round about to start); one no longer picked is
+    /// forgotten, with its mapping.
     fn select_stun(&mut self, now: Instant, ask: bool) {
-        let networks = self.networks();
         let Some(n) = &mut self.nostr_stun else {
             return;
         };
         let v4 = self.base.is_ipv4();
-        let pairs: Vec<(String, String)> = n
-            .pairs(unix_now(), &networks)
+        let named: Vec<String> = n
+            .creator_named(unix_now())
             .into_iter()
-            .filter(|(_, a)| a.parse::<SocketAddr>().is_ok_and(|a| a.is_ipv4() == v4))
+            .filter(|a| a.parse::<SocketAddr>().is_ok_and(|a| a.is_ipv4() == v4))
             .collect();
         let own: Vec<String> = self
             .stun
@@ -1298,14 +1255,11 @@ impl State {
             .iter()
             .map(ToString::to_string)
             .collect();
-        let chosen: Vec<SocketAddr> = nfx_proto::stun::select(
-            &own,
-            pairs.iter().map(|(k, a)| (k.as_str(), a.as_str())),
-            MAX_STUN,
-        )
-        .iter()
-        .filter_map(|a| a.parse().ok())
-        .collect();
+        let chosen: Vec<SocketAddr> =
+            nfx_proto::stun::select(&own, named.iter().map(String::as_str), MAX_STUN)
+                .iter()
+                .filter_map(|a| a.parse().ok())
+                .collect();
         if chosen != self.stun.servers {
             let fresh: Vec<SocketAddr> = chosen
                 .iter()
@@ -1329,10 +1283,10 @@ impl State {
     }
 
     /// Whether no STUN server this node has asked returned a mapping (NFX-10 §1's trigger):
-    /// it has servers of its own, gathering has ended, and it has no address from elsewhere.
+    /// gathering has ended, no server it asks reported one (true when it asks none), and it
+    /// has no address from elsewhere.
     fn no_mapping(&self) -> bool {
         self.gathered
-            && !self.stun.configured.is_empty()
             && self.public.is_none()
             && self.portmapped.is_none()
             && !self
@@ -1667,10 +1621,8 @@ impl State {
     // ---- signaling --------------------------------------------------------------------------
 
     fn on_event(&mut self, event: &ns::Event) {
-        match event.kind.as_u16() {
-            KIND_BEACON => return self.on_beacon(event),
-            KIND_STUN_ANNOUNCEMENT => return self.on_announcement(event),
-            _ => {}
+        if event.kind.as_u16() == KIND_BEACON {
+            return self.on_beacon(event);
         }
         // Our own come back from every relay: dropped before anything else.
         if event.pubkey.to_hex() == self.me() {
@@ -1732,7 +1684,8 @@ impl State {
     }
 
     /// A beacon of a watched video: the STUN servers its `stun` endpoint names (none, if it
-    /// has none: the signer's newer beacon withdraws what its older one named).
+    /// has none: the signer's newer beacon withdraws what its older one named). They are asked
+    /// beside the configured ones only when the signer is the video's creator.
     fn on_beacon(&mut self, event: &ns::Event) {
         let Some(n) = &mut self.nostr_stun else {
             return;
@@ -1774,43 +1727,10 @@ impl State {
             expiration: b.expiration,
             heard: 0,
             addrs,
-            networks: None,
+            // `a` names the creator (checked above), and the manifest at `a` is its own.
+            creator: b.seeder == b.creator,
         };
-        if n.note(&b.seeder, format!("beacon {a}"), named, now) {
-            self.select_stun(Instant::now(), true);
-        }
-    }
-
-    /// A STUN service announcement for a network of a room joined.
-    fn on_announcement(&mut self, event: &ns::Event) {
-        let networks = self.networks();
-        let Some(n) = &mut self.nostr_stun else {
-            return;
-        };
-        let Ok(ev) = from_nostr(event) else {
-            return;
-        };
-        if !ev
-            .tag_values("n")
-            .any(|v| v.first().is_some_and(|x| networks.contains(x)))
-        {
-            return;
-        }
-        let now = unix_now();
-        let Ok(a) = StunAnnouncement::from_event(&ev, now) else {
-            return;
-        };
-        if !a.networks.iter().any(|x| networks.contains(&x.to_string())) {
-            return;
-        }
-        let named = Named {
-            created_at: a.created_at,
-            expiration: a.expiration,
-            heard: 0,
-            addrs: vec![a.addr.clone()],
-            networks: Some(a.networks.iter().map(ToString::to_string).collect()),
-        };
-        if n.note(&a.operator, format!("announcement {}", a.addr), named, now) {
+        if n.note(&b.seeder, a, named, now) {
             self.select_stun(Instant::now(), true);
         }
     }

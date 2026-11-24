@@ -70,12 +70,15 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   §2); exactly one `expiration`, a plain decimal with `created_at < expiration ≤
   created_at + 86400` and later than now; a `created_at` at most 15 min ahead of now (so
   `expiration` is at most 24 h ahead, give or take that skew); and empty content. It
-  ignores tags it does not know, and uses an announcement only for a network an `n` names.
+  ignores tags it does not know, and lists an announcement only under a network an `n` names.
   A sender signs it with `expiration` = `created_at` + 86400 and signs a new one every 12 h,
   so one is always live; being addressable, the newer replaces the older for that key and
   server. On stop it withdraws nothing: the last one expires within 24 h. General relays
   carry it as is; a scoped relay only if its NIP-11 `nfx.kinds` lists 33478 (NFX-04 §§1, 3,
-  as amended 2026-11-19). `stun-announcement.json` pins the checks.
+  as amended 2026-11-19). `stun-announcement.json` pins the checks. Announcements are a
+  directory: an operator or a person reads them to choose STUN servers to configure. A
+  client never uses an announced server on its own, neither by the rules below nor by the
+  fallback.
 - **Global unicast**, for this section: an IPv4 address in none of 0/8, 10/8, 100.64/10,
   127/8, 169.254/16, 172.16/12, 192.0.0/24, 192.168/16, 198.18/15, 224/4 and 240/4 (the
   broadcast address included), nor in the documentation blocks 192.0.2.0/24,
@@ -85,24 +88,29 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   endpoint names a documentation address is still a valid beacon (the endpoint's rule above
   is its form, not its reach); only the selection below refuses the address.
 - **Using STUN servers named over Nostr.** A client, a page or a native peer, SHOULD use
-  the STUN servers Nostr names, beside its own: those in the `stun` endpoints of the live
-  beacons of the video it plays or serves, each named by the beacon's signer, and those of
-  the live announcements for its network, each named by the operator. It picks them by
-  these rules, which `stun-select.json` pins:
+  the STUN servers the creator of the video it plays or serves names, beside its own: those
+  in the `stun` endpoint of a live, verified beacon of that video signed by its creator.
+  That is a beacon whose signer is the creator its `a` tag names, which is the author of the
+  manifest. It picks them by these rules, which `stun-select.json` pins:
   1. its own servers first (a page's own `iceServers`, a node's configured ones), each once;
-  2. then the named servers that are global unicast (above: never a private, loopback,
-     link-local, shared or documentation address) and not its own, ranked by the number of
-     distinct keys that name each (a key counts once, whether it seeds, announces, or both),
-     most first, ties in the order first named;
-  3. a server named by one key alone only when the client has none of its own and no named
-     server has two keys or more: a lone stranger's key adds no server beside a better one;
+  2. then the servers the creator's beacons name, in the order heard, each once, if the
+     address is global unicast (above: never a private, loopback, link-local, shared or
+     documentation address), the port is 1024 or above, and the server is not its own;
+  3. no other server named over Nostr. Not one a beacon signed by another key names, however
+     many keys name it: keys are free, so a count of keys proves nothing. Not one a STUN
+     service announcement names, whoever signed it. A seeder's server is reached only through
+     the fallback below;
   4. at most 4 STUN servers in all.
-- **A fallback when a client's own STUN fails.** A client that has STUN servers of its own
-  and got no mapping from any server it asks (no server-reflexive candidate when gathering
-  finished; for a native client, none after its attempts) MAY also ask, for the connection
-  to one peer, a STUN server named by a seeder, if all of this holds:
+
+  A creator whose node signs its beacons with a key other than the creator key names no
+  server by rule 2: its servers are reached only through the fallback.
+- **A fallback when a client's STUN fails.** A client that got no mapping from any server it
+  asks (no server-reflexive candidate when gathering finished; for a native client, none
+  after its attempts) MAY also ask, for the connection to one peer, a STUN server named by a
+  seeder. A client that asks no server at all has no mapping once gathering ends, so this
+  applies to it as well. It asks one only if all of this holds:
   1. a live, verified beacon of the video this connection is for names the server in its
-     `stun` endpoint. A STUN service announcement alone never qualifies;
+     `stun` endpoint. A STUN service announcement never qualifies;
   2. the client is **already signaling with that seeder**. A session key is deliberately
      not linked to the key that signs a beacon (§6.4), so the test is by address: the
      server's IP address is among the candidates of an SDP this peer has sent the client,
@@ -112,29 +120,31 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   4. one server per seeder, and at most 4 STUN servers in all, those it asks already
      included.
 
-  What that server reports is used for that peer's connection only. A client with no server
-  of its own has rule 3 above and not this. A client that offers learns the peer's addresses
-  from its answer, so the fallback applies from its next attempt with that peer. The test
-  shows where the request goes, not who signed the beacon: a peer can copy a seeder's address
-  into its SDP, but it could already make the client's ICE agent send checks there. A seeder
-  whose STUN server is at another address than its candidates is not reached this way.
-  `stun-select.json` pins the rule (`fallback`).
+  What that server reports is used for that peer's connection only. A client that offers
+  learns the peer's addresses from its answer, so the fallback applies from its next attempt
+  with that peer. The test shows where the request goes, not who signed the beacon: a peer
+  can copy a seeder's address into its SDP, but it could already make the client's ICE
+  agent send checks there. A seeder whose STUN server is at another address than its
+  candidates is not reached this way. `stun-select.json` pins the rule (`fallback`).
 - **The abuse bound.** Whatever beacons and announcements say, Nostr never makes a client
-  contact more than 4 STUN servers, the fallback's included, or any address that is not
-  global unicast: a beacon or
-  announcement from anywhere must not point viewers at their own network. A native client
+  contact more than 4 STUN servers, the fallback's included, any address that is not global
+  unicast, or any port below 1024: a beacon from anywhere must not point viewers at their
+  own network or at a well-known service. Only two keys can add a server: the creator's, for
+  every client of its video, and a seeder's, for a client already signaling with it at that
+  server's address. A native client
   that offers a server-reflexive candidate (§6) offers a mapping reported by a server named
   over Nostr only if that mapping is global unicast, so a lying server adds at most one
   candidate that fails (ICE tries every pair), never a private address for peers to check.
   A STUN server cannot touch the video either: it never sees the SDP, which carries the
   DTLS fingerprints that authenticate each peer.
 - **Privacy.** A STUN server moves no bytes of video, but it learns each client's IP address
-  and when it gathers, as a tracker does. Beacons and announcements come from any key, so
-  "most keys" counts keys a stranger can multiply: a client that must not tell strangers
-  who watches uses only its own STUN servers, or named ones only from keys it trusts. An
-  announcement ties the server's address to its operator's key, publicly. The fallback tells
-  no new address about the client: it asks only an IP address the peer it is connecting to
-  already gave its ICE agent to check.
+  and when it gathers, as a tracker does. So a client's address reaches only its own STUN
+  servers, the servers the creator of the video it chose names, and, through the fallback, a
+  server at the address of a peer it already signals with. A client that must not tell the
+  creator's servers who watches uses only its own. An announcement ties the server's address
+  to its operator's key, publicly, and makes no client ask it. The fallback tells no new
+  address about the client: it asks only an IP address the peer it is connecting to already
+  gave its ICE agent to check.
 
 ## 2. Swarms and bridges
 
@@ -764,3 +774,13 @@ with full ICE, and a NAT test.
   beacon keys (§6.4), "signaling with" is tested by address: the server's IP must be among
   that peer's SDP candidates. The rest of the selection is unchanged. `stun-select.json`
   gains `fallback` cases.
+- Draft 2026-11-24 (ADR 0107): §1's selection no longer counts keys, since keys are free and
+  two fresh ones could send every client to a server of their choice. Beside its own servers
+  a client now uses routinely only those named by a live beacon of the video signed by the
+  video's creator: global unicast, port 1024 or above, at most 4 in all. Any other server
+  named over Nostr is reached only through the fallback, which now also covers a client with
+  no STUN server of its own. Announcements stay valid events but are a directory: no client
+  uses one on its own. Nothing on the wire changes. (Was: own first, then named servers
+  ranked by distinct keys, beacons and announcements together, a lone key only when nothing
+  better exists, no port floor; the fallback only for a client with servers of its own.)
+  `stun-select.json`'s cases now give the creator and the beacons and announcements heard.

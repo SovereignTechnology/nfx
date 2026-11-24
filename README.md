@@ -143,16 +143,16 @@ Joining a room tells anyone present there the node's candidate addresses, its pu
 included, as a tracker's swarm would. `--mesh-bind` fixes its UDP port and `--mesh-max-peers`
 (default 16) caps its connections.
 
-The mesh endpoint also learns STUN servers from Nostr (NFX-10 §1), on its `--mesh-relay`s:
-those the beacons of its videos name in `stun` endpoints, and those STUN service
-announcements name for their networks (below). It asks them after its own `--mesh-stun`, by
-the rules every NFX client uses: global unicast addresses only, ranked by how many distinct
-keys name each, one named by a lone key only when it has none of its own and no better one
-is named, at most 4 in all. So `--mesh-stun` is optional where the network's relays carry
-beacons or announcements. `--mesh-stun-from-nostr=false` turns this off. If its `--mesh-stun`
-servers return no mapping, it also asks a server a seeder's beacon names, one per seeder and
-within the 4, when that server's IP is among the candidates of a peer it is signaling with,
-and uses the answer for that peer's connection only.
+The mesh endpoint also learns STUN servers from Nostr (NFX-10 §1), on its `--mesh-relay`s,
+from the `stun` endpoints of its videos' beacons. After its own `--mesh-stun` it asks those
+a beacon signed by the video's creator names, by the rules every NFX client uses: global
+unicast addresses only, on a port of 1024 or above, at most 4 in all. A beacon signed by any
+other key adds none of these, however many keys name a server: keys are free. STUN service
+announcements (below) are never used on their own. So `--mesh-stun` is optional where the
+creator's beacons name a STUN server. `--mesh-stun-from-nostr=false` turns this off. If no
+server it asks returns a mapping, or it asks none, it also asks a server a seeder's beacon
+names, one per seeder and within the 4, when that server's IP is among the candidates of a
+peer it is signaling with, and uses the answer for that peer's connection only.
 
 Behind a DNAT, a VM's say, STUN cannot tell the node its public address when the STUN server
 is its own (that would take a UDP hairpin), and no gateway maps a port. Name the address with
@@ -192,10 +192,13 @@ client's NAT drops one from another. Behind a DNAT, bind the host's own address 
 public one with `--public 203.0.113.7:3478`. With `--announce`, it signs a STUN service
 announcement (kind 33478, NFX-10 §1) with `--key`: that public address, for each
 `--network` (1 to 8), valid 24 h, sent to the `--relay`s (1 to 8) at once and again every
-12 h. Clients of those networks then find the server over Nostr. A scoped relay carries the
-announcement only if it admits kind 33478 (NFX-04 §1, as `nfxd run --embed-relay-stun-ads`
-makes nfxd's own); general relays carry it as is. Without `--announce` it is a STUN server
-that clients must be told about.
+12 h. The announcements form a directory: the people and operators of those networks find
+the server over Nostr and choose whether to use it. No client asks it just because it is
+announced. A page names it among its own STUN servers, a node with `--mesh-stun`, and a
+creator in the `stun` endpoint of its own beacons, which every viewer of its videos then
+uses. A scoped relay carries the announcement only if it admits kind 33478 (NFX-04 §1, as
+`nfxd run --embed-relay-stun-ads` makes nfxd's own); general relays carry it as is. Without
+`--announce` it is a STUN server that people must be told about some other way.
 
 Open UDP 3478 to it, for example with ufw:
 
@@ -229,10 +232,11 @@ WantedBy=multi-user.target
 **What the operator learns.** Every client that asks reveals its IP address, and when it
 gathers candidates, which is when it plays a video; a STUN server sees no video and no
 peer, and never touches a byte of one. The announcement ties the server's address to the
-operator's key, publicly. Clients use at most 4 STUN servers, prefer those named by several
-keys, and never take an address from Nostr that is not public (private, loopback or
-documentation; NFX-10 §1), so a lying or dead server costs a client one candidate, nothing
-more.
+operator's key, publicly. Clients use at most 4 STUN servers: their own, those the creator
+of the video names, and through the fallback a seeder's at the address of a peer they
+already signal with. They never take an address from Nostr that is not public (private,
+loopback or documentation) or a port below 1024 (NFX-10 §1), so a lying or dead server
+costs a client one candidate, nothing more.
 
 ## Checks
 

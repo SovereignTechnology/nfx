@@ -5,10 +5,10 @@
  * - `?a=<manifest address>&relay=<ws(s) URL>[&relay=…][&origin=<hint>]`: resolve the
  *   current signed manifest over Nostr, then play from an origin named by a verified
  *   beacon's `https` endpoint (or the hint). The trackers seeders' beacons name in
- *   `webrtc` endpoints are used too, and the STUN servers Nostr names (beacons' `stun`
- *   endpoints and STUN service announcements, NFX-10 §1), picked by `selectStun` after any
- *   `&stun=`: global unicast only, at most 4. Signatures give the anchor; endpoints are only
- *   hints.
+ *   `webrtc` endpoints are used too, and the STUN servers the video's creator names (the
+ *   `stun` endpoint of its own beacon, NFX-10 §1), picked by `selectStun` after any
+ *   `&stun=`: global unicast, port 1024 or above, at most 4. Signatures give the anchor;
+ *   endpoints are only hints.
  * - `?origin=<url>&root=<hex>[&video=<d>&segs=<n>]`: play a known root from a known origin.
  *
  * A loader wrapper checks every playlist, init and segment with nfx-proto (WASM) before
@@ -18,8 +18,10 @@
  * the NFX-10 browser mesh: segments may then come from other viewers, checked by the same
  * verifier. With `&signal=nostr`, the mesh signals over Nostr instead (NFX-10 §6): through
  * the page's `&relay=` URLs (up to 8), with no tracker at all, and beacon-named trackers
- * are not used. `&stun=<stun: URL>` adds an ICE server; there is none by default, so no
- * third party learns who watches. Test knobs, which change where bytes come from and never
+ * are not used. `&stun=<stun: URL>` adds an ICE server; the page has none of its own by
+ * default, so only the STUN servers the creator chose learn who watches (and, with
+ * `&signal=nostr`, a seeder's at the address of a peer it already signals with, when no
+ * server it asks gives a mapping). Test knobs, which change where bytes come from and never
  * whether they are checked: `&httpWindow=<s>` (seconds ahead fetched over HTTP) and
  * `&level=<n>` (pin a level).
  *
@@ -68,7 +70,7 @@ interface State {
   origins: string[];
   /** Trackers named by seeders' beacons (all heard, before the cap). */
   beaconTrackers: string[];
-  /** STUN servers named over Nostr (beacons and announcements). */
+  /** STUN servers the video's creator names (its own beacon's `stun` endpoint). */
   beaconStun: string[];
   /** Who holds which renditions, by the beacons heard last. */
   availability: RenditionAvailability | null;
@@ -222,7 +224,7 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
     originSources: [],
     trackers: [],
     stunServers: [],
-    stunNamed: [],
+    stunCreator: [],
     stunSeeders: [],
     seeders: 0,
     availability: { seeders: 0, all: 0, renditions: [] },
@@ -244,10 +246,10 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
         log(`a seeder names tracker ${t}`);
       }
     }
-    for (const { url, keys } of e.stunNamed) {
+    for (const url of e.stunCreator) {
       if (!st.beaconStun.includes(url)) {
         st.beaconStun.push(url);
-        log(`Nostr names STUN server ${url} (${keys} key${keys === 1 ? '' : 's'})`);
+        log(`the creator names STUN server ${url}`);
       }
     }
     wake?.();
@@ -263,15 +265,16 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
         fresh.forEach((o) => tried.add(o));
         // The page's own trackers first, then what seeders named by now.
         const trackers = [...new Set([...urlTrackers, ...heard.trackers])].slice(0, MAX_TRACKERS);
-        // Likewise its own STUN servers, then those Nostr names, by NFX-10 §1's rules.
-        const stun = selectStun(ownStun, heard.stunNamed)
+        // Likewise its own STUN servers, then those the creator names, by NFX-10 §1's rules.
+        const stun = selectStun(ownStun, heard.stunCreator)
           .slice(0, MAX_ICE_SERVERS)
           .map((urls) => ({ urls }));
         // Each beacon-named origin with the renditions beacons claim it serves (a hint the
         // library only orders by); the page's own hint makes no claim.
         const origins = fresh.map((o): string | OriginSource => heard.originSources.find((s) => s.url === o) ?? o);
-        // If the page's own STUN finds no mapping: a seeder's server at a peer's own address.
-        const stunFallback = ownStun.length > 0 ? { own: ownStun, seeders: () => heard.stunSeeders } : undefined;
+        // If no server it asks finds a mapping (or it asks none): a seeder's server at a
+        // peer's own address.
+        const stunFallback: StunFallback = { own: ownStun, seeders: () => heard.stunSeeders };
         try {
           await play({ ...common, iceServers: stun, manifestJson: m.event, origins, renditions: urlRenditions, signaling: trackerSignaling(trackers, stunFallback) });
           return;

@@ -9,9 +9,9 @@
  *   30 s, and negotiates peer connections: the lower session key offers (NFX-10 §6.6), each
  *   SDP complete (ICE gathering finished) and NIP-44 encrypted to its receiver. A peer's
  *   SDP reaches `setRemoteDescription` through the session's `remoteCandidates` filter
- *   (./remote-sdp.ts; `all`, the default, passes it as it is). When the session's own STUN
- *   found no mapping, a connection may also ask a seeder's STUN server at that peer's own
- *   address (`stunFallback`, ./stun-fallback.ts, NFX-10 §1). It claims a peer from the
+ *   (./remote-sdp.ts; `all`, the default, passes it as it is). When the session's STUN found
+ *   no mapping (or it asks no server), a connection may also ask a seeder's STUN server at
+ *   that peer's own address (`stunFallback`, ./stun-fallback.ts, NFX-10 §1). It claims a peer from the
  *   engine before negotiating and reports each peer connected or failed, so the engine
  *   keeps its peer de-duplication and limits.
  *
