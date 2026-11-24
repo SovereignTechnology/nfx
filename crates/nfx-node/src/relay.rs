@@ -30,13 +30,16 @@
 //! are charged after full verification, the embedded beacon included, so an unsigned event
 //! cannot spend someone else's budget. An id already carried is dropped and charges nothing.
 //!
-//! Stored manifests live in memory, capped at [`MAX_STORED_EVENTS`]: a restart forgets
-//! them, and publishers re-mirror (§4). TLS belongs in front, as for the origin.
+//! Stored manifests live in memory, capped at [`MAX_STORED_EVENTS`]. Without a state
+//! directory a restart forgets them, and publishers re-mirror (§4); with one
+//! ([`ScopedRelay::admitting_persisted`]) accepted manifests are kept on disk and reloaded,
+//! re-verified and re-admitted (`relay_store`). TLS belongs in front, as for the origin.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::hash::Hash;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bytes::Bytes;
@@ -59,6 +62,8 @@ use tokio::net::TcpListener;
 use crate::limit::{ConnGuard, ConnLimits};
 use crate::nostr::from_nostr;
 use crate::origin::{BoxFuture, HEADER_READ_TIMEOUT};
+pub use crate::relay_store::Reload;
+use crate::relay_store::{self, ManifestStore};
 use crate::unix_now;
 
 /// §2: at most one beacon per (`pubkey`, `a`) per this many seconds.
@@ -255,6 +260,8 @@ struct Admission {
     limits: Mutex<Limits>,
     /// The relay's own store, for applying NFX deletions (see [`Admission::apply`]).
     db: Arc<dyn ns::NostrDatabase>,
+    /// The state directory's copy, when there is one: deletions are recorded there too.
+    store: Option<Arc<ManifestStore>>,
 }
 
 /// What passed the synchronous checks.
@@ -273,6 +280,25 @@ impl Admission {
     /// Verification (signatures, NFX-02/03) runs before the lock is taken; the lock
     /// guards only the rate-limit counters.
     fn admit(&self, event: &ns::Event, now: u64) -> Result<Admitted, Refusal> {
+        self.admit_counting(event, now, true)
+    }
+
+    /// Whether a manifest read back from the state directory passes today's rules: all of
+    /// them but the publish budget, since reloading it is not a publish.
+    fn readmits(&self, event: &ns::Event, now: u64) -> bool {
+        event.kind.as_u16() == KIND_MANIFEST
+            && matches!(
+                self.admit_counting(event, now, false),
+                Ok(Admitted::Manifest(_))
+            )
+    }
+
+    fn admit_counting(
+        &self,
+        event: &ns::Event,
+        now: u64,
+        count: bool,
+    ) -> Result<Admitted, Refusal> {
         use ns::MachineReadablePrefix::{Blocked, Invalid, RateLimited};
         let kind = event.kind.as_u16();
         if kind == KIND_SIGNAL && self.may.mesh_signaling {
@@ -342,6 +368,7 @@ impl Admission {
         let mut limits = self.limits.lock().unwrap_or_else(PoisonError::into_inner);
         limits.sweep(now);
         match beacon_key {
+            None if !count => {}
             None => {
                 let times = limits.manifests.entry(ev.pubkey.clone()).or_default();
                 while times.front().is_some_and(|t| now >= t + 3600) {
@@ -622,10 +649,21 @@ impl Admission {
                 .until(ns::Timestamp::from(d.created_at));
             let _ = self.db.delete(filter).await;
         }
+        if let Some(store) = &self.store {
+            store.withdraw(d).await;
+        }
     }
 
-    /// Whether a stored deletion withdraws this revision (a replay of a deleted one).
+    /// Whether a stored deletion withdraws this revision (a replay of a deleted one). The
+    /// state directory remembers deletions from before a restart.
     async fn withdrawn(&self, m: &Manifest) -> bool {
+        if self
+            .store
+            .as_ref()
+            .is_some_and(|s| s.withdrawn(&m.a_tag(), m.created_at))
+        {
+            return true;
+        }
         let Ok(author) = ns::PublicKey::parse(&m.author) else {
             return false;
         };
@@ -749,6 +787,8 @@ impl ns::QueryPolicy for QueryLimits {
 #[derive(Debug)]
 struct TitleSearch {
     inner: nostr_memory::MemoryDatabase,
+    /// Where an accepted manifest is also written, when there is a state directory.
+    store: Option<Arc<ManifestStore>>,
 }
 
 /// Whether `ev` answers a search for `needle` (already trimmed and lowercased).
@@ -787,7 +827,13 @@ impl ns::NostrDatabase for TitleSearch {
         &'a self,
         event: &'a ns::Event,
     ) -> BoxFuture<'a, Result<ns::SaveEventStatus, DbError>> {
-        self.inner.save_event(event)
+        Box::pin(async move {
+            let status = self.inner.save_event(event).await?;
+            if let (true, Some(store)) = (status.is_success(), &self.store) {
+                store.put(event).await;
+            }
+            Ok(status)
+        })
     }
 
     fn check_id<'a>(
@@ -845,6 +891,7 @@ impl ns::NostrDatabase for TitleSearch {
 pub struct ScopedRelay {
     local: ns::LocalRelay,
     nip11: Bytes,
+    store: Option<Arc<ManifestStore>>,
 }
 
 impl ScopedRelay {
@@ -897,37 +944,69 @@ impl ScopedRelay {
         creators: Option<&[String]>,
         may: MayAdmit,
     ) -> crate::Result<Self> {
-        let Some(creators) = creators else {
-            return Ok(Self::build(namespaces, None, may));
-        };
-        if creators.is_empty() {
-            return Err(crate::NodeError::Relay("empty creator allow-list".into()));
-        }
-        if let Some(bad) = creators.iter().find(|c| {
-            c.len() != 64
-                || !c
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        }) {
-            return Err(crate::NodeError::Relay(format!(
-                "allow-list entry is not 64 lowercase hex: {bad}"
-            )));
-        }
-        Ok(Self::build(
-            namespaces,
-            Some(creators.iter().cloned().collect()),
+        Ok(Self::build(namespaces, allow_list(creators)?, may))
+    }
+
+    /// As [`ScopedRelay::admitting`], keeping accepted manifests in `dir` and serving those
+    /// already there (issue #114): each re-verified and run through the rules this relay has
+    /// now, so a file grants nothing. Deletions it has honoured stay honoured. Only kind 38504
+    /// is kept (§7). A directory it cannot use, or a damaged file in it, never stops the
+    /// relay: the returned [`Reload`] says what happened, for the caller to log.
+    pub async fn admitting_persisted(
+        namespaces: &[Namespace],
+        creators: Option<&[String]>,
+        may: MayAdmit,
+        dir: &Path,
+    ) -> crate::Result<(Self, Reload)> {
+        use ns::NostrDatabase as _;
+        let creators = allow_list(creators)?;
+        let rules = Admission {
+            namespaces: namespaces.iter().map(ToString::to_string).collect(),
+            creators: creators.clone(),
             may,
-        ))
+            limits: Mutex::new(Limits::default()),
+            db: Arc::new(nostr_memory::MemoryDatabase::bounded(
+                std::num::NonZeroUsize::MIN,
+            )),
+            store: None,
+        };
+        let dir = dir.to_owned();
+        // Reads and verifies up to the whole store: not on the async workers.
+        let (store, events, mut reload) = tokio::task::spawn_blocking(move || {
+            relay_store::open(&dir, MAX_STORED_EVENTS, |e, now| rules.readmits(e, now))
+        })
+        .await
+        .map_err(crate::NodeError::relay)?;
+        let (relay, database) = Self::build_on(namespaces, creators, may, store.map(Arc::new));
+        // Straight into the memory store: these are on disk already. Each read copy is dropped
+        // as it goes in, so a full store is not held twice.
+        for event in events {
+            if !matches!(database.inner.save_event(&event).await, Ok(s) if s.is_success()) {
+                reload.served = reload.served.saturating_sub(1);
+            }
+        }
+        Ok((relay, reload))
     }
 
     fn build(namespaces: &[Namespace], creators: Option<BTreeSet<String>>, may: MayAdmit) -> Self {
+        Self::build_on(namespaces, creators, may, None).0
+    }
+
+    fn build_on(
+        namespaces: &[Namespace],
+        creators: Option<BTreeSet<String>>,
+        may: MayAdmit,
+        store: Option<Arc<ManifestStore>>,
+    ) -> (Self, Arc<TitleSearch>) {
         let names: BTreeSet<String> = namespaces.iter().map(ToString::to_string).collect();
-        let database: Arc<dyn ns::NostrDatabase> = Arc::new(TitleSearch {
+        let search = Arc::new(TitleSearch {
             inner: nostr_memory::MemoryDatabase::bounded(
                 std::num::NonZeroUsize::new(MAX_STORED_EVENTS)
                     .unwrap_or(std::num::NonZeroUsize::MIN),
             ),
+            store: store.clone(),
         });
+        let database: Arc<dyn ns::NostrDatabase> = search.clone();
         let local = ns::LocalRelay::builder()
             .database(database.clone())
             .write_policy(Admission {
@@ -936,6 +1015,7 @@ impl ScopedRelay {
                 may,
                 limits: Mutex::new(Limits::default()),
                 db: database,
+                store: store.clone(),
             })
             .query_policy(QueryLimits)
             .rate_limit(ns::RateLimit {
@@ -998,10 +1078,14 @@ impl ScopedRelay {
                 "roles": roles
             }
         });
-        Self {
-            local,
-            nip11: Bytes::from(nip11.to_string()),
-        }
+        (
+            Self {
+                local,
+                nip11: Bytes::from(nip11.to_string()),
+                store,
+            },
+            search,
+        )
     }
 
     /// `guard` is the connection's admission slot; an upgraded WebSocket keeps it.
@@ -1111,7 +1195,32 @@ impl ScopedRelay {
 
     pub fn shutdown(&self) {
         self.local.shutdown();
+        if let Some(store) = &self.store {
+            store.close();
+        }
     }
+}
+
+/// A creator allow-list as admission holds it. An empty list, or a key in any other form than
+/// 64 lowercase hex, is an error: either would silently admit no one.
+fn allow_list(creators: Option<&[String]>) -> crate::Result<Option<BTreeSet<String>>> {
+    let Some(creators) = creators else {
+        return Ok(None);
+    };
+    if creators.is_empty() {
+        return Err(crate::NodeError::Relay("empty creator allow-list".into()));
+    }
+    if let Some(bad) = creators.iter().find(|c| {
+        c.len() != 64
+            || !c
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }) {
+        return Err(crate::NodeError::Relay(format!(
+            "allow-list entry is not 64 lowercase hex: {bad}"
+        )));
+    }
+    Ok(Some(creators.iter().cloned().collect()))
 }
 
 fn plain(status: StatusCode, text: &'static str) -> Response<Full<Bytes>> {
@@ -1141,6 +1250,7 @@ mod tests {
             db: Arc::new(nostr_memory::MemoryDatabase::bounded(
                 std::num::NonZeroUsize::new(100).unwrap(),
             )),
+            store: None,
         }
     }
 
@@ -1550,6 +1660,7 @@ mod tests {
         let (a, b) = (ns::Keys::generate(), ns::Keys::generate());
         let db = TitleSearch {
             inner: nostr_memory::MemoryDatabase::bounded(std::num::NonZeroUsize::new(100).unwrap()),
+            store: None,
         };
         let event = |keys: &ns::Keys, kind: u16, d: &str, title: &str, text: &str, at: u64| {
             ns::EventBuilder::new(ns::Kind::from(kind), text)

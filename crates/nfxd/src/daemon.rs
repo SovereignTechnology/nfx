@@ -85,7 +85,8 @@ pub struct Config {
     pub keys: Option<Keys>,
     pub store: PathBuf,
     /// The node's own state (iroh-blobs' index). Default: `<store>/.nfxd`. Kept on disk so
-    /// seeded files are imported by reference, not copied into memory.
+    /// seeded files are imported by reference, not copied into memory. When given, an
+    /// embedded relay also keeps the manifests it accepts in `relay-manifests` under it.
     pub state: Option<PathBuf>,
     /// Nostr relays (scoped relays, NFX-04).
     pub relays: Vec<String>,
@@ -998,10 +999,26 @@ impl Daemon {
                     stun_announcements: cfg.embed_relay_stun_ads,
                     seeder_lookup: cfg.embed_relay_lookup,
                 };
-                let relay = Arc::new(
-                    ScopedRelay::admitting(&namespaces, creators, may)
-                        .map_err(|e| Error::Config(format!("--allow-creator: {e}")))?,
-                );
+                let allow_err =
+                    |e: nfx_node::NodeError| Error::Config(format!("--allow-creator: {e}"));
+                // Only an explicit --state keeps manifests: the default one lives in the store.
+                let relay = Arc::new(match &cfg.state {
+                    Some(state) => {
+                        let dir = state.join("relay-manifests");
+                        let (relay, reload) =
+                            ScopedRelay::admitting_persisted(&namespaces, creators, may, &dir)
+                                .await
+                                .map_err(allow_err)?;
+                        crate::status!("nfxd: embedded relay: {reload}");
+                        for note in &reload.notes {
+                            crate::status!("nfxd: embedded relay: {note}");
+                        }
+                        relay
+                    }
+                    None => {
+                        ScopedRelay::admitting(&namespaces, creators, may).map_err(allow_err)?
+                    }
+                });
                 tasks.push(tokio::spawn(relay.clone().serve(listener)));
                 let url = format!("ws://{local}");
                 // The host speaks to its own relay through the same door (NFX-04 §7).
