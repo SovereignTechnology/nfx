@@ -188,7 +188,8 @@ level ("L2 + NFX-16") and passes the three `ratings*.json` vector files.
 
 STUN servers named over Nostr (NFX-10 §1) are optional too, and no level requires them: a
 client that uses them claims it beside a level ("L2 + NFX-10 §1 STUN") and passes
-`stun-announcement.json` as a reader and `stun-select.json`.
+`stun-select.json`. A client that reads announcements, to show the directory they form, also
+passes `stun-announcement.json` as a reader.
 
 ## 9. Canonical JSON (`canon`)
 
@@ -295,3 +296,7 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   covers a scoped relay that admits it (NFX-04 §1 as amended in place 2026-11-19); a client
   that uses STUN servers named over Nostr claims it beside a level. New vectors
   `stun-announcement.json` and `stun-select.json` (source `test-vectors/stunad.py`).
+- 2026-11-24 (ADR 0107) — NFX-10 §1 selects STUN servers from the creator's beacon only, so
+  a client that claims "NFX-10 §1 STUN" passes `stun-select.json`, whose cases change shape,
+  and passes `stun-announcement.json` only if it reads announcements. Kind 33478 is
+  unchanged.

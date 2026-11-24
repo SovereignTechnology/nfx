@@ -1,20 +1,23 @@
 //! STUN servers named over Nostr (NFX-10 §1): the STUN service announcement (kind 33478),
 //! which an operator who runs a STUN server signs with its own key, and the rules every
-//! client uses to pick STUN servers from what beacons and announcements name.
+//! client uses to pick STUN servers from what beacons name.
 //!
 //! STUN itself never travels over Nostr: it measures the public UDP mapping of the socket
 //! WebRTC uses, which only a datagram to an outside server can reveal. What Nostr carries is
-//! who runs STUN servers, and for which networks.
+//! who runs STUN servers, and for which networks. Announcements are a directory that people
+//! and operators read to choose servers to configure: no rule here takes an announced server.
 //!
 //! - [`StunAnnouncement::from_event`]: a reader's checks of an announcement at `now`.
 //! - [`tags`]: the tags a sender writes.
 //! - [`is_global_unicast`] and [`usable`]: the addresses a client may take from Nostr.
-//! - [`select`]: which STUN servers a client uses, its own first, at most [`MAX_SERVERS`].
-//! - [`fallback`]: what it may add for a peer it signals with when its own returned no mapping.
+//! - [`select`]: which STUN servers a client uses, its own first, then those the video's
+//!   creator names, at most [`MAX_SERVERS`].
+//! - [`fallback`]: what it may add for a peer it signals with when no server it asks returned
+//!   a mapping.
 //!
 //! Pure: callers pass `now`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 
 use crate::beacon::is_stun_addr;
@@ -36,9 +39,10 @@ pub const MAX_NETWORKS: usize = 8;
 /// Most STUN servers a client uses in all, its own included (NFX-10 §1's abuse bound).
 pub const MAX_SERVERS: usize = 4;
 
-/// The lowest port the fallback ([`fallback`]) asks: a beacon from any key must not aim a
-/// client's request at a well-known service (DNS, NTP, SNMP, and so on).
-pub const MIN_FALLBACK_PORT: u16 = 1024;
+/// The lowest port a client asks at an address named over Nostr ([`select`], [`fallback`]): a
+/// beacon must not aim a client's request at a well-known service (DNS, NTP, SNMP, and so
+/// on). A client's own servers may use any port.
+pub const MIN_PORT: u16 = 1024;
 
 /// An announcement that passed NFX-10 §1 at time `now`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,19 +201,30 @@ pub fn usable(addr: &str) -> bool {
             .is_ok_and(|a| is_global_unicast(a.ip()))
 }
 
-/// The STUN servers a client uses (NFX-10 §1), at most `max` (NFX-10 says [`MAX_SERVERS`]):
+/// Whether a client may ask `addr` when Nostr names it: [`usable`], on a port of at least
+/// [`MIN_PORT`].
+fn askable(addr: &str) -> bool {
+    usable(addr)
+        && addr
+            .parse::<SocketAddr>()
+            .is_ok_and(|a| a.port() >= MIN_PORT)
+}
+
+/// The STUN servers a client uses routinely (NFX-10 §1), at most `max` (NFX-10 says
+/// [`MAX_SERVERS`]):
 ///
 /// 1. its own (`own`, as given, each once) first;
-/// 2. then the servers named over Nostr, as `(key, addr)` pairs (a beacon's signer and each
-///    address of its `stun` endpoint; an announcement's operator and its `d`): only
-///    [`usable`] addresses, not its own, each counted once per distinct key, ranked by that
-///    count (most first; ties in the order first named);
-/// 3. a server named by one key alone is taken only when the client has none of its own and
-///    no named server has two keys or more: a lone stranger's key adds no server beside a
-///    better one.
-pub fn select<'a, I>(own: &[String], named: I, max: usize) -> Vec<String>
+/// 2. then the servers the video's creator names (`creator_named`), in the order heard, each
+///    once: only [`usable`] addresses on a port of at least [`MIN_PORT`] that are not its own.
+///
+/// `creator_named` are the addresses of the `stun` endpoints of the live, verified beacons of
+/// the video whose signer is its creator: the key in the beacon's `a` tag, the manifest's
+/// author. A caller passes nothing else. No beacon of another key adds a server, however many
+/// keys name it (keys are free), and no announcement ever does. A seeder's server is reached
+/// only through [`fallback`].
+pub fn select<'a, I>(own: &[String], creator_named: I, max: usize) -> Vec<String>
 where
-    I: IntoIterator<Item = (&'a str, &'a str)>,
+    I: IntoIterator<Item = &'a str>,
 {
     let mut out: Vec<String> = Vec::new();
     for s in own {
@@ -217,49 +232,28 @@ where
             out.push(s.clone());
         }
     }
-    // By first naming: the address and the distinct keys that name it.
-    // Indexed by address, so the work grows with the pairs, not with their square.
-    let mut ranked: Vec<(&str, BTreeSet<&str>)> = Vec::new();
-    let mut at: BTreeMap<&str, usize> = BTreeMap::new();
-    for (key, addr) in named {
-        if !usable(addr) || own.iter().any(|o| o == addr) {
-            continue;
-        }
-        match at.get(addr) {
-            Some(&i) => {
-                ranked[i].1.insert(key);
-            }
-            None => {
-                at.insert(addr, ranked.len());
-                ranked.push((addr, BTreeSet::from([key])));
-            }
-        }
-    }
-    // Stable: equal counts keep the order first named.
-    ranked.sort_by_key(|(_, keys)| core::cmp::Reverse(keys.len()));
-    let corroborated = ranked.first().is_some_and(|(_, k)| k.len() >= 2);
-    let lone_ok = own.is_empty() && !corroborated;
-    for (addr, keys) in ranked {
+    for addr in creator_named {
         if out.len() >= max {
             break;
         }
-        if keys.len() >= 2 || lone_ok {
+        if askable(addr) && !own.iter().any(|o| o == addr) && !out.iter().any(|o| o == addr) {
             out.push(addr.to_owned());
         }
     }
     out
 }
 
-/// The fallback when a client's own STUN failed (NFX-10 §1): the servers it may also ask, as
-/// `(seeder, addr)`, in the order of `beacons`. Empty unless the client has servers of its own
-/// (`own`) and none of those it asks (`in_use`, its own included) returned a mapping
-/// (`mapped` false). `beacons` are the (seeder, address) pairs of the `stun` endpoints of the
-/// live, verified beacons of this video, in the order heard, and never an announcement's.
+/// The fallback when no STUN server a client asks returned a mapping (NFX-10 §1): the servers
+/// it may also ask, as `(seeder, addr)`, in the order of `beacons`. Empty once one of those it
+/// asks (`own` and `in_use`) returned a mapping (`mapped` true). A client that asks no server
+/// at all (both empty) has no mapping once gathering ends, so it may fall back too. `beacons`
+/// are the (seeder, address) pairs of the `stun` endpoints of the live, verified beacons of
+/// this video, in the order heard, the creator's included, and never an announcement's.
 /// `signaling` are the addresses of the candidates in the SDP of the peers it is signaling
 /// with: a session key says nothing of who signed a beacon (NFX-10 §6.4), so a server counts
 /// only at an address the client's ICE agent was given anyway. At most one per seeder, only
-/// [`usable`] addresses on a port of at least [`MIN_FALLBACK_PORT`] that it does not ask yet,
-/// and at most `max` servers in all.
+/// [`usable`] addresses on a port of at least [`MIN_PORT`] that it does not ask yet, and at
+/// most `max` servers in all.
 pub fn fallback<'a, I>(
     own: &[String],
     in_use: &[String],
@@ -272,7 +266,7 @@ where
     I: IntoIterator<Item = (&'a str, &'a str)>,
 {
     let mut out = Vec::new();
-    if own.is_empty() || mapped {
+    if mapped {
         return out;
     }
     let mut asked: BTreeSet<&str> = own.iter().chain(in_use).map(String::as_str).collect();
@@ -281,12 +275,12 @@ where
         if asked.len() >= max {
             break;
         }
-        if seeders.contains(seeder) || asked.contains(addr) || !usable(addr) {
+        if seeders.contains(seeder) || asked.contains(addr) || !askable(addr) {
             continue;
         }
         if addr
             .parse::<SocketAddr>()
-            .is_ok_and(|a| a.port() >= MIN_FALLBACK_PORT && signaling.contains(&a.ip()))
+            .is_ok_and(|a| signaling.contains(&a.ip()))
         {
             seeders.insert(seeder);
             asked.insert(addr);
@@ -476,43 +470,24 @@ mod tests {
     }
 
     #[test]
-    fn selection_ranks_by_distinct_keys_and_takes_a_lone_key_last() {
+    fn selection_takes_the_creator_s_servers_after_its_own() {
         let own = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
-        let (x, y, z) = ("1.1.1.1:3478", "1.0.0.1:3478", "8.8.8.8:3478");
-        // Ranked by distinct keys; a key counts once however often it names a server.
-        let named = [
-            ("k1", x),
-            ("k1", y),
-            ("k2", y),
-            ("k3", y),
-            ("k2", x),
-            ("k4", z),
-            ("k5", z),
-            ("k6", z),
-            ("k6", z),
-        ];
-        assert_eq!(select(&[], named, MAX_SERVERS), [y, z, x]);
-        // A lone key: used when nothing better exists, never beside something better.
-        assert_eq!(select(&[], [("k1", x)], MAX_SERVERS), [x]);
-        assert_eq!(select(&[], [("k1", x), ("k1", x)], MAX_SERVERS), [x]);
+        let (x, y) = ("1.1.1.1:3478", "1.0.0.1:3478");
+        // The creator's servers, in the order named, each once.
+        assert_eq!(select(&[], [y, x, y], MAX_SERVERS), [y, x]);
+        assert_eq!(select(&own(&["9.9.9.9:3478"]), [x], 4), ["9.9.9.9:3478", x]);
+        // Its own first, each once, and a named server that is its own counts as its own.
+        assert_eq!(select(&own(&[x, x]), [x, y], 4), [x, y]);
+        // Nothing named, nothing added.
+        assert!(select(&[], [], MAX_SERVERS).is_empty());
+        // At most `max` in all, the client's own first.
+        let many: Vec<String> = (11..=16).map(|i| format!("1.1.1.{i}:3478")).collect();
         assert_eq!(
-            select(&[], [("k1", x), ("k2", y), ("k3", y)], MAX_SERVERS),
-            [y]
-        );
-        assert_eq!(
-            select(&own(&["9.9.9.9:3478"]), [("k1", x)], 4),
-            ["9.9.9.9:3478"]
-        );
-        // At most `max` in all, the client's own first and never twice.
-        let many: Vec<(String, String)> = (1..=6)
-            .flat_map(|i| {
-                let a = format!("1.1.1.{}:3478", 10 + i);
-                [(format!("a{i}"), a.clone()), (format!("b{i}"), a)]
-            })
-            .collect();
-        let pairs = many.iter().map(|(k, a)| (k.as_str(), a.as_str()));
-        assert_eq!(
-            select(&own(&["1.1.1.14:3478"]), pairs, MAX_SERVERS),
+            select(
+                &own(&["1.1.1.14:3478"]),
+                many.iter().map(String::as_str),
+                MAX_SERVERS
+            ),
             [
                 "1.1.1.14:3478",
                 "1.1.1.11:3478",
@@ -520,15 +495,20 @@ mod tests {
                 "1.1.1.13:3478"
             ]
         );
-        // Private, loopback and non-canonical addresses are refused, however many keys.
+        // Private, loopback, documentation and non-canonical addresses are refused, and a
+        // port below 1024; the client's own are its choice, on any port.
         let refused = [
             "10.0.0.1:3478",
             "127.0.0.1:3478",
             "[::1]:3478",
+            "203.0.113.10:3478",
             "203.0.113.010:3478",
+            "1.1.1.1:53",
+            "1.1.1.1:1023",
         ];
-        let pairs = refused.iter().flat_map(|a| [("k1", *a), ("k2", *a)]);
-        assert!(select(&[], pairs, MAX_SERVERS).is_empty());
+        assert!(select(&[], refused, MAX_SERVERS).is_empty());
+        assert_eq!(select(&[], ["1.1.1.1:1024"], 4), ["1.1.1.1:1024"]);
+        assert_eq!(select(&own(&["9.9.9.9:53"]), [], 4), ["9.9.9.9:53"]);
     }
 
     #[test]
@@ -537,13 +517,28 @@ mod tests {
         let (x, y) = ("1.1.1.1:3478", "1.0.0.1:3478");
         let at = |s: &str| -> IpAddr { s.parse().unwrap() };
         let ips = [at("1.1.1.1")];
-        // The trigger, on and off; no server of its own, no fallback.
+        // The trigger, on and off; a client that asks no server at all falls back too.
         assert_eq!(
             fallback(&own, &own, false, [("s1", x)], &ips, MAX_SERVERS),
             [("s1", x)]
         );
         assert!(fallback(&own, &own, true, [("s1", x)], &ips, MAX_SERVERS).is_empty());
-        assert!(fallback(&[], &[], false, [("s1", x)], &ips, MAX_SERVERS).is_empty());
+        assert_eq!(
+            fallback(&[], &[], false, [("s1", x)], &ips, MAX_SERVERS),
+            [("s1", x)]
+        );
+        // With none of its own, the creator's servers it asks count toward the 4 and are not
+        // added again.
+        let creators: Vec<String> = (1..=3).map(|i| format!("9.9.9.{i}:3478")).collect();
+        let more = [
+            ("creator", "9.9.9.1:3478"),
+            ("s1", x),
+            ("s2", "1.1.1.1:19302"),
+        ];
+        assert_eq!(
+            fallback(&[], &creators, false, more, &ips, MAX_SERVERS),
+            [("s1", x)]
+        );
         // A seeder not being signaled with.
         assert!(fallback(&own, &own, false, [("s1", y)], &ips, MAX_SERVERS).is_empty());
         // One per seeder, whichever of its addresses match.

@@ -1,6 +1,7 @@
 //! Unit tests of the mesh endpoint's signaling rules, driven event by event with no relay:
 //! the glare rule, the bounds, failure and backoff, and leaving a room; and the STUN servers it
-//! learns from beacons and announcements (NFX-10 §1).
+//! learns from beacons, the creator's for routine use and any seeder's for the fallback
+//! (NFX-10 §1).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -17,8 +18,8 @@ use tokio::net::UdpSocket;
 
 use super::book::{OfferBackoff, PENDING_OFFERS_PER_ROOM, PresenceBook, SeenIds, SenderLimiter};
 use super::{
-    Control, MAX_PEERS_PER_ROOM, MeshStatus, NAMED_PER_KEY, NostrStun, RoomState, State, Stun,
-    StunFallback,
+    Control, MAX_NAMED, MAX_PEERS_PER_ROOM, MeshStatus, NAMED_PER_KEY, NostrStun, RoomState, State,
+    Stun, StunFallback,
 };
 use crate::nostr::to_nostr;
 use crate::rtc_serve::{Swarm, Uploader};
@@ -79,7 +80,6 @@ async fn state(max_peers: usize) -> State {
             limiter: SenderLimiter::default(),
             backoff: OfferBackoff::default(),
             reannounce_at: now,
-            network: "nfx:mainnet:1".into(),
             video: "nfx:mainnet:1:salt-flats-dusk".into(),
         },
     );
@@ -665,14 +665,17 @@ async fn behind_a_dnat_full_ice_connects_through_the_public_address_it_is_told()
 
 // ---- STUN from Nostr (NFX-10 §1) -----------------------------------------------------------
 
+/// The secret of the watched video's creator: `beacon(CREATOR, …)` is the creator's own beacon.
+const CREATOR: u8 = 0x51;
+
 /// The manifest address the STUN tests watch (the room's video, `SWARM`).
 fn watched_a() -> String {
-    let creator = nfx_proto::event::public_key_hex(&[0x51; 32]).unwrap();
+    let creator = nfx_proto::event::public_key_hex(&[CREATOR; 32]).unwrap();
     format!("38504:{creator}:nfx:mainnet:1:salt-flats-dusk")
 }
 
-/// A beacon for the watched video by seeder `k`, with an `https` endpoint and, when `stun` is
-/// not empty, a `stun` endpoint naming it.
+/// A beacon for the watched video by seeder `k` (the creator when `k` is [`CREATOR`]), with an
+/// `https` endpoint and, when `stun` is not empty, a `stun` endpoint naming it.
 fn beacon(k: u8, stun: &[&str], created_at: u64) -> Event {
     use nfx_proto::beacon::{BeaconContent, Chunks, Endpoint};
     use nfx_proto::namespace::VideoAddr;
@@ -706,7 +709,7 @@ fn beacon(k: u8, stun: &[&str], created_at: u64) -> Event {
     .unwrap()
 }
 
-/// An announcement of `addr` for `network` by operator `k`.
+/// An announcement of `addr` for `network` by operator `k`: valid, and never read by the mesh.
 fn announcement(k: u8, addr: &str, network: &str, created_at: u64) -> Event {
     let nets = [nfx_proto::namespace::Namespace::parse(network).unwrap()];
     let tags = nfx_proto::stun::tags(addr, &nets, created_at, 3600).unwrap();
@@ -724,98 +727,85 @@ fn servers(s: &State) -> Vec<String> {
     s.stun.servers.iter().map(ToString::to_string).collect()
 }
 
-/// Beacons of a watched video and announcements for the room's network name STUN servers;
-/// the endpoint asks those NFX-10 §1's rules pick: ranked by distinct keys, a lone key only
-/// when nothing better exists, global unicast and of its family only, at most 4, the
-/// configured ones first.
+/// Only a beacon the video's creator signed names STUN servers the endpoint asks beside its
+/// own (NFX-10 §1): global unicast, on a port of 1024 or above, of its family, at most 4, the
+/// configured ones first. Strangers' beacons add none, however many keys name a server, and
+/// announcements are not even read.
 #[tokio::test]
-async fn stun_servers_named_over_nostr_are_picked_by_the_rules() {
+async fn only_the_creator_s_beacon_names_the_stun_servers_it_asks() {
     let mut s = state(16).await;
     s.nostr_stun = Some(NostrStun::default());
     s.nostr_stun.as_mut().unwrap().watched.insert(watched_a());
     let now = unix_now();
     let (x, y) = ("1.1.1.1:3478", "1.0.0.1:3478");
 
-    // A lone seeder's beacon: nothing better exists, so it is used.
-    feed(&mut s, &beacon(1, &[x], now));
+    // Two keys that are not the creator's name a server, then a third: none is asked (keys
+    // are free). Nor one that announcements name, the creator's own key's included.
+    feed(&mut s, &beacon(1, &[y], now));
+    feed(&mut s, &beacon(2, &[y], now));
+    assert!(servers(&s).is_empty());
+    feed(&mut s, &beacon(3, &[y], now));
+    for k in [4, 5, CREATOR] {
+        feed(&mut s, &announcement(k, y, "nfx:mainnet:1", now));
+    }
+    assert!(servers(&s).is_empty());
+    // The creator's beacon names one: it is asked, at once.
+    feed(&mut s, &beacon(CREATOR, &[x], now));
     assert_eq!(servers(&s), [x]);
-    // Asked at once.
     assert!(
         s.stun
             .pending
             .values()
             .any(|(server, _, _)| server.to_string() == x)
     );
-    // Two operators announce another: the corroborated one wins, the lone one is dropped.
-    feed(&mut s, &announcement(2, y, "nfx:mainnet:1", now));
-    feed(&mut s, &announcement(3, y, "nfx:mainnet:1", now));
-    assert_eq!(servers(&s), [y]);
-    // A second key for the first: both are corroborated, first heard first.
-    feed(&mut s, &announcement(4, x, "nfx:mainnet:1", now));
-    assert_eq!(servers(&s), [x, y]);
-    // Ignored: another network's announcement; a beacon of a video not watched (it is
-    // checked by its `a` before its signature); a private server however many keys name it
-    // (a beacon may name one; NFX-10 §1 refuses it as a client); another family.
-    let z = "8.8.8.8:3478";
-    feed(&mut s, &announcement(5, z, "nfx:testnet:1", now));
-    feed(&mut s, &announcement(6, z, "nfx:testnet:1", now));
-    let mut other = beacon(7, &[z], now);
+    // Not even the creator's: a port below 1024, a private address (a beacon may name one;
+    // NFX-10 §1 refuses it as a client), another family. Nor a beacon of a video not watched
+    // (it is checked by its `a` before its signature).
+    let refused = ["1.0.0.2:53", "10.0.0.1:3478", "[2606:4700::1111]:3478", x];
+    feed(&mut s, &beacon(CREATOR, &refused, now + 1));
+    assert_eq!(servers(&s), [x]);
+    let mut other = beacon(CREATOR, &["8.8.8.8:3478"], now + 2);
     other.tags[1][1] = other.tags[1][1].replace("salt-flats-dusk", "other");
     feed(&mut s, &other);
-    feed(&mut s, &beacon(8, &["10.0.0.1:3478"], now));
-    feed(&mut s, &beacon(9, &["10.0.0.1:3478"], now));
-    feed(
-        &mut s,
-        &announcement(10, "[2606:4700::1111]:3478", "nfx:mainnet:1", now),
-    );
-    feed(
-        &mut s,
-        &announcement(11, "[2606:4700::1111]:3478", "nfx:mainnet:1", now),
-    );
-    assert_eq!(servers(&s), [x, y]);
-    // A seeder's newer beacon without a `stun` endpoint withdraws what it named: x is down
-    // to one key, so it goes beside y, which still has two.
-    feed(&mut s, &beacon(1, &[], now + 1));
-    assert_eq!(servers(&s), [y]);
+    assert_eq!(servers(&s), [x]);
+    // The creator's newer beacon without a `stun` endpoint withdraws what it named...
+    feed(&mut s, &beacon(CREATOR, &[], now + 3));
+    assert!(servers(&s).is_empty());
     // ...and its older beacon, replayed, changes nothing.
-    feed(&mut s, &beacon(1, &[x], now - 5));
-    assert_eq!(servers(&s), [y]);
-    // At most 4 in all, the configured ones first: with one of its own, lone keys add nothing.
+    feed(&mut s, &beacon(CREATOR, &[x], now - 5));
+    assert!(servers(&s).is_empty());
+    // At most 4 in all, the configured ones first.
     let own: SocketAddr = "9.9.9.9:3478".parse().unwrap();
     s.stun.configured = vec![own];
-    for (k, a) in [
-        (20, "1.1.1.21:3478"),
-        (22, "1.1.1.22:3478"),
-        (24, "1.1.1.23:3478"),
-    ] {
-        feed(&mut s, &announcement(k, a, "nfx:mainnet:1", now));
-        feed(&mut s, &announcement(k + 1, a, "nfx:mainnet:1", now));
-    }
+    let four = [
+        "1.1.1.21:3478",
+        "1.1.1.22:3478",
+        "1.1.1.23:3478",
+        "1.1.1.24:3478",
+    ];
+    feed(&mut s, &beacon(CREATOR, &four, now + 4));
     let got = servers(&s);
-    assert_eq!(got.len(), 4, "{got:?}");
-    assert_eq!(got[0], own.to_string());
-    assert!(
-        !got.iter().any(|a| a == x),
-        "x is named by one key alone: {got:?}"
-    );
+    assert_eq!(got, ["9.9.9.9:3478", four[0], four[1], four[2]]);
     assert_eq!(s.status.lock().unwrap().stun, got, "the status names them");
 
-    // One key holds at most NAMED_PER_KEY sources.
+    // A key that is not the creator's holds at most NAMED_PER_KEY sources; a creator's beacon
+    // is kept however many strangers' fill the table (there is one per video watched).
     let n = s.nostr_stun.as_mut().unwrap();
+    let source = |addr: &str, creator: bool| super::Named {
+        created_at: now,
+        expiration: now + 60,
+        heard: 0,
+        addrs: vec![addr.to_owned()],
+        creator,
+    };
     let before = n.named.len();
     let mut kept = 0;
     for i in 0..20u8 {
-        let a = format!("1.0.0.{}:3478", 100 + i);
+        let a = format!("38504:k:nfx:mainnet:1:v{i}");
         if n.note(
             "k",
-            format!("announcement {a}"),
-            super::Named {
-                created_at: now,
-                expiration: now + 60,
-                heard: 0,
-                addrs: vec![a],
-                networks: None,
-            },
+            a,
+            source(&format!("1.0.0.{}:3478", 100 + i), false),
             now,
         ) {
             kept += 1;
@@ -823,11 +813,28 @@ async fn stun_servers_named_over_nostr_are_picked_by_the_rules() {
     }
     assert_eq!(kept, NAMED_PER_KEY);
     assert_eq!(n.named.len(), before + NAMED_PER_KEY);
+    let mut i = 0u32;
+    while n.named.len() < MAX_NAMED {
+        let signer = format!("s{i}");
+        n.note(
+            &signer,
+            "38504:x:nfx:mainnet:1:v".into(),
+            source(y, false),
+            now,
+        );
+        i += 1;
+    }
+    let late = source(y, false);
+    assert!(!n.note("late", "38504:x:nfx:mainnet:1:v".into(), late, now));
+    let theirs = source("1.0.0.9:3478", true);
+    assert!(n.note("c", "38504:c:nfx:mainnet:1:w".into(), theirs, now));
+    assert!(n.creator_named(now).contains(&"1.0.0.9:3478".to_owned()));
+    // Strangers' sources never count as the creator's.
+    assert!(!n.creator_named(now).contains(&y.to_owned()));
     // And what expires is no longer counted.
     assert!(
-        n.pairs(now + 61, &std::collections::BTreeSet::new())
-            .iter()
-            .all(|(k, _)| k != "k")
+        !n.creator_named(now + 61)
+            .contains(&"1.0.0.9:3478".to_owned())
     );
 }
 
@@ -887,8 +894,8 @@ async fn a_learnt_server_s_private_mapping_is_never_offered() {
     );
 }
 
-/// Forgetting a video stops reading its beacons and drops what they named, and what
-/// announcements for its network (no other room's) named.
+/// Forgetting a video stops reading its beacons and drops what they named, the creator's and
+/// every seeder's.
 #[tokio::test]
 async fn forgetting_a_video_drops_the_stun_servers_its_beacons_named() {
     let mut s = state(16).await;
@@ -902,29 +909,23 @@ async fn forgetting_a_video_drops_the_stun_servers_its_beacons_named() {
             .contains(&watched_a())
     );
     let now = unix_now();
-    feed(&mut s, &beacon(1, &["1.1.1.1:3478"], now));
+    feed(&mut s, &beacon(CREATOR, &["1.1.1.1:3478"], now));
+    feed(&mut s, &beacon(2, &["1.0.0.1:3478"], now));
     assert_eq!(servers(&s), ["1.1.1.1:3478"]);
-    feed(
-        &mut s,
-        &announcement(2, "1.0.0.1:3478", "nfx:mainnet:1", now),
-    );
-    feed(
-        &mut s,
-        &announcement(3, "1.0.0.1:3478", "nfx:mainnet:1", now),
-    );
-    assert_eq!(servers(&s), ["1.0.0.1:3478"]);
+    assert_eq!(s.nostr_stun.as_ref().unwrap().named.len(), 2);
     s.control(Control::Forget(
         vec![room().pubkey().to_owned()],
         "nfx:mainnet:1:salt-flats-dusk".into(),
     ))
     .await;
-    assert!(s.nostr_stun.as_ref().unwrap().watched.is_empty());
+    let n = s.nostr_stun.as_ref().unwrap();
+    assert!(n.watched.is_empty() && n.named.is_empty());
     assert!(servers(&s).is_empty());
 }
 
-/// A seeder's first beacon heard may name no STUN server: it is kept until it expires, so its
-/// older beacon, replayed, does not name one again. A beacon with more `stun` endpoints than
-/// one counts at most 4 addresses.
+/// The creator's first beacon heard may name no STUN server: it is kept until it expires, so
+/// its older beacon, replayed, does not name one again. A beacon with more `stun` endpoints
+/// than one counts at most 4 addresses.
 #[tokio::test]
 async fn a_withdrawal_heard_first_holds_and_a_beacon_names_at_most_four() {
     use nfx_proto::beacon::{BeaconContent, Chunks, Endpoint};
@@ -933,8 +934,8 @@ async fn a_withdrawal_heard_first_holds_and_a_beacon_names_at_most_four() {
     s.nostr_stun = Some(NostrStun::default());
     s.nostr_stun.as_mut().unwrap().watched.insert(watched_a());
     let now = unix_now();
-    feed(&mut s, &beacon(1, &[], now));
-    feed(&mut s, &beacon(1, &["1.1.1.1:3478"], now - 5));
+    feed(&mut s, &beacon(CREATOR, &[], now));
+    feed(&mut s, &beacon(CREATOR, &["1.1.1.1:3478"], now - 5));
     assert!(servers(&s).is_empty());
     // Many endpoints in one beacon: the first 4 distinct addresses count, no more.
     let endpoints: Vec<Endpoint> = (0..6u8)
@@ -952,21 +953,17 @@ async fn a_withdrawal_heard_first_holds_and_a_beacon_names_at_most_four() {
         accepts_mints: vec![],
         free: true,
     };
-    let tags = nfx_proto::beacon::tags(&watched_a(), now, 120).unwrap();
+    let tags = nfx_proto::beacon::tags(&watched_a(), now + 1, 120).unwrap();
     let many = Event::sign(
-        &[2; 32],
-        now,
+        &[CREATOR; 32],
+        now + 1,
         nfx_proto::KIND_BEACON,
         tags,
         content.to_content(),
     )
     .unwrap();
     feed(&mut s, &many);
-    let held = s
-        .nostr_stun
-        .as_mut()
-        .unwrap()
-        .pairs(now, &std::collections::BTreeSet::new());
+    let held = s.nostr_stun.as_mut().unwrap().creator_named(now);
     assert_eq!(held.len(), super::MAX_STUN_ADDRS, "{held:?}");
 }
 
@@ -1016,8 +1013,8 @@ fn asks(s: &State, server: SocketAddr) -> bool {
 
 /// NFX-10 §1's fallback: with its own STUN silent, the node asks the server of a seeder's
 /// beacon only at the address of a peer it is signaling with, never one an announcement
-/// alone names; the mapping goes to that peer's connection only; and its own server's mapping
-/// ends it.
+/// names (announcements are not even read); the mapping goes to that peer's connection only;
+/// and its own server's mapping ends it.
 #[tokio::test]
 async fn own_stun_failing_falls_back_only_to_a_signaled_seeder_s_server() {
     let mut s = state(16).await;
@@ -1035,7 +1032,8 @@ async fn own_stun_failing_falls_back_only_to_a_signaled_seeder_s_server() {
     );
     let (_, lo) = peers();
 
-    // A beacon names one server, an operator announces another; rule 3 adds neither.
+    // A seeder's beacon names one server, an operator announces another: neither is asked
+    // beside its own (the seeder is not the creator).
     feed(&mut s, &beacon(1, &["1.1.1.1:3478"], now));
     feed(
         &mut s,
@@ -1043,7 +1041,7 @@ async fn own_stun_failing_falls_back_only_to_a_signaled_seeder_s_server() {
     );
     assert_eq!(servers(&s), [own.to_string()]);
 
-    // A peer at the announced server's address: an announcement alone is never taken.
+    // A peer at the announced server's address: an announcement is never taken.
     feed(&mut s, &offer_at(&lo[0], "8.8.8.8:50000", now, 1));
     assert!(s.fallback.servers.is_empty() && !asks(&s, announced));
     // A peer at another address: that seeder is not one it is signaling with.
@@ -1120,4 +1118,42 @@ async fn the_fallback_keeps_to_four_servers_and_to_peers_still_there() {
     }
     s.select_fallback(Instant::now(), false);
     assert!(s.fallback.peers.is_empty() && s.fallback.servers.is_empty());
+}
+
+/// With no STUN server of its own, the node falls back too (NFX-10 §1): asking none, it has no
+/// mapping once gathering ends, so a seeder's server at a signaled peer's address is asked.
+/// The creator's server, asked and silent, leaves it so; its mapping ends the fallback.
+#[tokio::test]
+async fn with_no_stun_server_of_its_own_it_falls_back_too() {
+    let mut s = state(16).await;
+    s.base = "192.168.1.5:40000".parse().unwrap();
+    s.nostr_stun = Some(NostrStun::default());
+    s.nostr_stun.as_mut().unwrap().watched.insert(watched_a());
+    let now = unix_now();
+    let (seeder, creator): (SocketAddr, SocketAddr) = (
+        "1.1.1.1:3478".parse().unwrap(),
+        "1.0.0.1:3478".parse().unwrap(),
+    );
+    let (_, lo) = peers();
+    assert!(s.no_mapping(), "no server at all, and gathering has ended");
+
+    // A seeder's beacon is not asked beside nothing; at a signaled peer's address it is.
+    feed(&mut s, &beacon(1, &["1.1.1.1:3478"], now));
+    assert!(servers(&s).is_empty());
+    feed(&mut s, &offer_at(&lo[0], "1.1.1.1:50000", now, 1));
+    let got: Vec<SocketAddr> = s.fallback.servers.iter().map(|(_, a)| *a).collect();
+    assert_eq!(got, [seeder]);
+    assert!(asks(&s, seeder));
+
+    // The creator names a server: asked beside it, and while it is silent the fallback holds.
+    feed(&mut s, &beacon(CREATOR, &["1.0.0.1:3478"], now));
+    assert_eq!(servers(&s), [creator.to_string()]);
+    assert!(asks(&s, creator));
+    assert_eq!(s.fallback.servers.len(), 1);
+    assert!(s.no_mapping());
+
+    // The creator's server reports a mapping: the fallback ends.
+    stun_reply(&mut s, creator, [5, 6, 7, 8], 42000);
+    assert!(!s.no_mapping());
+    assert!(s.fallback.servers.is_empty() && s.fallback.mapped.is_empty());
 }

@@ -6,10 +6,12 @@
 //! With an [`Announce`], it also publishes a STUN service announcement (kind 33478, signed
 //! by the operator's key) to the given Nostr relays: the server's public `ip:port` (`d`) for
 //! each network (`n`), living [`MAX_TTL`] (24 h) and signed again every [`REANNOUNCE_EVERY`]
-//! (12 h), sooner ([`ANNOUNCE_RETRY`]) when no relay took it. Clients of those networks may
-//! then find the server through Nostr and ask it for their public mapping (NFX-10 §1). On
-//! stop nothing is withdrawn: the last announcement expires within 24 h, and a client that
-//! asks a server that is gone loses one candidate, nothing more.
+//! (12 h), sooner ([`ANNOUNCE_RETRY`]) when no relay took it. The announcements are a
+//! directory: the people and operators of those networks find the server through Nostr and
+//! may configure it (a page's own STUN servers, a node's `--mesh-stun`, a creator's beacon);
+//! no client asks a server only because it is announced (NFX-10 §1). On stop nothing is
+//! withdrawn: the last announcement expires within 24 h, and a client that asks a server that
+//! is gone loses one candidate, nothing more.
 //!
 //! **Privacy.** Every client that asks learns nothing but its own address; the operator
 //! learns each client's IP address and when it asked. The announcement names the server's

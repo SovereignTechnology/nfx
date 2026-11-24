@@ -1108,8 +1108,9 @@ fn stun_announcements_read_strictly() {
     assert_eq!((valid, invalid), (5, 38));
 }
 
-/// NFX-10 §1: the selection rules give exactly the vector's servers, and the addresses a
-/// client may take from Nostr are exactly the vector's.
+/// NFX-10 §1: the selection rules give exactly the vector's servers, from the addresses of
+/// the beacons the creator signed (no other key's, and no announcement, is even an input),
+/// and the addresses a client may take from Nostr are exactly the vector's.
 #[test]
 fn stun_selection_matches_the_vectors() {
     let v = vector!("stun-select.json");
@@ -1120,16 +1121,20 @@ fn stun_selection_matches_the_vectors() {
     for case in v["cases"].as_array().unwrap() {
         let name = str_of(case, "name");
         let own = strings(&case["own"]);
-        let named: Vec<Vec<String>> = serde_json::from_value(case["named"].clone()).unwrap();
-        let pairs = named.iter().map(|p| (p[0].as_str(), p[1].as_str()));
+        let creator = str_of(case, "creator");
+        let beacons: Vec<Vec<String>> = serde_json::from_value(case["beacons"].clone()).unwrap();
+        let creator_named = beacons
+            .iter()
+            .filter(|p| p[0] == creator)
+            .map(|p| p[1].as_str());
         assert_eq!(
-            stun::select(&own, pairs, max),
+            stun::select(&own, creator_named, max),
             strings(&case["selected"]),
             "{name}"
         );
         n += 1;
     }
-    assert_eq!(n, 16);
+    assert_eq!(n, 21);
     for a in strings(&v["global_unicast"]["yes"]) {
         assert!(stun::usable(&a), "{a}");
     }
@@ -1166,7 +1171,7 @@ fn stun_fallback_matches_the_vectors() {
         .collect();
         assert_eq!(got, strings(&case["selected"]), "{name}");
     }
-    assert_eq!(cases.len(), 17);
+    assert_eq!(cases.len(), 22);
 }
 
 /// NFX-17: an ask and a tell reproduce byte for byte from the throwaway keys, and the tell

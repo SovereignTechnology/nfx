@@ -16,10 +16,11 @@ await init();                                   // or init({ wasmUrl }) if the W
 const m = await resolveManifest(a, relays);     // NFX-02 over Nostr, deletions applied
 const stop = watchEndpoints(a, m.namespace, relays, (e) => {
   // e.origins: https bases, e.trackers: wss trackers, from the newest live beacon per
-  // seeder; e.stunNamed: stun: URLs named by beacons and STUN service announcements, with
-  // how many keys name each; e.originSources: the origins with the renditions beacons
-  // claim each serves (hints); e.availability: how many seeders hold each rendition
-  // selectStun(own, e.stunNamed): the STUN servers to use (NFX-10 §1's rules)
+  // seeder; e.stunCreator: stun: URLs the video's creator names in its own beacon;
+  // e.stunSeeders: each seeder's, for the fallback; e.originSources: the origins with the
+  // renditions beacons claim each serves (hints); e.availability: how many seeders hold each
+  // rendition
+  // selectStun(own, e.stunCreator): the STUN servers to use (NFX-10 §1's rules)
 });
 const session = await open(videoElement, {
   manifestJson: m.event,                        // verified again in WASM
@@ -84,25 +85,29 @@ level. `availability` (who holds which rendition, by distinct seeder key, newest
 each, at most 64) lets a page rank renditions; the test page shows it and leaves the levels
 to `open()`.
 
-STUN servers come from Nostr too (NFX-10 §1): from the `stun` endpoints of live beacons and
-from STUN service announcements for the video's network (kind 33478: an operator who runs a
-STUN server, `nfxd stun --announce` say, signs one with its own key). `watchEndpoints` reads
-both on the page's relays and counts each server once per key. `selectStun(own, named)`
-picks a session's servers by the rules every NFX client uses: the page's own first, then
-named servers that are global unicast, most keys first; one named by a lone key only when
-the page has none of its own and none is named by two; at most 4 in all. So Nostr never
-makes a viewer ask more than 4 STUN servers, or one at an address that is not public. Every
-STUN server learns the viewer's address, and keys are free: a page that must not tell
-strangers who watches passes only its own servers to `open()`.
+STUN servers come from Nostr too (NFX-10 §1), from the `stun` endpoints of live beacons.
+`watchEndpoints` reads them on the page's relays. `stunCreator` holds those of the creator's
+own beacon: one signed by the key in its `a` tag, the manifest's author. `selectStun(own,
+creator)` picks a session's servers by the rules every NFX client uses: the page's own
+first, then the creator's that are global unicast and on a port of 1024 or above; at most 4
+in all. A beacon signed by any other key adds none, however many keys name a server: keys
+are free, so a count proves nothing. STUN service announcements (kind 33478, which `nfxd
+stun --announce` signs) are a directory for people and operators; the player never reads
+them. So routine selection never makes a viewer ask more than 4 STUN servers, or one the
+creator did not name. The fallback below, only when the page asks for it, adds a seeder's
+server at the address of a peer it already signals with. Every STUN server learns the
+viewer's address: a page that must tell no one but its own servers who watches passes only
+its own servers to `open()` and no `stunFallback`.
 
-If the page's own STUN fails, Nostr signaling can fall back, when asked to:
-`signaling: { kind: 'nostr', relays, stunFallback: { own, seeders: () => endpoints.stunSeeders } }`.
-Once a gathering ends with no server-reflexive candidate, a later connection to a peer also
-asks one STUN server per seeder, for that connection only, if a live beacon names it and its
-IP address is among the candidates that same peer's SDP gave (a session key is not linked
-to a beacon key, so the address is the test). Never a server only an announcement names or on
-a port below 1024, and at most 4 STUN servers in the session. `selectStunFallback` is the same rule as a pure
-function.
+If no STUN server the session asks finds a mapping, or it asks none, Nostr signaling can
+fall back, when asked to:
+`signaling: { kind: 'nostr', relays, stunFallback: { own, seeders: () => endpoints.stunSeeders } }`
+(`own`: the page's own STUN URLs, 0 to 4). Once a gathering ends with no server-reflexive
+candidate, a later connection to a peer also asks one STUN server per seeder, for that
+connection only, if a live beacon names it and its IP address is among the candidates that
+same peer's SDP gave (a session key is not linked to a beacon key, so the address is the
+test). Never a server only an announcement names or on a port below 1024, and at most 4
+STUN servers in the session. `selectStunFallback` is the same rule as a pure function.
 
 `signaling` is how mesh peers find each other and exchange offers, answers and ICE
 candidates, wired into the engine in one place (`src/mesh.ts` `engineSignaling`). Two kinds:

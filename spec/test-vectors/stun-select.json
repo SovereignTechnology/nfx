@@ -1,12 +1,14 @@
 {
-  "description": "NFX-10 §1 STUN server selection. 'own' are the client's own servers; 'named' are [key, address] pairs, in the order heard, from live beacons' stun endpoints (the beacon's signer) and live announcements (the operator). 'selected' is what the client uses, in order: its own first, each once; then the named addresses that are global unicast in canonical form and not its own, ranked by the number of distinct keys naming each (most first, ties in the order first named); an address named by one key only when the client has none of its own and no named address has two or more keys; at most 'max' in all. 'global_unicast' lists addresses a client may and may not take from Nostr. Global unicast here also excludes the documentation blocks (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32, 3fff::/20), which route nowhere; beacons that name them in a stun endpoint stay valid beacons (beacon-stun.json), and only this selection refuses them. 'fallback' is what a client may add when its own STUN failed: nothing unless it has servers of its own ('own') and none it asks ('in_use', its own included) gave a mapping ('mapped' false); then, in the order of 'beacons' ([seeder, address] of live verified beacons of the video), at most one server per seeder, global unicast, on a port of 1024 or above, not asked yet, whose IP address is in 'signaling' (the addresses of the candidates of the peers it is signaling with), while it asks fewer than 'max' in all. 'announced' servers are never taken on their own. No traffic is ever sent to an address of a vector.",
+  "description": "NFX-10 §1 STUN server selection. In 'cases', 'own' are the client's own servers; 'beacons' are [signer, address] pairs, in the order heard, from the stun endpoints of the live, verified beacons of the video; 'creator' is the video's creator, the key in those beacons' 'a' tag and the manifest's author; 'announced' are [operator, address] pairs of live announcements for the network. 'selected' is what the client uses, in order: its own first, each once; then the addresses of the beacons the creator signed, in the order heard, each once, that are global unicast in canonical form, on a port of 1024 or above, and not its own; at most 'max' in all. A beacon signed by any other key adds nothing, however many keys name a server, and an announced server is never taken, whoever signed it. 'global_unicast' lists addresses a client may and may not take from Nostr. Global unicast here also excludes the documentation blocks (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32, 3fff::/20), which route nowhere; beacons that name them in a stun endpoint stay valid beacons (beacon-stun.json), and only this selection refuses them. 'fallback' is what a client may add when no server it asks ('in_use', its own included; none at all is allowed) gave a mapping ('mapped' false), whether or not it has servers of its own ('own'): in the order of 'beacons' ([seeder, address] of live verified beacons of the video, the creator's included), at most one server per seeder, global unicast, on a port of 1024 or above, not asked yet, whose IP address is in 'signaling' (the addresses of the candidates of the peers it is signaling with), while it asks fewer than 'max' in all. 'announced' servers are never taken. No traffic is ever sent to an address of a vector.",
   "max": 4,
   "cases": [
     {
       "name": "nothing",
       "reason": "no server of its own and none named",
       "own": [],
-      "named": [],
+      "creator": "creator",
+      "beacons": [],
+      "announced": [],
       "selected": []
     },
     {
@@ -16,7 +18,9 @@
         "9.9.9.9:3478",
         "1.1.1.1:3478"
       ],
-      "named": [],
+      "creator": "creator",
+      "beacons": [],
+      "announced": [],
       "selected": [
         "9.9.9.9:3478",
         "1.1.1.1:3478"
@@ -29,7 +33,9 @@
         "9.9.9.9:3478",
         "9.9.9.9:3478"
       ],
-      "named": [],
+      "creator": "creator",
+      "beacons": [],
+      "announced": [],
       "selected": [
         "9.9.9.9:3478"
       ]
@@ -44,7 +50,9 @@
         "1.1.1.14:3478",
         "1.1.1.15:3478"
       ],
-      "named": [],
+      "creator": "creator",
+      "beacons": [],
+      "announced": [],
       "selected": [
         "1.1.1.11:3478",
         "1.1.1.12:3478",
@@ -53,114 +61,187 @@
       ]
     },
     {
-      "name": "lone-key-alone",
-      "reason": "a server named by one key, when nothing better exists",
+      "name": "own-any-port",
+      "reason": "the port floor is for servers named over Nostr: the client's own are its choice",
+      "own": [
+        "9.9.9.9:53"
+      ],
+      "creator": "creator",
+      "beacons": [],
+      "announced": [],
+      "selected": [
+        "9.9.9.9:53"
+      ]
+    },
+    {
+      "name": "creator-alone",
+      "reason": "the creator's beacon names a server: it is used",
       "own": [],
-      "named": [
+      "creator": "creator",
+      "beacons": [
         [
-          "k1",
+          "creator",
           "1.1.1.1:3478"
         ]
       ],
+      "announced": [],
       "selected": [
         "1.1.1.1:3478"
       ]
     },
     {
-      "name": "lone-key-twice",
-      "reason": "a key counts once, however often it names a server",
-      "own": [],
-      "named": [
-        [
-          "k1",
-          "1.1.1.1:3478"
-        ],
-        [
-          "k1",
-          "1.1.1.1:3478"
-        ],
-        [
-          "k1",
-          "1.0.0.1:3478"
-        ]
-      ],
-      "selected": [
-        "1.1.1.1:3478",
-        "1.0.0.1:3478"
-      ]
-    },
-    {
-      "name": "lone-key-beside-own",
-      "reason": "one key adds no server beside the client's own",
+      "name": "creator-beside-own",
+      "reason": "the creator's server comes after the client's own",
       "own": [
         "9.9.9.9:3478"
       ],
-      "named": [
+      "creator": "creator",
+      "beacons": [
         [
-          "k1",
+          "creator",
           "1.1.1.1:3478"
         ]
       ],
-      "selected": [
-        "9.9.9.9:3478"
-      ]
-    },
-    {
-      "name": "lone-key-beside-corroborated",
-      "reason": "one key adds no server beside one named by two",
-      "own": [],
-      "named": [
-        [
-          "k1",
-          "1.1.1.1:3478"
-        ],
-        [
-          "k2",
-          "1.0.0.1:3478"
-        ],
-        [
-          "k3",
-          "1.0.0.1:3478"
-        ]
-      ],
-      "selected": [
-        "1.0.0.1:3478"
-      ]
-    },
-    {
-      "name": "corroborated-beside-own",
-      "reason": "a server named by two keys comes after the client's own",
-      "own": [
-        "9.9.9.9:3478"
-      ],
-      "named": [
-        [
-          "k1",
-          "1.1.1.1:3478"
-        ],
-        [
-          "k2",
-          "1.1.1.1:3478"
-        ],
-        [
-          "k3",
-          "1.0.0.1:3478"
-        ]
-      ],
+      "announced": [],
       "selected": [
         "9.9.9.9:3478",
         "1.1.1.1:3478"
       ]
     },
     {
-      "name": "ranked-by-distinct-keys",
-      "reason": "most keys first; ties in the order first named",
+      "name": "creator-in-order-heard",
+      "reason": "the creator's servers in the order heard, each once",
       "own": [],
-      "named": [
+      "creator": "creator",
+      "beacons": [
+        [
+          "creator",
+          "1.0.0.1:3478"
+        ],
+        [
+          "creator",
+          "1.1.1.1:3478"
+        ],
+        [
+          "creator",
+          "1.0.0.1:3478"
+        ]
+      ],
+      "announced": [],
+      "selected": [
+        "1.0.0.1:3478",
+        "1.1.1.1:3478"
+      ]
+    },
+    {
+      "name": "creator-equal-to-own",
+      "reason": "a server the creator names that is the client's own is its own, once",
+      "own": [
+        "1.1.1.1:3478"
+      ],
+      "creator": "creator",
+      "beacons": [
+        [
+          "creator",
+          "1.1.1.1:3478"
+        ],
+        [
+          "creator",
+          "1.0.0.1:3478"
+        ]
+      ],
+      "announced": [],
+      "selected": [
+        "1.1.1.1:3478",
+        "1.0.0.1:3478"
+      ]
+    },
+    {
+      "name": "creator-well-known-port-refused",
+      "reason": "a named server's port is 1024 or above, even the creator's: a beacon must not aim a client at a well-known service such as DNS",
+      "own": [],
+      "creator": "creator",
+      "beacons": [
+        [
+          "creator",
+          "1.1.1.1:53"
+        ],
+        [
+          "creator",
+          "1.1.1.1:1023"
+        ],
+        [
+          "creator",
+          "1.1.1.1:1024"
+        ]
+      ],
+      "announced": [],
+      "selected": [
+        "1.1.1.1:1024"
+      ]
+    },
+    {
+      "name": "stranger-one-key",
+      "reason": "a beacon signed by a key that is not the creator's adds no server, even when nothing else is named",
+      "own": [],
+      "creator": "creator",
+      "beacons": [
+        [
+          "k1",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "announced": [],
+      "selected": []
+    },
+    {
+      "name": "strangers-two-keys",
+      "reason": "two keys that are not the creator's add no server: keys are free, so a count of them proves nothing",
+      "own": [],
+      "creator": "creator",
+      "beacons": [
         [
           "k1",
           "1.1.1.1:3478"
         ],
+        [
+          "k2",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "announced": [],
+      "selected": []
+    },
+    {
+      "name": "strangers-three-keys",
+      "reason": "nor do three, or any number",
+      "own": [],
+      "creator": "creator",
+      "beacons": [
+        [
+          "k1",
+          "1.0.0.1:3478"
+        ],
+        [
+          "k2",
+          "1.0.0.1:3478"
+        ],
+        [
+          "k3",
+          "1.0.0.1:3478"
+        ]
+      ],
+      "announced": [],
+      "selected": []
+    },
+    {
+      "name": "strangers-beside-the-creator",
+      "reason": "only the creator's server is used, however many other keys name another",
+      "own": [
+        "9.9.9.9:3478"
+      ],
+      "creator": "creator",
+      "beacons": [
         [
           "k1",
           "1.0.0.1:3478"
@@ -174,29 +255,74 @@
           "1.0.0.1:3478"
         ],
         [
-          "k2",
+          "creator",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "announced": [],
+      "selected": [
+        "9.9.9.9:3478",
+        "1.1.1.1:3478"
+      ]
+    },
+    {
+      "name": "announcement-only",
+      "reason": "a server only announcements name is never used, however many operators announce it",
+      "own": [],
+      "creator": "creator",
+      "beacons": [],
+      "announced": [
+        [
+          "op1",
           "1.1.1.1:3478"
         ],
         [
-          "k4",
-          "8.8.8.8:3478"
+          "op2",
+          "1.1.1.1:3478"
         ],
         [
-          "k5",
-          "8.8.8.8:3478"
+          "op3",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "selected": []
+    },
+    {
+      "name": "announcement-by-the-creator",
+      "reason": "an announcement is never used, even one the creator's key signed",
+      "own": [],
+      "creator": "creator",
+      "beacons": [],
+      "announced": [
+        [
+          "creator",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "selected": []
+    },
+    {
+      "name": "announcement-beside-the-creator",
+      "reason": "the creator's beacon counts; an announcement does not",
+      "own": [],
+      "creator": "creator",
+      "beacons": [
+        [
+          "creator",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "announced": [
+        [
+          "op1",
+          "1.0.0.1:3478"
         ],
         [
-          "k6",
-          "8.8.8.8:3478"
-        ],
-        [
-          "k6",
-          "8.8.8.8:3478"
+          "op2",
+          "1.0.0.1:3478"
         ]
       ],
       "selected": [
-        "1.0.0.1:3478",
-        "8.8.8.8:3478",
         "1.1.1.1:3478"
       ]
     },
@@ -206,56 +332,34 @@
       "own": [
         "9.9.9.9:3478"
       ],
-      "named": [
+      "creator": "creator",
+      "beacons": [
         [
-          "k1-0",
+          "creator",
           "1.1.1.11:3478"
         ],
         [
-          "k2-0",
-          "1.1.1.11:3478"
-        ],
-        [
-          "k1-1",
+          "creator",
           "1.1.1.12:3478"
         ],
         [
-          "k2-1",
-          "1.1.1.12:3478"
-        ],
-        [
-          "k1-2",
+          "creator",
           "1.1.1.13:3478"
         ],
         [
-          "k2-2",
-          "1.1.1.13:3478"
-        ],
-        [
-          "k1-3",
+          "creator",
           "1.1.1.14:3478"
         ],
         [
-          "k2-3",
-          "1.1.1.14:3478"
-        ],
-        [
-          "k1-4",
+          "creator",
           "1.1.1.15:3478"
         ],
         [
-          "k2-4",
-          "1.1.1.15:3478"
-        ],
-        [
-          "k1-5",
-          "1.1.1.16:3478"
-        ],
-        [
-          "k2-5",
+          "creator",
           "1.1.1.16:3478"
         ]
       ],
+      "announced": [],
       "selected": [
         "9.9.9.9:3478",
         "1.1.1.11:3478",
@@ -264,367 +368,182 @@
       ]
     },
     {
-      "name": "named-equal-to-own",
-      "reason": "a named server that is the client's own is its own, once",
-      "own": [
-        "1.1.1.1:3478"
-      ],
-      "named": [
-        [
-          "k1",
-          "1.1.1.1:3478"
-        ],
-        [
-          "k2",
-          "1.1.1.1:3478"
-        ],
-        [
-          "k3",
-          "1.0.0.1:3478"
-        ],
-        [
-          "k4",
-          "1.0.0.1:3478"
-        ]
-      ],
-      "selected": [
-        "1.1.1.1:3478",
-        "1.0.0.1:3478"
-      ]
-    },
-    {
       "name": "ipv6",
       "reason": "a global unicast IPv6 server",
       "own": [],
-      "named": [
+      "creator": "creator",
+      "beacons": [
         [
-          "k1",
-          "[2606:4700::1111]:3478"
-        ],
-        [
-          "k2",
+          "creator",
           "[2606:4700::1111]:3478"
         ]
       ],
+      "announced": [],
       "selected": [
         "[2606:4700::1111]:3478"
       ]
     },
     {
       "name": "documentation-refused",
-      "reason": "documentation addresses (RFC 5737, RFC 3849, RFC 9637) route nowhere: never taken from Nostr, however many keys name them, and a lone key's routable server is taken instead",
+      "reason": "documentation addresses (RFC 5737, RFC 3849, RFC 9637) route nowhere: never taken from Nostr, even from the creator, whose routable server is taken",
       "own": [],
-      "named": [
+      "creator": "creator",
+      "beacons": [
         [
-          "k1",
+          "creator",
           "192.0.2.1:3478"
         ],
         [
-          "k2",
-          "192.0.2.1:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "198.51.100.7:3478"
         ],
         [
-          "k2",
-          "198.51.100.7:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "203.0.113.10:3478"
         ],
         [
-          "k2",
-          "203.0.113.10:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "[2001:db8::1]:3478"
         ],
         [
-          "k2",
-          "[2001:db8::1]:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "[2001:db8:ffff::1]:3478"
         ],
         [
-          "k2",
-          "[2001:db8:ffff::1]:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "[3fff::1]:3478"
         ],
         [
-          "k2",
-          "[3fff::1]:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "[3fff:fff:ffff::1]:3478"
         ],
         [
-          "k2",
-          "[3fff:fff:ffff::1]:3478"
-        ],
-        [
-          "k3",
+          "creator",
           "1.1.1.1:3478"
         ]
       ],
+      "announced": [],
       "selected": [
         "1.1.1.1:3478"
       ]
     },
     {
       "name": "not-public-refused",
-      "reason": "named addresses that are not global unicast, or not canonical, are never taken, however many keys name them",
+      "reason": "named addresses that are not global unicast, or not canonical, are never taken, even from the creator",
       "own": [],
-      "named": [
+      "creator": "creator",
+      "beacons": [
         [
-          "k1",
+          "creator",
           "10.0.0.1:3478"
         ],
         [
-          "k2",
-          "10.0.0.1:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "127.0.0.1:3478"
         ],
         [
-          "k2",
-          "127.0.0.1:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "192.168.1.1:3478"
         ],
         [
-          "k2",
-          "192.168.1.1:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "100.64.0.1:3478"
         ],
         [
-          "k2",
-          "100.64.0.1:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "169.254.1.1:3478"
         ],
         [
-          "k2",
-          "169.254.1.1:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "172.16.0.1:3478"
         ],
         [
-          "k2",
-          "172.16.0.1:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "192.0.0.1:3478"
         ],
         [
-          "k2",
-          "192.0.0.1:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "198.18.0.1:3478"
         ],
         [
-          "k2",
-          "198.18.0.1:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "224.0.0.1:3478"
         ],
         [
-          "k2",
-          "224.0.0.1:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "255.255.255.255:3478"
         ],
         [
-          "k2",
-          "255.255.255.255:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "0.0.0.0:3478"
         ],
         [
-          "k2",
-          "0.0.0.0:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "[::1]:3478"
         ],
         [
-          "k2",
-          "[::1]:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "[fe80::1]:3478"
         ],
         [
-          "k2",
-          "[fe80::1]:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "[fd00::1]:3478"
         ],
         [
-          "k2",
-          "[fd00::1]:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "[ff02::1]:3478"
         ],
         [
-          "k2",
-          "[ff02::1]:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "1.1.1.01:3478"
         ],
         [
-          "k2",
-          "1.1.1.01:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "[::ffff:1.1.1.1]:3478"
         ],
         [
-          "k2",
-          "[::ffff:1.1.1.1]:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "1.1.1.1:0"
         ],
         [
-          "k2",
-          "1.1.1.1:0"
-        ],
-        [
-          "k1",
+          "creator",
           "stun.example:3478"
         ],
         [
-          "k2",
-          "stun.example:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "stun:1.1.1.1:3478"
         ],
         [
-          "k2",
-          "stun:1.1.1.1:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "192.0.2.1:3478"
         ],
         [
-          "k2",
-          "192.0.2.1:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "198.51.100.7:3478"
         ],
         [
-          "k2",
-          "198.51.100.7:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "203.0.113.10:3478"
         ],
         [
-          "k2",
-          "203.0.113.10:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "[2001:db8::1]:3478"
         ],
         [
-          "k2",
-          "[2001:db8::1]:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "[2001:db8:ffff::1]:3478"
         ],
         [
-          "k2",
-          "[2001:db8:ffff::1]:3478"
-        ],
-        [
-          "k1",
+          "creator",
           "[3fff::1]:3478"
         ],
         [
-          "k2",
-          "[3fff::1]:3478"
-        ],
-        [
-          "k1",
-          "[3fff:fff:ffff::1]:3478"
-        ],
-        [
-          "k2",
+          "creator",
           "[3fff:fff:ffff::1]:3478"
         ]
       ],
+      "announced": [],
       "selected": []
-    },
-    {
-      "name": "not-public-beside-a-lone-key",
-      "reason": "a refused address does not count as something better",
-      "own": [],
-      "named": [
-        [
-          "k1",
-          "10.0.0.1:3478"
-        ],
-        [
-          "k2",
-          "10.0.0.1:3478"
-        ],
-        [
-          "k3",
-          "1.1.1.1:3478"
-        ]
-      ],
-      "selected": [
-        "1.1.1.1:3478"
-      ]
     }
   ],
   "fallback": [
@@ -676,7 +595,7 @@
     },
     {
       "name": "no-server-of-its-own",
-      "reason": "a client with none of its own has rule 3, not this",
+      "reason": "a client that asks no STUN server at all has no mapping once gathering ends: the fallback applies",
       "own": [],
       "in_use": [],
       "mapped": false,
@@ -690,7 +609,137 @@
       "signaling": [
         "1.1.1.1"
       ],
+      "selected": [
+        "1.1.1.1:3478"
+      ]
+    },
+    {
+      "name": "no-own-the-creator-s-failed",
+      "reason": "none of its own, and the creator's server it asks gave no mapping: that server is not added again, a seeder's may be",
+      "own": [],
+      "in_use": [
+        "8.8.8.8:3478"
+      ],
+      "mapped": false,
+      "beacons": [
+        [
+          "creator",
+          "8.8.8.8:3478"
+        ],
+        [
+          "s1",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.1.1.1",
+        "8.8.8.8"
+      ],
+      "selected": [
+        "1.1.1.1:3478"
+      ]
+    },
+    {
+      "name": "no-own-announcement-only",
+      "reason": "with none of its own, an announced server at a signaled address is still never taken",
+      "own": [],
+      "in_use": [],
+      "mapped": false,
+      "beacons": [],
+      "announced": [
+        [
+          "op1",
+          "1.1.1.1:3478"
+        ],
+        [
+          "op2",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "signaling": [
+        "1.1.1.1"
+      ],
       "selected": []
+    },
+    {
+      "name": "no-own-seeder-not-signaled",
+      "reason": "with none of its own, still only a seeder it signals with",
+      "own": [],
+      "in_use": [],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.0.0.1"
+      ],
+      "selected": []
+    },
+    {
+      "name": "no-own-well-known-port-refused",
+      "reason": "with none of its own, still never a port below 1024",
+      "own": [],
+      "in_use": [],
+      "mapped": false,
+      "beacons": [
+        [
+          "s1",
+          "1.1.1.1:53"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.1.1.1"
+      ],
+      "selected": []
+    },
+    {
+      "name": "no-own-at-most-four",
+      "reason": "with none of its own, at most 4 in all, one per seeder",
+      "own": [],
+      "in_use": [],
+      "mapped": false,
+      "beacons": [
+        [
+          "s0",
+          "1.1.1.11:3478"
+        ],
+        [
+          "s1",
+          "1.1.1.12:3478"
+        ],
+        [
+          "s2",
+          "1.1.1.13:3478"
+        ],
+        [
+          "s3",
+          "1.1.1.14:3478"
+        ],
+        [
+          "s4",
+          "1.1.1.15:3478"
+        ]
+      ],
+      "announced": [],
+      "signaling": [
+        "1.1.1.11",
+        "1.1.1.12",
+        "1.1.1.13",
+        "1.1.1.14",
+        "1.1.1.15"
+      ],
+      "selected": [
+        "1.1.1.11:3478",
+        "1.1.1.12:3478",
+        "1.1.1.13:3478",
+        "1.1.1.14:3478"
+      ]
     },
     {
       "name": "seeder-not-signaled",
