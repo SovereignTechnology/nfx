@@ -187,8 +187,7 @@ It bounds what open sources can do:
   has not asked before, then **one more every 30 s**, preferring hosts first heard on a relay it has
   not yet taken one from. Tier 4, when there is one, is tried before any host past the first 6.
 - For the ranking of NFX-03 §5, all keys that name only open sources count together as **one
-  seeder**. The same holds for STUN servers and trackers (NFX-10 §1): one named only by such keys
-  counts as named by one key.
+  seeder**.
 - It uses only the `https` endpoints of pool entries (§4.1).
 - It SHOULD open its beacon subscription when the video's page opens, without publishing anything,
   so that beacons heard before Play are already in hand.
@@ -351,6 +350,10 @@ checks both.
 ## 8. Open issues
 
 **Before any freeze:**
+
+- STUN servers and trackers named in beacons are counted by key (NFX-10 §1), and fresh keys
+  answering an ask can reach any count. Whether NFX-10 §1 should count keys that name only open
+  sources (§4.2) as one is a question for NFX-10, not for this document.
 
 - Registering kind 20465 in `nostr-protocol/registry-of-kinds`. It was unclaimed in the NIPs table
   and that registry on 2026-11-22.
