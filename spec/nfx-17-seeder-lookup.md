@@ -188,7 +188,9 @@ It bounds what open sources can do:
   not yet taken one from. Tier 4, when there is one, is tried before any host past the first 6.
 - For the ranking of NFX-03 §5, all keys that name only open sources count together as **one
   seeder**.
-- It uses only the `https` endpoints of pool entries (§4.1).
+- It uses only the `https` endpoints of pool entries (§4.1). STUN servers follow NFX-10 §1, which
+  uses routinely only the one named by the creator's own beacon, so keys answering an ask cannot
+  choose a viewer's STUN server.
 - It SHOULD open its beacon subscription when the video's page opens, without publishing anything,
   so that beacons heard before Play are already in hand.
 
@@ -233,11 +235,11 @@ A viewer:
   | Bytes that do not verify | The source is **stopped for the session** (NFX-05 §4) |
   | A network error, or an HTTP error other than the next row | A **strike** |
   | `404` for a rendition outside the source's firm claim | Nothing: the viewer goes on to another source that claims it |
-  | A give-up (no bytes, or too slow) | The source moves to the end of its tier |
+  | A give-up (no bytes, or too slow) | An open source moves behind tier 4 and every open source that has not given up; any other source to the end of its tier |
 
 - stops a source that has **2 strikes in its last 6 requests**. A source stopped once may be used
-  again after **30 s**, in its tier's place. One stopped twice, or for bytes that do not verify, is
-  never used again ahead of a source not yet asked;
+  again after **30 s**, in its tier's place. One stopped twice is never used again ahead of a source
+  not yet asked. One that sent bytes that do not verify is never used again in the session;
 - when every source has failed a file, waits for a new source or for 10 s, whichever comes first,
   then starts again with the sources stopped by strikes eligible;
 - sends **no `Referer`** to any source (`referrerPolicy: no-referrer`);
@@ -351,9 +353,6 @@ checks both.
 
 **Before any freeze:**
 
-- STUN servers and trackers named in beacons are counted by key (NFX-10 §1), and fresh keys
-  answering an ask can reach any count. Whether NFX-10 §1 should count keys that name only open
-  sources (§4.2) as one is a question for NFX-10, not for this document.
 
 - Registering kind 20465 in `nostr-protocol/registry-of-kinds`. It was unclaimed in the NIPs table
   and that registry on 2026-11-22.
