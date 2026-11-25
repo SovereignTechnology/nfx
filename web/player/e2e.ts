@@ -32,6 +32,16 @@
  *   must still offer 720p and 360p (each with its rendition id) and play; asked for 720p alone
  *   (`&renditions=720p`), it must play 720p from that origin rather than skip it.
  *
+ *   4K: a fourth video, a 3840x2160 clip packaged in 2160p and 720p (the ladder's top tier, 16 Mbit/s
+ *   H.264), played by address with 2160p asked for first: the page must offer both levels, start
+ *   on 2160p and play past 2 s with every file verified. It guards the top of the ladder: the
+ *   rendition ids, level matching, the hash list and the fetcher at a 20 Mbit/s-class bitrate.
+ *
+ *   Real 4K content: `NFX_E2E_4K_SOURCE=<a 2160p mp4>` replaces the synthetic clip with an excerpt
+ *   of that file (`NFX_E2E_4K_START` and `NFX_E2E_4K_SECONDS`, default 30 and 20, cut without
+ *   re-encoding), and `NFX_E2E_4K_WATCH=<seconds>` plays that far before the playback quality (frames
+ *   shown and dropped) is read. The source's frame rate is kept (60 fps stays 60).
+ *
  * Usage: npm run build && npm run e2e
  * Needs `cargo` (builds nfxd and nfx-package) and ffmpeg (`NFX_FFMPEG`, else PATH).
  * Every process it starts runs in its own process group, and only those are killed.
@@ -118,6 +128,30 @@ async function recorder(upstream: string): Promise<{ url: string; requests: stri
     }),
   );
   return { url: `http://127.0.0.1:${port}`, requests };
+}
+
+/**
+ * A withholding origin (NFX-17 §4.3): proxies `upstream`, but for every listed segment sends
+ * headers and then nothing, holding the connection open.
+ */
+async function withholder(upstream: string, segments: Set<string>): Promise<string> {
+  const port = await listen(
+    createServer((req, res) => {
+      const name = (req.url ?? '').split('/').pop() ?? '';
+      if (segments.has(name.split('.')[0] ?? '')) {
+        res.writeHead(200, { 'content-type': 'video/mp4', 'access-control-allow-origin': '*' });
+        res.flushHeaders();
+        return; // never a byte of the body
+      }
+      const up = httpRequest(`${upstream}${req.url}`, { method: req.method }, (r) => {
+        res.writeHead(r.statusCode ?? 502, r.headers);
+        r.pipe(res);
+      });
+      up.on('error', () => res.writeHead(502).end());
+      up.end();
+    }),
+  );
+  return `http://127.0.0.1:${port}`;
 }
 
 /** A lying origin: proxies `upstream`, flipping the first byte of every listed segment. */
@@ -304,16 +338,34 @@ async function main(): Promise<void> {
   if (list3.renditions.map((r) => r.id).sort().join() !== '360p,720p') throw new Error(`video 3 renditions: ${JSON.stringify(list3.renditions)}`);
   const files720of3 = renditionFiles(join(pkg3, 'store'), list3, '720p');
 
+  // A fourth video in 4K: a 3840x2160 clip, two seconds a segment, packaged in 2160p and 720p.
+  const clip4 = join(work, 'clip4.mp4');
+  const real4k = process.env.NFX_E2E_4K_SOURCE;
+  if (real4k) {
+    run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-ss', process.env.NFX_E2E_4K_START ?? '30', '-i', real4k, '-t', process.env.NFX_E2E_4K_SECONDS ?? '20', '-c', 'copy', clip4]);
+  } else {
+    run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=3840x2160:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=990:sample_rate=48000', '-t', '6', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', clip4]);
+  }
+  const pkg4 = join(work, 'pkg4');
+  run(bin('nfx-package'), [clip4, '--video', 'nfx:mainnet:1:player-e2e-4k', '--out', pkg4, '--renditions', '2160p,720p', '--preset', 'veryfast']);
+  const meta4 = JSON.parse(readFileSync(join(pkg4, 'nfx.json'), 'utf8')) as { root: string; video: string };
+  const list4 = JSON.parse(readFileSync(join(pkg4, 'store', meta4.root), 'utf8')) as HashListFile;
+  if (list4.renditions.map((r) => r.id).sort().join() !== '2160p,720p') throw new Error(`video 4 renditions: ${JSON.stringify(list4.renditions)}`);
+  for (const f of readdirSync(join(pkg4, 'store'))) {
+    if (!existsSync(join(pkg, 'store', f))) cpSync(join(pkg4, 'store', f), join(pkg, 'store', f));
+  }
+
   const key = join(work, 'node.key');
   const pubkey = run(bin('nfxd'), ['key', 'new', key]).split('\n')[0]!;
   const a = `38504:${pubkey}:${meta.video}`;
   const a2 = `38504:${pubkey}:${meta2.video}`;
   const a3 = `38504:${pubkey}:${meta3.video}`;
+  const a4 = `38504:${pubkey}:${meta4.video}`;
   const tls = await tlsProxy();
   const whole = await staticOrigin(join(pkg3, 'store'), [meta3.root]);
   const node = await start(
     bin('nfxd'),
-    ['run', '--key', key, '--store', join(pkg, 'store'), '--seed', a, '--seed', `${a2}#360p`, '--embed-relay', '127.0.0.1:0', '--origin', '127.0.0.1:0', '--https-url', tls.url],
+    ['run', '--key', key, '--store', join(pkg, 'store'), '--seed', a, '--seed', `${a2}#360p`, '--seed', a4, '--embed-relay', '127.0.0.1:0', '--origin', '127.0.0.1:0', '--https-url', tls.url],
     [/embedded relay: (ws:\/\/\S+)/, /origin: (http:\/\/\S+?)\/?\s/],
   );
   const relay = node.matches[0]![1]!;
@@ -323,6 +375,8 @@ async function main(): Promise<void> {
   if (published !== a) throw new Error(`published ${published}, expected ${a}`);
   const published2 = run(bin('nfxd'), ['publish', '--key', key, '--relay', relay, '--package', pkg2, '--title', 'Player e2e, held renditions']).trim();
   if (published2 !== a2) throw new Error(`published ${published2}, expected ${a2}`);
+  const published4 = run(bin('nfxd'), ['publish', '--key', key, '--relay', relay, '--package', pkg4, '--title', 'Player e2e, 4K']).trim();
+  if (published4 !== a4) throw new Error(`published ${published4}, expected ${a4}`);
   const published3 = run(bin('nfxd'), ['publish', '--key', key, '--relay', relay, '--package', pkg3, '--title', 'Player e2e, a hostile beacon']).trim();
   if (published3 !== a3) throw new Error(`published ${published3}, expected ${a3}`);
   // The stranger: another key, its own copy of the store and state, the creator's relay. It
@@ -340,7 +394,7 @@ async function main(): Promise<void> {
     let text = '';
     node.child.stderr!.on('data', (c: Buffer) => {
       text += c.toString();
-      if (text.includes(`${a}: Seeding`) && text.includes(`${a2}: Seeding`)) {
+      if (text.includes(`${a}: Seeding`) && text.includes(`${a2}: Seeding`) && text.includes(`${a4}: Seeding`)) {
         clearTimeout(timer);
         ok();
       }
@@ -364,6 +418,7 @@ async function main(): Promise<void> {
   const segments = new Set(list.files.filter((f) => f.role === 'segment').map((f) => f.sha256));
   const player = await playerServer();
   const lying = await liar(origin, segments);
+  const holding = await withholder(origin, segments);
 
   const browser = await chromium.launch({
     headless: true,
@@ -464,7 +519,8 @@ async function main(): Promise<void> {
       !only360(beaconHeld) ||
       beaconHeld.renditions !== null ||
       JSON.stringify(beaconHeld.availability) !== JSON.stringify(wantAvailability) ||
-      JSON.stringify(beaconHeld.originSources) !== JSON.stringify([{ url: tls.url, renditions: ['360p'] }])
+      // The node is the video's creator: its origin is tier 1 (NFX-17 §4.2).
+      JSON.stringify(beaconHeld.originSources) !== JSON.stringify([{ url: tls.url, renditions: ['360p'], tier: 1 }])
     ) {
       throw new Error(`held renditions, from beacons: ${JSON.stringify(beaconHeld)}`);
     }
@@ -484,7 +540,8 @@ async function main(): Promise<void> {
     }
     // The hostile beacon: its narrowing claim reached the library as the origin's hint, and
     // was only a hint: both levels offered, and 720p played when asked for.
-    const wantHostileSources = JSON.stringify([{ url: whole.url, renditions: ['360p'] }]);
+    // A stranger's key: an open source, tier 3 (NFX-17 §4.2).
+    const wantHostileSources = JSON.stringify([{ url: whole.url, renditions: ['360p'], tier: 3 }]);
     if (
       !healthy(narrowed, meta3.root, whole.url) ||
       levelIds(narrowed) !== '360p@360,720p@720' ||
@@ -501,6 +558,34 @@ async function main(): Promise<void> {
     }
     for (const p of [fromBeacons, askedFirst, hostileAll, hostile720]) await p.context().close();
 
+    // 4K: by address, 2160p asked for first. The ladder's top tier (16 Mbit/s) plays: both levels
+    // are offered with their heights, the session starts on 2160p, and every file verified.
+    const fourKPage = await fresh();
+    await fourKPage.goto(`${player}/?a=${encodeURIComponent(a4)}&relay=${encodeURIComponent(relay)}&renditions=2160p,720p`);
+    const fourK = await settle(fourKPage, 240_000);
+    results.fourK = fourK;
+    const heights = fourK.levels.map((l: { id: string; height: number }) => `${l.id}@${l.height}`).sort().join();
+    if (!healthy(fourK, meta4.root, tls.url) || heights !== '2160p@2160,720p@720') {
+      throw new Error(`4K: ${JSON.stringify(fourK)}`);
+    }
+    // Files of the 2160p rendition itself were fetched and verified: its playlist, its init and
+    // at least one segment (the session started on it, as the page asked).
+    const files2160 = renditionFiles(join(pkg, 'store'), list4, '2160p');
+    const verified4k = await fourKPage.evaluate(() => (window as any).__nfx.verified as string[]);
+    const of2160 = verified4k.filter((sha) => files2160.shas.has(sha)).length;
+    results.fourKVerified2160 = of2160;
+    // Play on, as far as asked, then read what the browser did with the frames. Dropped frames
+    // here say what this machine's decoder managed (no GPU in a test VM), not what the network did.
+    const watch = Number(process.env.NFX_E2E_4K_WATCH ?? 0);
+    if (watch > 2) {
+      await fourKPage.waitForFunction((w: number) => (document.querySelector('video') as HTMLVideoElement).currentTime > w, watch, { timeout: (watch + 120) * 1000 });
+    }
+    results.fourKQuality = await fourKPage.evaluate(() => {
+      const v = document.querySelector('video') as HTMLVideoElement;
+      const q = v.getVideoPlaybackQuality();
+      return { size: `${v.videoWidth}x${v.videoHeight}`, playedTo: Math.round(v.currentTime * 10) / 10, shown: q.totalVideoFrames, dropped: q.droppedVideoFrames, errors: (window as any).__nfx.errors.length };
+    });
+    if (of2160 < 3) throw new Error(`4K: only ${of2160} files of the 2160p rendition verified: ${JSON.stringify(fourK)}`);
     // By origin and root (no beacon): `&renditions=360p` asks for nothing of 720p.
     const rec = await recorder(origin);
     const byRoot = (o: string, extra: string, r = meta2.root): string => `${player}/?origin=${encodeURIComponent(o)}&root=${r}${extra}`;
@@ -574,6 +659,24 @@ async function main(): Promise<void> {
     results.liar = { ...lied, rejected: lied.rejected.length };
     const allSegments = lied.rejected.every((sha: string | null) => sha !== null && segments.has(sha));
     if (lied.playing || lied.t !== 0 || lied.rejected.length === 0 || !allSegments) throw new Error(`lying origin: ${JSON.stringify(lied)}`);
+
+    // NFX-17 §4.3: with an honest origin beside it, the liar is left after its first bad
+    // segment and the video plays; a withholding origin, which serves the hash list and then
+    // sends nothing, is left after 4 s and the video plays too.
+    for (const [name, bad] of [['liarThenHonest', lying], ['withholderThenHonest', holding]] as const) {
+      const p = await context.newPage();
+      await p.goto(`${player}/?origin=${encodeURIComponent(bad)}&origin=${encodeURIComponent(origin)}&root=${meta.root}`);
+      await p.waitForFunction(() => (window as any).__nfx.playing && (document.querySelector('video') as HTMLVideoElement).currentTime > 2, null, { timeout: 90_000 });
+      const got = await p.evaluate(() => {
+        const s = (window as any).__nfx;
+        return { playing: s.playing, verified: s.verified.length, rejected: s.rejected.length, errors: s.errors, t: (document.querySelector('video') as HTMLVideoElement).currentTime };
+      });
+      results[name] = got;
+      // Both are configured sources, tried in the page's order: the bad one first.
+      const left = name === 'liarThenHonest' ? got.rejected > 0 : true;
+      if (!got.playing || got.t <= 2 || got.errors.length > 0 || !left) throw new Error(`${name}: ${JSON.stringify(got)}`);
+      await p.close();
+    }
     // The creator withdraws the video (NFX-02 §6): resolving it now fails, never plays.
     run(bin('nfxd'), ['delete', '--key', key, '--relay', relay, '--a', a]);
     const gone = await context.newPage();

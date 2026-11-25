@@ -9,7 +9,7 @@
 //! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--iroh-relay-ca <pem>]… [--relay-only]
 //!          [--iroh-bind <ip:port> [--iroh-external <ip:port>]…]
 //!          [--seed <a>[#<id>,…]]… [--fetch <a>[#<id>,…]]… [--pull <a>[#<id>,…]]… [--origin <addr:port>]
-//!          [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>]]
+//!          [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>] [--embed-relay-lookup]]
 //!          [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]…
 //!          [--stun <ip:port> [--stun-public <ip:port>]]
 //!          [--mesh-relay <wss url>… [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]… [--mesh-max-peers <n>]
@@ -86,6 +86,16 @@
 //! checks (a global unicast server, an expiration at most 24 h on), 12 an hour per key and 1024
 //! held at once, each kept until it expires; `--allow-creator` does not narrow them, since they
 //! name no video. Off by default.
+//!
+//! `--embed-relay-lookup` lets the embedded relay carry seeder lookup too (kind 20465, NFX-17
+//! §5): a viewer's ask and a seeder's answer, ephemeral, never stored, admitted only after full
+//! verification, rate-limited. `--allow-creator` narrows it to those creators' videos. Off by
+//! default.
+//!
+//! A node with a key answers seeder lookups (NFX-17 §3): when a viewer asks who seeds a video
+//! it is announcing, it answers at once with its signed beacon, within a budget per viewer,
+//! per video and overall. `--no-lookup` turns that off, and viewers then wait for the periodic
+//! beacon.
 //!
 //! `--embed-relay-stun-port <port>` says in the embedded relay's NIP-11 document
 //! (`nfx.stun_port`, NFX-04 §3 as amended 2026-11-24) that this host answers STUN Binding
@@ -193,7 +203,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>]] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]... [--mesh-max-peers <n>] [--mesh-stun-from-nostr=false]]
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>] [--embed-relay-lookup]] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]... [--mesh-max-peers <n>] [--mesh-stun-from-nostr=false]]
   nfxd stun --bind <ip:port> [--public <ip:port>] [--announce --key <file> --relay <url>... --network <ns>...]
 
   --mesh-relay runs the mesh endpoint (NFX-10 §6): browsers meet this node in the rooms of
@@ -214,6 +224,10 @@ const USAGE: &str = "usage:
   too: ephemeral, room proof checked, rate-limited per sender. Off by default.
   --embed-relay-stun-ads lets it carry STUN service announcements (kind 33478) for its
   networks: checked, rate-limited per key, kept until they expire. Off by default.
+  --embed-relay-lookup lets it carry seeder lookup (kind 20465): a viewer's ask and a seeder's
+  answer, verified, rate-limited, never stored. Off by default.
+  --no-lookup stops this node answering viewers who ask who seeds a video; they then wait for
+  its periodic beacon.
   --embed-relay-stun-port <port> (1024 to 65535) says in the relay's NIP-11 document
   (nfx.stun_port) that the host of its URL answers STUN on that UDP port, so pages that
   signal through it (with --embed-relay-mesh) ask it: the relay already sees their address.
@@ -384,6 +398,8 @@ async fn run(args: &[String]) -> Result<()> {
     let gossip = args.iter().any(|a| a == "--gossip");
     let embed_relay_mesh = args.iter().any(|a| a == "--embed-relay-mesh");
     let embed_relay_stun_ads = args.iter().any(|a| a == "--embed-relay-stun-ads");
+    let embed_relay_lookup = args.iter().any(|a| a == "--embed-relay-lookup");
+    let no_lookup = args.iter().any(|a| a == "--no-lookup");
     // On by default; `--mesh-stun-from-nostr=true` says so, `=false` turns it off.
     let no_mesh_stun_from_nostr = args.iter().any(|a| a == "--mesh-stun-from-nostr=false");
     let bare = [
@@ -391,6 +407,8 @@ async fn run(args: &[String]) -> Result<()> {
         "--gossip",
         "--embed-relay-mesh",
         "--embed-relay-stun-ads",
+        "--embed-relay-lookup",
+        "--no-lookup",
         "--mesh-stun-from-nostr=false",
         "--mesh-stun-from-nostr=true",
     ];
@@ -507,6 +525,8 @@ async fn run(args: &[String]) -> Result<()> {
         allow_creators: all(&f, "allow-creator"),
         embed_relay_mesh,
         embed_relay_stun_ads,
+        embed_relay_lookup,
+        no_lookup,
         embed_relay_stun_port: port(&f, "embed-relay-stun-port")?,
         no_mesh_stun_from_nostr,
         gossip,

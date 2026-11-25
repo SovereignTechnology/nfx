@@ -3,9 +3,12 @@
 // The player bundles p2p-media-loader-core 4.0.0 from its own TypeScript source, with one
 // patch: `signalingClientFactory`, a hook through which a stream's swarm uses a signaling
 // client the player supplies (Nostr, NFX-10 §6) in place of WebTorrent tracker clients;
-// and `onPeerConnect` handing over the peer's RTCPeerConnection (`PeerConnectDetails`), so
-// the stats panel can read its selected candidate pair (nfx #99). Nothing else in the engine
-// changes, and with no factory it behaves as published.
+// `onPeerConnect` handing over the peer's RTCPeerConnection (`PeerConnectDetails`), so
+// the stats panel can read its selected candidate pair (nfx #99); and, for NFX-17 §4.3,
+// `httpSegmentFetch`, through which the player's own fetcher picks each segment's source, and
+// `segmentFromOneSource`, which starts every attempt from the segment's first byte instead of
+// resuming from bytes another source sent. Nothing else in the engine changes, and with none
+// of these set it behaves as published.
 //
 // Before anything is written, every input is checked against engine/pin.json:
 //   - package-lock.json pins the npm tarball by the integrity (sha512) recorded there, which

@@ -37,9 +37,10 @@ use std::time::Duration;
 use iroh::RelayUrl;
 use nfx_node::bridge::{Bridge, BridgeConfig, MAX_PEERS_LIMIT, dialable};
 use nfx_node::gossip::{Announcer, Listener, envelope_wire};
+use nfx_node::lookup::Answerer;
 use nfx_node::mesh::{Mesh, MeshConfig, MeshStatus};
 use nfx_node::node::{Node, NodeConfig};
-use nfx_node::nostr::{BEACON_TTL, ManifestQuery, Relays};
+use nfx_node::nostr::{BEACON_TTL, ManifestQuery, Relays, sign_beacon};
 use nfx_node::origin::{Origin, SwarmPull, serve};
 use nfx_node::relay::{MayAdmit, ScopedRelay};
 use nfx_node::seed::Seeded;
@@ -68,6 +69,10 @@ pub const RATING_RETRY: Duration = Duration::from_secs(10 * 60);
 /// How often the rating task looks for a namespace it has no scores for yet.
 const RATING_TICK: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often a seeded video's gossip swarm hears from this node, and how often a deletion is
+/// looked for. Neither follows the beacon's shorter cadence.
+const GOSSIP_EVERY: Duration = Duration::from_secs(60);
+const DELETION_CHECK_EVERY: Duration = Duration::from_secs(60);
 /// How long a node with `iroh_relays` and no `iroh_external` waits to reach one before it
 /// seeds without it, with a warning. An iroh relay is extra reachability, never a
 /// requirement: beacons name it once it connects. A node with an external address does not
@@ -193,6 +198,13 @@ pub struct Config {
     /// 12 an hour per key, at most 1024 held, each kept until it expires
     /// (`nfx_node::relay::MayAdmit`). Off by default. Needs `embed_relay`.
     pub embed_relay_stun_ads: bool,
+    /// The embedded relay also carries kind-20465 seeder lookup, asks and tells (NFX-17 §5):
+    /// ephemeral, fully verified, rate-limited (`nfx_node::relay::MayAdmit`). Off by default.
+    /// Needs `embed_relay`.
+    pub embed_relay_lookup: bool,
+    /// Do not answer seeder lookups (NFX-17 §3). By default a node with a key answers a
+    /// viewer's ask for a video it is announcing, on the relays it announces to.
+    pub no_lookup: bool,
     /// The embedded relay's NIP-11 document says this host answers STUN Binding requests on
     /// this UDP port (`nfx.stun_port`, NFX-04 §3 as amended 2026-11-24), so clients that signal
     /// through it ask it (NFX-10 §1). 1024 to 65535. The operator's word: nothing checks that
@@ -282,6 +294,8 @@ pub struct Daemon {
 struct Shared {
     node: Arc<Node>,
     relays: Arc<Relays>,
+    /// Answers viewers' asks, unless `no_lookup`.
+    lookup: Option<Answerer>,
     store: Arc<FsStore>,
     keys: Option<Keys>,
     pull: Arc<SwarmPull>,
@@ -603,20 +617,42 @@ impl Shared {
             }
             None => (None, None),
         };
+        let _answering = Answering(self.lookup.clone(), a.to_owned());
         let mut announce = tokio::time::interval(Duration::from_secs(BEACON_TTL / 2));
+        let mut gossip = tokio::time::interval(GOSSIP_EVERY);
         let mut check = tokio::time::interval(self.deletion_check_every);
         loop {
             tokio::select! {
                 _ = announce.tick() => {
                     let content = self.beacon(&seeded, manifest, held.as_deref());
-                    // The relay beacon first: gossip is optional and never holds it up. A
-                    // refused or unreachable relay is retried at the next tick (beacons are
-                    // hints), but it shows: a node that cannot announce is invisible.
-                    match self.relays.announce(&keys, manifest, &content).await {
+                    // A refused or unreachable relay is retried at the next tick (beacons are
+                    // hints), but it shows: a node that cannot announce is invisible. A signed
+                    // beacon can answer a lookup either way.
+                    let sent = match sign_beacon(
+                        &keys,
+                        &manifest.a_tag(),
+                        &content,
+                        nfx_node::unix_now(),
+                        BEACON_TTL,
+                    )
+                    .await
+                    {
+                        Ok(event) => {
+                            if let Some(lookup) = &self.lookup {
+                                lookup.serve(a, event.clone(), content);
+                            }
+                            self.relays.publish(&event).await
+                        }
+                        Err(e) => Err(e),
+                    };
+                    match sent {
                         Ok(_) => self.set(a, VideoState::Seeding),
                         Err(e) => self.set(a, VideoState::Unannounced(e.to_string())),
                     }
+                }
+                _ = gossip.tick(), if announcer.is_some() => {
                     if let Some(announcer) = &announcer {
+                        let content = self.beacon(&seeded, manifest, held.as_deref());
                         gossip_send(announcer, Op::Here, &pubkey, content, &secret).await;
                     }
                 }
@@ -739,6 +775,17 @@ impl Shared {
     }
 }
 
+/// Stops answering lookups for a video when its seeding ends, however it ends.
+struct Answering(Option<Answerer>, String);
+
+impl Drop for Answering {
+    fn drop(&mut self) {
+        if let Some(lookup) = &self.0 {
+            lookup.forget(&self.1);
+        }
+    }
+}
+
 impl Daemon {
     pub async fn start(cfg: Config) -> Result<Self> {
         let all: Vec<&String> = cfg.seed.iter().chain(&cfg.fetch).chain(&cfg.pull).collect();
@@ -779,6 +826,11 @@ impl Daemon {
         if cfg.embed_relay_stun_ads && cfg.embed_relay.is_none() {
             return Err(Error::Config(
                 "--embed-relay-stun-ads needs --embed-relay".into(),
+            ));
+        }
+        if cfg.embed_relay_lookup && cfg.embed_relay.is_none() {
+            return Err(Error::Config(
+                "--embed-relay-lookup needs --embed-relay".into(),
             ));
         }
         if let Some(port) = cfg.embed_relay_stun_port {
@@ -964,6 +1016,7 @@ impl Daemon {
                 let may = MayAdmit {
                     mesh_signaling: cfg.embed_relay_mesh,
                     stun_announcements: cfg.embed_relay_stun_ads,
+                    seeder_lookup: cfg.embed_relay_lookup,
                 };
                 let allow_err =
                     |e: nfx_node::NodeError| Error::Config(format!("--allow-creator: {e}"));
@@ -1040,6 +1093,12 @@ impl Daemon {
                 relays,
             )));
         }
+        let lookup = match &cfg.keys {
+            Some(keys) if !cfg.no_lookup && !relays.is_empty() => {
+                Some(Answerer::start(&relays, keys.secret_key().to_secret_bytes()).await?)
+            }
+            _ => None,
+        };
         let relays = Arc::new(Relays::connect(&relays, CONNECT_TIMEOUT).await?);
         let store = Arc::new(FsStore::open(&cfg.store)?);
         let pull = Arc::new(SwarmPull::new(node.clone()));
@@ -1113,9 +1172,10 @@ impl Daemon {
             stun_public,
             bridged: Mutex::new(BTreeMap::new()),
             renditions: cfg.renditions.clone(),
+            lookup: lookup.clone(),
             deletion_check_every: cfg
                 .deletion_check_every
-                .unwrap_or(Duration::from_secs(BEACON_TTL / 2))
+                .unwrap_or(DELETION_CHECK_EVERY)
                 .max(Duration::from_millis(100)),
             gossip: cfg.gossip,
             gossip_peers: cfg.gossip_peers.clone(),
@@ -1364,6 +1424,9 @@ impl Daemon {
         // Leave the mesh's rooms first: a `disconnect` to its relays, best effort, 2 s at most.
         if let Some(mesh) = &self.shared.mesh {
             mesh.shutdown().await;
+        }
+        if let Some(lookup) = &self.shared.lookup {
+            lookup.shutdown().await;
         }
         if let Some(relay) = &self.embedded {
             relay.shutdown();

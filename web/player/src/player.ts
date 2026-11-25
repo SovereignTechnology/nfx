@@ -95,6 +95,8 @@ interface State {
 }
 
 let session: Session | null = null;
+/** Tells the beacon watch which origins delivered (NFX-17 §4.2), while one runs. */
+let delivered: ((origin: string) => void) | null = null;
 const st: State = {
   secureContext: window.isSecureContext,
   resolved: null,
@@ -147,6 +149,7 @@ const onEvent = (e: PlayerEvent): void => {
       break;
     case 'origin':
       if (!e.ok) log(`origin ${e.origin} did not serve a verifying copy: ${e.why ?? ''}`);
+      else delivered?.(e.origin);
       break;
     case 'verified':
       st.verified.push(e.sha256);
@@ -170,6 +173,8 @@ const params = new URLSearchParams(location.search);
 const a = params.get('a') ?? '';
 const relays = params.getAll('relay').filter((r) => /^wss?:\/\//.test(r));
 const origin = (params.get('origin') ?? '').replace(/\/+$/, '');
+/** Every `origin` given: by origin and root, the session fetches from all of them (NFX-17 §4.3). */
+const urlOrigins = params.getAll('origin').map((o) => o.replace(/\/+$/, '')).filter((o) => o !== '');
 const root = params.get('root') ?? '';
 const video = params.get('video');
 const segs = Number(params.get('segs'));
@@ -240,8 +245,18 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
     availability: { seeders: 0, all: 0, renditions: [] },
   };
   let wake: (() => void) | null = null;
-  const stop = watchEndpoints(a, m.namespace, relays, (e) => {
+  // Seeder lookup (NFX-17): off unless the URL says `ask=1`. An ask is a public signal that a
+  // video is starting, and this test page starts playing on load without a Play press, so it
+  // asks only when told to. A product viewer asks when its user presses Play.
+  const ask = params.get('ask') === '1';
+  const stop = watchEndpoints(
+    a,
+    m.namespace,
+    relays,
+    (e) => {
     heard = e;
+    // Every source heard of while playing joins the session (NFX-17 §4.3).
+    session?.addSources(e.originSources);
     st.availability = e.availability;
     st.originSources = e.originSources;
     for (const o of e.origins) {
@@ -263,7 +278,11 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
       }
     }
     wake?.();
-  });
+    },
+    { ask },
+  );
+  delivered = stop.delivered;
+  stop.ask();
   const tried = new Set<string>();
   let pending = hint ? [hint] : [];
   // Once playing, the watch stays for the page's life: the fallback reads fresh beacons
@@ -285,12 +304,15 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
           .map((urls) => ({ urls }));
         // Each beacon-named origin with the renditions beacons claim it serves (a hint the
         // library only orders by); the page's own hint makes no claim.
-        const origins = fresh.map((o): string | OriginSource => heard.originSources.find((s) => s.url === o) ?? o);
+        // The page's own hint stays its own (tier 4), whatever a beacon says of it.
+        const origins = fresh.map((o): string | OriginSource => (o === hint ? o : (heard.originSources.find((s) => s.url === o) ?? o)));
         // If no server it asks finds a mapping (or it asks none): a seeder's server at a
         // peer's own address.
         const stunFallback: StunFallback = { own: ownStun, seeders: () => heard.stunSeeders };
         try {
           await play({ ...common, iceServers: stun, manifestJson: m.event, origins, renditions: urlRenditions, signaling: trackerSignaling(trackers, stunFallback) });
+          // Sources heard of while `open()` was pending had no session to join: add them now.
+          if (heard.originSources.length > 0) session?.addSources(heard.originSources);
           playing = true;
           return;
         } catch (e) {
@@ -310,7 +332,10 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
       wake = null;
     }
   } finally {
-    if (!playing) stop();
+    if (!playing) {
+      stop();
+      delivered = null;
+    }
   }
 }
 
@@ -329,6 +354,6 @@ if (a) {
 } else if (origin && root) {
   const bound = video && Number.isSafeInteger(segs) && segs > 0 ? { video, segs } : {};
   init()
-    .then(() => play({ ...common, renditions: urlRenditions, root, ...bound, origins: [origin], signaling: trackerSignaling(urlTrackers) }))
+    .then(() => play({ ...common, renditions: urlRenditions, root, ...bound, origins: urlOrigins, signaling: trackerSignaling(urlTrackers) }))
     .catch(fail);
 }

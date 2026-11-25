@@ -199,7 +199,7 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
   eq('first beacon taken', book.add(beacon(S(1), NOW, [https('https://a.example/'), webrtc('wss://t1.example')]), NOW), true);
   eq('first snapshot', book.snapshot(NOW), {
     origins: ['https://a.example'],
-    originSources: [{ url: 'https://a.example' }],
+    originSources: [{ url: 'https://a.example', tier: 3 }],
     trackers: ['wss://t1.example'],
     stunServers: [],
     stunCreator: [],
@@ -214,7 +214,7 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
   eq('newer beacon', book.add(beacon(S(1), NOW + 1, [https('https://b.example')]), NOW + 1), true);
   eq('newer replaces', book.snapshot(NOW + 1), {
     origins: ['https://b.example'],
-    originSources: [{ url: 'https://b.example' }],
+    originSources: [{ url: 'https://b.example', tier: 3 }],
     trackers: [],
     stunServers: [],
     stunCreator: [],
@@ -257,15 +257,22 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
   eq('bad created_at', book.add({ ...beacon(S(4), NOW, []), created_at: 1.5 }, NOW), false);
 }
 {
-  // Ranked by how many seeders name an entry; ties in first-heard order.
+  // Trackers ranked by how many seeders name them, ties in first-heard order; origins in
+  // NFX-17 §4.2's tiers, never by how many keys name them (book-unit.ts has the tiers).
   const book = new EndpointBook();
   book.add(beacon(S(1), NOW, [webrtc('wss://lonely.example'), https('https://one.example')]), NOW);
   book.add(beacon(S(2), NOW, [webrtc('wss://shared.example'), https('https://two.example')]), NOW);
   book.add(beacon(S(3), NOW, [webrtc('wss://shared.example'), https('https://two.example')]), NOW);
-  eq('ranked', book.snapshot(NOW), {
-    origins: ['https://two.example', 'https://one.example'],
-    originSources: [{ url: 'https://two.example' }, { url: 'https://one.example' }],
-    trackers: ['wss://shared.example', 'wss://lonely.example'],
+  const snap = book.snapshot(NOW);
+  eq('trackers ranked', snap.trackers, ['wss://shared.example', 'wss://lonely.example']);
+  eq('origins: both open', [...snap.originSources].sort((x, y) => x.url.localeCompare(y.url)), [
+    { url: 'https://one.example', tier: 3 },
+    { url: 'https://two.example', tier: 3 },
+  ]);
+  eq('ranked: the rest', { ...snap, origins: [], originSources: [], trackers: [] }, {
+    origins: [],
+    originSources: [],
+    trackers: [],
     stunServers: [],
     stunCreator: [],
     stunSeeders: [],
@@ -342,9 +349,10 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
   const book = new EndpointBook();
   const many = Array.from({ length: 10 }, (_, i) => `wss://t${i}.example`);
   book.add(beacon(S(1), NOW, [webrtc(...many), ...many.map((_, i) => https(`https://o${i}.example`))]), NOW);
-  eq('per-beacon caps', book.snapshot(NOW), {
+  const capped = book.snapshot(NOW);
+  eq('per-beacon caps', { ...capped, origins: [...capped.origins].sort(), originSources: [...capped.originSources].sort((x, y) => x.url.localeCompare(y.url)) }, {
     origins: ['https://o0.example', 'https://o1.example', 'https://o2.example', 'https://o3.example'],
-    originSources: [0, 1, 2, 3].map((i) => ({ url: `https://o${i}.example` })),
+    originSources: [0, 1, 2, 3].map((i) => ({ url: `https://o${i}.example`, tier: 3 })),
     trackers: ['wss://t0.example', 'wss://t1.example', 'wss://t2.example', 'wss://t3.example'],
     stunServers: [],
     stunCreator: [],
@@ -352,7 +360,10 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
     seeders: 1,
     availability: allOf(1),
   });
-  for (let i = 2; i <= 12; i++) book.add(beacon(S(i), NOW, [webrtc(`wss://u${i}.example`), https(`https://p${i}.example`)]), NOW);
+  for (let i = 2; i <= 12; i++) {
+    const four = [0, 1, 2, 3].map((j) => https(`https://p${i}-${j}.example`));
+    book.add(beacon(S(i), NOW, [webrtc(`wss://u${i}.example`), ...four]), NOW);
+  }
   const snap = book.snapshot(NOW);
   eq('overall origin cap', snap.origins.length, MAX_ORIGINS);
   eq('overall tracker cap', snap.trackers.length, 4);
@@ -389,7 +400,7 @@ const held = (book: EndpointBook, now: number) => book.snapshot(now).availabilit
     ],
   });
   eq('every seeder still counts in seeders', book.snapshot(NOW).seeders, 5);
-  eq('an origin with the renditions it serves', book.snapshot(NOW).originSources, [{ url: 'https://o3.example', renditions: ['360p'] }]);
+  eq('an origin with the renditions it serves', book.snapshot(NOW).originSources, [{ url: 'https://o3.example', renditions: ['360p'], tier: 3 }]);
   // Absent = all: an https endpoint without `renditions` holds every rendition, and so does a
   // bridge without one; each counts for every id, named or not.
   book.add(beacon(S(6), NOW, [https('https://all.example')]), NOW);
@@ -403,10 +414,10 @@ const held = (book: EndpointBook, now: number) => book.snapshot(now).availabilit
       { id: '1080p', seeders: 3 },
     ],
   });
-  eq('origins: absent serves all, a list serves those', book.snapshot(NOW).originSources, [
-    { url: 'https://o3.example', renditions: ['360p'] },
-    { url: 'https://all.example' },
-    { url: 'https://o7.example', renditions: ['720p'] },
+  eq('origins: absent serves all, a list serves those', [...book.snapshot(NOW).originSources].sort((x, y) => x.url.localeCompare(y.url)), [
+    { url: 'https://all.example', tier: 3 },
+    { url: 'https://o3.example', renditions: ['360p'], tier: 3 },
+    { url: 'https://o7.example', renditions: ['720p'], tier: 3 },
   ]);
   // Stale: an older beacon from a key already held changes nothing; a newer one replaces it.
   eq('stale beacon refused', book.add(beacon(S(2), NOW - 5, [bridge('2160p')]), NOW), false);
@@ -448,11 +459,11 @@ const held = (book: EndpointBook, now: number) => book.snapshot(now).availabilit
   book.add(beacon(S(1), NOW, [served('https://x.example', '720p', '360p')]), NOW);
   book.add(beacon(S(2), NOW, [served('https://x.example/', '360p', '1080p')]), NOW);
   book.add(beacon(S(3), NOW, [https('https://x.example')]), NOW);
-  eq('claims narrow, never widen', book.snapshot(NOW).originSources, [{ url: 'https://x.example', renditions: ['360p'] }]);
+  eq('claims narrow, never widen', book.snapshot(NOW).originSources, [{ url: 'https://x.example', renditions: ['360p'], tier: 3 }]);
   book.add(beacon(S(4), NOW, [served('https://x.example', '1080p')]), NOW);
-  eq('conflicting claims: it serves none', book.snapshot(NOW).originSources, [{ url: 'https://x.example', renditions: [] }]);
+  eq('conflicting claims: it serves none', book.snapshot(NOW).originSources, [{ url: 'https://x.example', renditions: [], tier: 3 }]);
   book.add(beacon(S(5), NOW, [served('https://y.example', '720p'), served('https://y.example', '720p', '360p')]), NOW);
-  eq('one beacon naming an origin twice', book.snapshot(NOW).originSources[1], { url: 'https://y.example', renditions: ['720p'] });
+  eq('one beacon naming an origin twice', book.snapshot(NOW).originSources.find((o) => o.url === 'https://y.example'), { url: 'https://y.example', renditions: ['720p'], tier: 3 });
   const bad = new EndpointBook();
   bad.add(beacon(S(1), NOW, [{ t: 'https', url: 'https://z.example', renditions: '720p' }, { ...bridge(), renditions: null }]), NOW);
   eq('malformed renditions', [bad.snapshot(NOW).originSources, bad.snapshot(NOW).trackers, held(bad, NOW)], [[], ['wss://bridge.example'], { seeders: 0, all: 0, renditions: [] }]);
@@ -519,13 +530,15 @@ eq('32 ids', checkRenditions(Array.from({ length: MAX_RENDITIONS }, (_, i) => `r
 refuses('a long id is cut short in the message', () => checkRenditions(['x'.repeat(5000), 'x'.repeat(5000)]), TypeError, /^nfx: renditions: "x{64}…" is named twice$/);
 
 eq('origin sources: strings and objects', checkOriginSources(['https://a.example/', { url: 'https://b.example' }, { url: 'http://127.0.0.1:9/', renditions: ['360p', '360p', '720p'] }]), [
-  { url: 'https://a.example', renditions: null },
-  { url: 'https://b.example', renditions: null },
-  { url: 'http://127.0.0.1:9', renditions: ['360p', '720p'] },
+  { url: 'https://a.example', renditions: null, tier: 4 },
+  { url: 'https://b.example', renditions: null, tier: 4 },
+  { url: 'http://127.0.0.1:9', renditions: ['360p', '720p'], tier: 4 },
 ]);
-eq('an origin serving none', checkOriginSources([{ url: 'https://a.example', renditions: [] }]), [{ url: 'https://a.example', renditions: [] }]);
+eq('an origin serving none', checkOriginSources([{ url: 'https://a.example', renditions: [] }]), [{ url: 'https://a.example', renditions: [], tier: 4 }]);
+eq('an origin with a tier', checkOriginSources([{ url: 'https://a.example', tier: 1 }]), [{ url: 'https://a.example', renditions: null, tier: 1 }]);
+refuses('a tier out of range', () => checkOriginSources([{ url: 'https://a.example', tier: 5 as never }]), TypeError, /tier of/);
 eq('an origin given twice: first wins', checkOriginSources([{ url: 'https://a.example', renditions: ['720p'] }, 'https://a.example/']), [
-  { url: 'https://a.example', renditions: ['720p'] },
+  { url: 'https://a.example', renditions: ['720p'], tier: 4 },
 ]);
 refuses('origin renditions not a list', () => checkOriginSources([{ url: 'https://a.example', renditions: '720p' as never }]), TypeError, /renditions of https:\/\/a.example/);
 refuses('origin renditions null', () => checkOriginSources([{ url: 'https://a.example', renditions: null as never }]), TypeError, /renditions of/);
@@ -534,7 +547,7 @@ refuses('origin renditions, 33', () => checkOriginSources([{ url: 'https://a.exa
 refuses('an origin object without a url', () => checkOriginSources([{ renditions: ['720p'] } as never]), TypeError, /not an origin base/);
 refuses('a null origin', () => checkOriginSources([null as never]), TypeError, /not an origin base/);
 refuses('origins not a list', () => checkOriginSources('https://a.example' as never), TypeError, /must be a list/);
-refuses('too many origins', () => checkOriginSources(Array.from({ length: 17 }, (_, i) => `https://o${i}.example`)), TypeError, /at most 16/);
+refuses('too many origins', () => checkOriginSources(Array.from({ length: MAX_ORIGINS + 9 }, (_, i) => `https://o${i}.example`)), TypeError, new RegExp(`at most ${MAX_ORIGINS + 8}`));
 
 // Hints (what beacons claim an origin serves): they order, never remove (nfx #85).
 eq('mayServe: no claim', mayServe(['720p'], null), true);
@@ -1036,7 +1049,7 @@ const verified = JSON.parse(verifyBeacon(JSON.stringify(vector.event), vector.no
   eq('vector beacon taken', book.add(verified, vector.now), true);
   eq('vector endpoints', book.snapshot(vector.now), {
     origins: ['https://seed.example/nfx'],
-    originSources: [{ url: 'https://seed.example/nfx' }],
+    originSources: [{ url: 'https://seed.example/nfx', tier: verified.seeder === verified.creator ? 1 : 3 }],
     trackers: ['wss://tracker.example/announce'],
     stunServers: [],
     stunCreator: [],
@@ -1067,7 +1080,9 @@ throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(ve
     const book = new EndpointBook();
     book.add(JSON.parse(verifyBeacon(JSON.stringify(c.event), v.now)) as VerifiedBeacon, v.now);
     const snap = book.snapshot(v.now);
-    eq(`vector ${c.name}`, [snap.originSources, snap.availability], want[c.name]);
+    // The tier (NFX-17 §4.2) is book-unit.ts's to check; here, what each origin serves.
+    const served = snap.originSources.map(({ tier: _tier, ...o }) => o);
+    eq(`vector ${c.name}`, [served, snap.availability], want[c.name]);
   }
   for (const c of v.invalid) throws(`invalid vector ${c.name}`, () => verifyBeacon(JSON.stringify(c.event), v.now));
 }

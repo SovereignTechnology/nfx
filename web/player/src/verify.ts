@@ -89,15 +89,42 @@ export class Anchor {
   static async load(origin: string, root: string, manifest?: ManifestBinding, signal?: AbortSignal): Promise<Anchor> {
     if (!/^[0-9a-f]{64}$/.test(root)) throw new Error('root must be 64 lowercase hex');
     await loadWasm();
-    const res = await fetch(`${origin}/${root}`, { signal, credentials: 'omit' });
+    const res = await fetch(`${origin}/${root}`, { signal, credentials: 'omit', referrerPolicy: 'no-referrer' });
     if (!res.ok) throw new Error(`hash list: HTTP ${res.status}`);
     const bytes = await cappedBody(res, MAX_HASH_LIST_BYTES, 'hash list');
+    return Anchor.fromBytes(origin, root, bytes, manifest);
+  }
+
+  /**
+   * The hash list in `bytes`, fetched from `origin` by whatever means, verified against
+   * `root` (and `manifest`). Throws on any mismatch. Call after `loadWasm()`.
+   */
+  static fromBytes(origin: string, root: string, bytes: Uint8Array, manifest?: ManifestBinding): Anchor {
+    if (!/^[0-9a-f]{64}$/.test(root)) throw new Error('root must be 64 lowercase hex');
+    if (bytes.byteLength > MAX_HASH_LIST_BYTES) throw new Error('hash list: too large');
     const list = manifest
       ? new VerifiedHashList(bytes, root, manifest.video, manifest.segs)
       : VerifiedHashList.fromRoot(bytes, root);
     // Read from nfx-proto's own rendering of the list it verified, never the bytes as sent.
     const { renditions, master } = hashListLevels(list.toJSON());
     return new Anchor(origin, root, list, renditions, master);
+  }
+
+  /** The same verified list, with URLs under `origin`. */
+  at(origin: string): Anchor {
+    return new Anchor(origin, this.root, this.list, this.renditions, this.master);
+  }
+
+  /** Each file the list names, with its listed size (null when it gives none usable). */
+  fileSizes(): [string, number | null][] {
+    const parsed = JSON.parse(this.list.toJSON()) as { files?: unknown };
+    const out: [string, number | null][] = [];
+    for (const f of Array.isArray(parsed.files) ? (parsed.files as unknown[]) : []) {
+      const { name, size } = (f ?? {}) as { name?: unknown; size?: unknown };
+      if (typeof name !== 'string') continue;
+      out.push([name, typeof size === 'number' && Number.isSafeInteger(size) && size >= 0 ? size : null]);
+    }
+    return out;
   }
 
   /** The rendition id of the playlist at `url` (by its content name, NFX-10 §2), or null. */
@@ -134,7 +161,7 @@ export class Anchor {
    * are read. Throws on an HTTP error, a longer body, any mismatch, or when `signal` aborts.
    */
   async fetchChecked(url: string, max: number, signal: AbortSignal): Promise<Uint8Array> {
-    const res = await fetch(url, { signal, credentials: 'omit' });
+    const res = await fetch(url, { signal, credentials: 'omit', referrerPolicy: 'no-referrer' });
     if (!res.ok) {
       void res.body?.cancel().catch(() => {});
       throw new Error(`HTTP ${res.status}`);

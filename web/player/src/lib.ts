@@ -26,20 +26,24 @@
  */
 import Hls, {
   type HlsConfig,
+  LoadStats,
   type Loader,
   type LoaderCallbacks,
   type LoaderConfiguration,
   type LoaderContext,
+  type LoaderStats,
 } from 'hls.js';
 import { HlsJsP2PEngine } from 'p2p-media-loader-hlsjs';
 
 import { verifyManifest } from '../out/wasm/nfx_wasm.js';
 import type {
+  EndpointWatch,
   Endpoints,
   InitOptions,
   Level,
   MeshStats,
   OpenOptions,
+  OriginSource,
   PeerAddress,
   PlayerEvent,
   Rejection,
@@ -52,6 +56,7 @@ import type {
   Signaling,
   Stats,
   SeederStun,
+  WatchOptions,
 } from './api';
 import {
   MAX_ICE_SERVERS as ENDPOINTS_MAX_ICE_SERVERS,
@@ -80,6 +85,8 @@ import { MAX_REMOTE_CANDIDATES as SDP_MAX_REMOTE_CANDIDATES, filterRemoteSdp as 
 import { NostrSignaler } from './signal-nostr';
 import { StunFallbackBook } from './stun-fallback';
 import { resolveManifest as resolveOverRelays, watchEndpoints as watchBeacons } from './resolve';
+import { SessionSources, bufferedAhead } from './session-sources';
+import { capOpenHosts } from './sources';
 import { Anchor, MAX_HASH_LIST_BYTES, type ManifestBinding, loadWasm } from './verify';
 
 // Everything public is declared here or in ./api.ts, so the declaration file built from
@@ -235,16 +242,22 @@ export function resolveManifest(a: string, relays: string[], options: ResolveOpt
  * `wss://` trackers only, at most 4; `availability`). STUN servers come from beacons' `stun`
  * endpoints, global unicast addresses only: the creator's own beacon's (`stunCreator`, and
  * `stunServers`, what `selectStun` picks for a page with none of its own), and every seeder's
- * for the fallback (`stunSeeders`). STUN service announcements are not read. Returns `stop`,
- * which closes the subscriptions.
+ * for the fallback (`stunSeeders`). STUN service announcements are not read. Origins come in
+ * NFX-17 §4.2's tiers (`OriginSource.tier`): pass them to `open()` and `Session.addSources`.
+ * Returns `stop`, which closes the subscriptions; `stop.delivered(url)` tells the watch an
+ * origin delivered a file, so the first key that named it keeps its place. With `ask: true`,
+ * `stop.ask()` asks the video's seeders to answer at once (NFX-17): call it when the viewer
+ * presses Play. It publishes one event, from a throwaway key, that says which video is
+ * starting; a page MUST offer a way to turn it off.
  */
 export function watchEndpoints(
   a: string,
   namespace: string,
   relays: string[],
   onChange: (endpoints: Endpoints) => void,
-): () => void {
-  return watchBeacons(a, namespace, relays, onChange);
+  options: WatchOptions = {},
+): EndpointWatch {
+  return watchBeacons(a, namespace, relays, onChange, options);
 }
 
 function message(e: unknown): string {
@@ -313,18 +326,51 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
     failures.push(`${origin}: ${why}`);
     emit({ type: 'origin', origin, ok: false, why });
   };
-  // What beacons say an origin serves (`hint`) only orders: origins whose hint names an
-  // allowed rendition are tried first, and those renditions are asked for first. Which
-  // renditions the session offers is what the origin answers for (nfx #85).
-  for (const { url: origin, renditions: hint } of originOrder(origins, wanted)) {
-    let loaded: Anchor;
-    try {
-      loaded = await Anchor.load(origin, root, binding, signal);
-    } catch (e) {
-      if (signal?.aborted) throw abortError(signal);
-      skip(origin, message(e));
-      continue;
-    }
+  // Every source the session knows, in NFX-17 §4.2's tiers. The hash list comes from whichever
+  // delivers a copy that verifies against `root` first (§4.3), whoever sent it.
+  const sources = new SessionSources(
+    root,
+    origins.map((o) => ({ url: o.url, tier: o.tier, renditions: o.renditions })),
+  );
+  sources.bind({ log, reject: (source, path) => skip(source, `${path} did not verify`) });
+  const built: { list: Anchor | null } = { list: null };
+  let delivered: string;
+  try {
+    const got = await sources.get(
+      root,
+      (bytes) => {
+        try {
+          built.list = Anchor.fromBytes('', root, bytes, binding);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      signal,
+      true,
+      MAX_HASH_LIST_BYTES,
+    );
+    delivered = got.source;
+  } catch (e) {
+    if (signal?.aborted) throw abortError(signal);
+    throw new Error(`no origin served a hash list that verifies (${message(e)}${failures.length > 0 ? `; ${failures.join('; ')}` : ''})`);
+  }
+  const list = built.list;
+  if (list === null) throw new Error('no origin served a hash list that verifies');
+  sources.learnSizes(list.fileSizes());
+
+  // Which renditions the session offers is what a source answers for (nfx #85), asked of the
+  // source that delivered the hash list first, then the rest. What beacons say an origin
+  // serves (`hint`) only orders them.
+  // In tier order, the deliverer first, and at most 3 open hosts asked (NFX-17 §4.2).
+  const tierOf = (o: { url: string; tier: number }): number => (o.url === delivered ? 0 : o.tier === 4 ? 3.5 : o.tier);
+  const ranked = originOrder(origins, wanted).sort((x, y) => tierOf(x) - tierOf(y));
+  const order = capOpenHosts(
+    ranked.filter((o) => !sources.rejects(o.url)),
+    delivered,
+  );
+  for (const { url: origin, renditions: hint } of order) {
+    const loaded = list.at(origin);
     let picked: Selection;
     try {
       // A RangeError (an id the hash list lacks) ends open(), before any probe: every
@@ -355,7 +401,7 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
   if (signal?.aborted) throw abortError(signal);
   log(`hash list verified: ${anchor.size} files of ${anchor.video}${binding ? ' (bound to the manifest)' : ''}`);
   const levelRule = { renditions, preferStart: wanted !== null };
-  return start(el, anchor, { signaling, iceServers, autoplay, level, httpWindow, signal, ...levelRule }, emit, log, () => {
+  return start(el, anchor, { signaling, iceServers, autoplay, level, httpWindow, signal, ...levelRule, sources }, emit, log, () => {
     dead = true;
   });
 }
@@ -403,6 +449,8 @@ interface StartOptions {
   level: number | undefined;
   httpWindow: number | undefined;
   signal: AbortSignal | undefined;
+  /** Where every file comes from (NFX-17 §§4.2-4.3). */
+  sources: SessionSources;
 }
 
 function start(
@@ -439,18 +487,38 @@ function start(
       throw e;
     }
   };
+  o.sources.bind({
+    buffer: () => bufferedAhead(el),
+    // Each source that delivers a file (a page passes it on to `EndpointWatch.delivered`).
+    delivered: (origin) => emit({ type: 'origin', origin, ok: true }),
+    reject: (source, path) => {
+      let sha256: string | null = null;
+      try {
+        sha256 = anchor.expected(`${anchor.origin}/${path}`);
+      } catch {
+        // a path the hash list does not name is reported with sha256 null
+      }
+      reject({ sha256, url: `${source}/${path}`, why: 'bytes that do not verify; source stopped for the session' });
+    },
+  });
+  // Every file comes through the session's sources, which retry, hedge and change source
+  // themselves (NFX-17 §4.3): hls.js retries nothing, and never times a load out first.
+  const noRetry = { default: { maxTimeToFirstByteMs: Infinity, maxLoadTimeMs: 3_600_000, timeoutRetry: null, errorRetry: null } };
   const base = {
-    loader: verifyingLoader(
+    loader: sourcedLoader(
       anchor,
+      o.sources,
       (sha256, url, bytes) => {
         verified += 1;
         originBytes += bytes;
         emit({ type: 'verified', sha256, url });
       },
-      reject,
       cut,
     ),
     progressive: false,
+    fragLoadPolicy: noRetry,
+    playlistLoadPolicy: noRetry,
+    manifestLoadPolicy: noRetry,
   };
   let hls: Hls;
   let mesh: MeshStats | null = null;
@@ -481,7 +549,15 @@ function start(
       const relayStun = signaling.relayStun ? new RelayStunBook(signaling.relayStun, signaling.relays, log) : null;
       nostr = new NostrSignaler(signaling.relays, log, signaling.remoteCandidates ?? 'all', fallback, relayStun);
     }
-    hls = new HlsWithP2P({ ...base, ...meshConfig(anchor, signaling, o.iceServers, mesh, log, tuning, nostr, book) } as never);
+    const p2p = meshConfig(anchor, signaling, o.iceServers, mesh, log, tuning, nostr, book);
+    // The engine's HTTP downloads go through the session's sources too, and a segment is
+    // assembled from one source's (or one peer's) bytes only (NFX-17 §4.3; engine patch).
+    Object.assign(p2p.p2p.core, {
+      httpSegmentFetch: async (url: string, signal: AbortSignal | undefined): Promise<Uint8Array> =>
+        (await o.sources.get(pathUnder(anchor, url), verifies(anchor, url), signal)).bytes,
+      segmentFromOneSource: true,
+    });
+    hls = new HlsWithP2P({ ...base, ...p2p } as never);
     engine = `hls.js ${Hls.version} + ${P2P_ENGINE}`;
     const filtered = nostr?.remoteCandidates === 'global' ? ' (remote candidates: global unicast UDP only)' : '';
     const atRelays = nostr?.relayStun ? ' (STUN at its relays too)' : '';
@@ -588,6 +664,11 @@ function start(
         bandwidthEstimate: dead ? 0 : hls.bandwidthEstimate,
       };
     },
+    addSources(list: readonly (string | OriginSource)[]): void {
+      // An empty list is no change (every beacon may have expired); `open()` alone needs an origin.
+      if (dead || list.length === 0) return;
+      o.sources.add(checkOriginSources(list).map((x) => ({ url: x.url, tier: x.tier, renditions: x.renditions })));
+    },
     async addresses(): Promise<PeerAddress[]> {
       if (dead || mesh === null) return [];
       const found = await book.addresses();
@@ -597,64 +678,110 @@ function start(
   };
 }
 
+/** `url`'s path under the session's anchor origin: `<root>` or `<root>/<name>`. */
+function pathUnder(anchor: Anchor, url: string): string {
+  const base = `${anchor.origin}/`;
+  if (!url.startsWith(base)) throw new Error(`nfx: ${url} is not under the session's origin`);
+  return url.slice(base.length);
+}
+
+/** Whether bytes are the file the hash list names at `url`. */
+function verifies(anchor: Anchor, url: string): (bytes: Uint8Array) => boolean {
+  return (bytes) => {
+    try {
+      anchor.check(url, bytes);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+}
+
 /**
- * Wraps hls.js' default loader: fetch as bytes, verify, then hand over; the master playlist
- * through `masterText` (its text, once verified, cut to the session's renditions).
+ * hls.js' loader: every file through the session's sources (NFX-17 §4.3), verified before
+ * hls.js sees a byte; the master playlist through `masterText` (its text, once verified, cut
+ * to the session's renditions). A media playlist also tells the sources each file's
+ * rendition and media time.
  */
-function verifyingLoader(
+function sourcedLoader(
   anchor: Anchor,
+  sources: SessionSources,
   onVerified: (sha256: string, url: string, bytes: number) => void,
-  onRejected: (r: Rejection) => void,
   masterText: (url: string, text: string) => string,
 ): new (config: HlsConfig) => Loader<LoaderContext> {
-  const Base = Hls.DefaultConfig.loader as unknown as new (config: HlsConfig) => Loader<LoaderContext>;
-  return class VerifyingLoader extends Base {
-    override load(
-      context: LoaderContext,
-      config: LoaderConfiguration,
-      callbacks: LoaderCallbacks<LoaderContext>,
-    ): void {
+  return class SourcedLoader implements Loader<LoaderContext> {
+    context: LoaderContext | null = null;
+    stats: LoaderStats = new LoadStats();
+    #ctl: AbortController | null = null;
+
+    destroy(): void {
+      this.abort();
+      this.context = null;
+    }
+
+    abort(): void {
+      if (this.#ctl !== null && !this.stats.aborted) {
+        this.stats.aborted = true;
+        this.#ctl.abort();
+      }
+    }
+
+    load(context: LoaderContext, _config: LoaderConfiguration, callbacks: LoaderCallbacks<LoaderContext>): void {
+      this.context = context;
+      const stats = this.stats;
+      stats.loading.start = performance.now();
+      const ctl = new AbortController();
+      this.#ctl = ctl;
+      const url = context.url;
       const wantText = context.responseType !== 'arraybuffer';
-      context.responseType = 'arraybuffer';
-      super.load(context, config, {
-        onError: callbacks.onError,
-        onTimeout: callbacks.onTimeout,
-        onAbort: callbacks.onAbort,
-        // No onProgress: unverified bytes must never reach hls.js.
-        onSuccess: (response, stats, ctx, details) => {
+      const fail = (why: string): void => {
+        if (!stats.aborted) callbacks.onError({ code: 0, text: `nfx: ${why}` }, context, null, stats);
+      };
+      let path: string;
+      try {
+        path = pathUnder(anchor, url);
+      } catch (e) {
+        queueMicrotask(() => fail(message(e)));
+        return;
+      }
+      sources.get(path, verifies(anchor, url), ctl.signal).then(
+        ({ bytes, firstByteMs, totalMs }) => {
           if (stats.aborted) return;
-          const bytes = response.data as ArrayBuffer;
+          // The fetcher's own timing, so hls.js's bandwidth estimate sees the transfer time and
+          // not an instant body after a long wait for the first byte.
+          const end = Math.max(performance.now(), stats.loading.start + totalMs);
+          stats.loading.first = Math.min(end - 1, stats.loading.start + firstByteMs);
+          stats.loading.end = end;
+          stats.loaded = bytes.byteLength;
+          stats.total = bytes.byteLength;
+          stats.chunkCount = 1;
           let sha: string;
           try {
-            sha = anchor.check(ctx.url, bytes);
+            sha = anchor.check(url, bytes);
           } catch (e) {
-            const why = message(e);
-            let expected: string | null = null;
+            fail(message(e));
+            return;
+          }
+          onVerified(sha, url, bytes.byteLength);
+          let data: string | ArrayBuffer = bytes.slice().buffer;
+          if (wantText) {
             try {
-              expected = anchor.expected(ctx.url);
-            } catch {
-              // an unanchored URL is reported with sha256 null
+              const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+              if (sha === anchor.master) data = masterText(url, text);
+              else {
+                sources.learnPlaylist(text, anchor.renditionOf(url));
+                data = text;
+              }
+            } catch (e) {
+              // Verified bytes hls.js must still not see: an error, never data.
+              fail(message(e));
+              return;
             }
-            onRejected({ sha256: expected, url: ctx.url, why });
-            callbacks.onError({ code: 0, text: `nfx: ${why}` }, ctx, details, stats);
-            return;
           }
-          onVerified(sha, ctx.url, bytes.byteLength);
-          let data: string | ArrayBuffer = bytes;
-          try {
-            if (wantText) {
-              data = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-              if (sha === anchor.master) data = masterText(ctx.url, data);
-            }
-          } catch (e) {
-            // Verified bytes hls.js must still not see: an error, never data.
-            callbacks.onError({ code: 0, text: `nfx: ${message(e)}` }, ctx, details, stats);
-            return;
-          }
-          response.data = data;
-          callbacks.onSuccess(response, stats, ctx, details);
+          callbacks.onSuccess({ url, data }, stats, context, null);
         },
-      });
+        (e: unknown) => fail(message(e)),
+      );
     }
   };
 }

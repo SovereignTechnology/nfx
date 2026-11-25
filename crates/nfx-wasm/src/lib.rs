@@ -546,6 +546,89 @@ impl MeshSession {
     }
 }
 
+/// A seeder lookup asker (NFX-17 §4): a throwaway key, made by the page for one video and one
+/// session, held here. It signs asks and reads the tells addressed to it.
+#[wasm_bindgen]
+pub struct LookupAsker {
+    secret: [u8; 32],
+    pubkey: String,
+    a: String,
+}
+
+impl LookupAsker {
+    /// An asker for the manifest address `manifest_a`, from 32 random bytes (a secret key).
+    pub fn create(secret: &[u8], manifest_a: &str) -> Result<Self, String> {
+        let secret = bytes::<32>(secret, "the secret")?;
+        let pubkey = nfx_proto::event::public_key_hex(&secret).map_err(|e| e.to_string())?;
+        // The address is checked as an ask would check it.
+        nfx_proto::lookup::ask_tags(manifest_a, 0).map_err(|e| e.to_string())?;
+        Ok(Self {
+            secret,
+            pubkey,
+            a: manifest_a.to_owned(),
+        })
+    }
+
+    /// A signed ask (NFX-17 §1.1), as JSON.
+    pub fn ask_json(&self, created_at: u64) -> Result<String, String> {
+        let ev =
+            nfx_proto::lookup::ask(&self.secret, &self.a, created_at).map_err(|e| e.to_string())?;
+        serde_json::to_string(&ev).map_err(|e| e.to_string())
+    }
+
+    /// A tell read at `now` (NFX-17 §2): the beacon it carries, as `verifyBeacon` gives it. An
+    /// error for anything else, a tell to another key or about another video included.
+    pub fn read_tell_json(&self, event_json: &str, now: u64) -> Result<String, String> {
+        let ev = parse_event(event_json)?;
+        match nfx_proto::lookup::read(&ev, now).map_err(|e| e.to_string())? {
+            nfx_proto::lookup::Parsed::Tell(t) => {
+                if t.asker != self.pubkey {
+                    return Err("a tell to another key".into());
+                }
+                if t.a != self.a {
+                    return Err("a tell about another video".into());
+                }
+                let beacon = serde_json::to_string(&t.event).map_err(|e| e.to_string())?;
+                beacon_json(&beacon, now)
+            }
+            _ => Err("not a tell".into()),
+        }
+    }
+}
+
+#[wasm_bindgen]
+impl LookupAsker {
+    /// `new LookupAsker(secret, a)`: 32 random bytes (a valid secret key), never reused or kept,
+    /// and the video's manifest address.
+    #[wasm_bindgen(constructor)]
+    pub fn js_new(secret: &[u8], manifest_a: &str) -> Result<LookupAsker, JsError> {
+        Self::create(secret, manifest_a).map_err(|e| JsError::new(&e))
+    }
+
+    /// The throwaway key, 64 lowercase hex: the `#p` a tell subscription filters on.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn pubkey(&self) -> String {
+        self.pubkey.clone()
+    }
+
+    /// `ask(createdAt)`: a signed ask, as JSON.
+    #[wasm_bindgen(js_name = ask)]
+    pub fn js_ask(&self, created_at: f64) -> Result<String, JsError> {
+        let t = safe_u64(created_at, "createdAt").map_err(|e| JsError::new(&e))?;
+        self.ask_json(t).map_err(|e| JsError::new(&e))
+    }
+
+    /// `readTell(eventJson, now)`: the beacon a tell to this asker carries, as `verifyBeacon`
+    /// gives it, or a thrown error.
+    #[wasm_bindgen(js_name = readTell)]
+    pub fn js_read_tell(&self, event_json: &str, now: f64) -> Result<String, JsError> {
+        let now = safe_u64(now, "now").map_err(|e| JsError::new(&e))?;
+        self.read_tell_json(event_json, now)
+            .map_err(|e| JsError::new(&e))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -773,5 +856,47 @@ mod tests {
         for bad in [-1.0, 1.5, f64::NAN, f64::INFINITY, 9_007_199_254_740_992.0] {
             assert!(safe_u64(bad, "n").is_err(), "{bad}");
         }
+    }
+
+    /// NFX-17: an asker signs asks with its own key, and reads only the tells addressed to it
+    /// about its video, as the beacon they carry.
+    #[test]
+    fn a_lookup_asker_asks_and_reads_only_its_own_tells() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../../spec/test-vectors/lookup.json")).unwrap();
+        let now = v["now"].as_u64().unwrap();
+        let a = v["manifest_a"].as_str().unwrap();
+        let hex_secret = |who: &str| {
+            let mut out = [0u8; 32];
+            hex::decode_to_slice(v["secret_keys_DO_NOT_USE"][who].as_str().unwrap(), &mut out)
+                .unwrap();
+            out
+        };
+        let asker = LookupAsker::create(&hex_secret("asker"), a).unwrap();
+        assert_eq!(asker.pubkey, v["asker"].as_str().unwrap());
+        let ask: Event = serde_json::from_str(&asker.ask_json(now).unwrap()).unwrap();
+        assert!(matches!(
+            nfx_proto::lookup::read(&ask, now).unwrap(),
+            nfx_proto::lookup::Parsed::Ask(_)
+        ));
+
+        let tell = v["tell"].to_string();
+        let beacon: serde_json::Value =
+            serde_json::from_str(&asker.read_tell_json(&tell, now).unwrap()).unwrap();
+        assert_eq!(beacon["seeder"], v["seeder"]);
+        assert_eq!(beacon["a"], a);
+
+        let other = LookupAsker::create(&[9; 32], a).unwrap();
+        assert!(
+            other.read_tell_json(&tell, now).is_err(),
+            "a tell to another key"
+        );
+        assert!(
+            asker
+                .read_tell_json(&serde_json::to_string(&ask).unwrap(), now)
+                .is_err(),
+            "an ask is not a tell"
+        );
+        assert!(LookupAsker::create(&[1; 32], "not an address").is_err());
     }
 }
