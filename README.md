@@ -12,13 +12,15 @@ mesh (browsers) and an HTTP origin, which a public deployment puts behind TLS an
 The optional Hypercore profile (NFX-12) and payments (Cashu ecash, per delivered chunk)
 are specified as drafts.
 
-**Status (2026-11-19):** NFX 0.1.3 is the latest release: `nfxd` and `nfx-package` for
+**Status (2026-11-25):** NFX 0.1.4 is the latest release: `nfxd` and `nfx-package` for
 linux-x64 on the [Releases page](https://github.com/SovereignTechnology/nfx/releases), free video
-only ([release notes](docs/nfx/releases/v0.1.3.md); earlier: [0.1.2](docs/nfx/releases/v0.1.2.md),
-[0.1.1](docs/nfx/releases/v0.1.1.md), [0.1.0](docs/nfx/releases/v0.1.0.md)). `nfxd` serves
+only ([release notes](docs/nfx/releases/v0.1.4.md); earlier: [0.1.3](docs/nfx/releases/v0.1.3.md),
+[0.1.2](docs/nfx/releases/v0.1.2.md), [0.1.1](docs/nfx/releases/v0.1.1.md),
+[0.1.0](docs/nfx/releases/v0.1.0.md)). `nfxd` serves
 browsers directly, through NATs, signaling only over Nostr relays (its mesh endpoint, NFX-10 §6),
 and since 0.1.3 its embedded scoped relay can carry that signaling too (`--embed-relay-mesh`);
-a video gets one rendition by default. It is tested against the nutflix-pear desktop app in both directions, behind NATs and
+since 0.1.4 that relay keeps its manifests across a restart (`--state`) and a client can find a
+STUN server through Nostr (NFX-10 §1); a video gets one rendition by default. It is tested against the nutflix-pear desktop app in both directions, behind NATs and
 over TLS relays, and against browsers behind NATs. The public services on `nfx:testnet:1` are an iroh
 relay, `https://iroh.nutflix.xyz/`, and a scoped Nostr relay, `wss://relay.nutflix.xyz` ([testnet](docs/nfx/testnet.md)). The free end-to-end slice (milestone M1: publish, seed, fetch,
 play; no payments) is built and passed its exit run. That run and the Phase A exit run before it used two

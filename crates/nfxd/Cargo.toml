@@ -1,6 +1,6 @@
 [package]
 name = "nfxd"
-version = "0.1.3"
+version = "0.1.4"
 description = "The headless NFX node: seed, fetch, pull-through origin and an embedded scoped relay"
 edition.workspace = true
 rust-version.workspace = true
