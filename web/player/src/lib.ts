@@ -86,6 +86,7 @@ import { NostrSignaler } from './signal-nostr';
 import { StunFallbackBook } from './stun-fallback';
 import { resolveManifest as resolveOverRelays, watchEndpoints as watchBeacons } from './resolve';
 import { SessionSources, bufferedAhead } from './session-sources';
+import { capOpenHosts } from './sources';
 import { Anchor, MAX_HASH_LIST_BYTES, type ManifestBinding, loadWasm } from './verify';
 
 // Everything public is declared here or in ./api.ts, so the declaration file built from
@@ -364,8 +365,10 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
   // In tier order, the deliverer first, and at most 3 open hosts asked (NFX-17 §4.2).
   const tierOf = (o: { url: string; tier: number }): number => (o.url === delivered ? 0 : o.tier === 4 ? 3.5 : o.tier);
   const ranked = originOrder(origins, wanted).sort((x, y) => tierOf(x) - tierOf(y));
-  let open = 0;
-  const order = ranked.filter((o) => !sources.rejects(o.url) && (o.url === delivered || o.tier !== 3 || ++open <= 3));
+  const order = capOpenHosts(
+    ranked.filter((o) => !sources.rejects(o.url)),
+    delivered,
+  );
   for (const { url: origin, renditions: hint } of order) {
     const loaded = list.at(origin);
     let picked: Selection;

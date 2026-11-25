@@ -425,16 +425,22 @@ async fn keep_subscribed(
         // A relay not sent this list yet (it was away when the list changed, or is new) gets
         // every chunk again: its old subscription under the same id still has the old filter.
         let stale = applied.get(url.as_str()) != Some(&next);
+        let mut all_sent = true;
         for (id, namespace, videos) in &next {
             if changed || stale || relay.subscription(id).await.is_none() {
                 let filter = ask_filter(namespace, videos);
-                let _ = client
+                let sent = client
                     .subscribe(ns::ReqTarget::single(url.clone(), [filter]))
                     .with_id(id.clone())
                     .await;
+                all_sent &= sent.is_ok();
             }
         }
-        applied.insert(url.to_string(), next.clone());
+        // Only a relay that took every chunk counts as up to date: after a refused one, the
+        // relay may still hold the old filter under that id, and the next round sends it again.
+        if all_sent {
+            applied.insert(url.to_string(), next.clone());
+        }
     }
     *held = next;
 }

@@ -13,6 +13,7 @@ import {
   SourceSet,
   type Tier,
   bestTier,
+  capOpenHosts,
   hostOf,
 } from './src/sources';
 
@@ -214,6 +215,33 @@ eq('host of junk', hostOf('not a url'), null);
   set.update([src('https://gone.example/b', 3), src('https://ok.example', 3)], T);
   eq('rejects', [set.rejects('https://gone.example/c'), set.rejects('https://ok.example')], [true, false]);
   eq('an evicted liar stays out', drain(set, null, T), ['https://ok.example']);
+}
+
+{
+  // `open()` probes at most 3 open HOSTS, not 3 entries (NFX-17 §4.2): three paths on one
+  // host are one host, and creator, rated and configured entries never count.
+  const e = (url: string, tier: number) => ({ url, tier });
+  const order = [
+    e('https://creator.example', 1),
+    e('https://a.example/x', 3),
+    e('https://a.example/y', 3),
+    e('https://a.example/z', 3),
+    e('https://b.example', 3),
+    e('https://c.example', 3),
+    e('https://d.example', 3),
+    e('https://fallback.example', 4),
+  ];
+  eq(
+    'three open hosts, however many entries each',
+    capOpenHosts(order, null).map((o) => o.url),
+    ['https://creator.example', 'https://a.example/x', 'https://a.example/y', 'https://a.example/z', 'https://b.example', 'https://c.example', 'https://fallback.example'],
+  );
+  eq(
+    'the deliverer is kept even past the cap',
+    capOpenHosts(order, 'https://d.example').map((o) => o.url).includes('https://d.example'),
+    true,
+  );
+  eq('a cap of 1', capOpenHosts(order, null, 1).map((o) => o.url), ['https://creator.example', 'https://a.example/x', 'https://a.example/y', 'https://a.example/z', 'https://fallback.example']);
 }
 
 console.log(`sources: ${ran - bad}/${ran} passed`);

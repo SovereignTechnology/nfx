@@ -64,6 +64,23 @@ export function hostOf(url: string): string | null {
   }
 }
 
+/**
+ * The entries `open()` may probe: every entry that is not an open source (tier 3), the entry
+ * that already delivered the hash list, and the open entries of the first `cap` open HOSTS in
+ * the order given (NFX-17 §4.2 counts hosts, not entries: three paths on one host are one host).
+ */
+export function capOpenHosts<T extends { url: string; tier: number }>(order: readonly T[], delivered: string | null, cap: number = OPEN_HOSTS_PER_FILE): T[] {
+  const hosts = new Set<string>();
+  return order.filter((o) => {
+    if (o.url === delivered || o.tier !== 3) return true;
+    const h = hostOf(o.url) ?? o.url;
+    if (hosts.has(h)) return true;
+    if (hosts.size >= cap) return false;
+    hosts.add(h);
+    return true;
+  });
+}
+
 interface State {
   info: SourceInfo;
   host: string;
