@@ -200,6 +200,17 @@ uses. A scoped relay carries the announcement only if it admits kind 33478 (NFX-
 `nfxd run --embed-relay-stun-ads` makes nfxd's own); general relays carry it as is. Without
 `--announce` it is a STUN server that people must be told about some other way.
 
+A relay operator can offer it to the clients that signal through the relay. When the STUN
+server answers on the relay's own host name, `nfxd run --embed-relay-stun-port 3478` puts
+`"stun_port": 3478` in the embedded relay's NIP-11 `nfx` object (NFX-04 §3), and a page
+that signals through the relay (with `--embed-relay-mesh`) asks
+`stun:<host of the relay URL>:3478` after its own servers and before the creator's (NFX-10
+§1, decision record 0108). The relay sees the client's address anyway, so its STUN server
+learns only the client's UDP port. nfxd does not check that anything answers there: the
+host is whatever the relay's name resolves to, so behind a TLS proxy or a CDN it is the
+proxy's, and a port that does not answer costs clients a slot and a gathering timeout. Only
+the web player asks relays' STUN servers so far; nfxd's own mesh endpoint does not.
+
 Open UDP 3478 to it, for example with ufw:
 
 ```sh
@@ -232,11 +243,13 @@ WantedBy=multi-user.target
 **What the operator learns.** Every client that asks reveals its IP address, and when it
 gathers candidates, which is when it plays a video; a STUN server sees no video and no
 peer, and never touches a byte of one. The announcement ties the server's address to the
-operator's key, publicly. Clients use at most 4 STUN servers: their own, those the creator
-of the video names, and through the fallback a seeder's at the address of a peer they
-already signal with. They never take an address from Nostr that is not public (private,
-loopback or documentation) or a port below 1024 (NFX-10 §1), so a lying or dead server
-costs a client one candidate, nothing more.
+operator's key, publicly. Clients use at most 4 STUN servers: their own, those of the relays
+they signal through that name one for their own host (`--embed-relay-stun-port`), those the
+creator of the video names, and through the fallback a seeder's at the address of a peer
+they already signal with. A relay's operator learns the client's UDP port and when it
+gathers, beside the address the relay already saw. Clients never take an address from Nostr
+that is not public (private, loopback or documentation) or a port below 1024 (NFX-10 §1), so
+a lying or dead server costs a client one candidate, nothing more.
 
 ## Checks
 

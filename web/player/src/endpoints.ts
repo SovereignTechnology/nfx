@@ -4,7 +4,7 @@
  * still untrusted. A beacon names where to fetch, never what is right: every byte is
  * checked against the signed anchor whatever its source.
  */
-import type { Endpoints, OriginSource, RenditionAvailability, SeederStun, Signaling, StunFallback } from './api';
+import type { Endpoints, OriginSource, RelayInfo, RelayStun, RenditionAvailability, SeederStun, Signaling, StunFallback } from './api';
 import { MAX_RENDITIONS, beaconRenditionId } from './levels';
 import { MAX_RELAYS, MAX_TRACKERS, relayUrl, trackerUrl } from './mesh';
 
@@ -173,21 +173,118 @@ function askable(url: string): boolean {
   return stunHost(url) !== null && Number(url.slice(url.lastIndexOf(':') + 1)) >= MIN_STUN_PORT;
 }
 
+/** A host name as WHATWG's URL parser leaves it: lowercase labels of letters, digits and hyphens. */
+const HOST_NAME = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/;
+/** The Nostr signaling kind (NFX-10 §6): a relay's STUN is asked only if it carries it. */
+const SIGNAL_KIND = 25050;
+
+/**
+ * The host of a relay URL (`wss:` or `ws:`) at which a session may ask the relay's STUN server
+ * (NFX-10 §1), as the URL parser writes it, or null: a name as it is, except `localhost` and
+ * names under `.localhost`, which are loopback (RFC 6761); an IP address only if global
+ * unicast (`globalUnicast`, rule `stun`), an IPv6 one in brackets. A page cannot see what a
+ * name resolves to, and need not: it connects to that name for the relay anyway. No URL with
+ * credentials, a query or a fragment.
+ */
+export function relayStunHost(relay: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(relay);
+  } catch {
+    return null;
+  }
+  if (!(u.protocol === 'wss:' || u.protocol === 'ws:') || u.username || u.password || u.search || u.hash) return null;
+  const host = u.hostname;
+  if (host.startsWith('[')) return globalUnicast(host.slice(1, -1), 'stun') ? host : null;
+  if (/^[0-9.]+$/.test(host)) return globalUnicast(host, 'stun') ? host : null;
+  if (host === 'localhost' || host.endsWith('.localhost')) return null;
+  return HOST_NAME.test(host) ? host : null;
+}
+
+/**
+ * The STUN server a relay names for itself in its NIP-11 document (NFX-10 §1, NFX-04 §3), as
+ * a `stun:` URL, or null: `stun:<host of relay>:<stun_port>` when `info.nfx.kinds` lists 25050
+ * (it carries signaling) and `info.nfx.stun_port` is 1024 to 65535 (as `parseRelayInfo` keeps
+ * it), at a host `relayStunHost` takes. The URL's own port and path are the relay's.
+ */
+export function relayStunUrl(relay: string, info: RelayInfo | null): string | null {
+  const nfx = info?.nfx;
+  const port = nfx?.stun_port;
+  if (!nfx?.kinds?.includes(SIGNAL_KIND) || port === undefined) return null;
+  if (!(Number.isSafeInteger(port) && port >= MIN_STUN_PORT && port <= 65535)) return null;
+  const host = relayStunHost(relay);
+  return host === null ? null : `stun:${host}:${port}`;
+}
+
+/** Whether `url` is a relay's STUN server as `relayStunUrl` writes it. */
+function relayAskable(url: string): boolean {
+  const m = /^stun:(.+):(\d{1,5})$/.exec(url);
+  if (!m) return false;
+  const port = Number(m[2]);
+  if (!(port >= MIN_STUN_PORT && port <= 65535) || String(port) !== m[2]) return false;
+  return relayStunHost(`wss://${m[1]}`) === m[1];
+}
+
 /**
  * The STUN servers a session uses routinely (NFX-10 §1), as `stun:` URLs, at most `max`: the
- * page's own (`own`, each once) first; then those the video's creator names (`creator`, as
- * `Endpoints.stunCreator` gives them: the `stun` endpoint of the creator's own live beacon),
- * in that order, each once, if global unicast, on a port of 1024 or above, and not its own.
- * No other key's beacon adds a server here, however many keys name it, and no announcement
- * ever does. So Nostr never makes a viewer ask more than 4 STUN servers, or one the creator
- * did not name.
+ * page's own (`own`, each once) first; then those its relays name for themselves (`relays`,
+ * as `relayStunUrl` gives them, in the order of the relays it signals through), each once;
+ * then those the video's creator names (`creator`, as `Endpoints.stunCreator` gives them: the
+ * `stun` endpoint of the creator's own live beacon), in that order, each once, if global
+ * unicast, on a port of 1024 or above, and not taken already. No other key's beacon adds a
+ * server here, however many keys name it, and no announcement ever does. So Nostr never makes
+ * a viewer ask more than 4 STUN servers, or one that neither the creator nor a relay it
+ * signals through named.
  */
-export function selectStun(own: readonly string[], creator: readonly string[], max: number = MAX_ICE_SERVERS): string[] {
+export function selectStun(
+  own: readonly string[],
+  relays: readonly string[],
+  creator: readonly string[],
+  max: number = MAX_ICE_SERVERS,
+): string[] {
   const out: string[] = [];
   for (const o of own) if (out.length < max && !out.includes(o)) out.push(o);
+  for (const url of relays) {
+    if (out.length >= max) break;
+    if (!out.includes(url) && !own.includes(url) && relayAskable(url)) out.push(url);
+  }
   for (const url of creator) {
     if (out.length >= max) break;
     if (!out.includes(url) && !own.includes(url) && askable(url)) out.push(url);
+  }
+  return out;
+}
+
+/**
+ * The STUN servers of one new peer connection of a session that uses its relays' (NFX-10 §1),
+ * as `stun:` URLs: of `configured` (the session's `iceServers`), those in `own` first; then
+ * `relays` (the relays' servers known so far, in the order of the relays); then the rest of
+ * `configured`; each once. A server not in `asked` (every server the session has asked so far,
+ * the fallback's included) joins only while fewer than `max` have been asked, and is then
+ * added to `asked`. So the session never asks more than `max` in all, and neither does one
+ * connection. The relays' servers are checked as `selectStun` checks them; `configured` are
+ * the page's choice, taken as they are.
+ */
+export function relayStunServers(
+  configured: readonly string[],
+  own: readonly string[],
+  relays: readonly string[],
+  asked: Set<string>,
+  max: number = MAX_ICE_SERVERS,
+): string[] {
+  const order = [
+    ...configured.filter((u) => own.includes(u)),
+    ...relays.filter(relayAskable),
+    ...configured.filter((u) => !own.includes(u)),
+  ];
+  const out: string[] = [];
+  for (const url of order) {
+    if (out.includes(url)) continue;
+    if (!asked.has(url)) {
+      if (asked.size >= max) continue;
+      asked.add(url);
+    }
+    out.push(url);
   }
   return out;
 }
@@ -499,7 +596,7 @@ export class EndpointBook {
         c.renditions === null ? { url, tier: c.tier } : { url, renditions: c.renditions, tier: c.tier },
       ),
       trackers: ranked(trackers).slice(0, MAX_TRACKERS),
-      stunServers: selectStun([], stunCreator),
+      stunServers: selectStun([], [], stunCreator),
       stunCreator,
       stunSeeders,
       seeders,
@@ -606,7 +703,7 @@ export function checkRelays(list: readonly string[]): string[] {
  * signaling keeps `remoteCandidates` when given (`all` or `global`). Trackers signaling
  * refuses `remoteCandidates` other than `all`: their SDP goes through the engine's tracker
  * clients, which this option does not filter, and a filter asked for must not be silently
- * missing. `stunFallback` is for Nostr signaling only, for the same reason.
+ * missing. `stunFallback` and `relayStun` are for Nostr signaling only, for the same reason.
  */
 export function checkSignaling(s: Signaling | undefined): Signaling | null {
   if (s === undefined) return null;
@@ -616,9 +713,11 @@ export function checkSignaling(s: Signaling | undefined): Signaling | null {
     throw new TypeError(`nfx: remoteCandidates must be 'all' or 'global', not ${typeof remote === 'string' ? JSON.stringify(remote) : typeof remote}`);
   }
   const fallback = (s as { stunFallback?: unknown } | null)?.stunFallback;
+  const relayStun = (s as { relayStun?: unknown } | null)?.relayStun;
   if (kind === 'trackers') {
     if (remote === 'global') throw new TypeError("nfx: remoteCandidates 'global' needs nostr signaling");
     if (fallback !== undefined) throw new TypeError('nfx: stunFallback needs nostr signaling');
+    if (relayStun !== undefined) throw new TypeError('nfx: relayStun needs nostr signaling');
     const urls = checkTrackers((s as { urls: string[] }).urls ?? []);
     if (urls.length === 0) throw new TypeError('nfx: trackers signaling needs at least one tracker');
     return { kind, urls };
@@ -631,6 +730,7 @@ export function checkSignaling(s: Signaling | undefined): Signaling | null {
       relays,
       ...(remote === undefined ? {} : { remoteCandidates: remote }),
       ...(fallback === undefined ? {} : { stunFallback: checkStunFallback(fallback) }),
+      ...(relayStun === undefined ? {} : { relayStun: checkRelayStun(relayStun) }),
     };
   }
   throw new TypeError(`nfx: signaling of kind ${JSON.stringify(kind)} is not in this build`);
@@ -650,11 +750,24 @@ function checkStunFallback(raw: unknown): StunFallback {
   return { own: [...new Set(own as string[])], seeders: f.seeders as StunFallback['seeders'] };
 }
 
-/** Throws unless every server `stunFallback` calls the page's own is one the session asks. */
+/** `relayStun` as given: 0 to 4 distinct STUN URLs of the page's own. */
+function checkRelayStun(raw: unknown): RelayStun {
+  const own = (raw as { own?: unknown } | null)?.own;
+  if (!Array.isArray(own) || own.length > MAX_ICE_SERVERS || !own.every((u) => typeof u === 'string' && STUN_URL.test(u))) {
+    throw new TypeError(`nfx: relayStun.own must be 0 to ${MAX_ICE_SERVERS} stun: or stuns: URLs`);
+  }
+  return { own: [...new Set(own as string[])] };
+}
+
+/**
+ * Throws unless every server `stunFallback` and `relayStun` call the page's own is one the
+ * session asks.
+ */
 export function checkStunFallbackServers(s: Signaling | null, iceServers: readonly RTCIceServer[]): void {
-  if (s?.kind !== 'nostr' || s.stunFallback === undefined) return;
+  if (s?.kind !== 'nostr') return;
   const asked = iceServers.flatMap((i) => i.urls);
-  if (!s.stunFallback.own.every((u) => asked.includes(u))) throw new TypeError('nfx: stunFallback.own must be among iceServers');
+  if (s.stunFallback && !s.stunFallback.own.every((u) => asked.includes(u))) throw new TypeError('nfx: stunFallback.own must be among iceServers');
+  if (s.relayStun && !s.relayStun.own.every((u) => asked.includes(u))) throw new TypeError('nfx: relayStun.own must be among iceServers');
 }
 
 /** The ICE servers a session may use: STUN only, no credentials; throws otherwise. */

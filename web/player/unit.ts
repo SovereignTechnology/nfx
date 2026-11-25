@@ -14,7 +14,9 @@
  * panel's per-peer book and candidate-pair reader (nfx #99). The NFX-10 §1 STUN vectors run
  * through nfx-wasm (announcements, which the player never uses on its own) and the selection
  * rules (`stun-select.json`: the creator's servers, and the fallback), the verdicts nfx-proto
- * and the generator give.
+ * and the generator give; and STUN at the relays a session signals through (`relay-stun.json`,
+ * the generator's verdicts), with the NIP-11 reader behind it (a stand-in fetch: no network)
+ * and the per-connection order and session-wide cap.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -48,10 +50,15 @@ import {
   originBase,
   checkRelays,
   pageOrigin,
+  relayStunHost,
+  relayStunServers,
+  relayStunUrl,
   selectStun,
   selectStunFallback,
   stunHost,
 } from './src/endpoints';
+import { RELAY_INFO_MAX_BYTES, RelayInfoCache, fetchRelayInfo, parseRelayInfo, relayInfoUrl } from './src/relay-info';
+import { RelayStunBook } from './src/relay-stun';
 import { StunFallbackBook } from './src/stun-fallback';
 import {
   MAX_RENDITIONS,
@@ -308,19 +315,34 @@ const allOf = (n: number) => ({ seeders: n, all: n, renditions: [] });
   eq('and its server is used', book.snapshot(NOW).stunServers, ['stun:1.1.1.2:3478']);
 }
 {
-  // selectStun: the page's own first, then the creator's by the same rules.
+  // selectStun: the page's own first, then its relays', then the creator's by the same rules.
   const creator = ['stun:1.1.1.1:3478', 'stun:1.1.1.2:3478'];
-  eq('own first, then the creator s', selectStun(['stun:stun.example:3478'], creator), [
+  eq('own first, then the creator s', selectStun(['stun:stun.example:3478'], [], creator), [
     'stun:stun.example:3478',
     'stun:1.1.1.1:3478',
     'stun:1.1.1.2:3478',
   ]);
-  eq('own counts once', selectStun(['stun:1.1.1.2:3478', 'stun:1.1.1.2:3478'], creator), ['stun:1.1.1.2:3478', 'stun:1.1.1.1:3478']);
-  eq('own on any port', selectStun(['stun:9.9.9.9:53'], []), ['stun:9.9.9.9:53']);
-  eq('the creator s below 1024: refused', selectStun([], ['stun:1.1.1.1:1023', 'stun:1.1.1.1:1024']), ['stun:1.1.1.1:1024']);
-  eq('the creator s not global unicast: refused', selectStun([], ['stun:10.0.0.1:3478', 'stun:203.0.113.1:3478', 'stun:x.example:3478']), []);
-  eq('at most 4', selectStun(['stun:a:1', 'stun:b:1', 'stun:c:1', 'stun:d:1', 'stun:e:1'], creator).length, 4);
-  eq('nothing at all', selectStun([], []), []);
+  eq('own counts once', selectStun(['stun:1.1.1.2:3478', 'stun:1.1.1.2:3478'], [], creator), ['stun:1.1.1.2:3478', 'stun:1.1.1.1:3478']);
+  eq('own on any port', selectStun(['stun:9.9.9.9:53'], [], []), ['stun:9.9.9.9:53']);
+  eq('the creator s below 1024: refused', selectStun([], [], ['stun:1.1.1.1:1023', 'stun:1.1.1.1:1024']), ['stun:1.1.1.1:1024']);
+  eq('the creator s not global unicast: refused', selectStun([], [], ['stun:10.0.0.1:3478', 'stun:203.0.113.1:3478', 'stun:x.example:3478']), []);
+  eq('at most 4', selectStun(['stun:a:1', 'stun:b:1', 'stun:c:1', 'stun:d:1', 'stun:e:1'], [], creator).length, 4);
+  eq('nothing at all', selectStun([], [], []), []);
+  // A relay's server may be a name (it is the relay's own host), never a loopback one.
+  const relays = ['stun:relay.example:3478', 'stun:[2606:4700::1111]:3479'];
+  eq('own, the relays , then the creator s', selectStun(['stun:9.9.9.9:3478'], relays, creator), [
+    'stun:9.9.9.9:3478',
+    'stun:relay.example:3478',
+    'stun:[2606:4700::1111]:3479',
+    'stun:1.1.1.1:3478',
+  ]);
+  eq('a relay s server that is its own: once, as its own', selectStun(['stun:relay.example:3478'], relays, []), ['stun:relay.example:3478', 'stun:[2606:4700::1111]:3479']);
+  eq('a creator s server that a relay named: once', selectStun([], ['stun:1.1.1.1:3478'], creator), ['stun:1.1.1.1:3478', 'stun:1.1.1.2:3478']);
+  eq(
+    'a relay s server: refused below 1024, at a loopback or private host, or in another form',
+    selectStun([], ['stun:relay.example:1023', 'stun:localhost:3478', 'stun:a.localhost:3478', 'stun:127.0.0.1:3478', 'stun:[fd00::1]:3478', 'stun:Relay.example:3478', 'stuns:relay.example:3478', 'stun:relay.example:03478', 'stun:relay.example'], []),
+    [],
+  );
 }
 {
   // Caps: per beacon, and overall.
@@ -1222,6 +1244,7 @@ interface VerifiedStunAnnouncement {
     });
     const got = selectStun(
       c.own.map((a) => `stun:${a}`),
+      [],
       creator,
       v.max,
     );
@@ -1302,6 +1325,14 @@ interface VerifiedStunAnnouncement {
   none.gathered(mapping);
   eq('fallback: with none, off once a server it asks gave a mapping', none.serversFor('p1', 500), []);
 
+  // With relayStun, what the session has asked (its relays' servers included) is what counts.
+  const viaRelays = new StunFallbackBook({ own: [], seeders: () => seeders }, []);
+  viaRelays.signaled('p1', sdpAt('1.1.1.1'));
+  viaRelays.gathered(noMapping);
+  const four = ['stun:a.example:3478', 'stun:b.example:3478', 'stun:c.example:3478', 'stun:d.example:3478'];
+  eq('fallback: none once the session asked 4 (relayStun)', viaRelays.serversFor('p1', 500, four), []);
+  eq('fallback: one while there is room (relayStun)', viaRelays.serversFor('p1', 500, four.slice(0, 3)), [X]);
+
   eq('stunHost', [X, 'stun:[2606:4700::1111]:3478', 'stun:10.0.0.1:3478', 'stuns:1.1.1.1:3478'].map(stunHost), ['1.1.1.1', '2606:4700::1111', null, null]);
   const seedersFn = (): typeof seeders => seeders;
   eq(
@@ -1321,6 +1352,209 @@ interface VerifiedStunAnnouncement {
   const withFallback: Signaling = { kind: 'nostr', relays: ['wss://r.example'], stunFallback: { own: [OWN], seeders: seedersFn } };
   throws('stunFallback.own must be among iceServers', () => checkStunFallbackServers(withFallback, [{ urls: [X] }]));
   checkStunFallbackServers(withFallback, [{ urls: [OWN] }]);
+  eq(
+    'checkSignaling keeps relayStun, each own URL once',
+    checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], relayStun: { own: [OWN, OWN] } }),
+    { kind: 'nostr', relays: ['wss://r.example'], relayStun: { own: [OWN] } },
+  );
+  throws('relayStun needs nostr', () => checkSignaling({ kind: 'trackers', urls: ['wss://t.example'], relayStun: { own: [] } } as unknown as Signaling));
+  throws('relayStun.own over 4', () => checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], relayStun: { own: ['stun:a:1', 'stun:b:1', 'stun:c:1', 'stun:d:1', 'stun:e:1'] } }));
+  throws('relayStun.own not STUN', () => checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], relayStun: { own: ['https://x.example'] } }));
+  throws('relayStun with no own', () => checkSignaling({ kind: 'nostr', relays: ['wss://r.example'], relayStun: {} as never }));
+  const withRelayStun: Signaling = { kind: 'nostr', relays: ['wss://r.example'], relayStun: { own: [OWN] } };
+  throws('relayStun.own must be among iceServers', () => checkStunFallbackServers(withRelayStun, [{ urls: [X] }]));
+  checkStunFallbackServers(withRelayStun, [{ urls: [OWN] }]);
+}
+{
+  // STUN at the relays a session signals through (NFX-10 §1): the generator's verdicts.
+  const v = JSON.parse(readFileSync(join(here, '../../spec/test-vectors/relay-stun.json'), 'utf8')) as {
+    max: number;
+    relays: { name: string; relay: string; nip11: unknown; stun: string | null }[];
+    cases: { name: string; own: string[]; relays: { relay: string; nip11: unknown }[]; creator: string[]; selected: string[] }[];
+  };
+  eq('relay-stun max', v.max, MAX_ICE_SERVERS);
+  for (const c of v.relays) eq(`relay-stun ${c.name}`, relayStunUrl(c.relay, parseRelayInfo(c.nip11)), c.stun);
+  for (const c of v.cases) {
+    const named = c.relays.flatMap((r) => relayStunUrl(r.relay, parseRelayInfo(r.nip11)) ?? []);
+    eq(`relay-stun select ${c.name}`, selectStun(c.own, named, c.creator, v.max), c.selected);
+  }
+  eq('relay-stun vector counts', [v.relays.length, v.cases.length], [40, 16]);
+  eq(
+    'relayStunHost',
+    ['wss://Relay.Example:7777/x', 'wss://[2606:4700::1111]', 'wss://1.1.1.1', 'ws://127.0.0.1:7447', 'wss://relay.example/?q', 'wss://u@relay.example', 'https://relay.example'].map(relayStunHost),
+    ['relay.example', '[2606:4700::1111]', '1.1.1.1', null, null, null, null],
+  );
+}
+{
+  // A relay's NIP-11 document (./src/relay-info.ts), through a stand-in fetch: no network.
+  eq(
+    'relayInfoUrl',
+    ['wss://relay.example', 'wss://relay.example:7777/nostr', 'ws://127.0.0.1:7447', 'wss://[2606:4700::1111]/', 'https://relay.example', 'wss://u:p@relay.example', 'nope'].map(relayInfoUrl),
+    ['https://relay.example/', 'https://relay.example:7777/nostr', 'http://127.0.0.1:7447/', 'https://[2606:4700::1111]/', null, null, null],
+  );
+  const nfx = { networks: ['nfx:mainnet:1'], kinds: [38504, 20464, 5, 25050], roles: ['catalog', 'signaling'], stun_port: 3478 };
+  const json = JSON.stringify({ name: 'relay', supported_nips: [1, 11], nfx });
+  const calls: { url: string; init: RequestInit }[] = [];
+  const answer =
+    (status: number, body: () => BodyInit | null, headers: Record<string, string> = {}) =>
+    async (url: string, init: RequestInit): Promise<Response> => {
+      calls.push({ url, init });
+      return new Response(body(), { status, headers });
+    };
+  const streamOf = (bytes: Uint8Array): ReadableStream<Uint8Array> =>
+    new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(bytes);
+        c.close();
+      },
+    });
+  const text = (t: string): Uint8Array => new TextEncoder().encode(t);
+  eq('fetchRelayInfo: the nfx object', await fetchRelayInfo('wss://relay.example:7777/nostr', {}, answer(200, () => json)), { nfx });
+  const first = calls[0];
+  eq('fetchRelayInfo: the relay s own URL, https', first?.url, 'https://relay.example:7777/nostr');
+  eq('fetchRelayInfo: asks for NIP-11', (first?.init.headers as Record<string, string> | undefined)?.Accept, 'application/nostr+json');
+  eq(
+    'fetchRelayInfo: no credentials, referrer, cache or redirect',
+    [first?.init.credentials, first?.init.referrerPolicy, first?.init.cache, first?.init.redirect, first?.init.mode],
+    ['omit', 'no-referrer', 'no-store', 'error', 'cors'],
+  );
+  await fetchRelayInfo('ws://127.0.0.1:7447', {}, answer(200, () => json));
+  eq('fetchRelayInfo: ws is http', calls.at(-1)?.url, 'http://127.0.0.1:7447/');
+  const n = calls.length;
+  eq('fetchRelayInfo: not a relay URL', await fetchRelayInfo('https://relay.example', {}, answer(200, () => json)), null);
+  eq('fetchRelayInfo: and nothing fetched', calls.length, n);
+  eq('fetchRelayInfo: a general relay', await fetchRelayInfo('wss://r.example', {}, answer(200, () => '{"name":"general"}')), { nfx: null });
+  eq('fetchRelayInfo: a 404', await fetchRelayInfo('wss://r.example', {}, answer(404, () => json)), null);
+  eq('fetchRelayInfo: a 204', await fetchRelayInfo('wss://r.example', {}, answer(204, () => null)), null);
+  eq('fetchRelayInfo: not JSON', await fetchRelayInfo('wss://r.example', {}, answer(200, () => 'hello')), null);
+  eq('fetchRelayInfo: not an object', await fetchRelayInfo('wss://r.example', {}, answer(200, () => '[1,2]')), null);
+  eq('fetchRelayInfo: null', await fetchRelayInfo('wss://r.example', {}, answer(200, () => 'null')), null);
+  eq('fetchRelayInfo: not UTF-8', await fetchRelayInfo('wss://r.example', {}, answer(200, () => streamOf(new Uint8Array([0x7b, 0xff, 0x7d])))), null);
+  eq('fetchRelayInfo: a network failure', await fetchRelayInfo('wss://r.example', {}, async () => { throw new TypeError('failed to fetch'); }), null);
+  const padded = json + ' '.repeat(RELAY_INFO_MAX_BYTES - json.length);
+  eq('fetchRelayInfo: 64 KiB is read', await fetchRelayInfo('wss://r.example', {}, answer(200, () => streamOf(text(padded)))), { nfx });
+  eq('fetchRelayInfo: past 64 KiB, as read', await fetchRelayInfo('wss://r.example', {}, answer(200, () => streamOf(text(`${padded} `)))), null);
+  eq(
+    'fetchRelayInfo: past 64 KiB, by its length',
+    await fetchRelayInfo('wss://r.example', {}, answer(200, () => json, { 'content-length': String(RELAY_INFO_MAX_BYTES + 1) })),
+    null,
+  );
+  // Time: an answer that never comes, one deaf to the signal, a body that never ends, an abort.
+  const never = (_url: string, init: RequestInit): Promise<Response> =>
+    new Promise<Response>((_, reject) => init.signal?.addEventListener('abort', () => reject(new Error('aborted'))));
+  let t0 = Date.now();
+  eq('fetchRelayInfo: no answer in time', await fetchRelayInfo('wss://r.example', { timeoutMs: 50 }, never), null);
+  eq('fetchRelayInfo: no answer in time, given up then', Date.now() - t0 < 1_000, true);
+  t0 = Date.now();
+  eq('fetchRelayInfo: a fetch deaf to the signal', await fetchRelayInfo('wss://r.example', { timeoutMs: 50 }, () => new Promise<Response>(() => {})), null);
+  eq('fetchRelayInfo: deaf, given up then', Date.now() - t0 < 1_000, true);
+  const endless = (): ReadableStream<Uint8Array> =>
+    new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(text('{"nfx":'));
+      },
+    });
+  t0 = Date.now();
+  eq('fetchRelayInfo: a body that never ends', await fetchRelayInfo('wss://r.example', { timeoutMs: 50 }, answer(200, endless)), null);
+  eq('fetchRelayInfo: never ends, given up then', Date.now() - t0 < 1_000, true);
+  const ctl = new AbortController();
+  const abortedOne = fetchRelayInfo('wss://r.example', { signal: ctl.signal }, never);
+  ctl.abort();
+  eq('fetchRelayInfo: aborted', await abortedOne, null);
+  eq('fetchRelayInfo: already aborted', await fetchRelayInfo('wss://r.example', { signal: ctl.signal }, answer(200, () => json)), null);
+
+  // Read defensively: only fields of their type, list entries of theirs, nothing else.
+  eq(
+    'parseRelayInfo: defensive',
+    parseRelayInfo({ nfx: { networks: ['a', 1, 'a', 'x'.repeat(129)], kinds: [25050, '5', 5.5, -1, 65536, 25050, 7], roles: 'signaling', stun_port: 3478.5, more: 1 } }),
+    { nfx: { networks: ['a'], kinds: [25050, 7] } },
+  );
+  eq('parseRelayInfo: stun_port below 1024', parseRelayInfo({ nfx: { stun_port: 1023 } }), { nfx: {} });
+  eq('parseRelayInfo: stun_port as text', parseRelayInfo({ nfx: { stun_port: '3478' } }), { nfx: {} });
+  eq('parseRelayInfo: stun_port', parseRelayInfo({ nfx: { stun_port: 65535 } }), { nfx: { stun_port: 65535 } });
+  eq('parseRelayInfo: nfx null or a list', [parseRelayInfo({ nfx: null }), parseRelayInfo({ nfx: [] })], [{ nfx: null }, { nfx: null }]);
+  eq('parseRelayInfo: not an object', [null, [], 'x', 3, undefined].map(parseRelayInfo), [null, null, null, null, null]);
+
+  // One fetch per relay per session, shared by every caller.
+  let fetched = 0;
+  const counting = async (): Promise<Response> => {
+    fetched += 1;
+    return new Response(json, { status: 200 });
+  };
+  const cache = new RelayInfoCache({ fetch: counting });
+  const [c1, c2] = await Promise.all([cache.get('wss://relay.example'), cache.get('wss://relay.example')]);
+  await cache.get('wss://relay.example');
+  eq('RelayInfoCache: one fetch per relay', fetched, 1);
+  eq('RelayInfoCache: one answer for every caller', c1 === c2 && c1 !== null, true);
+  await cache.get('wss://relay2.example');
+  eq('RelayInfoCache: another relay, another fetch', fetched, 2);
+  cache.destroy();
+  eq('RelayInfoCache: nothing after destroy', await cache.get('wss://relay3.example'), null);
+  eq('RelayInfoCache: and no fetch', fetched, 2);
+}
+{
+  // A session's relays' STUN (./src/relay-stun.ts): read beside the sockets, never waited for;
+  // each connection asks its own, the relays' known by then, the rest; 4 in the session at most.
+  const OWN = 'stun:9.9.9.9:3478';
+  const C1 = 'stun:1.0.0.1:3478';
+  const C2 = 'stun:8.8.8.8:3478';
+  const R1 = 'stun:relay.example:3478';
+  const R2 = 'stun:relay2.example:3479';
+  const relays = ['wss://relay.example', 'ws://127.0.0.1:7447', 'wss://plain.example', 'wss://relay2.example', 'wss://down.example'];
+  const docs: Record<string, unknown> = {
+    'https://relay.example/': { nfx: { kinds: [38504, 20464, 5, 25050], stun_port: 3478 } },
+    'https://plain.example/': { nfx: { kinds: [38504, 20464, 5], stun_port: 3478 } },
+    'https://relay2.example/': { nfx: { kinds: [25050], stun_port: 3479 } },
+  };
+  const make = (): { book: RelayStunBook; fetched: string[]; lines: string[] } => {
+    const fetched: string[] = [];
+    const lines: string[] = [];
+    const served = async (url: string): Promise<Response> => {
+      fetched.push(url);
+      const d = docs[url];
+      return d === undefined ? new Response('no', { status: 503 }) : new Response(JSON.stringify(d), { status: 200 });
+    };
+    return { book: new RelayStunBook({ own: [OWN] }, relays, (m) => lines.push(m), { fetch: served }), fetched, lines };
+  };
+
+  const early = make();
+  await sleep(10);
+  eq('relayStun: no document asked of a loopback relay', early.fetched, ['https://relay.example/', 'https://plain.example/', 'https://relay2.example/', 'https://down.example/']);
+  eq('relayStun: what the relays named, in their order', early.book.named, [R1, R2]);
+  eq('relayStun: logged', early.lines, [`mesh: relay wss://relay.example answers STUN at ${R1}`, `mesh: relay wss://relay2.example answers STUN at ${R2}`]);
+  eq('relayStun: its own, the relays , then the creator s, 4 at most', early.book.serversFor([C1, OWN, C2]), [OWN, R1, R2, C1]);
+  eq('relayStun: the same for the next connection', early.book.serversFor([C1, OWN, C2]), [OWN, R1, R2, C1]);
+  eq('relayStun: the session asked 4', early.book.asked.length, 4);
+  early.book.destroy();
+
+  // The first connection before any document: what it asked counts, and a late one joins
+  // while there is room.
+  const late = make();
+  eq('relayStun: before the documents, the configured servers', late.book.serversFor([OWN, C1, C2]), [OWN, C1, C2]);
+  await sleep(10);
+  eq('relayStun: then a relay s, while there is room', late.book.serversFor([OWN, C1, C2]), [OWN, R1, C1, C2]);
+  eq('relayStun: and never a fifth', late.book.asked.length, 4);
+  late.book.destroy();
+
+  // The fallback's servers count toward the 4 too.
+  const fallen = make();
+  eq('relayStun: no server configured', fallen.book.serversFor([]), []);
+  fallen.book.noteAsked(['stun:1.1.1.1:3478', 'stun:1.1.1.2:3478', 'stun:1.1.1.3:3478']);
+  await sleep(10);
+  eq('relayStun: one slot left for the relays', fallen.book.serversFor([]), [R1]);
+  fallen.book.destroy();
+
+  // Destroyed before its documents came: nothing learned.
+  const gone = make();
+  gone.book.destroy();
+  await sleep(10);
+  eq('relayStun: nothing after destroy', gone.book.named, []);
+
+  // The order as a pure function.
+  const asked = new Set<string>();
+  eq('relayStunServers: own, relays, rest, each once', relayStunServers([C1, OWN, C1], [OWN], [R1, R1, 'stun:localhost:3478'], asked), [OWN, R1, C1]);
+  eq('relayStunServers: records what it asked', [...asked], [OWN, R1, C1]);
+  eq('relayStunServers: a max', relayStunServers([C2], [], [R2], asked, 4), [R2]);
 }
 {
   // The stats panel's sources (nfx #99): per-peer counters from the engine's events, and the

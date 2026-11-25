@@ -64,7 +64,7 @@ Capability keys:
 
 | Where | Key | Document |
 |---|---|---|
-| relay NIP-11 document | `"nfx"` | NFX-04 §3 |
+| relay NIP-11 document | `"nfx"` | NFX-04 §3 (optional `stun_port`: the UDP port its host answers STUN on, NFX-10 §1) |
 | mint NUT-06 info | `"nfx"` (incl. `redeem_pubkey`) | NFX-09 §1 |
 
 ## 4. Pinned dependency series
@@ -141,6 +141,7 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | Mesh signaling events that MUST be rejected or ignored (NFX-10 §6.5) | `test-vectors/mesh-signal-invalid.json` |
 | STUN service announcements, valid and invalid (NFX-10 §1) | `test-vectors/stun-announcement.json` |
 | STUN server selection, and the addresses a client may take from Nostr (NFX-10 §1) | `test-vectors/stun-select.json` |
+| STUN at a relay's own host, from its NIP-11 `nfx.stun_port`, and its place in the selection (NFX-10 §1) | `test-vectors/relay-stun.json` |
 | `https` endpoints naming their renditions, valid and invalid (NFX-03 §4) | `test-vectors/beacon-renditions.json` |
 | `nfx/files/1` messages, valid and invalid (NFX-12 §4) | `test-vectors/files1.json` |
 | Seeder ratings, valid (NFX-16 §1) | `test-vectors/ratings.json` |
@@ -189,7 +190,8 @@ level ("L2 + NFX-16") and passes the three `ratings*.json` vector files.
 STUN servers named over Nostr (NFX-10 §1) are optional too, and no level requires them: a
 client that uses them claims it beside a level ("L2 + NFX-10 §1 STUN") and passes
 `stun-select.json`. A client that reads announcements, to show the directory they form, also
-passes `stun-announcement.json` as a reader.
+passes `stun-announcement.json` as a reader. A client that uses the STUN servers of the
+relays it signals through (`nfx.stun_port`, NFX-04 §3) also passes `relay-stun.json`.
 
 ## 9. Canonical JSON (`canon`)
 
@@ -300,3 +302,7 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   a client that claims "NFX-10 §1 STUN" passes `stun-select.json`, whose cases change shape,
   and passes `stun-announcement.json` only if it reads announcements. Kind 33478 is
   unchanged.
+- 2026-11-24 (ADR 0108) — the relay NIP-11 `nfx` object gains an optional `stun_port`
+  (NFX-04 §3 as amended in place 2026-11-24): the UDP port on which the relay's own host
+  answers STUN. A client that uses its relays' STUN servers (NFX-10 §1) also passes the new
+  `relay-stun.json` (source `test-vectors/stunad.py`). `stun-select.json` is unchanged.

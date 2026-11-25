@@ -887,3 +887,46 @@ async fn a_relay_with_seeder_lookup_carries_asks_and_tells_and_keeps_neither() {
     relay.shutdown();
     server.abort();
 }
+
+/// NFX-04 §3 as amended 2026-11-24: `nfx.stun_port` is in the NIP-11 document only when the
+/// operator says the relay's host answers STUN, and only for a port of 1024 to 65535.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_names_its_stun_port_in_nip11_only_when_told() {
+    let net = Namespace::parse("nfx:testnet:1").unwrap();
+    let nets = std::slice::from_ref(&net);
+
+    // Not told: no `stun_port`.
+    let (off, _, addr, server) = start(ScopedRelay::with_options(nets, None, true).unwrap()).await;
+    let doc = nip11(addr).await;
+    assert!(doc["nfx"].get("stun_port").is_none(), "{doc}");
+    off.shutdown();
+    server.abort();
+
+    // Told: the port, beside everything else the document says.
+    let relay = ScopedRelay::with_options(nets, None, true)
+        .unwrap()
+        .with_stun_port(3478)
+        .unwrap();
+    let (on, _, addr, server) = start(relay).await;
+    let doc = nip11(addr).await;
+    assert_eq!(doc["nfx"]["stun_port"], 3478);
+    assert_eq!(
+        doc["nfx"]["kinds"],
+        serde_json::json!([38504, 20464, 5, 25050])
+    );
+    assert_eq!(doc["nfx"]["networks"], serde_json::json!(["nfx:testnet:1"]));
+    assert_eq!(doc["supported_nips"], serde_json::json!([1, 11, 40, 50]));
+    on.shutdown();
+    server.abort();
+
+    // A well-known port is refused: a client would never ask it.
+    for bad in [0, 53, 443, 1023] {
+        assert!(ScopedRelay::new(nets).with_stun_port(bad).is_err(), "{bad}");
+    }
+    for good in [1024, 3478, 65535] {
+        assert!(
+            ScopedRelay::new(nets).with_stun_port(good).is_ok(),
+            "{good}"
+        );
+    }
+}

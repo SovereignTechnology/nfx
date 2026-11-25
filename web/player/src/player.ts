@@ -21,9 +21,12 @@
  * are not used. `&stun=<stun: URL>` adds an ICE server; the page has none of its own by
  * default, so only the STUN servers the creator chose learn who watches (and, with
  * `&signal=nostr`, a seeder's at the address of a peer it already signals with, when no
- * server it asks gives a mapping). Test knobs, which change where bytes come from and never
- * whether they are checked: `&httpWindow=<s>` (seconds ahead fetched over HTTP) and
- * `&level=<n>` (pin a level).
+ * server it asks gives a mapping). With `&signal=nostr`, it also asks the STUN server each
+ * of its relays names for itself in its NIP-11 document (`nfx.stun_port`, NFX-10 §1), after
+ * its own and before the creator's: the relay sees the viewer's address anyway. `&relayStun=0`
+ * turns that off, for a viewer behind a proxy, a VPN or Tor. Test knobs, which change where
+ * bytes come from and never whether they are checked: `&httpWindow=<s>` (seconds ahead
+ * fetched over HTTP) and `&level=<n>` (pin a level).
  *
  * Which renditions it offers (NFX-03 §5, NFX-10 §1): by address, each beacon-named origin
  * goes to the library with the renditions its `https` endpoint names, as a hint, and the
@@ -188,10 +191,17 @@ const nostrRelays =
   params.get('signal') === 'nostr'
     ? [...new Set(relays.map(relayUrl).filter((r): r is string => r !== null))].slice(0, MAX_RELAYS)
     : [];
+/** `&relayStun=0`: ask no relay's STUN server (a viewer who hides its address from relays). */
+const relayStun = params.get('relayStun') !== '0';
 /** The mesh over Nostr, or through these trackers, or no mesh. */
 const trackerSignaling = (urls: string[], stunFallback?: StunFallback): Signaling | undefined =>
   nostrRelays.length > 0
-    ? { kind: 'nostr', relays: nostrRelays, ...(stunFallback ? { stunFallback } : {}) }
+    ? {
+        kind: 'nostr',
+        relays: nostrRelays,
+        ...(stunFallback ? { stunFallback } : {}),
+        ...(relayStun ? { relayStun: { own: ownStun } } : {}),
+      }
     : urls.length > 0
       ? { kind: 'trackers', urls }
       : undefined;
@@ -287,7 +297,8 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
         // The page's own trackers first, then what seeders named by now.
         const trackers = [...new Set([...urlTrackers, ...heard.trackers])].slice(0, MAX_TRACKERS);
         // Likewise its own STUN servers, then those the creator names, by NFX-10 §1's rules.
-        const stun = selectStun(ownStun, heard.stunCreator)
+        // Its relays' come between the two, in the library, as their documents arrive.
+        const stun = selectStun(ownStun, [], heard.stunCreator)
           .slice(0, MAX_ICE_SERVERS)
           .map((urls) => ({ urls }));
         // Each beacon-named origin with the renditions beacons claim it serves (a hint the

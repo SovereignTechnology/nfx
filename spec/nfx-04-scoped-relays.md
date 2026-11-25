@@ -1,8 +1,8 @@
 # NFX-04 — Scoped relay profile
 
-**Status: Frozen (M1)** · 2026-09-24, amended in place 2026-11-18 and 2026-11-19 (§§1–3,
-exceptions to the freeze rule: see the changelog) · depends on NFX-01/02/03, and NFX-10 §§1, 6
-for the amendments
+**Status: Frozen (M1)** · 2026-09-24, amended in place 2026-11-18, 2026-11-19 and 2026-11-24
+(§§1–3, exceptions to the freeze rule: see the changelog) · depends on NFX-01/02/03, and
+NFX-10 §§1, 6 for the amendments
 
 A "scoped relay" is a bog-standard NIP-01 relay with a deliberately narrow admission
 policy. Nothing in this document invents wire mechanics; it is a *profile* — an
@@ -77,6 +77,14 @@ A relay that admits mesh signaling (§1) adds `25050` to `kinds` and `"signaling
 `roles`. A page or node that wants a scoped relay for signaling reads this document; one
 that does not list 25050 refuses it. A relay that admits STUN service announcements (§1)
 adds `33478` to `kinds` and `"stun"` to `roles`; one that does not list 33478 refuses them.
+
+A relay whose own host answers STUN Binding requests (NFX-10 §1: Binding only, no
+authentication) MAY say so with `"stun_port"` in the `nfx` object: an integer from 1024 to
+65535, the UDP port on which the host named in the relay's URL answers. A client that
+signals through the relay may then ask that host for its public mapping (NFX-10 §1, as
+amended 2026-11-24); clients ask only a relay that lists 25050 in `kinds`. A reader takes
+any other value as no `stun_port`. Nothing checks that the port answers: the operator says
+so.
 
 ## 4. Serving the catalog side
 
@@ -168,3 +176,13 @@ redundancy comes from many operators).
   reader's benefit. Unlike kind 25050, an announcement carries `n`, so the relay scopes it
   to its networks as it does a beacon. The decision and the alternatives considered (a
   version bump; reading announcements from general relays only) are in issue #104.
+- **Amended in place 2026-11-24, a third exception to the freeze rule (the maintainer's
+  decision, sovtech, 2026-11-24; decision record 0108).** §3: the `nfx` object MAY carry
+  `stun_port`, an integer from 1024 to 65535: the UDP port on which the host named in the
+  relay's URL answers STUN Binding requests. A client that signals through the relay may ask
+  it for its public mapping (NFX-10 §1), since the relay already sees the client's address
+  on the WebSocket. Why in place and not a `specver` bump, as for #96 and #104: the change is
+  additive and a MAY; no artifact changes; a relay without the field is exactly as
+  conformant as before, and so is a reader that ignores it; no reader of NFX-02, -03 or -05
+  changes behaviour. A bump would have re-derived every room key and republished every
+  manifest, for no reader's benefit. The reasons are in decision record 0108.

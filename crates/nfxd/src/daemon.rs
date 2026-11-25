@@ -205,6 +205,11 @@ pub struct Config {
     /// Do not answer seeder lookups (NFX-17 §3). By default a node with a key answers a
     /// viewer's ask for a video it is announcing, on the relays it announces to.
     pub no_lookup: bool,
+    /// The embedded relay's NIP-11 document says this host answers STUN Binding requests on
+    /// this UDP port (`nfx.stun_port`, NFX-04 §3 as amended 2026-11-24), so clients that signal
+    /// through it ask it (NFX-10 §1). 1024 to 65535. The operator's word: nothing checks that
+    /// the port answers (`nfx_node::relay::ScopedRelay::with_stun_port`). Needs `embed_relay`.
+    pub embed_relay_stun_port: Option<u16>,
     /// Join each video's gossip swarm (NFX-06 §4). Off by default: joining lets any swarm
     /// member point this node's endpoint at hosts of its choosing, because iroh-gossip
     /// feeds members' advertised addresses to it unfiltered (independent audit M1, M3).
@@ -828,6 +833,19 @@ impl Daemon {
                 "--embed-relay-lookup needs --embed-relay".into(),
             ));
         }
+        if let Some(port) = cfg.embed_relay_stun_port {
+            if cfg.embed_relay.is_none() {
+                return Err(Error::Config(
+                    "--embed-relay-stun-port needs --embed-relay".into(),
+                ));
+            }
+            // A client never asks a port below 1024 (NFX-10 §1), so naming one does nothing.
+            if port < nfx_proto::stun::MIN_PORT {
+                return Err(Error::Config(format!(
+                    "--embed-relay-stun-port {port}: not 1024 to 65535"
+                )));
+            }
+        }
         if cfg.relay_only && (cfg.gossip || !cfg.gossip_peers.is_empty()) {
             return Err(Error::Config(
                 "--gossip, --gossip-peer: a relay-only node does not gossip".into(),
@@ -1003,7 +1021,7 @@ impl Daemon {
                 let allow_err =
                     |e: nfx_node::NodeError| Error::Config(format!("--allow-creator: {e}"));
                 // Only an explicit --state keeps manifests: the default one lives in the store.
-                let relay = Arc::new(match &cfg.state {
+                let relay = match &cfg.state {
                     Some(state) => {
                         let dir = state.join("relay-manifests");
                         let (relay, reload) =
@@ -1019,6 +1037,13 @@ impl Daemon {
                     None => {
                         ScopedRelay::admitting(&namespaces, creators, may).map_err(allow_err)?
                     }
+                };
+                // The operator's word that this host answers STUN there (NFX-04 §3).
+                let relay = Arc::new(match cfg.embed_relay_stun_port {
+                    Some(port) => relay
+                        .with_stun_port(port)
+                        .map_err(|e| Error::Config(format!("--embed-relay-stun-port: {e}")))?,
+                    None => relay,
                 });
                 tasks.push(tokio::spawn(relay.clone().serve(listener)));
                 let url = format!("ws://{local}");

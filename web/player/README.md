@@ -88,16 +88,17 @@ to `open()`.
 STUN servers come from Nostr too (NFX-10 §1), from the `stun` endpoints of live beacons.
 `watchEndpoints` reads them on the page's relays. `stunCreator` holds those of the creator's
 own beacon: one signed by the key in its `a` tag, the manifest's author. `selectStun(own,
-creator)` picks a session's servers by the rules every NFX client uses: the page's own
-first, then the creator's that are global unicast and on a port of 1024 or above; at most 4
-in all. A beacon signed by any other key adds none, however many keys name a server: keys
+relays, creator)` picks a session's servers by the rules every NFX client uses: the page's
+own first, then those the relays it signals through name for themselves (below), then the
+creator's that are global unicast and on a port of 1024 or above; each once, at most 4 in
+all. A beacon signed by any other key adds none, however many keys name a server: keys
 are free, so a count proves nothing. STUN service announcements (kind 33478, which `nfxd
 stun --announce` signs) are a directory for people and operators; the player never reads
-them. So routine selection never makes a viewer ask more than 4 STUN servers, or one the
-creator did not name. The fallback below, only when the page asks for it, adds a seeder's
-server at the address of a peer it already signals with. Every STUN server learns the
-viewer's address: a page that must tell no one but its own servers who watches passes only
-its own servers to `open()` and no `stunFallback`.
+them. So routine selection never makes a viewer ask more than 4 STUN servers, or one that
+neither the creator nor one of its relays named. The fallback below, only when the page asks
+for it, adds a seeder's server at the address of a peer it already signals with. Every STUN
+server learns the viewer's address: a page that must tell no one but its own servers who
+watches passes only its own servers to `open()`, no `relayStun` and no `stunFallback`.
 
 If no STUN server the session asks finds a mapping, or it asks none, Nostr signaling can
 fall back, when asked to:
@@ -108,6 +109,25 @@ connection only, if a live beacon names it and its IP address is among the candi
 same peer's SDP gave (a session key is not linked to a beacon key, so the address is the
 test). Never a server only an announcement names or on a port below 1024, and at most 4
 STUN servers in the session. `selectStunFallback` is the same rule as a pure function.
+
+A relay can offer STUN on its own host (NFX-10 §1, NFX-04 §3): its NIP-11 document lists
+25050 in `nfx.kinds` and gives `nfx.stun_port` (1024 to 65535; `nfxd
+--embed-relay-stun-port`). The relay already sees the viewer's address on its WebSocket, so
+its STUN server learns only the UDP port. With
+`signaling: { kind: 'nostr', relays, relayStun: { own } }` (`own`: the page's own STUN URLs,
+0 to 4, each among `iceServers`), the session reads each relay's document when it starts,
+in parallel with connecting (at most 3 s and 64 KiB each, once per session; no relay whose
+host is an IP address that is not global unicast, or `localhost`, is asked). Nothing waits
+for them: each new peer connection asks the page's own servers, then the relays' known by
+then (`stun:<host of the relay URL>:<stun_port>`), then the rest of `iceServers`, each
+once, and a server joins only while the session has asked fewer than 4 in all (the
+fallback's included). A document that comes late counts from the next connection. It is
+off unless given: a viewer behind a proxy, a VPN or Tor must not use it (the STUN request
+goes around the proxy and tells the relay the address it hides), and a page cannot detect
+that. `fetchRelayInfo(relay)`, `parseRelayInfo(doc)` and `relayStunUrl(relay, info)` are the
+same steps for a page that reads relays' documents itself (`src/relay-info.ts` is reusable
+for `nfx.kinds` too); their vectors are in `test-vectors/relay-stun.json`. The test page
+turns it on with `&signal=nostr`, and `&relayStun=0` turns it off.
 
 `signaling` is how mesh peers find each other and exchange offers, answers and ICE
 candidates, wired into the engine in one place (`src/mesh.ts` `engineSignaling`). Two kinds:
@@ -158,7 +178,7 @@ npm ci
 npm run build          # the WASM (wasm-pack) and the test page, out/
 npm run build:lib      # the library: out-lib/player.js (minified) and its declarations
 npm run typecheck
-npm run unit           # sanitisers, the beacon endpoint book and availability, open()'s option checks, levels and probes, the remote candidate filter
+npm run unit           # sanitisers, the beacon endpoint book and availability, open()'s option checks, levels and probes, the remote candidate filter, relays' NIP-11 and STUN
 npm run e2e            # the test page end to end (cargo, ffmpeg, openssl, Chromium), held renditions and a hostile beacon included
 npm run e2e:mesh       # the mesh, the bridge, the library's lifecycle, trackers from a beacon
 eval "$(bash e2e-strfry.sh /var/tmp/strfry)"   # the stock relay, strfry at a pinned commit
@@ -215,4 +235,7 @@ To serve it, extract the tar into one directory: `player.js` loads
 `wasm/nfx_wasm_bg.wasm` from beside itself unless `init({ wasmUrl })` says otherwise. A page
 under a CSP needs `'wasm-unsafe-eval'` in `script-src` (the WASM verifier), `blob:` in
 `media-src` (the MediaSource) and in `worker-src` (hls.js's transmuxing worker), and its
-origins, relays (the Nostr signaling relays included) and trackers in `connect-src`.
+origins, relays (the Nostr signaling relays included) and trackers in `connect-src`. With
+`relayStun`, `connect-src` also needs each signaling relay's NIP-11 URL (`https://` for
+`wss://`, on the same host and port); where the policy refuses one, its document is not read
+and the session asks no STUN server of that relay.

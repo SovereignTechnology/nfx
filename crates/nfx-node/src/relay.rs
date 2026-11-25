@@ -30,6 +30,11 @@
 //! are charged after full verification, the embedded beacon included, so an unsigned event
 //! cannot spend someone else's budget. An id already carried is dropped and charges nothing.
 //!
+//! With a STUN port ([`ScopedRelay::with_stun_port`]), its NIP-11 document says that the
+//! relay's own host answers STUN Binding requests on that UDP port (`nfx.stun_port`, NFX-04 §3
+//! as amended 2026-11-24), so clients that signal through it ask it for their mapping
+//! (NFX-10 §1). The relay does not check that anything answers there: its operator says so.
+//!
 //! Stored manifests live in memory, capped at [`MAX_STORED_EVENTS`]. Without a state
 //! directory a restart forgets them, and publishers re-mirror (§4); with one
 //! ([`ScopedRelay::admitting_persisted`]) accepted manifests are kept on disk and reloaded,
@@ -986,6 +991,25 @@ impl ScopedRelay {
             }
         }
         Ok((relay, reload))
+    }
+
+    /// Say in the NIP-11 document that this relay's own host, the host named in its URL,
+    /// answers STUN Binding requests on UDP `port` (`nfx.stun_port`, NFX-04 §3 as amended
+    /// 2026-11-24). Clients that signal through the relay then ask it for their public mapping
+    /// (NFX-10 §1): it sees their address anyway. `port` is 1024 to 65535. Nothing checks that
+    /// the port answers: the operator says so. Clients ask only a relay that lists kind 25050,
+    /// so it goes with mesh signaling.
+    pub fn with_stun_port(mut self, port: u16) -> crate::Result<Self> {
+        if port < nfx_proto::stun::MIN_PORT {
+            return Err(crate::NodeError::Relay(format!(
+                "STUN port {port}: not 1024 to 65535"
+            )));
+        }
+        let mut doc: serde_json::Value =
+            serde_json::from_slice(&self.nip11).map_err(crate::NodeError::relay)?;
+        doc["nfx"]["stun_port"] = port.into();
+        self.nip11 = Bytes::from(doc.to_string());
+        Ok(self)
     }
 
     fn build(namespaces: &[Namespace], creators: Option<BTreeSet<String>>, may: MayAdmit) -> Self {

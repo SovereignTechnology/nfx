@@ -119,11 +119,12 @@ export interface Endpoints {
   /** `wss://` trackers from `webrtc` endpoints (NFX-10 §2), at most 4, most-named first. */
   trackers: string[];
   /**
-   * The STUN servers NFX-10 §1's rules pick for a page with none of its own
-   * (`selectStun([], stunCreator)`), as `stun:<ip>:<port>` URLs, at most 4: those of
+   * The STUN servers NFX-10 §1's rules pick for a page with none of its own and no relay's
+   * (`selectStun([], [], stunCreator)`), as `stun:<ip>:<port>` URLs, at most 4: those of
    * `stunCreator` on a port of 1024 or above. A page with servers of its own calls
-   * `selectStun(own, stunCreator)` instead. Such a server learns each viewer's address; the
-   * video's creator chose it.
+   * `selectStun(own, [], stunCreator)` instead (its relays' come in through
+   * `NostrSignaling.relayStun`). Such a server learns each viewer's address; the video's
+   * creator chose it.
    */
   stunServers: string[];
   /**
@@ -174,6 +175,64 @@ export interface StunFallback {
   own: string[];
   /** The seeders' servers now, read at each new connection: `() => endpoints.stunSeeders`. */
   seeders: () => readonly SeederStun[];
+}
+
+/**
+ * STUN at the relays a session signals through (NFX-10 §1), for `NostrSignaling`.
+ *
+ * When a session starts, it reads the NIP-11 document of each of its relays whose host may
+ * be asked (`relayStunUrl`: no IP address that is not global unicast, no `localhost`), in
+ * parallel with connecting to them (`fetchRelayInfo`: at most 3 s and 64 KiB each, once per
+ * session). A relay whose `nfx.kinds` lists 25050 and whose `nfx.stun_port` is 1024 to 65535
+ * names `stun:<host of its URL>:<stun_port>`. The relay already sees the viewer's address on
+ * its WebSocket, so its STUN server learns only the viewer's UDP port, and when.
+ *
+ * Each new peer connection then asks, in this order, each once: the session's `iceServers`
+ * that are its own (`own`), the servers its relays named so far (in the order of `relays`),
+ * and its other `iceServers` (the creator's). A server joins only while the session has
+ * asked fewer than 4 in all (the fallback's included), and nothing waits for a document: one
+ * that comes late counts from the next connection, if there is room. So a page that gives 4
+ * `iceServers` and whose first connection starts before its relays answer asks no relay's.
+ *
+ * A viewer who reaches relays through a proxy, a VPN or Tor, which hides the address from
+ * the relay, must not use this: the STUN request goes around the proxy and tells the relay
+ * the address. A page cannot detect that; one whose users may do it leaves this off, or lets
+ * them turn it off. The page's Content-Security-Policy must allow `connect-src` to the
+ * relays' `https:` URLs (`http:` for `ws:`), or the documents are not read and nothing changes.
+ */
+export interface RelayStun {
+  /** The page's own STUN URLs, 0 to 4, each among `iceServers`: these come first. */
+  own: string[];
+}
+
+/** What `parseRelayInfo` keeps of a relay's NIP-11 document. */
+export interface RelayInfo {
+  /** Its `nfx` object (NFX-04 §3), or null when it has none, or none that is an object. */
+  nfx: RelayNfx | null;
+}
+
+/**
+ * A relay's NIP-11 `nfx` object (NFX-04 §3), read defensively: a field that is missing or
+ * not of its type is left out, a list keeps only the entries of its type, and nothing else
+ * of the object is kept.
+ */
+export interface RelayNfx {
+  /** NFX namespaces it serves: strings of at most 128 characters, at most 64, each once. */
+  networks?: string[];
+  /** The kinds it admits: integers 0 to 65535, at most 256, each once. */
+  kinds?: number[];
+  /** Its roles (`catalog`, `availability`, `signaling`, `stun`, …): as `networks`. */
+  roles?: string[];
+  /** The UDP port its URL's host answers STUN on: an integer 1024 to 65535 only. */
+  stun_port?: number;
+}
+
+/** How `fetchRelayInfo` asks. */
+export interface RelayInfoOptions {
+  /** Give up after this long (ms), body included. Default 3000. */
+  timeoutMs?: number;
+  /** Aborting it gives up at once. */
+  signal?: AbortSignal;
 }
 
 /** One rendition as hls.js parsed it from the master playlist. */
@@ -326,6 +385,8 @@ export interface NostrSignaling {
   remoteCandidates?: RemoteCandidates;
   /** Off unless given: what to try when this session's own STUN fails (`StunFallback`). */
   stunFallback?: StunFallback;
+  /** Off unless given: ask the STUN servers the relays name for themselves (`RelayStun`). */
+  relayStun?: RelayStun;
 }
 
 /**
@@ -419,8 +480,9 @@ export interface OpenCommon {
   /**
    * STUN servers for the mesh (`stun:` or `stuns:` URLs only), at most 4. Default none.
    * A page may add those the video's creator names to its own (the `stun` endpoint of the
-   * creator's beacon, NFX-10 §1): `selectStun(own, endpoints.stunCreator)` applies the rules
-   * every NFX client uses.
+   * creator's beacon, NFX-10 §1): `selectStun(own, [], endpoints.stunCreator)` applies the
+   * rules every NFX client uses. Those its relays name come in through Nostr signaling's
+   * `relayStun`, which puts them between the two, at most 4 in all.
    */
   iceServers?: RTCIceServer[];
   onEvent?: (event: PlayerEvent) => void;
