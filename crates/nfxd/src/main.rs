@@ -9,7 +9,7 @@
 //! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--iroh-relay-ca <pem>]… [--relay-only]
 //!          [--iroh-bind <ip:port> [--iroh-external <ip:port>]…]
 //!          [--seed <a>[#<id>,…]]… [--fetch <a>[#<id>,…]]… [--pull <a>[#<id>,…]]… [--origin <addr:port>]
-//!          [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads]]
+//!          [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>]]
 //!          [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]…
 //!          [--stun <ip:port> [--stun-public <ip:port>]]
 //!          [--mesh-relay <wss url>… [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]… [--mesh-max-peers <n>]
@@ -86,6 +86,16 @@
 //! checks (a global unicast server, an expiration at most 24 h on), 12 an hour per key and 1024
 //! held at once, each kept until it expires; `--allow-creator` does not narrow them, since they
 //! name no video. Off by default.
+//!
+//! `--embed-relay-stun-port <port>` says in the embedded relay's NIP-11 document
+//! (`nfx.stun_port`, NFX-04 §3 as amended 2026-11-24) that this host answers STUN Binding
+//! requests on that UDP port, 1024 to 65535. Pages and nodes that signal through the relay then
+//! ask it for their public mapping (NFX-10 §1): the relay sees their address on the WebSocket
+//! anyway, so the STUN server learns only the port. They ask only a relay that lists kind
+//! 25050, so it goes with `--embed-relay-mesh`, and they ask the host name of the relay's URL,
+//! so it must answer where that name resolves (behind a TLS proxy, the proxy's host). nfxd does
+//! not check that anything answers there: that is the operator's word. Run `--stun` (or `nfxd
+//! stun`) on that port. Off by default.
 //!
 //! With `--state`, the embedded relay keeps the manifests it accepts in
 //! `<state>/relay-manifests` (private to the user) and serves them again after a restart,
@@ -183,7 +193,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads]] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]... [--mesh-max-peers <n>] [--mesh-stun-from-nostr=false]]
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>]] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]... [--mesh-max-peers <n>] [--mesh-stun-from-nostr=false]]
   nfxd stun --bind <ip:port> [--public <ip:port>] [--announce --key <file> --relay <url>... --network <ns>...]
 
   --mesh-relay runs the mesh endpoint (NFX-10 §6): browsers meet this node in the rooms of
@@ -204,6 +214,10 @@ const USAGE: &str = "usage:
   too: ephemeral, room proof checked, rate-limited per sender. Off by default.
   --embed-relay-stun-ads lets it carry STUN service announcements (kind 33478) for its
   networks: checked, rate-limited per key, kept until they expire. Off by default.
+  --embed-relay-stun-port <port> (1024 to 65535) says in the relay's NIP-11 document
+  (nfx.stun_port) that the host of its URL answers STUN on that UDP port, so pages that
+  signal through it (with --embed-relay-mesh) ask it: the relay already sees their address.
+  nfxd does not check that anything answers there: run --stun on that port. Off by default.
   With --state, the embedded relay keeps the manifests it accepts in <state>/relay-manifests
   and serves them after a restart, re-verified and re-admitted under this run's flags. Only
   manifests are kept. Without --state they live in memory only.
@@ -411,6 +425,7 @@ async fn run(args: &[String]) -> Result<()> {
             "origin",
             "https-url",
             "embed-relay",
+            "embed-relay-stun-port",
             "embed-tracker",
             "bridge",
             "bridge-public",
@@ -492,6 +507,7 @@ async fn run(args: &[String]) -> Result<()> {
         allow_creators: all(&f, "allow-creator"),
         embed_relay_mesh,
         embed_relay_stun_ads,
+        embed_relay_stun_port: port(&f, "embed-relay-stun-port")?,
         no_mesh_stun_from_nostr,
         gossip,
         gossip_peers: gossip_peers(&all(&f, "gossip-peer"))?,
@@ -798,6 +814,16 @@ fn count(f: &[(String, String)], name: &str) -> Result<Option<usize>> {
         .transpose()
 }
 
+/// `--NAME PORT`, a UDP or TCP port, given at most once; `Daemon::start` checks its range.
+fn port(f: &[(String, String)], name: &str) -> Result<Option<u16>> {
+    one(f, name)?
+        .map(|v| {
+            v.parse()
+                .map_err(|_| Error::Config(format!("--{name} {v}: not a port")))
+        })
+        .transpose()
+}
+
 /// `--NAME ip:port`, given at most once. Only the form is checked here; `Daemon::start`
 /// checks that the daemon can use it.
 fn ip_port(f: &[(String, String)], name: &str) -> Result<Option<std::net::SocketAddr>> {
@@ -848,8 +874,8 @@ fn gossip_peers(values: &[String]) -> Result<Vec<iroh::EndpointAddr>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bridge_max_peers, flags, gossip_peers, ip_port, iroh_addrs, items, pubkey_hex, relay_cas,
-        write_lines,
+        bridge_max_peers, flags, gossip_peers, ip_port, iroh_addrs, items, port, pubkey_hex,
+        relay_cas, write_lines,
     };
 
     /// Takes `left` bytes, then fails every write with `kind`.
@@ -1186,5 +1212,38 @@ mod tests {
         let err = ip_port(&f, "mesh-public").unwrap_err().to_string();
         assert!(err.contains("--mesh-public given twice"), "{err}");
         assert!(flags(&args(&["--mesh-public"]), &known).is_err());
+    }
+
+    #[test]
+    fn embed_relay_stun_port_is_one_port() {
+        let args = |s: &[&str]| s.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let name = "embed-relay-stun-port";
+        let known = [name];
+        for (v, want) in [("3478", 3478), ("1024", 1024), ("65535", 65535)] {
+            let f = flags(&args(&["--embed-relay-stun-port", v]), &known).unwrap();
+            assert_eq!(port(&f, name).unwrap(), Some(want));
+        }
+        assert_eq!(port(&[], name).unwrap(), None);
+        // Only the form here: `Daemon::start` refuses one below 1024.
+        let f = flags(&args(&["--embed-relay-stun-port", "53"]), &known).unwrap();
+        assert_eq!(port(&f, name).unwrap(), Some(53));
+        for bad in ["", "65536", "-1", "3478.0", "udp:3478", "1.1.1.1:3478"] {
+            let f = flags(&args(&["--embed-relay-stun-port", bad]), &known).unwrap();
+            let err = port(&f, name).unwrap_err().to_string();
+            assert_eq!(err, format!("--embed-relay-stun-port {bad}: not a port"));
+        }
+        let f = flags(
+            &args(&[
+                "--embed-relay-stun-port",
+                "3478",
+                "--embed-relay-stun-port",
+                "3479",
+            ]),
+            &known,
+        )
+        .unwrap();
+        let err = port(&f, name).unwrap_err().to_string();
+        assert!(err.contains("--embed-relay-stun-port given twice"), "{err}");
+        assert!(flags(&args(&["--embed-relay-stun-port"]), &known).is_err());
     }
 }

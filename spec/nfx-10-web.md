@@ -87,23 +87,52 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   client at its own network; the documentation blocks route nowhere. A beacon whose `stun`
   endpoint names a documentation address is still a valid beacon (the endpoint's rule above
   is its form, not its reach); only the selection below refuses the address.
+- **STUN at the relays a client signals through.** A relay whose own host answers STUN
+  Binding requests (as above) MAY say so in its NIP-11 document, with `nfx.stun_port` (NFX-04
+  §3, as amended 2026-11-24). A client SHOULD use it for each relay it signals through (§6:
+  the relays it sends and reads kind-25050 events on, in the order it is configured with
+  them), if that relay's NIP-11 `nfx.kinds` lists 25050 and its `nfx.stun_port` is an
+  integer from 1024 to 65535: the STUN server `stun:<host>:<stun_port>`, one per relay.
+  `<host>` is the host of the relay's URL as it is (`wss://<host>[:<port>][/<path>]`); the
+  URL's port and path are the relay's, not the STUN server's. The relay already sees the
+  client's IP address on its WebSocket, so its STUN server learns only the UDP port the
+  client is mapped to, and when. `relay-stun.json` pins the rule.
+  - A host that is an IP address must be global unicast (above). `localhost`, and a name
+    under `.localhost`, name no server: they are loopback (RFC 6761). A native client
+    resolves any other host name, and asks the server only if every address the name
+    resolves to is global unicast. A browser cannot see what a name resolves to, and need
+    not: it has already connected to that name for the relay.
+  - A client that reaches a relay through a proxy, a VPN or Tor, which hides its address
+    from the relay, SHOULD NOT use that relay's STUN server: the request would go around the
+    proxy and tell the relay the address it hides. A page cannot tell whether the browser
+    uses one, so a page whose users may does not use its relays' STUN servers, or lets its
+    user turn them off.
+  - A client reads a relay's NIP-11 document (NIP-11: a `GET` of the relay's URL with
+    `https` for `wss` and `http` for `ws`, and `Accept: application/nostr+json`) at most
+    once a session, and never waits for it to start playing: until the document has come, it
+    asks no STUN server of that relay. A document it cannot fetch or parse, or one with no
+    `nfx` object, names no server.
 - **Using STUN servers named over Nostr.** A client, a page or a native peer, SHOULD use
-  the STUN servers the creator of the video it plays or serves names, beside its own: those
-  in the `stun` endpoint of a live, verified beacon of that video signed by its creator.
-  That is a beacon whose signer is the creator its `a` tag names, which is the author of the
-  manifest. It picks them by these rules, which `stun-select.json` pins:
+  the STUN servers the creator of the video it plays or serves names, beside its own and its
+  relays': those in the `stun` endpoint of a live, verified beacon of that video signed by
+  its creator. That is a beacon whose signer is the creator its `a` tag names, which is the
+  author of the manifest. It picks its STUN servers by these rules, which `stun-select.json`
+  and `relay-stun.json` pin:
   1. its own servers first (a page's own `iceServers`, a node's configured ones), each once;
-  2. then the servers the creator's beacons name, in the order heard, each once, if the
+  2. then its relays' servers (above), in the order of its relays, each once;
+  3. then the servers the creator's beacons name, in the order heard, each once, if the
      address is global unicast (above: never a private, loopback, link-local, shared or
-     documentation address), the port is 1024 or above, and the server is not its own;
-  3. no other server named over Nostr. Not one a beacon signed by another key names, however
+     documentation address), the port is 1024 or above, and the server is not one it took
+     already;
+  4. no other server named over Nostr. Not one a beacon signed by another key names, however
      many keys name it: keys are free, so a count of keys proves nothing. Not one a STUN
      service announcement names, whoever signed it. A seeder's server is reached only through
      the fallback below;
-  4. at most 4 STUN servers in all.
+  5. at most 4 STUN servers in all. Two servers are one when their `stun:` URLs are the
+     same: a relay's server that is also one of the client's own is taken once, as its own.
 
   A creator whose node signs its beacons with a key other than the creator key names no
-  server by rule 2: its servers are reached only through the fallback.
+  server by rule 3: its servers are reached only through the fallback.
 - **A fallback when a client's STUN fails.** A client that got no mapping from any server it
   asks (no server-reflexive candidate when gathering finished; for a native client, none
   after its attempts) MAY also ask, for the connection to one peer, a STUN server named by a
@@ -126,25 +155,31 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   can copy a seeder's address into its SDP, but it could already make the client's ICE
   agent send checks there. A seeder whose STUN server is at another address than its
   candidates is not reached this way. `stun-select.json` pins the rule (`fallback`).
-- **The abuse bound.** Whatever beacons and announcements say, Nostr never makes a client
-  contact more than 4 STUN servers, the fallback's included, any address that is not global
-  unicast, or any port below 1024: a beacon from anywhere must not point viewers at their
-  own network or at a well-known service. Only two keys can add a server: the creator's, for
-  every client of its video, and a seeder's, for a client already signaling with it at that
-  server's address. A native client
+- **The abuse bound.** Whatever beacons, announcements and relays' NIP-11 documents say,
+  they never make a client contact more than 4 STUN servers, the fallback's included, an IP
+  address they name that is not global unicast, or any port below 1024: a beacon from
+  anywhere must not point viewers at their own network or at a well-known service. Only two
+  keys can add a server: the creator's, for every client of its video, and a seeder's, for
+  a client already signaling with it at that server's address. A relay can add one server,
+  at the host of its own URL, and only for a client that signals through it. A native client
+  checks the addresses that host's name resolves to; a browser cannot, but it has already
+  connected to that name. A native client
   that offers a server-reflexive candidate (§6) offers a mapping reported by a server named
-  over Nostr only if that mapping is global unicast, so a lying server adds at most one
-  candidate that fails (ICE tries every pair), never a private address for peers to check.
-  A STUN server cannot touch the video either: it never sees the SDP, which carries the
-  DTLS fingerprints that authenticate each peer.
+  over Nostr, or by a relay's, only if that mapping is global unicast, so a lying server adds
+  at most one candidate that fails (ICE tries every pair), never a private address for peers
+  to check. A STUN server cannot touch the video either: it never sees the SDP, which carries
+  the DTLS fingerprints that authenticate each peer.
 - **Privacy.** A STUN server moves no bytes of video, but it learns each client's IP address
-  and when it gathers, as a tracker does. So a client's address reaches only its own STUN
-  servers, the servers the creator of the video it chose names, and, through the fallback, a
-  server at the address of a peer it already signals with. A client that must not tell the
-  creator's servers who watches uses only its own. An announcement ties the server's address
-  to its operator's key, publicly, and makes no client ask it. The fallback tells no new
-  address about the client: it asks only an IP address the peer it is connecting to already
-  gave its ICE agent to check.
+  and when it gathers, as a tracker does. So a client's address goes only to its own STUN
+  servers, to the relays it signals through, which see it on their WebSockets already, to
+  the servers the creator of the video it chose names, and, through the fallback, to a
+  server at the address of a seeder it already signals with. A relay's STUN server adds the
+  client's UDP port, and when it gathers, to what the relay knew. A client that must not tell
+  the creator's servers who watches uses only its own; one that hides its address from its
+  relays does not use theirs (above). An announcement ties the server's address to its
+  operator's key, publicly, and makes no client ask it. The fallback tells no new address
+  about the client: it asks only an IP address the peer it is connecting to already gave
+  its ICE agent to check.
 
 ## 2. Swarms and bridges
 
@@ -784,3 +819,13 @@ with full ICE, and a NAT test.
   ranked by distinct keys, beacons and announcements together, a lone key only when nothing
   better exists, no port floor; the fallback only for a client with servers of its own.)
   `stun-select.json`'s cases now give the creator and the beacons and announcements heard.
+- Draft 2026-11-24 (ADR 0108): §1 adds STUN at the relays a client signals through. A relay
+  whose NIP-11 `nfx.kinds` lists 25050 and whose `nfx.stun_port` (NFX-04 §3, amended in
+  place 2026-11-24) is an integer from 1024 to 65535 names the STUN server
+  `stun:<host of its URL>:<stun_port>`. A client SHOULD use it, one per relay in the order of
+  its relays, after its own servers and before the creator's, at most 4 in all, each `stun:`
+  URL once. The relay already sees the client's address. A host that is an IP address must
+  be global unicast, and `localhost` names none; a native client resolves a name and needs
+  every address to be; a client that hides its address from a relay through a proxy, a VPN
+  or Tor SHOULD NOT use it. The abuse bound and the privacy note now name relays. Nothing on the Nostr wire
+  changes. New vectors `relay-stun.json`.

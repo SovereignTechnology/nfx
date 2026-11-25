@@ -238,6 +238,37 @@ async fn a_bad_https_url_is_refused_at_start_not_silently_every_minute() {
     .err()
     .expect("refused");
     assert!(err.to_string().contains("--embed-relay-stun-ads"), "{err}");
+    // And the STUN port its NIP-11 document names; a port below 1024 is one no client asks.
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("relay-stun-port-no-relay"),
+        embed_relay_stun_port: Some(3478),
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(
+        err.to_string()
+            .contains("--embed-relay-stun-port needs --embed-relay"),
+        "{err}"
+    );
+    let err = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: tmp("relay-stun-port-low"),
+        embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        namespaces: vec![nfx_proto::namespace::Namespace::parse("nfx:testnet:1").unwrap()],
+        embed_relay_stun_port: Some(1023),
+        ..Config::default()
+    })
+    .await
+    .err()
+    .expect("refused");
+    assert!(
+        err.to_string()
+            .contains("--embed-relay-stun-port 1023: not 1024 to 65535"),
+        "{err}"
+    );
     // Turning off STUN from Nostr means something only with the mesh endpoint.
     let err = Daemon::start(Config {
         keys: Some(Keys::generate()),
@@ -310,6 +341,61 @@ async fn a_bad_https_url_is_refused_at_start_not_silently_every_minute() {
     .await
     .expect("a valid https URL starts");
     ok.shutdown().await;
+}
+
+/// The NIP-11 document of the relay at `url` (`ws://ip:port`, as `Daemon::relay_url` gives it).
+async fn relay_nip11(url: &str) -> Value {
+    let addr: SocketAddr = url.strip_prefix("ws://").unwrap().parse().unwrap();
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    let res = sender
+        .send_request(
+            Request::get("/")
+                .header("host", "relay.test")
+                .header("accept", "application/nostr+json")
+                .body(Empty::<Bytes>::new())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
+/// `--embed-relay-stun-port`: the embedded relay's NIP-11 document names the STUN port
+/// (`nfx.stun_port`, NFX-04 §3 as amended 2026-11-24) when it is given, and only then.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_embedded_relay_names_its_stun_port_only_when_given_one() {
+    let net = nfx_proto::namespace::Namespace::parse("nfx:testnet:1").unwrap();
+    for (name, stun_port) in [
+        ("relay-stun-port-off", None),
+        ("relay-stun-port-on", Some(3478)),
+    ] {
+        let daemon = Daemon::start(Config {
+            keys: Some(Keys::generate()),
+            store: tmp(name),
+            embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+            embed_relay_mesh: true,
+            namespaces: vec![net.clone()],
+            embed_relay_stun_port: stun_port,
+            ..Config::default()
+        })
+        .await
+        .expect("starts");
+        let doc = relay_nip11(daemon.relay_url.as_deref().unwrap()).await;
+        assert_eq!(
+            doc["nfx"]["kinds"],
+            serde_json::json!([38504, 20464, 5, 25050]),
+            "{name}"
+        );
+        match stun_port {
+            Some(port) => assert_eq!(doc["nfx"]["stun_port"], port, "{name}"),
+            None => assert!(doc["nfx"].get("stun_port").is_none(), "{name}: {doc}"),
+        }
+        daemon.shutdown().await;
+    }
 }
 
 #[tokio::test]
