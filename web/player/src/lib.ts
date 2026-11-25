@@ -37,6 +37,7 @@ import { HlsJsP2PEngine } from 'p2p-media-loader-hlsjs';
 
 import { verifyManifest } from '../out/wasm/nfx_wasm.js';
 import type {
+  EndpointWatch,
   Endpoints,
   InitOptions,
   Level,
@@ -55,6 +56,7 @@ import type {
   Signaling,
   Stats,
   SeederStun,
+  WatchOptions,
 } from './api';
 import {
   MAX_ICE_SERVERS as ENDPOINTS_MAX_ICE_SERVERS,
@@ -82,7 +84,7 @@ import { RelayStunBook } from './relay-stun';
 import { MAX_REMOTE_CANDIDATES as SDP_MAX_REMOTE_CANDIDATES, filterRemoteSdp as filterSdp } from './remote-sdp';
 import { NostrSignaler } from './signal-nostr';
 import { StunFallbackBook } from './stun-fallback';
-import { type EndpointWatch, type WatchOptions, resolveManifest as resolveOverRelays, watchEndpoints as watchBeacons } from './resolve';
+import { resolveManifest as resolveOverRelays, watchEndpoints as watchBeacons } from './resolve';
 import { SessionSources, bufferedAhead } from './session-sources';
 import { Anchor, MAX_HASH_LIST_BYTES, type ManifestBinding, loadWasm } from './verify';
 

@@ -567,3 +567,18 @@ export interface Session {
    */
   destroy(): void;
 }
+
+/**
+ * `watchEndpoints`'s result: call it to stop; `delivered(url)` tells it an origin delivered a
+ * file; `ask()` asks the video's seeders to answer at once (NFX-17 §4), when the watch was
+ * made with `ask: true`. Call `ask()` when the viewer presses Play, not when a page opens.
+ */
+export type EndpointWatch = (() => void) & { delivered(url: string): void; ask(): void };
+
+export interface WatchOptions {
+  /**
+   * Ask seeders when `ask()` is called (NFX-17): one public event per wait, signed by a
+   * throwaway key, that says which video is starting. Off: nothing is ever published.
+   */
+  ask?: boolean;
+}
