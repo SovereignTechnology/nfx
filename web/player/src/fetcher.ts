@@ -33,7 +33,12 @@ export interface FileSpec {
   mediaTime: number | null;
   /** The rendition it belongs to; null for files every source serves. */
   rendition: string | null;
+  /** The most bytes read when `size` is unknown (the hash list's own limit, for the hash list). */
+  maxBytes?: number;
 }
+
+/** The most bytes read of a file whose size is not known and that names no limit of its own. */
+export const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
 
 /** Bytes received over time, by host and across the session: the floor and the link rate. */
 export class Meter {
@@ -192,7 +197,7 @@ export async function fetchFile(
         a.received += value.byteLength;
         a.chunks.push(value);
         meter.add(t, value.byteLength, a.host, a.id);
-        if (file.size !== null && a.received > file.size) {
+        if (a.received > (file.size ?? file.maxBytes ?? DEFAULT_MAX_BYTES)) {
           a.state = 'failed';
           a.status = -1; // longer than the hash list says: not this file
           a.ctl.abort();

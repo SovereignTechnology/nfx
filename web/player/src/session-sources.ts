@@ -140,6 +140,7 @@ export class SessionSources {
     verify: (bytes: Uint8Array) => boolean,
     signal?: AbortSignal,
     once = false,
+    maxBytes?: number,
   ): Promise<{ bytes: Uint8Array; source: string }> {
     const name = path.slice(path.lastIndexOf('/') + 1);
     const facts = this.#facts.get(name);
@@ -156,7 +157,13 @@ export class SessionSources {
       once,
     };
     const got = await fetchFile(
-      { path, size: facts?.size ?? null, mediaTime: facts?.mediaTime ?? null, rendition: facts?.rendition ?? null },
+      {
+        path,
+        size: facts?.size ?? null,
+        mediaTime: facts?.mediaTime ?? null,
+        rendition: facts?.rendition ?? null,
+        ...(maxBytes === undefined ? {} : { maxBytes }),
+      },
       deps,
       signal,
     );

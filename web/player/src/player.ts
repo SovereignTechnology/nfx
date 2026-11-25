@@ -303,7 +303,8 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
           .map((urls) => ({ urls }));
         // Each beacon-named origin with the renditions beacons claim it serves (a hint the
         // library only orders by); the page's own hint makes no claim.
-        const origins = fresh.map((o): string | OriginSource => heard.originSources.find((s) => s.url === o) ?? o);
+        // The page's own hint stays its own (tier 4), whatever a beacon says of it.
+        const origins = fresh.map((o): string | OriginSource => (o === hint ? o : (heard.originSources.find((s) => s.url === o) ?? o)));
         // If no server it asks finds a mapping (or it asks none): a seeder's server at a
         // peer's own address.
         const stunFallback: StunFallback = { own: ownStun, seeders: () => heard.stunSeeders };

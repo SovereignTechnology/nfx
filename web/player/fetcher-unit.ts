@@ -218,5 +218,21 @@ async function run(
   eq('too long: the next delivers', r.source, 'https://good.example');
 }
 
+{
+  // A file of unknown size (the hash list): a source that sends past its limit is left.
+  const endless: [number, Uint8Array][] = [];
+  for (let t = 50; t < 20_000; t += 50) endless.push([t, new Uint8Array(100_000).fill(7)]);
+  const r = await run(
+    [src('https://endless.example', 3), src('https://good.example', 3)],
+    [
+      ['https://endless.example', { chunks: endless, end: false }],
+      ['https://good.example', whole(100)],
+    ],
+    { file: { path: 'root/seg.m4s', size: null, mediaTime: null, rendition: null, maxBytes: FILE.byteLength } },
+  );
+  eq('an endless body is cut at the limit', r.source, 'https://good.example');
+  eq('the endless source is out', r.set.list(r.ms).find((s) => s.url === 'https://endless.example')?.bad, true);
+}
+
 console.log(`fetcher: ${ran - bad}/${ran} passed`);
 process.exit(bad === 0 ? 0 : 1);

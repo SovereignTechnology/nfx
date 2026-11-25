@@ -8,8 +8,12 @@ export type Filter = Record<string, unknown>;
 
 /** Largest relay message parsed; NFX events are ≤ 64 KiB (NFX-04 §2). */
 const MAX_MESSAGE = 70 * 1024;
-/** Most events one subscription hands on, of each kind (so one filter's flood cannot starve another's). */
+/**
+ * Most events one subscription hands on per minute, of each kind (so one filter's flood cannot
+ * starve another's, and a subscription that lives for hours keeps working).
+ */
 const MAX_EVENTS = 1000;
+const EVENTS_WINDOW_MS = 60_000;
 /** Most distinct kinds one subscription counts. */
 const MAX_KINDS = 8;
 
@@ -32,8 +36,9 @@ export function subscribe(
 ): Subscription {
   const id = `nfx${++seq}`;
   let ended = false;
-  /** Events handed on, by kind. */
+  /** Events handed on, by kind, in the current window. */
   const counts = new Map<unknown, number>();
+  let windowStart = Date.now();
   const end = (why: string): void => {
     if (!ended) {
       ended = true;
@@ -60,6 +65,10 @@ export function subscribe(
     }
     if (!Array.isArray(msg) || msg[1] !== id) return;
     if (msg[0] === 'EVENT' && msg[2] !== null && typeof msg[2] === 'object') {
+      if (Date.now() - windowStart >= EVENTS_WINDOW_MS) {
+        counts.clear();
+        windowStart = Date.now();
+      }
       const kind = (msg[2] as { kind?: unknown }).kind;
       const n = (counts.get(kind) ?? 0) + 1;
       if (!counts.has(kind) && counts.size >= MAX_KINDS) return;

@@ -162,6 +162,7 @@ export function watchEndpoints(
   // Seeder lookup (NFX-17 §4): one throwaway key per video and watch, made on the first ask.
   let asker: LookupAsker | null = null;
   let asks = 0;
+  let asking = false;
   const skipped = new Set<string>();
   let tellSubs: Subscription[] = [];
   let tellTimer: ReturnType<typeof setTimeout> | undefined;
@@ -185,12 +186,17 @@ export function watchEndpoints(
     tellTimer = setTimeout(closeTells, TELLS_OPEN_MS);
   };
   const ask = (): void => {
-    if (stopped || options.ask !== true || asks > 0) return;
+    if (stopped || options.ask !== true || asking) return;
     const targets = relays.filter((r) => !skipped.has(r)).slice(0, ASK_RELAYS);
     if (targets.length === 0) return;
+    asking = true;
     void loadWasm().then(() => {
       if (stopped) return;
-      asker ??= new LookupAsker(randomBytes(32), a);
+      if (asker === null) {
+        const secret = randomBytes(32);
+        asker = new LookupAsker(secret, a);
+        secret.fill(0);
+      }
       const me = asker;
       const tellFilter = { kinds: [20465], '#n': [namespace], '#p': [me.pubkey], '#t': ['tell'], '#a': [a], since: now() - 60 };
       let live = 0;
@@ -203,12 +209,19 @@ export function watchEndpoints(
       };
       for (const r of targets) {
         let seen = 0;
-        const sub = subscribe(
+        // Assigned just below; a tell cannot arrive before `subscribe` returns.
+        let sub: Subscription | null = null;
+        sub = subscribe(
           r,
           tellFilter,
           (json) => {
-            // At most 64 tells per ask on each relay, counted before verification (§4.1).
-            if (stopped || ++seen > TELLS_PER_RELAY) return;
+            // At most 64 tells per ask on each relay, counted before verification; then that
+            // relay's tell subscription closes (§4.1).
+            if (stopped) return;
+            if (++seen > TELLS_PER_RELAY) {
+              sub?.close();
+              return;
+            }
             try {
               const b = JSON.parse(me.readTell(json, now())) as VerifiedBeacon;
               if (b.a === a && book.addTold(b, now())) {
@@ -225,7 +238,7 @@ export function watchEndpoints(
           },
           () => {},
         );
-        tellSubs.push(sub);
+        if (sub !== null) tellSubs.push(sub);
       }
       // A relay that never sends EOSE does not hold the ask up for more than a second.
       setTimeout(go, ASK_AFTER_MS);
@@ -242,6 +255,8 @@ export function watchEndpoints(
     clearTimeout(reaskTimer);
     subs.forEach((s) => s.close());
     closeTells();
+    asker?.free();
+    asker = null;
   };
   // A session tells the book which origins delivered, so the first key that named each is
   // never replaced (NFX-17 §4.2).

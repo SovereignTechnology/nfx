@@ -45,6 +45,14 @@ export type Outcome =
   | { kind: 'not-held'; rendition: string }
   | { kind: 'give-up' };
 
+/** The better of two standings: 1 or 2 by rank, then the caller's 4 over an open 3. */
+export function bestTier(a: Tier, b: Tier): Tier {
+  if (a === 1 || b === 1) return 1;
+  if (a === 2 || b === 2) return 2;
+  if (a === 4 || b === 4) return 4;
+  return 3;
+}
+
 /** The scheme, host and port of an origin URL, or null when it is not one. */
 export function hostOf(url: string): string | null {
   try {
@@ -95,6 +103,8 @@ export class SourceSet {
   readonly #sources = new Map<string, State>();
   readonly #hosts = new Map<string, HostState>();
   readonly #random: () => number;
+  /** Hosts that sent bytes that do not verify: never used again, whatever URL names them. */
+  readonly #badHosts = new Set<string>();
   #delivered = 0;
   #demoted = 0;
   #given = 0;
@@ -117,9 +127,13 @@ export class SourceSet {
     for (const info of sources) {
       const host = hostOf(info.url);
       if (host === null) continue;
+      if (this.#badHosts.has(host)) continue;
       const held = this.#sources.get(info.url);
       if (held) {
-        held.info = { ...info };
+        // A source keeps the best standing anyone gave it: a beacon cannot demote a source the
+        // creator, a rated key or the caller named (tier 4 stays the caller's last resort).
+        const tier = bestTier(held.info.tier, info.tier);
+        held.info = tier === info.tier ? { ...info } : held.info;
         continue;
       }
       this.#sources.set(info.url, {
@@ -160,7 +174,7 @@ export class SourceSet {
 
   /** Whether `s` may be asked for the plan's file now. */
   #eligible(s: State, plan: FilePlan, now: number): boolean {
-    if (s.bad || plan.tried.has(s.info.url)) return false;
+    if (s.bad || this.#badHosts.has(s.host) || plan.tried.has(s.info.url)) return false;
     if (s.stoppedAt !== null && now - s.stoppedAt < REST_MS) return false;
     if (s.info.tier === 3 && !plan.openHosts.has(s.host) && plan.openHosts.size >= OPEN_HOSTS_PER_FILE) return false;
     if (this.#isNew(s) && this.#newBudget(now) <= 0) return false;
@@ -267,6 +281,7 @@ export class SourceSet {
       }
       case 'bad-bytes':
         s.bad = true;
+        this.#badHosts.add(s.host);
         s.stoppedAt = now;
         if (this.#last?.url === url) this.#last = null;
         return;

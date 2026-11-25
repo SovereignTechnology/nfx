@@ -197,20 +197,19 @@ fn keep_live<K: Eq + Hash>(map: &mut HashMap<K, VecDeque<u64>>, now: u64, window
 }
 
 impl LookupLimits {
+    /// Keys charged after verification. Connections are counted apart (`MAX_LOOKUP_KEYS` each), so
+    /// a flood of unsigned events on fresh connections cannot fill this table.
     fn keys(&self) -> usize {
-        self.connections.len()
-            + self.asks.len()
-            + self.asks_per_video.len()
-            + self.tells.len()
-            + self.tells_per_key.len()
+        self.asks.len() + self.asks_per_video.len() + self.tells.len() + self.tells_per_key.len()
     }
 
     /// Sweeps are O(keys): at most once per [`SWEEP_EVERY_SECS`] past [`SWEEP_ABOVE`] keys, and
     /// at most once a second while the table is full.
     fn sweep(&mut self, now: u64) {
-        let keys = self.keys();
+        let keys = self.keys() + self.connections.len();
         let due = keys > SWEEP_ABOVE && now >= self.swept_at.saturating_add(SWEEP_EVERY_SECS);
-        let full = keys >= MAX_LOOKUP_KEYS && now > self.swept_at;
+        let full = (self.keys() >= MAX_LOOKUP_KEYS || self.connections.len() >= MAX_LOOKUP_KEYS)
+            && now > self.swept_at;
         if !due && !full {
             return;
         }
@@ -550,7 +549,7 @@ impl Admission {
             if !has_room(times, now, LOOKUP_WINDOW_SECS, LOOKUPS_PER_CONNECTION) {
                 return Err((RateLimited, "lookup events per 10 s".into()));
             }
-            if times.is_none() && l.keys() >= MAX_LOOKUP_KEYS {
+            if times.is_none() && l.connections.len() >= MAX_LOOKUP_KEYS {
                 return Err((RateLimited, "too many lookups at once".into()));
             }
             charge(

@@ -12,6 +12,7 @@ import {
   type SourceInfo,
   SourceSet,
   type Tier,
+  bestTier,
   hostOf,
 } from './src/sources';
 
@@ -187,6 +188,23 @@ eq('host of junk', hostOf('not a url'), null);
   const held = set.list(T);
   eq('open capped', held.filter((s) => s.tier === 3).length, MAX_OPEN_SOURCES);
   eq('tier 4 kept', held.some((s) => s.url === 'https://cfg.example'), true);
+}
+
+{
+  // A beacon cannot demote a source the caller configured, or one the creator names.
+  const set = new SourceSet(counter());
+  set.update([src('https://cfg.example', 4), src('https://c.example', 1)], T);
+  set.update([src('https://cfg.example', 3), src('https://c.example', 3)], T);
+  eq('tiers kept', set.list(T).map((s) => s.tier), [4, 1]);
+  eq('best tier', [bestTier(3, 4), bestTier(4, 2), bestTier(3, 3), bestTier(1, 4)], [4, 2, 3, 1]);
+}
+{
+  // A host that sent bytes that do not verify stays out under any URL, even after eviction.
+  const set = new SourceSet(counter());
+  set.update([src('https://liar.example/a', 3), src('https://ok.example', 3)], T);
+  set.outcome('https://liar.example/a', { kind: 'bad-bytes' }, T);
+  set.update([src('https://liar.example/b', 3)], T);
+  eq('a bad host, another path', drain(set, null, T), ['https://ok.example']);
 }
 
 console.log(`sources: ${ran - bad}/${ran} passed`);

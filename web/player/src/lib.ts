@@ -345,6 +345,7 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
       },
       signal,
       true,
+      MAX_HASH_LIST_BYTES,
     );
     delivered = got.source;
   } catch (e) {
@@ -358,8 +359,11 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
   // Which renditions the session offers is what a source answers for (nfx #85), asked of the
   // source that delivered the hash list first, then the rest. What beacons say an origin
   // serves (`hint`) only orders them.
-  const order = originOrder(origins, wanted);
-  order.sort((x, y) => (x.url === delivered ? -1 : y.url === delivered ? 1 : 0));
+  // In tier order, the deliverer first, and at most 3 open hosts asked (NFX-17 §4.2).
+  const tierOf = (o: { url: string; tier: number }): number => (o.url === delivered ? 0 : o.tier === 4 ? 3.5 : o.tier);
+  const ranked = originOrder(origins, wanted).sort((x, y) => tierOf(x) - tierOf(y));
+  let open = 0;
+  const order = ranked.filter((o) => o.url === delivered || o.tier !== 3 || ++open <= 3);
   for (const { url: origin, renditions: hint } of order) {
     const loaded = list.at(origin);
     let picked: Selection;
