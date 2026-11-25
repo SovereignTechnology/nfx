@@ -1157,6 +1157,23 @@ async fn own_stun_failing_falls_back_only_to_a_signaled_seeder_s_server() {
     assert!(s.fallback_mappings(&key, lo[1].pubkey()).is_empty());
     assert!(s.no_mapping(), "a fallback's mapping is not its own");
 
+    // The answer to that peer names the mapping, so the kinds a failed link is logged with
+    // count it; an answer to another peer names the host alone.
+    for l in &mut s.links {
+        l.conn.dead = true;
+    }
+    feed(&mut s, &offer_at(&lo[2], "1.1.1.1:50000", now, 4));
+    feed(&mut s, &offer_at(&lo[1], "1.0.0.1:50000", now, 5));
+    let kinds = |peer: &str| {
+        s.links
+            .iter()
+            .rev()
+            .find(|l| l.conn.remote == peer)
+            .map(|l| l.local_kinds.clone())
+    };
+    assert_eq!(kinds(lo[2].pubkey()).as_deref(), Some("host 1, srflx 1"));
+    assert_eq!(kinds(lo[1].pubkey()).as_deref(), Some("host 1"));
+
     // A mapping from its own server ends the fallback, and what it reported.
     s.stun_send(own, 0, Instant::now());
     stun_reply(&mut s, own, [5, 6, 7, 8], 42000);

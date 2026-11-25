@@ -997,12 +997,6 @@ impl State {
         rtc
     }
 
-    /// The kinds of the candidates every new connection gets, counted ([`sdp::count_kinds`]).
-    /// The fallback's own mappings, added per connection, are not counted.
-    fn local_kinds(&self) -> String {
-        sdp::count_kinds(self.candidates().iter().map(|c| c.kind().to_string()))
-    }
-
     /// The fallback's mappings (NFX-10 §1) as candidates of the connection to `peer` in room
     /// `key` alone: those of the servers at an address that peer's SDP named.
     fn add_fallback_candidates(&self, rtc: &mut Rtc, key: &str, peer: &str) {
@@ -1888,15 +1882,17 @@ impl State {
         let Some(nonce) = random::<32>() else {
             return;
         };
-        let Ok(ev) =
-            self.session
-                .offer(&room.room, peer, &offer.to_sdp_string(), &nonce, unix_now())
+        let offer_sdp = offer.to_sdp_string();
+        let Ok(ev) = self
+            .session
+            .offer(&room.room, peer, &offer_sdp, &nonce, unix_now())
         else {
             return;
         };
         self.publish(&ev);
         self.counts.offers += 1;
-        let local_kinds = self.local_kinds();
+        // What the offer names, the fallback's mappings for this peer included.
+        let local_kinds = sdp::candidate_kinds(&offer_sdp);
         self.links.push(Link {
             conn: Conn::new(rtc, key.to_owned(), peer.to_owned(), now),
             offerer: true,
@@ -1946,11 +1942,12 @@ impl State {
         let (Some(nonce), Some(room)) = (random::<32>(), self.rooms.get(key)) else {
             return;
         };
+        let answer_sdp = answer.to_sdp_string();
         let Ok(ev) = self.session.answer(
             &room.room,
             &r.sender,
             &r.id,
-            &answer.to_sdp_string(),
+            &answer_sdp,
             &nonce,
             unix_now(),
         ) else {
@@ -1964,7 +1961,8 @@ impl State {
         }
         self.publish(&ev);
         self.counts.answers += 1;
-        let local_kinds = self.local_kinds();
+        // What the answer names, the fallback's mappings for this peer included.
+        let local_kinds = sdp::candidate_kinds(&answer_sdp);
         self.links.push(Link {
             conn: Conn::new(rtc, key.to_owned(), r.sender.clone(), now),
             offerer: false,
