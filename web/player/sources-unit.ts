@@ -102,10 +102,11 @@ eq('host of junk', hostOf('not a url'), null);
   eq('tier 4 ahead of it', later.indexOf('https://config.example') < later.indexOf(fresh[0] ?? ''), true);
 }
 {
-  // A source is asked only for renditions its tier claims; a 404 outside its firm claim is no strike.
+  // A claim orders, never removes: a source said to serve the rendition comes first; a 404
+  // outside its firm claim is no strike.
   const set = new SourceSet(counter());
   set.update([src('https://720.example', 3, ['720p'], ['720p']), src('https://any.example', 3, null, ['720p'])], T);
-  eq('rendition filter', drain(set, '1080p', T), ['https://any.example']);
+  eq('claims order, never remove', drain(set, '1080p', T), ['https://any.example', 'https://720.example']);
   set.outcome('https://any.example', { kind: 'not-held', rendition: '1080p' }, T);
   set.outcome('https://any.example', { kind: 'not-held', rendition: '1080p' }, T);
   eq('no strike outside the firm claim', set.list(T).find((s) => s.url === 'https://any.example')?.stopped, false);

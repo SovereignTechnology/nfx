@@ -159,9 +159,10 @@ it can trust from a beacon's key, from when the beacon arrived, from which relay
 how many keys name an origin. It orders sources by what it can check instead.
 
 A **source** is an origin URL of an `https` endpoint (NFX-05 §6). Its **host** is the URL's scheme,
-host and port. A source takes the highest tier of any key that names it. It may be asked for any
-rendition a key of that tier claims for it, and its **firm claim** is what all those keys claim in
-common. Peers (NFX-10) are not sources here; §4.3 says how their bytes are treated.
+host and port. A source takes the highest tier of any key that names it. It is asked first for
+the renditions a key of that tier claims for it; a claim orders sources and never removes one (as
+NFX-03 §5 and the reference player already treat claims). Its **firm claim** is what all those keys
+claim in common. Peers (NFX-10) are not sources here; §4.3 says how their bytes are treated.
 
 A viewer tries sources in these tiers, in this order:
 

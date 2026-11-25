@@ -18,7 +18,7 @@ export interface SourceInfo {
   /** `https://host[:port][/prefix]`, without a trailing slash. */
   url: string;
   tier: Tier;
-  /** Renditions it may be asked for; null: every one. */
+  /** Renditions it is said to serve; null: every one. Asked first for those, never only (nfx #85). */
   renditions: readonly string[] | null;
   /** Renditions every key of its tier claims for it; null: every one. A 404 outside it is no strike. */
   firm: readonly string[] | null;
@@ -157,7 +157,6 @@ export class SourceSet {
   /** Whether `s` may be asked for the plan's file now. */
   #eligible(s: State, plan: FilePlan, now: number): boolean {
     if (s.bad || plan.tried.has(s.info.url)) return false;
-    if (plan.rendition !== null && s.info.renditions !== null && !s.info.renditions.includes(plan.rendition)) return false;
     if (s.stoppedAt !== null && now - s.stoppedAt < REST_MS) return false;
     if (s.info.tier === 3 && !plan.openHosts.has(s.host) && plan.openHosts.size >= OPEN_HOSTS_PER_FILE) return false;
     if (this.#isNew(s) && this.#newBudget(now) <= 0) return false;
@@ -193,10 +192,16 @@ export class SourceSet {
       if (!held || s.draw < held.draw) firstOfHost.set(s.host, s);
     }
     const second = (s: State): number => (triedHosts.has(s.host) || firstOfHost.get(s.host) !== s ? 1 : 0);
+    // A claim orders, never removes (nfx #85): within a group, sources said to serve the file's
+    // rendition first.
+    const unclaimed = (s: State): number =>
+      plan.rendition !== null && s.info.renditions !== null && !s.info.renditions.includes(plan.rendition) ? 1 : 0;
     const sorted = live.sort((x, y) => {
       const g = group(x) - group(y);
       if (g !== 0) return g;
       if (x.demoted !== y.demoted) return x.demoted - y.demoted;
+      const c = unclaimed(x) - unclaimed(y);
+      if (c !== 0) return c;
       if (x.info.tier === 3) {
         const d = deliveredAt(x) - deliveredAt(y);
         if (d !== 0) return d;
