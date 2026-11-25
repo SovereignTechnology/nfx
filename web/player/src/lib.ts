@@ -439,7 +439,15 @@ function start(
     buffer: () => bufferedAhead(el),
     // Each source that delivers a file (a page passes it on to `EndpointWatch.delivered`).
     delivered: (origin) => emit({ type: 'origin', origin, ok: true }),
-    reject: (source, path) => reject({ sha256: null, url: `${source}/${path}`, why: 'bytes that do not verify; source stopped for the session' }),
+    reject: (source, path) => {
+      let sha256: string | null = null;
+      try {
+        sha256 = anchor.expected(`${anchor.origin}/${path}`);
+      } catch {
+        // a path the hash list does not name is reported with sha256 null
+      }
+      reject({ sha256, url: `${source}/${path}`, why: 'bytes that do not verify; source stopped for the session' });
+    },
   });
   // Every file comes through the session's sources, which retry, hedge and change source
   // themselves (NFX-17 §4.3): hls.js retries nothing, and never times a load out first.
