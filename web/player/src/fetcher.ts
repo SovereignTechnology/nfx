@@ -81,6 +81,16 @@ export class Meter {
   }
 }
 
+/** What `fetchFile` gives: the bytes, whose they are, and when the first byte and the last came. */
+export interface FetchResult {
+  bytes: Uint8Array;
+  source: string;
+  /** From the file's request to the winning request's first byte. */
+  firstByteMs: number;
+  /** From the file's request to the end. */
+  totalMs: number;
+}
+
 export interface FetchDeps {
   sources: SourceSet;
   meter: Meter;
@@ -129,8 +139,9 @@ export async function fetchFile(
   file: FileSpec,
   deps: FetchDeps,
   signal?: AbortSignal,
-): Promise<{ bytes: Uint8Array; source: string }> {
+): Promise<FetchResult> {
   const { sources, meter } = deps;
+  const began = deps.now();
   const fileRate = file.size !== null && file.mediaTime !== null && file.mediaTime > 0 ? (file.size * 8) / file.mediaTime : null;
   let plan: FilePlan = sources.plan(file.rendition);
   const live: Attempt[] = [];
@@ -226,7 +237,7 @@ export async function fetchFile(
             const realTime = fileRate === null || (a.received * 8 * 1000) / took >= fileRate;
             sources.outcome(a.source.url, { kind: 'delivered', realTime }, now);
             for (const other of [...live]) stop(other);
-            return { bytes, source: a.source.url };
+            return { bytes, source: a.source.url, firstByteMs: Math.max(0, (a.firstByte ?? now) - began), totalMs: Math.max(1, now - began) };
           }
           sources.outcome(a.source.url, { kind: 'bad-bytes' }, now);
           deps.onReject?.(a.source.url);
@@ -240,13 +251,16 @@ export async function fetchFile(
         }
       }
 
-      // Give-ups (§4.3).
-      const link = meter.link(now);
+      // Give-ups (§4.3). Each request's own rate over a full window is noted first, so the
+      // floor is judged against the link rate as known now (not as it was a tick ago).
       const low = deps.bufferAhead() < LOW_BUFFER_S;
+      for (const a of live) {
+        if (a.firstByte !== null && now - a.firstByte >= RATE_WINDOW_MS) meter.observe(meter.requestRate(a.id, now), now);
+      }
+      const link = meter.link(now);
       for (const a of [...live]) {
         const ran = now - a.started;
         const sinceFirst = a.firstByte === null ? 0 : now - a.firstByte;
-        if (sinceFirst >= RATE_WINDOW_MS) meter.observe(meter.requestRate(a.id, now), now);
         const tooSlow = sinceFirst >= RATE_WINDOW_MS && meter.hostRate(a.host, now) < floor(link);
         const overTime =
           a.source.tier === 3 && file.mediaTime !== null && low && ran > Math.max(4_000, 2_000 * file.mediaTime);

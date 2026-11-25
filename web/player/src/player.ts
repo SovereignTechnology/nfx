@@ -245,9 +245,10 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
     availability: { seeders: 0, all: 0, renditions: [] },
   };
   let wake: (() => void) | null = null;
-  // Seeder lookup (NFX-17): on unless the URL says `ask=0`. This page starts playing as it
-  // loads, which is when a viewer presses Play.
-  const ask = params.get('ask') !== '0';
+  // Seeder lookup (NFX-17): off unless the URL says `ask=1`. An ask is a public signal that a
+  // video is starting, and this test page starts playing on load without a Play press, so it
+  // asks only when told to. A product viewer asks when its user presses Play.
+  const ask = params.get('ask') === '1';
   const stop = watchEndpoints(
     a,
     m.namespace,
@@ -310,6 +311,8 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
         const stunFallback: StunFallback = { own: ownStun, seeders: () => heard.stunSeeders };
         try {
           await play({ ...common, iceServers: stun, manifestJson: m.event, origins, renditions: urlRenditions, signaling: trackerSignaling(trackers, stunFallback) });
+          // Sources heard of while `open()` was pending had no session to join: add them now.
+          if (heard.originSources.length > 0) session?.addSources(heard.originSources);
           playing = true;
           return;
         } catch (e) {

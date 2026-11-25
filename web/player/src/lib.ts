@@ -352,10 +352,10 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
     delivered = got.source;
   } catch (e) {
     if (signal?.aborted) throw abortError(signal);
-    throw new Error(`no source served a hash list that verifies (${message(e)}${failures.length > 0 ? `; ${failures.join('; ')}` : ''})`);
+    throw new Error(`no origin served a hash list that verifies (${message(e)}${failures.length > 0 ? `; ${failures.join('; ')}` : ''})`);
   }
   const list = built.list;
-  if (list === null) throw new Error('no source served a hash list that verifies');
+  if (list === null) throw new Error('no origin served a hash list that verifies');
   sources.learnSizes(list.fileSizes());
 
   // Which renditions the session offers is what a source answers for (nfx #85), asked of the
@@ -365,7 +365,7 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
   const tierOf = (o: { url: string; tier: number }): number => (o.url === delivered ? 0 : o.tier === 4 ? 3.5 : o.tier);
   const ranked = originOrder(origins, wanted).sort((x, y) => tierOf(x) - tierOf(y));
   let open = 0;
-  const order = ranked.filter((o) => o.url === delivered || o.tier !== 3 || ++open <= 3);
+  const order = ranked.filter((o) => !sources.rejects(o.url) && (o.url === delivered || o.tier !== 3 || ++open <= 3));
   for (const { url: origin, renditions: hint } of order) {
     const loaded = list.at(origin);
     let picked: Selection;
@@ -394,7 +394,7 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
     emit({ type: 'origin', origin, ok: true });
     break;
   }
-  if (anchor === null) throw new Error(`no origin held an allowed rendition (${failures.join('; ')})`);
+  if (anchor === null) throw new Error(`no origin served a hash list that verifies and held an allowed rendition (${failures.join('; ')})`);
   if (signal?.aborted) throw abortError(signal);
   log(`hash list verified: ${anchor.size} files of ${anchor.video}${binding ? ' (bound to the manifest)' : ''}`);
   const levelRule = { renditions, preferStart: wanted !== null };
@@ -662,7 +662,8 @@ function start(
       };
     },
     addSources(list: readonly (string | OriginSource)[]): void {
-      if (dead) return;
+      // An empty list is no change (every beacon may have expired); `open()` alone needs an origin.
+      if (dead || list.length === 0) return;
       o.sources.add(checkOriginSources(list).map((x) => ({ url: x.url, tier: x.tier, renditions: x.renditions })));
     },
     async addresses(): Promise<PeerAddress[]> {
@@ -741,11 +742,13 @@ function sourcedLoader(
         return;
       }
       sources.get(path, verifies(anchor, url), ctl.signal).then(
-        ({ bytes }) => {
+        ({ bytes, firstByteMs, totalMs }) => {
           if (stats.aborted) return;
-          const now = performance.now();
-          stats.loading.first = Math.max(stats.loading.start, now - 1);
-          stats.loading.end = now;
+          // The fetcher's own timing, so hls.js's bandwidth estimate sees the transfer time and
+          // not an instant body after a long wait for the first byte.
+          const end = Math.max(performance.now(), stats.loading.start + totalMs);
+          stats.loading.first = Math.min(end - 1, stats.loading.start + firstByteMs);
+          stats.loading.end = end;
           stats.loaded = bytes.byteLength;
           stats.total = bytes.byteLength;
           stats.chunkCount = 1;

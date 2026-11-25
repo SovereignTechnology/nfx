@@ -115,22 +115,35 @@ export function query(url: string, filter: Filter, timeoutMs: number): Promise<s
  * event, and its message (`blocked: …`, `rate-limited: …`, NIP-01). A relay that does not
  * answer within `timeoutMs` counts as not taking it.
  */
-export function publish(url: string, eventJson: string, timeoutMs: number): Promise<{ ok: boolean; message: string }> {
+export function publish(
+  url: string,
+  eventJson: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; message: string }> {
   return new Promise((resolve) => {
     let done = false;
-    let ws: WebSocket;
+    let ws: WebSocket | undefined;
     const finish = (ok: boolean, message: string): void => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', cancel);
       try {
-        ws.close();
+        ws?.close();
       } catch {
         // closing anyway
       }
       resolve({ ok, message });
     };
     const timer = setTimeout(() => finish(false, 'timeout'), timeoutMs);
+    // A cancelled publication closes its socket, connecting or not, and never sends.
+    const cancel = (): void => finish(false, 'cancelled');
+    if (signal?.aborted) {
+      queueMicrotask(cancel);
+      return;
+    }
+    signal?.addEventListener('abort', cancel, { once: true });
     let id: unknown;
     try {
       id = (JSON.parse(eventJson) as { id?: unknown }).id;
@@ -139,8 +152,11 @@ export function publish(url: string, eventJson: string, timeoutMs: number): Prom
       queueMicrotask(() => finish(false, `bad relay URL or event: ${String(e)}`));
       return;
     }
-    ws.onopen = () => ws.send(`["EVENT",${eventJson}]`);
-    ws.onmessage = (m: MessageEvent) => {
+    const socket = ws;
+    socket.onopen = () => {
+      if (!done) socket.send(`["EVENT",${eventJson}]`);
+    };
+    socket.onmessage = (m: MessageEvent) => {
       const text = typeof m.data === 'string' ? m.data : '';
       if (text.length === 0 || text.length > MAX_MESSAGE) return;
       let msg: unknown;
@@ -151,7 +167,7 @@ export function publish(url: string, eventJson: string, timeoutMs: number): Prom
       }
       if (Array.isArray(msg) && msg[0] === 'OK' && msg[1] === id) finish(msg[2] === true, typeof msg[3] === 'string' ? msg[3].slice(0, 200) : '');
     };
-    ws.onerror = () => finish(false, 'websocket error');
-    ws.onclose = () => finish(false, 'websocket closed');
+    socket.onerror = () => finish(false, 'websocket error');
+    socket.onclose = () => finish(false, 'websocket closed');
   });
 }

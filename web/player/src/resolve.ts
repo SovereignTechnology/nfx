@@ -146,6 +146,8 @@ export function watchEndpoints(
   );
   // Seeder lookup (NFX-17 §4): one throwaway key per video and watch, made on the first ask.
   let asker: LookupAsker | null = null;
+  /** Aborted when the watch stops: no ask is published, or left half-published, after it. */
+  const askCtl = new AbortController();
   let asks = 0;
   let asking = false;
   const skipped = new Set<string>();
@@ -162,7 +164,7 @@ export function watchEndpoints(
     asks += 1;
     const ev = asker.ask(now());
     for (const r of targets) {
-      void publish(r, ev, PUBLISH_TIMEOUT_MS).then(({ ok, message }) => {
+      void publish(r, ev, PUBLISH_TIMEOUT_MS, askCtl.signal).then(({ ok, message }) => {
         // `blocked:` says the relay does not carry the kind: skip it for the session.
         if (!ok && message.startsWith('blocked:')) skipped.add(r);
       });
@@ -236,6 +238,7 @@ export function watchEndpoints(
 
   const stop = (): void => {
     stopped = true;
+    askCtl.abort();
     clearTimeout(timer);
     clearTimeout(reaskTimer);
     subs.forEach((s) => s.close());

@@ -98,5 +98,22 @@ function counter(): () => number {
   ]);
 }
 
+{
+  // A seeder heard by broadcast whose beacon has expired may be told again; a live one may not.
+  const book = new EndpointBook({ random: counter() });
+  const told = (seeder: string, at: number): VerifiedBeacon => ({
+    seeder,
+    creator: CREATOR,
+    created_at: at,
+    expiration: at + 120,
+    a: 'x',
+    content: { endpoints: [https('https://told.example')] },
+  });
+  book.add(beacon(S(1), [https('https://heard.example')]), NOW, 'wss://r');
+  eq('a live broadcast needs no tell', book.addTold(told(S(1), NOW), NOW + 10), false);
+  eq('an expired one may be told', book.addTold(told(S(1), NOW + 200), NOW + 200), true);
+  eq('and its tell counts', book.snapshot(NOW + 200).origins, ['https://told.example']);
+}
+
 console.log(`book: ${ran - bad}/${ran} passed`);
 process.exit(bad === 0 ? 0 : 1);

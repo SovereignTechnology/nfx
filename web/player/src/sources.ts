@@ -157,6 +157,12 @@ export class SourceSet {
     }
   }
 
+  /** Whether `url`'s host sent bytes that do not verify. */
+  rejects(url: string): boolean {
+    const host = hostOf(url);
+    return host !== null && this.#badHosts.has(host);
+  }
+
   /** A new file's plan. */
   plan(rendition: string | null): FilePlan {
     return { rendition, tried: new Set(), openHosts: new Set() };
@@ -269,6 +275,12 @@ export class SourceSet {
 
   /** Record what a request to `url` came to. */
   outcome(url: string, o: Outcome, now: number): void {
+    // Whatever became of the source in the meantime (it may have been evicted while asked): a
+    // host that sent bytes that do not verify is out under every URL.
+    if (o.kind === 'bad-bytes') {
+      const host = hostOf(url);
+      if (host !== null) this.#badHosts.add(host);
+    }
     const s = this.#sources.get(url);
     if (!s) return;
     switch (o.kind) {

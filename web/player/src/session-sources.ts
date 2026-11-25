@@ -7,7 +7,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-import { type FetchDeps, Meter, fetchFile } from './fetcher';
+import { type FetchDeps, type FetchResult, Meter, fetchFile } from './fetcher';
 import { type SourceInfo, SourceSet, type Tier } from './sources';
 
 /** What is known about a file before it is fetched, by its content name. */
@@ -91,8 +91,14 @@ export class SessionSources {
     this.add(origins);
   }
 
+  /** Whether a host sent bytes that do not verify: it is out for the session (NFX-05 §4). */
+  rejects(url: string): boolean {
+    return this.set.rejects(url);
+  }
+
   /** Sources heard of while the session runs (NFX-17 §4.3: it keeps adding them). */
   add(origins: readonly Origin[]): void {
+    if (origins.length === 0) return;
     const infos: SourceInfo[] = origins.map((o) => ({
       url: o.url,
       tier: o.tier ?? 4,
@@ -141,7 +147,7 @@ export class SessionSources {
     signal?: AbortSignal,
     once = false,
     maxBytes?: number,
-  ): Promise<{ bytes: Uint8Array; source: string }> {
+  ): Promise<FetchResult> {
     const name = path.slice(path.lastIndexOf('/') + 1);
     const facts = this.#facts.get(name);
     const deps: FetchDeps = {

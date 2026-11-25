@@ -95,6 +95,8 @@ struct Served {
 
 #[derive(Debug)]
 struct Answered {
+    /// The video asked about: forgetting it drops this answer too.
+    a: String,
     at: u64,
     tell: Event,
     relays: HashSet<String>,
@@ -160,6 +162,9 @@ impl Book {
     /// Stop answering for the video `a`.
     pub fn forget(&mut self, a: &str) {
         self.videos.remove(a);
+        // An ask answered on one relay must not be answered again on another once the video is
+        // no longer served: `order` keeps the ids, and `expire` drops the stale ones.
+        self.answered.retain(|_, done| done.a != a);
     }
 
     /// The videos to listen for, by network.
@@ -277,6 +282,7 @@ impl Book {
         self.answered.insert(
             ev.id.clone(),
             Answered {
+                a: shape.a.clone(),
                 at: now,
                 tell: tell.clone(),
                 relays: HashSet::from([relay.to_owned()]),
@@ -341,16 +347,21 @@ impl Answerer {
     }
 }
 
+/// A subscription as held: its id, its network and the videos it asks about.
+type Held = (ns::SubscriptionId, String, Vec<String>);
+
 async fn run(client: ns::Client, book: Arc<Mutex<Book>>, secret: [u8; 32]) {
     let mut notes = client.notifications();
     let mut check = tokio::time::interval(SUBSCRIPTION_CHECK);
     check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut held: Vec<(ns::SubscriptionId, String, Vec<String>)> = Vec::new();
+    let mut held: Vec<Held> = Vec::new();
+    // The list each relay was last sent: one that was away when the list changed gets it on return.
+    let mut applied: HashMap<String, Vec<Held>> = HashMap::new();
     loop {
         tokio::select! {
             _ = check.tick() => {
                 let wanted = book.lock().unwrap_or_else(PoisonError::into_inner).wanted();
-                keep_subscribed(&client, &wanted, &mut held).await;
+                keep_subscribed(&client, &wanted, &mut held, &mut applied).await;
             }
             note = notes.next() => match note {
                 Some(ns::ClientNotification::Event { relay_url, event, .. }) => {
@@ -389,7 +400,8 @@ fn ask_filter(namespace: &str, videos: &[String]) -> ns::Filter {
 async fn keep_subscribed(
     client: &ns::Client,
     wanted: &BTreeMap<String, Vec<String>>,
-    held: &mut Vec<(ns::SubscriptionId, String, Vec<String>)>,
+    held: &mut Vec<Held>,
+    applied: &mut HashMap<String, Vec<Held>>,
 ) {
     let mut next = Vec::new();
     for (namespace, videos) in wanted {
@@ -410,8 +422,11 @@ async fn keep_subscribed(
         if !relay.status().is_connected() {
             continue;
         }
+        // A relay not sent this list yet (it was away when the list changed, or is new) gets
+        // every chunk again: its old subscription under the same id still has the old filter.
+        let stale = applied.get(url.as_str()) != Some(&next);
         for (id, namespace, videos) in &next {
-            if changed || relay.subscription(id).await.is_none() {
+            if changed || stale || relay.subscription(id).await.is_none() {
                 let filter = ask_filter(namespace, videos);
                 let _ = client
                     .subscribe(ns::ReqTarget::single(url.clone(), [filter]))
@@ -419,6 +434,7 @@ async fn keep_subscribed(
                     .await;
             }
         }
+        applied.insert(url.to_string(), next.clone());
     }
     *held = next;
 }
@@ -627,6 +643,21 @@ mod tests {
         assert_ne!(told.event.id, f.beacon.id);
         assert_eq!(told.beacon.created_at, late);
         assert_eq!(told.expiration, late + BEACON_TTL);
+    }
+
+    /// A video that stops being served stops being answered, on every relay.
+    #[test]
+    fn a_forgotten_video_is_not_answered_from_the_cache_on_another_relay() {
+        let f = fixture();
+        let mut b = book(&f);
+        let t = f.now * 1000;
+        let q = ask(1, &f, f.now);
+        assert!(b.offer(&q, "r1", &f.seeder, t).is_some());
+        b.forget(&f.a);
+        assert!(
+            b.offer(&q, "r2", &f.seeder, t + 1000).is_none(),
+            "the same ask on a second relay, after the video was forgotten"
+        );
     }
 
     #[test]

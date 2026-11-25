@@ -99,7 +99,7 @@ const whole = (after: number, bytes: Uint8Array = FILE): Script => ({ chunks: [[
 async function run(
   sources: SourceInfo[],
   scripts: [string, Script][],
-  opts: { buffer?: number; maxMs?: number; file?: FileSpec } = {},
+  opts: { buffer?: number; maxMs?: number; file?: FileSpec; len?: number } = {},
 ): Promise<{ source: string | null; ms: number; asked: string[]; set: SourceSet }> {
   const clock = new Clock();
   const set = new SourceSet(
@@ -117,7 +117,7 @@ async function run(
     now: clock.now,
     sleep: clock.sleep,
     bufferAhead: () => opts.buffer ?? 30,
-    verify: (b) => b.byteLength === FILE.byteLength && b.every((x) => x === 7),
+    verify: (b) => b.byteLength === (opts.len ?? FILE.byteLength) && b.every((x) => x === 7),
   };
   let result: { bytes: Uint8Array; source: string } | null = null;
   const ctl = new AbortController();
@@ -164,7 +164,9 @@ async function run(
   eq('the liar is out', r.set.list(r.ms).find((s) => s.url === 'https://liar.example')?.bad, true);
 }
 {
-  // A drip under the floor (1 Mbit/s): given up after 4 s of it, with the buffer full.
+  // A drip (16 kbit/s) from an open source, another source idle. With the buffer low (a start, a
+  // seek), the request is joined by another source at 2 s, which delivers and sets the link rate:
+  // the drip is then far under the floor.
   const drip: [number, Uint8Array][] = [];
   for (let t = 100; t < 20_000; t += 500) drip.push([t, new Uint8Array(1000).fill(7)]);
   const r = await run(
@@ -173,28 +175,48 @@ async function run(
       ['https://drip.example', { chunks: drip, end: false }],
       ['https://good.example', whole(100)],
     ],
-    { buffer: 30 },
+    { buffer: 1 },
   );
-  eq('drip: given up', r.source, 'https://good.example');
-  eq('soon after the window', r.ms <= 5000, true);
+  eq('drip, buffer low: another source delivers', r.source, 'https://good.example');
+  eq('within the hedge', r.ms <= 3500, true);
 }
 {
-  // An open source that keeps the floor but not the file's pace, with the buffer low: over its
-  // time limit (4 s here) it is given up, and the third place has gone to the configured source.
+  // The same drip with the buffer full costs nothing and is left alone: it is the only request
+  // measured, so it is the link rate, and a slow link is not a slow source (a drip is only
+  // given up once the buffer runs low, by the open-source time limit and the hedge above).
+  const drip: [number, Uint8Array][] = [];
+  for (let t = 100; t < 20_000; t += 500) drip.push([t, new Uint8Array(1000).fill(7)]);
+  const r = await run(
+    [src('https://drip.example', 3), src('https://good.example', 4)],
+    [
+      ['https://drip.example', { chunks: drip, end: false }],
+      ['https://good.example', whole(100)],
+    ],
+    { buffer: 30, maxMs: 9_000 },
+  );
+  eq('drip, buffer full: not given up', r.source, null);
+  eq('and not demoted', r.set.list(r.ms).find((s) => s.url === 'https://drip.example')?.stopped, false);
+}
+{
+  // Open sources that keep above the 1 Mbit/s floor (~1.04 Mbit/s) but far under a 1 MB, 2 s
+  // file's pace (4 Mbit/s), with the buffer low: each is given up at its time limit (4 s), not
+  // when its body overruns the file (7.7 s), and the configured source delivers at about 6 s.
+  // Without the time limit it would be after 7.7 s.
+  const BIG = new Uint8Array(1_000_000).fill(7);
   const pace: [number, Uint8Array][] = [];
-  for (let t = 100; t < 60_000; t += 100) pace.push([t, new Uint8Array(1300).fill(7)]); // ~1.04 Mbit/s
+  for (let t = 100; t < 60_000; t += 100) pace.push([t, new Uint8Array(13_000).fill(7)]);
   const r = await run(
     [src('https://slow1.example', 3), src('https://slow2.example', 3), src('https://slow3.example', 3), src('https://cfg.example', 4)],
     [
       ['https://slow1.example', { chunks: pace, end: false }],
       ['https://slow2.example', { chunks: pace, end: false }],
       ['https://slow3.example', { chunks: pace, end: false }],
-      ['https://cfg.example', whole(200)],
+      ['https://cfg.example', whole(200, BIG)],
     ],
-    { buffer: 1 },
+    { buffer: 1, len: BIG.byteLength, file: { path: 'root/seg.m4s', size: BIG.byteLength, mediaTime: 2, rendition: '720p' } },
   );
   eq('low buffer: the configured source delivers', r.source, 'https://cfg.example');
-  eq('the third place was the configured source', r.asked.slice(0, 3)[2], 'https://cfg.example');
+  eq('before an overrun could have ended the open sources', r.ms < 7_000, true);
 }
 {
   // Every source failed: wait 10 s, then start again.
@@ -232,6 +254,21 @@ async function run(
   );
   eq('an endless body is cut at the limit', r.source, 'https://good.example');
   eq('the endless source is out', r.set.list(r.ms).find((s) => s.url === 'https://endless.example')?.bad, true);
+}
+
+{
+  // A viewer on a 400 kbit/s link, one source: the link rate is learnt before the 1 Mbit/s floor
+  // is applied, so a slow link is not mistaken for a slow source.
+  const LEN = 300_000;
+  const slow: [number, Uint8Array][] = [];
+  for (let t = 100; t <= 6_000; t += 100) slow.push([t, new Uint8Array(5_000).fill(7)]);
+  const r = await run(
+    [src('https://only.example', 3)],
+    [['https://only.example', { chunks: slow }]],
+    { len: LEN, maxMs: 20_000, file: { path: 'root/list', size: LEN, mediaTime: null, rendition: null } },
+  );
+  eq('a slow link still gets its file', r.source, 'https://only.example');
+  eq('without a give-up', r.set.list(r.ms).find((s) => s.url === 'https://only.example')?.stopped, false);
 }
 
 console.log(`fetcher: ${ran - bad}/${ran} passed`);

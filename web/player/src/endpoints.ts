@@ -612,7 +612,12 @@ export class EndpointBook {
    */
   addTold(b: VerifiedBeacon, now: number): boolean {
     if (typeof b.seeder !== 'string' || !Number.isSafeInteger(b.expiration) || b.expiration <= now) return false;
-    if (this.#seeders.has(b.seeder)) return false;
+    const broadcast = this.#seeders.get(b.seeder);
+    if (broadcast !== undefined) {
+      // A seeder still live by broadcast needs no tell; one whose beacon expired may be told again.
+      if (broadcast.expiration > now) return false;
+      this.#seeders.delete(b.seeder);
+    }
     const origins: NamedOrigin[] = [];
     const endpoints = Array.isArray(b.content?.endpoints) ? (b.content.endpoints as unknown[]) : [];
     for (const e of endpoints) {

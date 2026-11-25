@@ -207,5 +207,14 @@ eq('host of junk', hostOf('not a url'), null);
   eq('a bad host, another path', drain(set, null, T), ['https://ok.example']);
 }
 
+{
+  // Bad bytes from a source evicted while it was being asked: its host is still out.
+  const set = new SourceSet(counter());
+  set.outcome('https://gone.example/a', { kind: 'bad-bytes' }, T);
+  set.update([src('https://gone.example/b', 3), src('https://ok.example', 3)], T);
+  eq('rejects', [set.rejects('https://gone.example/c'), set.rejects('https://ok.example')], [true, false]);
+  eq('an evicted liar stays out', drain(set, null, T), ['https://ok.example']);
+}
+
 console.log(`sources: ${ran - bad}/${ran} passed`);
 process.exit(bad === 0 ? 0 : 1);
