@@ -568,6 +568,8 @@ async fn run(args: &[String]) -> Result<()> {
     }
     let mut last = std::collections::BTreeMap::new();
     let mut last_mesh = None;
+    // The number of the last mesh connection that never opened and was printed.
+    let mut last_failure = 0;
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     // SIGTERM (a service manager's stop) ends the run as SIGINT does: the mesh's rooms hear a
     // `disconnect`, and the relays and the node close.
@@ -584,7 +586,13 @@ async fn run(args: &[String]) -> Result<()> {
                     }
                 }
                 last = now;
-                let mesh = daemon.mesh_status().map(|s| mesh_line(&s));
+                let mesh_now = daemon.mesh_status();
+                if let Some(s) = &mesh_now {
+                    for line in link_failure_lines(&s.failures, &mut last_failure) {
+                        status!("{line}");
+                    }
+                }
+                let mesh = mesh_now.map(|s| mesh_line(&s));
                 if mesh != last_mesh {
                     if let Some(line) = &mesh {
                         status!("{line}");
@@ -804,6 +812,35 @@ fn mesh_line(s: &nfx_node::mesh::MeshStatus) -> String {
     )
 }
 
+/// One line for each mesh connection in `failures` that was not printed yet (`seen` is the
+/// number of the last one that was), oldest first: how it started, how far it got and the
+/// kinds of candidate each side named. Counted kinds only, never an address: a peer may be a
+/// viewer. A gap in the numbers says how many the endpoint's short list let go before the
+/// next look.
+fn link_failure_lines(failures: &[nfx_node::mesh::LinkFailure], seen: &mut u64) -> Vec<String> {
+    let mut out = Vec::new();
+    let printed = *seen;
+    for f in failures.iter().filter(|f| f.seq > printed) {
+        if f.seq > *seen + 1 {
+            out.push(format!(
+                "mesh: {} earlier link(s) that never opened are not listed",
+                f.seq - *seen - 1
+            ));
+        }
+        out.push(format!(
+            "mesh: link {} never opened ({}) after {} s; we {}; our candidates [{}], theirs [{}]",
+            f.seq,
+            f.stage,
+            f.after_secs,
+            if f.offerer { "offered" } else { "answered" },
+            f.local,
+            f.remote,
+        ));
+        *seen = f.seq;
+    }
+    out
+}
+
 /// `--NAME N`, a count; `Daemon::start` checks its range.
 fn count(f: &[(String, String)], name: &str) -> Result<Option<usize>> {
     one(f, name)?
@@ -874,9 +911,57 @@ fn gossip_peers(values: &[String]) -> Result<Vec<iroh::EndpointAddr>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bridge_max_peers, flags, gossip_peers, ip_port, iroh_addrs, items, port, pubkey_hex,
-        relay_cas, write_lines,
+        bridge_max_peers, flags, gossip_peers, ip_port, iroh_addrs, items, link_failure_lines,
+        port, pubkey_hex, relay_cas, write_lines,
     };
+    use nfx_node::mesh::{FailStage, LinkFailure};
+
+    fn failure(seq: u64, stage: FailStage, offerer: bool) -> LinkFailure {
+        LinkFailure {
+            seq,
+            offerer,
+            stage,
+            after_secs: 15,
+            local: "host 1".into(),
+            remote: "host 1, srflx 1".into(),
+        }
+    }
+
+    #[test]
+    fn each_link_that_never_opened_is_printed_once_with_its_stage_and_no_address() {
+        let list = [
+            failure(1, FailStage::NoAnswer, true),
+            failure(2, FailStage::NoIcePair, false),
+        ];
+        let mut seen = 0;
+        let lines = link_failure_lines(&list, &mut seen);
+        assert_eq!(seen, 2);
+        assert_eq!(
+            lines,
+            [
+                "mesh: link 1 never opened (no answer) after 15 s; we offered; our candidates [host 1], theirs [host 1, srflx 1]",
+                "mesh: link 2 never opened (no ICE pair) after 15 s; we answered; our candidates [host 1], theirs [host 1, srflx 1]",
+            ]
+        );
+        assert!(
+            link_failure_lines(&list, &mut seen).is_empty(),
+            "printed once"
+        );
+        // Numbers 3 and 4 fell out of the endpoint's short list before the next look.
+        let more = [failure(5, FailStage::NoDtls, true)];
+        let lines = link_failure_lines(&more, &mut seen);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            "mesh: 2 earlier link(s) that never opened are not listed"
+        );
+        assert!(lines[1].starts_with("mesh: link 5 never opened (ICE up, no DTLS)"));
+        assert_eq!(seen, 5);
+        // Nothing that looks like an address: one colon (after `mesh`) and no dot.
+        for l in &lines {
+            assert!(l.matches(':').count() == 1 && !l.contains('.'), "{l}");
+        }
+    }
 
     /// Takes `left` bytes, then fails every write with `kind`.
     struct FailsAfter {

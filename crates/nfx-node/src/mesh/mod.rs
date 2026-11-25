@@ -254,6 +254,66 @@ pub struct MeshStatus {
     pub opened: u64,
     pub failed: u64,
     pub served: u64,
+    /// The last [`FAILURES_KEPT`] connections that never opened, oldest first, each with the
+    /// number it had in [`MeshStatus::failed`] (`seq`): a caller that printed up to some `seq`
+    /// prints the ones after it.
+    pub failures: Vec<LinkFailure>,
+}
+
+/// The connections kept in [`MeshStatus::failures`].
+pub const FAILURES_KEPT: usize = 16;
+
+impl MeshStatus {
+    /// Keep `f` as the newest failure; the oldest goes when [`FAILURES_KEPT`] are held.
+    fn push_failure(&mut self, f: LinkFailure) {
+        if self.failures.len() >= FAILURES_KEPT {
+            self.failures.remove(0);
+        }
+        self.failures.push(f);
+    }
+}
+
+/// How far a connection that never opened got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailStage {
+    /// Our offer was not answered in [`ANSWER_TIMEOUT`].
+    NoAnswer,
+    /// The peer's answer could not be applied.
+    AnswerRefused,
+    /// Offer and answer were exchanged, and ICE found no working pair in time.
+    NoIcePair,
+    /// ICE found a pair, and DTLS did not come up on it in time.
+    NoDtls,
+    /// DTLS is up, and the data channel did not open in time.
+    NoChannel,
+}
+
+impl std::fmt::Display for FailStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NoAnswer => "no answer",
+            Self::AnswerRefused => "answer refused",
+            Self::NoIcePair => "no ICE pair",
+            Self::NoDtls => "ICE up, no DTLS",
+            Self::NoChannel => "DTLS up, no data channel",
+        })
+    }
+}
+
+/// One connection that never opened: what it was, how far it got, and the kinds of candidate
+/// each side named, counted and without any address ([`sdp::count_kinds`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkFailure {
+    /// This failure's number: [`MeshStatus::failed`] when it was counted.
+    pub seq: u64,
+    /// Whether this node offered (and the peer answered, or did not).
+    pub offerer: bool,
+    pub stage: FailStage,
+    /// Seconds since the negotiation began.
+    pub after_secs: u64,
+    /// Our candidates, and the peer's (`none` until its SDP is applied).
+    pub local: String,
+    pub remote: String,
 }
 
 /// One rendition's room to join.
@@ -721,6 +781,29 @@ struct Link {
     opened: bool,
     /// Replaced by a newer negotiation with the same peer: its end is no failure.
     superseded: bool,
+    /// The kinds of candidate each side named, for the line a failure is logged with
+    /// ([`sdp::count_kinds`]; the peer's is empty until its SDP is applied).
+    local_kinds: String,
+    remote_kinds: String,
+    /// The peer's answer could not be applied.
+    refused: bool,
+}
+
+impl Link {
+    /// How far this connection got, for a failure: the end of a negotiation that never opened.
+    fn stage(&self) -> FailStage {
+        if self.pending.is_some() {
+            FailStage::NoAnswer
+        } else if self.refused {
+            FailStage::AnswerRefused
+        } else if !self.conn.ice_up {
+            FailStage::NoIcePair
+        } else if !self.conn.dtls_up {
+            FailStage::NoDtls
+        } else {
+            FailStage::NoChannel
+        }
+    }
 }
 
 /// A joined room.
@@ -912,6 +995,12 @@ impl State {
             rtc.add_local_candidate(c);
         }
         rtc
+    }
+
+    /// The kinds of the candidates every new connection gets, counted ([`sdp::count_kinds`]).
+    /// The fallback's own mappings, added per connection, are not counted.
+    fn local_kinds(&self) -> String {
+        sdp::count_kinds(self.candidates().iter().map(|c| c.kind().to_string()))
     }
 
     /// The fallback's mappings (NFX-10 §1) as candidates of the connection to `peer` in room
@@ -1607,6 +1696,18 @@ impl State {
             // not worth offering again at the next presence either.
             if !l.opened {
                 self.counts.failed += 1;
+                self.counts.push_failure(LinkFailure {
+                    seq: self.counts.failed,
+                    offerer: l.offerer,
+                    stage: l.stage(),
+                    after_secs: now.duration_since(l.conn.born).as_secs(),
+                    local: l.local_kinds.clone(),
+                    remote: if l.remote_kinds.is_empty() {
+                        "none".into()
+                    } else {
+                        l.remote_kinds.clone()
+                    },
+                });
             }
             if (!l.opened || l.conn.served == 0)
                 && let Some(r) = self.rooms.get_mut(&l.conn.swarm)
@@ -1795,6 +1896,7 @@ impl State {
         };
         self.publish(&ev);
         self.counts.offers += 1;
+        let local_kinds = self.local_kinds();
         self.links.push(Link {
             conn: Conn::new(rtc, key.to_owned(), peer.to_owned(), now),
             offerer: true,
@@ -1803,6 +1905,9 @@ impl State {
             deadline: now + ANSWER_TIMEOUT,
             opened: false,
             superseded: false,
+            local_kinds,
+            remote_kinds: String::new(),
+            refused: false,
         });
     }
 
@@ -1859,6 +1964,7 @@ impl State {
         }
         self.publish(&ev);
         self.counts.answers += 1;
+        let local_kinds = self.local_kinds();
         self.links.push(Link {
             conn: Conn::new(rtc, key.to_owned(), r.sender.clone(), now),
             offerer: false,
@@ -1867,6 +1973,9 @@ impl State {
             deadline: now + ANSWERED_TIMEOUT,
             opened: false,
             superseded: false,
+            local_kinds,
+            remote_kinds: sdp::candidate_kinds(&filtered),
+            refused: false,
         });
         // With the link in place, so this peer counts as one it is signaling with.
         self.select_fallback(now, true);
@@ -1897,6 +2006,7 @@ impl State {
         let filtered = sdp::filter_candidates(&sdp, self.base);
         self.note_signaled(key, &r.sender, &filtered);
         let l = &mut self.links[i];
+        l.remote_kinds = sdp::candidate_kinds(&filtered);
         let answer = SdpAnswer::from_sdp_string(&filtered);
         let accepted = match (answer, l.pending.take()) {
             (Ok(answer), Some(pending)) => {
@@ -1907,6 +2017,7 @@ impl State {
         if accepted {
             l.deadline = now + OPEN_TIMEOUT;
         } else {
+            l.refused = true;
             l.conn.dead = true;
         }
         self.select_fallback(now, true);

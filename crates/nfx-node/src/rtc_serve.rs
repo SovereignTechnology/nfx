@@ -230,6 +230,10 @@ pub(crate) struct Conn {
     pub dead: bool,
     /// Segment requests answered with data.
     pub served: u64,
+    /// How far the handshake got, for the one line a link that never opened is logged with:
+    /// ICE found a working pair, and DTLS is up on it.
+    pub ice_up: bool,
+    pub dtls_up: bool,
 }
 
 impl Conn {
@@ -249,6 +253,8 @@ impl Conn {
             active: now,
             dead: false,
             served: 0,
+            ice_up: false,
+            dtls_up: false,
         }
     }
 }
@@ -372,7 +378,12 @@ impl Uploader {
                 }
             }
             Event::ChannelClose(id) if Some(id) == p.channel => p.dead = true,
+            Event::IceConnectionStateChange(
+                IceConnectionState::Connected | IceConnectionState::Completed,
+            ) => p.ice_up = true,
             Event::IceConnectionStateChange(IceConnectionState::Disconnected) => p.dead = true,
+            // ICE and DTLS are both up (the data channel opens after it).
+            Event::Connected => p.dtls_up = true,
             _ => {}
         }
     }
