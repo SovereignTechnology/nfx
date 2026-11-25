@@ -88,6 +88,43 @@ pub fn candidate_ips(sdp: &str) -> Vec<IpAddr> {
     out
 }
 
+/// `kinds` counted, in the order each first appears and with no address: `host 1, srflx 2`,
+/// or `none`. What a link that failed is logged with: which kinds of candidate it tried,
+/// never where (a viewer's address is not written down).
+#[must_use]
+pub fn count_kinds<I: IntoIterator<Item = String>>(kinds: I) -> String {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for k in kinds {
+        match counts.iter_mut().find(|(name, _)| *name == k) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((k, 1)),
+        }
+    }
+    if counts.is_empty() {
+        return "none".into();
+    }
+    counts
+        .iter()
+        .map(|(k, n)| format!("{k} {n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The kinds of the candidates in `sdp`, as [`filter_candidates`] left it, counted by
+/// [`count_kinds`].
+#[must_use]
+pub fn candidate_kinds(sdp: &str) -> String {
+    count_kinds(sdp.lines().filter_map(|line| {
+        let cand = line.trim_end().strip_prefix("a=")?;
+        if !cand.starts_with("candidate:") {
+            return None;
+        }
+        Candidate::from_sdp_string(cand)
+            .ok()
+            .map(|c| c.kind().to_string())
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

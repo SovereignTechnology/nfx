@@ -18,8 +18,8 @@ use tokio::net::UdpSocket;
 
 use super::book::{OfferBackoff, PENDING_OFFERS_PER_ROOM, PresenceBook, SeenIds, SenderLimiter};
 use super::{
-    Control, MAX_NAMED, MAX_PEERS_PER_ROOM, MeshStatus, NAMED_PER_KEY, NostrStun, RoomState, State,
-    Stun, StunFallback,
+    Control, FAILURES_KEPT, FailStage, LinkFailure, MAX_NAMED, MAX_PEERS_PER_ROOM, MeshStatus,
+    NAMED_PER_KEY, NostrStun, RoomState, State, Stun, StunFallback,
 };
 use crate::nostr::to_nostr;
 use crate::rtc_serve::{Swarm, Uploader};
@@ -264,8 +264,96 @@ async fn a_failed_offer_backs_off_and_events_that_fail_the_checks_are_not_taken(
     s.pump_all();
     assert!(s.links.is_empty());
     assert_eq!(s.counts.failed, 1);
+    // ... and it is listed: ours was the offer, nobody answered, we named a host candidate.
+    let f = &s.counts.failures;
+    assert_eq!(f.len(), 1);
+    assert_eq!(
+        (f[0].seq, f[0].offerer, f[0].stage),
+        (1, true, FailStage::NoAnswer)
+    );
+    assert_eq!(
+        (f[0].local.as_str(), f[0].remote.as_str()),
+        ("host 1", "none")
+    );
     feed(&mut s, &hi[0].connect(&room(), now + 1).unwrap());
     assert!(s.links.is_empty(), "backing off");
+}
+
+/// Kinds are counted and nothing else is said: no address of ours or a peer's reaches a log.
+fn only_kinds(x: &str) -> bool {
+    x.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == ',')
+}
+
+#[tokio::test]
+async fn an_answered_offer_that_never_opens_is_listed_with_how_far_it_got() {
+    let (_, lo) = peers();
+    let mut s = state(16).await;
+    feed(&mut s, &offer_from(&lo[0], unix_now(), 1));
+    assert_eq!(s.links.len(), 1, "answered");
+    assert!(!s.links[0].offerer);
+    // No packet ever arrives: ICE finds no pair within the answerer's wait.
+    s.links[0].deadline = Instant::now() - Duration::from_secs(1);
+    s.timeout().await;
+    s.pump_all();
+    assert!(s.links.is_empty());
+    assert_eq!(s.counts.failed, 1);
+    let f = &s.counts.failures;
+    assert_eq!(f.len(), 1);
+    assert_eq!(
+        (f[0].seq, f[0].offerer, f[0].stage),
+        (1, false, FailStage::NoIcePair)
+    );
+    // Their offer named one host candidate (the browser stand-in's); ours is the socket's.
+    assert_eq!(
+        (f[0].local.as_str(), f[0].remote.as_str()),
+        ("host 1", "host 1")
+    );
+    assert!(only_kinds(&f[0].local) && only_kinds(&f[0].remote));
+    // The status a caller reads carries it too.
+    s.publish_status();
+    assert_eq!(s.status.lock().unwrap().failures, s.counts.failures);
+}
+
+#[test]
+fn the_stage_is_how_far_the_handshake_got_and_only_the_last_failures_are_kept() {
+    let mut s = MeshStatus::default();
+    for seq in 1..=(FAILURES_KEPT as u64 + 3) {
+        s.failed = seq;
+        s.push_failure(LinkFailure {
+            seq,
+            offerer: seq % 2 == 0,
+            stage: FailStage::NoChannel,
+            after_secs: 15,
+            local: "host 1".into(),
+            remote: "host 1, srflx 1".into(),
+        });
+    }
+    assert_eq!(s.failures.len(), FAILURES_KEPT);
+    assert_eq!(s.failures[0].seq, 4, "the three oldest are gone");
+    assert_eq!(s.failures.last().map(|f| f.seq), Some(s.failed));
+    assert!(s.failures.windows(2).all(|w| w[1].seq == w[0].seq + 1));
+    // What the line says for each stage.
+    for (stage, text) in [
+        (FailStage::NoAnswer, "no answer"),
+        (FailStage::AnswerRefused, "answer refused"),
+        (FailStage::NoIcePair, "no ICE pair"),
+        (FailStage::NoDtls, "ICE up, no DTLS"),
+        (FailStage::NoChannel, "DTLS up, no data channel"),
+    ] {
+        assert_eq!(stage.to_string(), text);
+    }
+}
+
+#[test]
+fn candidate_kinds_are_counted_in_order_without_an_address() {
+    let (_, _, sdp) = browser_offer();
+    assert_eq!(super::sdp::candidate_kinds(&sdp), "host 1");
+    assert_eq!(super::sdp::candidate_kinds("v=0\r\n"), "none");
+    assert_eq!(
+        super::sdp::count_kinds(["srflx", "host", "srflx", "srflx"].map(String::from)),
+        "srflx 3, host 1"
+    );
 }
 
 #[tokio::test]
@@ -1068,6 +1156,23 @@ async fn own_stun_failing_falls_back_only_to_a_signaled_seeder_s_server() {
     assert_eq!(s.fallback_mappings(&key, lo[2].pubkey()), [mapping]);
     assert!(s.fallback_mappings(&key, lo[1].pubkey()).is_empty());
     assert!(s.no_mapping(), "a fallback's mapping is not its own");
+
+    // The answer to that peer names the mapping, so the kinds a failed link is logged with
+    // count it; an answer to another peer names the host alone.
+    for l in &mut s.links {
+        l.conn.dead = true;
+    }
+    feed(&mut s, &offer_at(&lo[2], "1.1.1.1:50000", now, 4));
+    feed(&mut s, &offer_at(&lo[1], "1.0.0.1:50000", now, 5));
+    let kinds = |peer: &str| {
+        s.links
+            .iter()
+            .rev()
+            .find(|l| l.conn.remote == peer)
+            .map(|l| l.local_kinds.clone())
+    };
+    assert_eq!(kinds(lo[2].pubkey()).as_deref(), Some("host 1, srflx 1"));
+    assert_eq!(kinds(lo[1].pubkey()).as_deref(), Some("host 1"));
 
     // A mapping from its own server ends the fallback, and what it reported.
     s.stun_send(own, 0, Instant::now());
