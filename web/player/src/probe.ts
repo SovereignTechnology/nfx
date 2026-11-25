@@ -116,7 +116,7 @@ export async function probeStatus(
   signal: AbortSignal,
   maxBytes: number = PROBE_MAX_BYTES,
 ): Promise<number> {
-  const res = await fetchFn(url, { signal, credentials: 'omit', cache: 'no-cache' });
+  const res = await fetchFn(url, { signal, credentials: 'omit', cache: 'no-cache', referrerPolicy: 'no-referrer' });
   const body = res.body;
   if (body === null) return res.status;
   const reader = body.getReader();

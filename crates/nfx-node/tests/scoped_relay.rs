@@ -1,6 +1,6 @@
 //! The NFX-04 scoped relay: NIP-11, admission, the §2 limits, ephemeral beacons, and its
-//! MAYs (mesh signaling, STUN service announcements), exercised through a real WebSocket
-//! client.
+//! MAYs (mesh signaling, STUN service announcements, seeder lookup), exercised through a real
+//! WebSocket client.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -666,6 +666,7 @@ async fn a_relay_with_stun_announcements_admits_rate_limits_and_expires_them() {
     let may = MayAdmit {
         mesh_signaling: true,
         stun_announcements: true,
+        ..MayAdmit::default()
     };
     let (relay, url, addr, server) = start(ScopedRelay::admitting(nets, None, may).unwrap()).await;
     let doc = nip11(addr).await;
@@ -751,6 +752,138 @@ async fn a_relay_with_stun_announcements_admits_rate_limits_and_expires_them() {
     assert!(!left.contains(&ad.id), "the expired one is gone");
 
     c.shutdown().await;
+    relay.shutdown();
+    server.abort();
+}
+
+/// Whether the event `id` arrives on `notes` within [`WAIT`].
+async fn heard(
+    mut notes: impl n0_future::Stream<Item = nostr_sdk::prelude::ClientNotification> + Unpin,
+    id: &str,
+) -> bool {
+    use n0_future::StreamExt as _;
+    use nostr_sdk::prelude::ClientNotification;
+    tokio::time::timeout(WAIT, async {
+        loop {
+            match notes.next().await {
+                Some(ClientNotification::Event { event, .. }) if event.id.to_hex() == id => {
+                    return;
+                }
+                Some(_) => {}
+                None => panic!("the notification stream ended"),
+            }
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// NFX-17 §5: off, kind 20465 stays out of scope. On, an ask reaches a seeder that is listening,
+/// its tell reaches only the viewer who asked, and the relay keeps neither.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_with_seeder_lookup_carries_asks_and_tells_and_keeps_neither() {
+    use nfx_node::nostr::sign_beacon;
+    use nfx_node::relay::MayAdmit;
+    use nfx_proto::lookup::{self, KIND_LOOKUP};
+    use nostr_sdk::prelude as ns;
+
+    let (manifest, _, seeder) = vector();
+    let net = manifest.addr.namespace().clone();
+    let nets = std::slice::from_ref(&net);
+    let a = manifest.a_tag();
+    let viewer = [21u8; 32];
+    let ask = lookup::ask(&viewer, &a, unix_now()).unwrap();
+
+    // Off (the default): out of scope, and not advertised.
+    let (off, url, addr, server) = start(ScopedRelay::new(nets)).await;
+    assert_eq!(
+        nip11(addr).await["nfx"]["kinds"],
+        serde_json::json!([38504, 20464, 5])
+    );
+    let c = client(&url).await;
+    assert!(refusal(&c, &ask).await.starts_with("blocked: out of scope"));
+    c.shutdown().await;
+    off.shutdown();
+    server.abort();
+
+    // On.
+    let may = MayAdmit {
+        seeder_lookup: true,
+        ..MayAdmit::default()
+    };
+    let (relay, url, addr, server) = start(ScopedRelay::admitting(nets, None, may).unwrap()).await;
+    let doc = nip11(addr).await;
+    assert_eq!(
+        doc["nfx"]["kinds"],
+        serde_json::json!([38504, 20464, 5, 20465])
+    );
+    assert!(
+        doc["nfx"]["roles"]
+            .as_array()
+            .unwrap()
+            .contains(&"lookup".into())
+    );
+
+    // Each REQ is ordered before the fetch that follows it on the same connection: once that
+    // returns, the subscription is live.
+    let listen = |c: Client, filter: ns::Filter| async move {
+        let notes = c.notifications();
+        c.subscribe(filter).await.unwrap();
+        c.fetch_events(ns::Filter::new().kind(ns::Kind::from(38504u16)).limit(1))
+            .timeout(WAIT)
+            .await
+            .unwrap();
+        notes
+    };
+    let lookups = || ns::Filter::new().kind(ns::Kind::from(KIND_LOOKUP));
+    let seeder_side = client(&url).await;
+    let asks = listen(
+        seeder_side.clone(),
+        lookups().custom_tag(ns::SingleLetterTag::LOWERCASE_T, "ask"),
+    )
+    .await;
+    let viewer_side = client(&url).await;
+    let answers = listen(
+        viewer_side.clone(),
+        lookups().custom_tag(ns::SingleLetterTag::LOWERCASE_P, ask.pubkey.as_str()),
+    )
+    .await;
+    let bystander = client(&url).await;
+    let other_viewer = "ab".repeat(32);
+    let not_mine = listen(
+        bystander.clone(),
+        lookups().custom_tag(ns::SingleLetterTag::LOWERCASE_P, other_viewer.as_str()),
+    )
+    .await;
+
+    assert!(accepted(&viewer_side, &ask).await, "a valid ask");
+    assert!(heard(asks, &ask.id).await, "the seeder hears the ask");
+
+    let beacon = sign_beacon(&seeder, &a, &content(&manifest), unix_now(), 60)
+        .await
+        .unwrap();
+    let secret = seeder.secret_key().to_secret_bytes();
+    let tell = lookup::tell(&secret, &beacon, &ask.pubkey, unix_now()).unwrap();
+    assert!(accepted(&seeder_side, &tell).await, "a valid tell");
+    assert!(heard(answers, &tell.id).await, "the viewer hears the tell");
+    assert!(
+        !tokio::time::timeout(Duration::from_millis(300), heard(not_mine, &tell.id))
+            .await
+            .unwrap_or(false),
+        "another viewer's subscription does not match it"
+    );
+
+    // Ephemeral: a fresh REQ finds neither.
+    let stored = viewer_side
+        .fetch_events(lookups().since(ns::Timestamp::from(unix_now() - 600)))
+        .timeout(WAIT)
+        .await
+        .unwrap();
+    assert!(stored.is_empty(), "lookups are never persisted");
+
+    seeder_side.shutdown().await;
+    viewer_side.shutdown().await;
+    bystander.shutdown().await;
     relay.shutdown();
     server.abort();
 }

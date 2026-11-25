@@ -1,14 +1,18 @@
 --- a/src/core.ts
 +++ b/src/core.ts
-@@ -82,6 +82,7 @@
+@@ -80,8 +80,11 @@
+     validateP2PSegment: undefined,
+     validateHTTPSegment: undefined,
      httpRequestSetup: undefined,
++    httpSegmentFetch: undefined,
++    segmentFromOneSource: false,
      swarmId: undefined,
      streamSwarmIdBuilder: undefined,
 +    signalingClientFactory: undefined,
      p2pMaxPeers: 50,
      p2pChurnMaxPeersMultiplier: 1.5,
      p2pChurnCleanupIntervalMs: 30000,
-@@ -718,8 +719,12 @@
+@@ -718,8 +721,12 @@
  
    private stripStaticOnlyProps<T extends object>(
      config: T,
@@ -23,7 +27,7 @@
        return config;
      }
  
-@@ -727,15 +732,17 @@
+@@ -727,15 +734,17 @@
      // plain-JS callers can still pass them — signal instead of silently
      // ignoring the update.
      this.logger(
@@ -42,6 +46,90 @@
      return sanitized;
    }
  
+--- a/src/http-loader.ts
++++ b/src/http-loader.ts
+@@ -16,7 +16,11 @@
+ 
+ type HttpConfig = Pick<
+   CoreConfig,
+-  "httpNotReceivingBytesTimeoutMs" | "httpRequestSetup" | "validateHTTPSegment"
++  | "httpNotReceivingBytesTimeoutMs"
++  | "httpRequestSetup"
++  | "validateHTTPSegment"
++  | "httpSegmentFetch"
++  | "segmentFromOneSource"
+ >;
+ 
+ export class HttpRequestExecutor {
+@@ -42,6 +46,20 @@
+   }
+ 
+   execute() {
++    const fetchWhole = this.httpConfig.httpSegmentFetch;
++    // NFX (NFX-17 §4.3): a segment is assembled from one source's bytes only.
++    if (fetchWhole || this.httpConfig.segmentFromOneSource) {
++      this.request.clearLoadedBytes();
++    }
++    if (fetchWhole) {
++      const controls = this.request.start(
++        { downloadSource: "http" },
++        { onAbort: () => this.abortController.abort() },
++      );
++      void this.fetchWhole(fetchWhole, controls);
++      return;
++    }
++
+     const startControls = {
+       onAbort: () => this.abortController.abort(),
+       notReceivingBytesTimeoutMs:
+@@ -229,6 +247,47 @@
+     }
+   }
+ 
++  /** NFX: the whole segment from the player's own fetcher, which picks the source. */
++  private async fetchWhole(
++    fetchSegment: NonNullable<HttpConfig["httpSegmentFetch"]>,
++    requestControls: RequestControls,
++  ) {
++    const { segment } = this.request;
++    const abortSignal = isAbortControllerSupported
++      ? (this.abortController.signal as AbortSignal)
++      : undefined;
++    try {
++      const value = await fetchSegment(segment.url, abortSignal);
++      if (this.isAborted()) {
++        throw new DOMException("Request aborted", "AbortError");
++      }
++      requestControls.firstBytesReceived();
++      requestControls.addLoadedChunk(value);
++      this.onChunkDownloaded(
++        value.byteLength,
++        "http",
++        undefined,
++        segment.stream.type,
++        this.request.infoHash,
++      );
++      const isValid = await this.request.validateData(
++        this.httpConfig.validateHTTPSegment,
++      );
++      if (this.isAborted()) {
++        throw new DOMException("Request aborted", "AbortError");
++      }
++      if (!isValid) {
++        this.request.clearLoadedBytes();
++        throw new RequestError<"http-segment-validation-failed">(
++          "http-segment-validation-failed",
++        );
++      }
++      requestControls.completeOnSuccess();
++    } catch (error) {
++      this.handleError(error, requestControls);
++    }
++  }
++
+   private handleResponseHeaders(response: Response) {
+     if (!response.ok) {
+       if (response.status === 406 || response.status === 416) {
 --- a/src/p2p/loader.ts
 +++ b/src/p2p/loader.ts
 @@ -68,8 +68,10 @@
@@ -63,7 +151,15 @@
      channel: RTCDataChannel;
      trackerUrl: string;
      close: (error?: PeerError) => void;
-@@ -316,6 +319,7 @@
+@@ -304,6 +307,7 @@
+         webRtcMaxMessageSize: this.#config.webRtcMaxMessageSize,
+         p2pErrorRetries: this.#config.p2pErrorRetries,
+         validateP2PSegment: this.#config.validateP2PSegment,
++        segmentFromOneSource: this.#config.segmentFromOneSource,
+         streamType: this.#stream.type,
+         infoHash: this.#stream.infoHash,
+       },
+@@ -316,6 +320,7 @@
        infoHash: this.#stream.infoHash,
        streamType: this.#stream.type,
        trackerUrl: event.trackerUrl,
@@ -71,9 +167,39 @@
      });
  
      if (this.#config.isP2PUploadDisabled) return;
+--- a/src/p2p/peer-protocol.ts
++++ b/src/p2p/peer-protocol.ts
+@@ -10,6 +10,7 @@
+   | "webRtcMaxMessageSize"
+   | "p2pErrorRetries"
+   | "validateP2PSegment"
++  | "segmentFromOneSource"
+ > & { streamType: StreamType; infoHash: string };
+ 
+ export type PeerProtocolEventHandlers = {
+--- a/src/p2p/peer.ts
++++ b/src/p2p/peer.ts
+@@ -274,6 +274,8 @@
+     if (this.#downloadingContext) {
+       throw new Error("Some segment already is downloading");
+     }
++    // NFX (NFX-17 §4.3): a segment is assembled from one source's bytes only.
++    if (this.#peerConfig.segmentFromOneSource) segmentRequest.clearLoadedBytes();
+ 
+     const completed = segmentRequest.tryCompleteByLoadedBytes(
+       { downloadSource: "p2p", peerId: this.id },
 --- a/src/types.ts
 +++ b/src/types.ts
-@@ -510,6 +510,27 @@
+@@ -122,6 +122,8 @@
+   | "validateP2PSegment"
+   | "validateHTTPSegment"
+   | "httpRequestSetup"
++  | "httpSegmentFetch"
++  | "segmentFromOneSource"
+   | "isP2PDisabled"
+   | "isP2PUploadDisabled"
+   | "p2pMaxPeers"
+@@ -510,6 +512,27 @@
    ) => string | undefined;
  
    /**
@@ -101,10 +227,46 @@
     * An optional function to validate a P2P segment before fully integrating it into the playback buffer.
     * @param url The URL of the segment to validate.
     * @param byteRange The optional byte range of the segment.
-@@ -654,6 +675,88 @@
+@@ -566,6 +589,34 @@
+   ) => Promise<Request | undefined | null>;
+ 
+   /**
++   * NFX (NFX-17 §4.3): when set, every HTTP segment download goes through this function
++   * instead of `fetch(segment.url)`. It chooses the source, gives up and hedges, checks the
++   * bytes, and resolves with the whole segment, or rejects. `httpRequestSetup` and
++   * `httpNotReceivingBytesTimeoutMs` do not apply to it.
++   *
++   * @default
++   * ```typescript
++   * httpSegmentFetch: undefined
++   * ```
++   */
++  httpSegmentFetch?: (
++    segmentUrl: string,
++    requestAbortSignal: AbortSignal | undefined,
++  ) => Promise<Uint8Array>;
++
++  /**
++   * NFX (NFX-17 §4.3): assemble each segment from one source's bytes only. A new attempt,
++   * over HTTP or from a peer, starts the segment again from its first byte instead of
++   * resuming from bytes another source sent.
++   *
++   * @default
++   * ```typescript
++   * segmentFromOneSource: false
++   * ```
++   */
++  segmentFromOneSource: boolean;
++
++  /**
+    * The maximum number of active peer-to-peer connections for the stream.
+    * If this limit is reached, the client will stop accepting new incoming offers
+    * and cease requesting new peers from the tracker until the connection count drops.
+@@ -653,6 +704,88 @@
+    */
    webRtcConnectionTimeoutMs: number;
  };
- 
++
 +/** What a `signalingClientFactory` is given for one stream swarm. */
 +export type SignalingClientContext = {
 +  /** The swarm's infohash, as trackers would be told. */
@@ -186,11 +348,10 @@
 +export type SignalingClientFactory = (
 +  context: SignalingClientContext,
 +) => SignalingClient;
-+
+ 
  /** The stream identity data passed to a custom `streamSwarmIdBuilder`. */
  export type StreamSwarmIdBuilderContext = {
-   /** The swarm ID of the stream: the configured `swarmId` or the manifest response URL. */
-@@ -745,6 +848,17 @@
+@@ -745,6 +878,17 @@
    trackerUrl: string;
  };
  
@@ -208,7 +369,7 @@
  /** Represents the types of errors that can occur during a peer connection. */
  export type PeerErrorType =
    | "transport-error"
-@@ -943,7 +1057,7 @@
+@@ -943,7 +1087,7 @@
     *
     * @param params - Contains details about the peer that the event is about.
     */
@@ -297,7 +458,8 @@
 -            shouldGenerateOffers: () =>
 -              this.#connectingPeers.size + this.#connectedPeers.size <
 -              this.#config.maxPeers(),
--          });
++            shouldGenerateOffers,
+           });
 -
 -          const onPeerConnected = (event: {
 -            peerId: string;
@@ -360,16 +522,17 @@
 -            client,
 -            releaseSocket: release,
 -            cleanupListeners,
-+            shouldGenerateOffers,
-           });
+-          });
 +          this.#addClient(client, url, release);
            addedToClients = true;
  
            client.start();
-@@ -239,6 +205,74 @@
+@@ -237,6 +203,74 @@
+       this.destroy();
+       throw error;
      }
-   }
- 
++  }
++
 +  // Wires a client's events to this manager and keeps it for destroy(); the
 +  // caller starts it.
 +  #addClient(
@@ -436,8 +599,6 @@
 +      releaseSocket: release,
 +      cleanupListeners,
 +    });
-+  }
-+
+   }
+ 
    public destroy(): void {
-     if (this.#destroyed) return;
-     this.#destroyed = true;

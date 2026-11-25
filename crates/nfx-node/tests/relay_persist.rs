@@ -388,7 +388,7 @@ async fn an_older_revision_is_served_from_memory_while_the_stored_one_is_refused
 }
 
 /// Only manifests reach the disk. A relay taking every kind it can (beacons, mesh signaling,
-/// STUN announcements) writes one file here: the manifest.
+/// STUN announcements, seeder lookups) writes one file here: the manifest.
 #[tokio::test(flavor = "multi_thread")]
 async fn ephemeral_and_other_kinds_never_reach_the_disk() {
     use nfx_proto::signal::{Room, Session};
@@ -399,6 +399,7 @@ async fn ephemeral_and_other_kinds_never_reach_the_disk() {
     let may = MayAdmit {
         mesh_signaling: true,
         stun_announcements: true,
+        seeder_lookup: true,
     };
     let m = video("persist-kinds");
     let (manifest, verified) = sign_manifest(&keys, &m, now - 10).await.unwrap();
@@ -427,8 +428,12 @@ async fn ephemeral_and_other_kinds_never_reach_the_disk() {
         .await
         .unwrap();
 
+    let ask = nfx_proto::lookup::ask(&[9; 32], &verified.a_tag(), now).unwrap();
+    let secret = keys.secret_key().to_secret_bytes();
+    let tell = nfx_proto::lookup::tell(&secret, &beacon, &ask.pubkey, now).unwrap();
+
     let (run, _) = boot_with(&dir, &[net()], None, may).await;
-    for event in [&manifest, &beacon, &signal, &stun] {
+    for event in [&manifest, &beacon, &signal, &stun, &ask, &tell] {
         run.publish(event).await.unwrap();
     }
     run.stop().await;
