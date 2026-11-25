@@ -68,7 +68,10 @@ interface State {
   bad: boolean;
   /** Set on each give-up: it goes to the end of its tier, the latest last. */
   demoted: number;
-  /** Drawn once, when first seen: the order among open sources that have not delivered. */
+  /**
+   * Its order within its tier: for an open source, drawn at random when first seen; for any
+   * other, the order it was given in (the caller's, or the score's).
+   */
   draw: number;
   asked: boolean;
   usedAt: number;
@@ -94,6 +97,7 @@ export class SourceSet {
   readonly #random: () => number;
   #delivered = 0;
   #demoted = 0;
+  #given = 0;
   /** Open hosts asked for the first time in this session, and when the last of the first six was. */
   #newUsed = 0;
   #sixthAt: number | null = null;
@@ -126,7 +130,7 @@ export class SourceSet {
         stops: 0,
         bad: false,
         demoted: 0,
-        draw: this.#random(),
+        draw: info.tier === 3 ? this.#random() : ++this.#given,
         asked: false,
         usedAt: now,
       });

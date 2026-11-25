@@ -614,7 +614,9 @@ async function main(): Promise<void> {
         return { playing: s.playing, verified: s.verified.length, rejected: s.rejected.length, errors: s.errors, t: (document.querySelector('video') as HTMLVideoElement).currentTime };
       });
       results[name] = got;
-      if (!got.playing || got.t <= 2 || got.errors.length > 0) throw new Error(`${name}: ${JSON.stringify(got)}`);
+      // Both are configured sources, tried in the page's order: the bad one first.
+      const left = name === 'liarThenHonest' ? got.rejected > 0 : true;
+      if (!got.playing || got.t <= 2 || got.errors.length > 0 || !left) throw new Error(`${name}: ${JSON.stringify(got)}`);
       await p.close();
     }
     // The creator withdraws the video (NFX-02 §6): resolving it now fails, never plays.
