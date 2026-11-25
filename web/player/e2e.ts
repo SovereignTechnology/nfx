@@ -489,7 +489,8 @@ async function main(): Promise<void> {
       !only360(beaconHeld) ||
       beaconHeld.renditions !== null ||
       JSON.stringify(beaconHeld.availability) !== JSON.stringify(wantAvailability) ||
-      JSON.stringify(beaconHeld.originSources) !== JSON.stringify([{ url: tls.url, renditions: ['360p'] }])
+      // The node is the video's creator: its origin is tier 1 (NFX-17 §4.2).
+      JSON.stringify(beaconHeld.originSources) !== JSON.stringify([{ url: tls.url, renditions: ['360p'], tier: 1 }])
     ) {
       throw new Error(`held renditions, from beacons: ${JSON.stringify(beaconHeld)}`);
     }
@@ -509,7 +510,8 @@ async function main(): Promise<void> {
     }
     // The hostile beacon: its narrowing claim reached the library as the origin's hint, and
     // was only a hint: both levels offered, and 720p played when asked for.
-    const wantHostileSources = JSON.stringify([{ url: whole.url, renditions: ['360p'] }]);
+    // A stranger's key: an open source, tier 3 (NFX-17 §4.2).
+    const wantHostileSources = JSON.stringify([{ url: whole.url, renditions: ['360p'], tier: 3 }]);
     if (
       !healthy(narrowed, meta3.root, whole.url) ||
       levelIds(narrowed) !== '360p@360,720p@720' ||
