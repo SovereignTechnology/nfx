@@ -40,6 +40,7 @@ import {
   SenderLimiter,
   eventHead,
   eventId,
+  isServerReflexive,
   nowSeconds,
   offersTo,
   overBytes,
@@ -53,6 +54,13 @@ export const KIND_SIGNAL = 25050;
 export const PROTOCOL = 'nfx-mesh/1';
 const FRESH_SECONDS = 60;
 const DEFAULT_ICE_GATHERING_TIMEOUT_MS = 5_000;
+/**
+ * Gathering ends this long after the first server-reflexive candidate (decision record 0110): the
+ * NAT mapping is known then, and one STUN server that never answers (its host down) no longer
+ * holds every connection for the whole gathering timeout. Long enough for the other servers'
+ * answers to the same probe, which arrive within a round trip of the first.
+ */
+const EARLY_GATHER_AFTER_SRFLX_MS = 300;
 const DEFAULT_CONNECTION_TIMEOUT_MS = 15_000;
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
@@ -749,14 +757,24 @@ export class RoomClient {
     });
   }
 
-  /** Wait until ICE gathering is complete (the SDP then carries every candidate), or the timeout. */
+  /**
+   * Wait until ICE gathering is complete (the SDP then carries every candidate), until
+   * `EARLY_GATHER_AFTER_SRFLX_MS` after the first server-reflexive candidate, or the timeout.
+   */
   #gathered(pc: RTCPeerConnection, signal: AbortSignal): Promise<void> {
     return abortable<void>(signal, (resolve, reject) => {
+      let early: ReturnType<typeof setTimeout> | undefined;
       const onState = (): void => {
         if (pc.iceGatheringState === 'complete') resolve();
       };
       const onCandidate = (e: RTCPeerConnectionIceEvent): void => {
-        if (e.candidate === null) resolve();
+        if (e.candidate === null) {
+          resolve();
+          return;
+        }
+        if (early === undefined && isServerReflexive(e.candidate)) {
+          early = setTimeout(() => resolve(), EARLY_GATHER_AFTER_SRFLX_MS);
+        }
       };
       const onSignaling = (): void => {
         if (pc.signalingState === 'closed') reject(new Error('peer connection closed while gathering'));
@@ -768,6 +786,7 @@ export class RoomClient {
       if (pc.iceGatheringState === 'complete') queueMicrotask(resolve);
       return () => {
         clearTimeout(timer);
+        if (early !== undefined) clearTimeout(early);
         pc.removeEventListener('icegatheringstatechange', onState);
         pc.removeEventListener('icecandidate', onCandidate);
         pc.removeEventListener('signalingstatechange', onSignaling);

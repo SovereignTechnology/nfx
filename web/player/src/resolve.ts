@@ -9,7 +9,7 @@
 import type { EndpointWatch, Endpoints, ResolvedManifest, WatchOptions } from './api';
 import { LookupAsker, parseATag, verifyBeacon, verifyDeletion, verifyManifest } from '../out/wasm/nfx_wasm.js';
 import { EndpointBook, type VerifiedBeacon } from './endpoints';
-import { type Subscription, publish, query, subscribe } from './nostr';
+import { type Subscription, keepSubscribed, publish, query, subscribe } from './nostr';
 import { loadWasm } from './verify';
 
 export { originBase } from './endpoints';
@@ -134,14 +134,14 @@ export function watchEndpoints(
     }
     if (changed) report();
   };
+  // Reopened whenever a relay drops it (decision record 0110): beacons are live only, so a
+  // subscription that ended would never hear a seeder again, even once the relay is back.
   const subs = relays.map((r) =>
-    subscribe(
+    keepSubscribed(
       r,
       filter,
       // Events can arrive before the WASM has loaded only if the caller skipped init().
       (json) => void loadWasm().then(() => hear(json, r), () => {}),
-      () => {},
-      () => {},
     ),
   );
   // Seeder lookup (NFX-17 §4): one throwaway key per video and watch, made on the first ask.
