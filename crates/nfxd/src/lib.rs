@@ -17,6 +17,7 @@ macro_rules! status {
 pub mod daemon;
 pub mod key;
 pub mod package;
+pub mod publish;
 pub mod stun;
 pub mod stun_server;
 
