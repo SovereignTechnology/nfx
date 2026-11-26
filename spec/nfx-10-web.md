@@ -724,10 +724,11 @@ NFX-18's.
 
 - A page MUST NOT write anything of a play before the minimum of NFX-18 §2.1. It counts
   seconds of media actually played; a seek counts nothing. What a shorter play fetched is
-  dropped from memory when the play ends.
-- Past the minimum, it writes every file it fetched for the play and every file it fetches
-  later, each verified before it is stored. It fetches nothing over HTTPS for keeping
-  (NFX-18 §2.1, decision record 0109).
+  dropped from memory when the play ends. A shorter play adds no reason and removes none
+  (NFX-18 §2.1): a video kept before stays kept, and its stored files stay.
+- Once a play reaches the minimum, the page writes every file it fetched for the play and
+  every file it fetches later, each verified before it is stored. It fetches nothing over
+  HTTPS for keeping (NFX-18 §2.1, decision record 0109).
 - Keeping SHOULD NOT change what the player fetches ahead: what a page holds in storage does
   not count against the memory the player budgets for segments ahead of the playhead.
 
