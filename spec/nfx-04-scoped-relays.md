@@ -193,7 +193,7 @@ redundancy comes from many operators).
   changes behaviour. A bump would have re-derived every room key and republished every
   manifest, for no reader's benefit. The reasons are in decision record 0108.
 - **Amended in place 2026-11-26, a fourth exception to the freeze rule (the maintainer's
-  decision, sovtech, 2026-11-26: the spec is not locked yet; decision record 0110).** §4:
+  decision, sovtech, 2026-11-26: the spec is not locked yet; decision record 0111).** §4:
   beacons MAY go to general public relays within NFX-03 §7's bound (was: never); catalog
   and beacon reads SHOULD query public and scoped relays together and merge (was: public
   first, scoped as fallback); manifests SHOULD be mirrored to the relays clients read by

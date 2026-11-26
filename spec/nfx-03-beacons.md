@@ -161,7 +161,7 @@ edit in this spec is ever required to grow the relay set.
   so the volume a relay sees grows with the number of seeders that chose it, not with
   catalog size. This replaces the original "split by churn" rule, under which beacons
   lived only on NFX-04 relays and a network whose scoped relays were unreachable had no
-  availability at all (decision record 0110).
+  availability at all (decision record 0111).
 - A general relay checks nothing: anyone can publish a kind-20464 event with any `n` and
   `a` there, for any video. Such a beacon is as untrusted as any other (§5 step 2): it can
   name endpoints that withhold or are slow, never bytes that verify (NFX-05). Scoped
@@ -209,7 +209,7 @@ edit in this spec is ever required to grow the relay set.
   rendition and may then meet `404` for one it does not; the `iroh` and `webrtc` endpoints
   already said which renditions they serve. Vectors: `beacon-renditions.json`.
 - **Amended in place 2026-11-26, an exception to the freeze rule (the maintainer's
-  decision, sovtech, 2026-11-26: the spec is not locked yet; decision record 0110).** §7: a
+  decision, sovtech, 2026-11-26: the spec is not locked yet; decision record 0111).** §7: a
   seeder MAY publish beacons to general public relays as well as scoped ones, within a
   per-relay bound (30 events a minute per key, beacons at most 20, NFX-17 tells 10 reserved
   and up to 15, back-off on `rate-limited:` or `blocked:`); the "split by churn" rule, under
