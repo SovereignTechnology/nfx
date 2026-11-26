@@ -3,7 +3,7 @@
 
 use iroh::EndpointAddr;
 use iroh_gossip::TopicId;
-use iroh_gossip::api::{Event, GossipReceiver, GossipSender};
+use iroh_gossip::{Event, GossipReceiver, GossipSender};
 use n0_future::StreamExt;
 use nfx_proto::Verified;
 use nfx_proto::canon;

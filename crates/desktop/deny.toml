@@ -26,7 +26,6 @@ unsound = "all"
 ignore = [
     # "Unmaintained" notices, not vulnerabilities: compile-time proc macros deep in iroh's
     # tree that cannot be swapped without forking it. Revisit at every iroh bump.
-    { id = "RUSTSEC-2024-0436", reason = "paste (proc macro) via iroh > netwatch > netdev > netlink-packet-core; unmaintained notice only" },
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error (proc macro) via iroh-blobs > bao-tree > genawaiter; unmaintained notice only" },
     # A vulnerability with no fix on its line (2026-10-25): crypto-bigint 0.5.5 via str0m 0.24.1
     # > dimpl 0.7 (and str0m-rust-crypto 0.6) > ecdsa/p256/p384 0.16/0.13 > elliptic-curve 0.13,
@@ -93,7 +92,6 @@ allow = [
 # Copyleft stays out of the global list: each MPL crate is named. MPL-2.0 is file-level
 # and compatible with this repository's AGPL-3.0-or-later.
 exceptions = [
-    { allow = ["MPL-2.0"], crate = "attohttpc" }, # via iroh > portmapper > igd-next (UPnP)
     # Tauri's tree (desktop app only): Servo's CSS parser family via tauri-utils > kuchikiki,
     # and option-ext via dirs > dirs-sys.
     { allow = ["MPL-2.0"], crate = "cssparser" },

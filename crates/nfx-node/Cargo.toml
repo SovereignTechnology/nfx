@@ -31,7 +31,7 @@ nostr-memory.workspace = true
 nostr-sdk = { workspace = true, features = ["local-relay"] }
 # The mesh endpoint's gateway port mapping (crate::mesh): the one iroh already runs, at the same
 # version and with no default feature, as iroh takes it.
-portmapper = { version = "0.19.3", default-features = false }
+portmapper = { version = "0.20.2", default-features = false }
 serde_json.workspace = true
 str0m.workspace = true
 thiserror.workspace = true
