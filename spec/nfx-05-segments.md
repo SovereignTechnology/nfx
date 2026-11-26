@@ -26,9 +26,9 @@ and `mpv`/ffmpeg natively, and hash-addressed chunks dedupe across renditions.
 
 The manifest (NFX-02) anchors one document: the **hash list**, whose sha256 is the
 manifest's `root` tag. The hash list is fetched by `root` (so it is itself
-hash-verified on arrival) from any origin/seeder and MUST NOT be trusted from any
-other source. Canonical address: `GET <base>/<root-hex>`, `<base>` being an origin's
-base URL (§6).
+hash-verified on arrival) from any origin, seeder or peer (NFX-10 §6.10), and a reader
+MUST NOT trust it for any reason but that it hashes to `root`. Canonical address:
+`GET <base>/<root-hex>`, `<base>` being an origin's base URL (§6).
 
 Format: UTF-8 JSON (schema: `schemas/hashlist.schema.json`). No canonicalization
 rules are needed — `root` commits to the exact bytes.
@@ -112,8 +112,10 @@ An **origin** is an HTTPS base URL serving hash-addressed bytes under it: scheme
 port and path, any trailing `/` dropped, with no query, fragment or credentials, as a
 beacon's `https` endpoint names one (NFX-03 §4) and as NFX-07 §4 pays one. So one host
 may hold several origins, each under a path of its own, and one at a host's root has an
-empty path. Every network needs ≥1 (manifest mirroring, browser genesis,
-censored-shutdown backstop). With `<base>` the origin's base URL:
+empty path. A network SHOULD have at least one, for manifest mirroring and as a
+backstop when its peers are censored or shut down. A browser needs none to start: it can
+take the hash list, playlists and init segments from peers (NFX-10 §§6.9–6.10). With
+`<base>` the origin's base URL:
 
 - `GET <base>/<sha256-hex>[.<ext>]` → file bytes. The extension is optional and ignored
   for lookup (as in BUD-01), so the content names of §3 (`<hex>.m4s`, `<hex>.mp4`,
@@ -219,3 +221,14 @@ server generalizes to an origin when its admin pins NFX-05 content.
   and wrote the paths from the host's root, while NFX-03 §4 already had a beacon's
   `https` endpoint serve `GET <base>/<sha256>` under a base path, and the M1 player
   already fetched under one.
+- 2026-11-26 (**an exception to the freeze rule**, proposed in ADR 01NN; for the maintainer,
+  sovtech, to decide over a `specver` bump, which would change every namespace, room key and
+  manifest): a browser needs no origin to start. §6 no longer says every network needs an
+  origin for "browser genesis": a browser can take its start-up files from peers over
+  NFX-10's file channel (§6.10), so a network SHOULD have an origin, for manifest mirroring
+  and as a backstop, and is conformant without one (was: "Every network needs ≥1 (manifest
+  mirroring, browser genesis, censored-shutdown backstop)"). §2 names a peer beside an
+  origin or a seeder as where a hash list may come from, trusted only because it hashes to
+  `root` (was: "from any origin/seeder and MUST NOT be trusted from any other source"). No
+  artifact, wire format or check changes: a hash list is still fetched by `root` and
+  verified against it, wherever it comes from.

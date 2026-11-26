@@ -43,6 +43,8 @@ else; `nutflix:*` namespaces are void (NFX-01 §2).
 | web tracker infohash | `base64(sha1(stream swarm ID)[0..15])`, 20 ASCII chars (p2p-media-loader v4 `computeInfoHash`) — NFX-10 §2 |
 | web mesh room secret | the first of `h_0 = sha256(utf8("nfx/1/web/room") \|\| 0x00 \|\| utf8(stream swarm ID))`, `h_(i+1) = sha256(h_i)` that is a secp256k1 secret key; the room key `P` is its x-only public key — NFX-10 §6.1 |
 | web mesh signaling | kind 25050, `i` = `nfx-mesh/1`, `y` = `nfx`; room proof challenge `nip-dc-presence-v1` (NIP-DC §§2, 5) — NFX-10 §§6.2–6.3 |
+| web video room ID | `nfx/1/web/video/38504:<creator key>:<namespace>:<video-id>`; its room key derived as a stream swarm's is — NFX-10 §6.9 |
+| web file channel | WebRTC data channel labelled `nfx-files/1`; a type byte, then 0 `get`, 1 `data`, 2 `end`, 3 `missing` (NFX-12 §4's, byte for byte), 4 `hello`, 5 `cancel`, 6 `busy`, 7 `list`, 8 `have`, 9 `beacons` — NFX-10 §6.10 |
 | HyperDHT topic (MAY) | `sha256("nfx/1/hyper/" + namespace + "/" + video-id)`, the 32-byte digest itself (vectors print it in hex) — NFX-12 §3 |
 | HyperDHT `bind` message | `utf8("nfx/hyperdht/1:" + seeder + ":" + namespace)`, signed with Ed25519 by the peer key — NFX-12 §2 |
 | Protomux file protocol | `nfx/files/1`, channel id `utf8(<namespace>:<video-id>)`, types 0 `get`, 1 `data`, 2 `end`, 3 `missing` — NFX-12 §4 |
@@ -137,8 +139,10 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | Derived identifiers (namespaces, topics, infohash) | `test-vectors/derived.json` |
 | `hyperdht` beacon endpoints, valid and invalid (NFX-12 §2) | `test-vectors/beacon-hyperdht.json` |
 | `stun` beacon endpoints, valid and invalid (NFX-10 §1) | `test-vectors/beacon-stun.json` |
-| Mesh signaling: rooms, room proofs, presence, offer and answer, NIP-44 v2 (NFX-10 §6) | `test-vectors/mesh-signal.json` |
+| Mesh signaling: rooms and video rooms, room proofs, presence, offer and answer, NIP-44 v2 (NFX-10 §§6, 6.9) | `test-vectors/mesh-signal.json` |
 | Mesh signaling events that MUST be rejected or ignored (NFX-10 §6.5) | `test-vectors/mesh-signal-invalid.json` |
+| File channel: every message, a transfer, `have`, a `beacons` answer, and the beacons a reader takes with their tier (NFX-10 §6.10) | `test-vectors/file-channel.json` |
+| File channel messages that MUST close the channel, and beacons a reader MUST refuse (NFX-10 §6.10) | `test-vectors/file-channel-invalid.json` |
 | STUN service announcements, valid and invalid (NFX-10 §1) | `test-vectors/stun-announcement.json` |
 | STUN server selection, and the addresses a client may take from Nostr (NFX-10 §1) | `test-vectors/stun-select.json` |
 | STUN at a relay's own host, from its NIP-11 `nfx.stun_port`, and its place in the selection (NFX-10 §1) | `test-vectors/relay-stun.json` |
@@ -147,7 +151,7 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | Seeder ratings, valid (NFX-16 §1) | `test-vectors/ratings.json` |
 | Invalid seeder ratings (every one MUST be rejected; NFX-16 §1) | `test-vectors/ratings-invalid.json` |
 | Seeder rating scores (NFX-16 §4) | `test-vectors/ratings-scoring.json` |
-| Generator (source of truth) | `test-vectors/generate.py` (with `pay1.py`, `ratings.py`, `meshsig.py` and `stunad.py`) |
+| Generator (source of truth) | `test-vectors/generate.py` (with `pay1.py`, `ratings.py`, `meshsig.py`, `stunad.py` and `filechan.py`) |
 
 Vectors use throwaway keys whose *secret is published in the file* — never use them
 elsewhere. Regenerate and re-verify (needs `coincurve`):
@@ -306,3 +310,6 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   (NFX-04 §3 as amended in place 2026-11-24): the UDP port on which the relay's own host
   answers STUN. A client that uses its relays' STUN servers (NFX-10 §1) also passes the new
   `relay-stun.json` (source `test-vectors/stunad.py`). `stun-select.json` is unchanged.
+- 2026-11-26 (ADR 01NN) — §3 registers the web video room ID (NFX-10 §6.9) and the file
+  channel `nfx-files/1` (NFX-10 §6.10), whose types 0 to 3 are NFX-12 §4's. Their vectors,
+  `file-channel*.json` and `mesh-signal.json`'s `video_rooms`, join §7 with their generator.
