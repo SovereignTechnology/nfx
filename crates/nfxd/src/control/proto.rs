@@ -146,13 +146,36 @@ pub fn decode<T: DeserializeOwned>(body: &[u8]) -> Result<T, FrameError> {
 // ---------------------------------------------------------------------------------------
 
 /// A request as it travels: `{"id": 7, "method": "list", "params": {...}}`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Request {
     pub id: u32,
     pub method: String,
-    #[serde(default, skip_serializing_if = "Value::is_null")]
+    #[serde(skip_serializing_if = "Value::is_null")]
     pub params: Value,
+}
+
+impl<'de> Deserialize<'de> for Request {
+    /// Only from an object: `[7, "list"]` is not a request.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            id: u32,
+            method: String,
+            #[serde(default)]
+            params: Value,
+        }
+        let Wire { id, method, params } = object(d)?;
+        Ok(Self { id, method, params })
+    }
+}
+
+/// Read a struct from a JSON object and nothing else. serde's derived impls also read a
+/// list as the fields in order; the wire has no such form, and a strict reader takes one
+/// spelling of each message.
+fn object<'de, D: serde::Deserializer<'de>, T: DeserializeOwned>(d: D) -> Result<T, D::Error> {
+    let map = serde_json::Map::<String, Value>::deserialize(d)?;
+    serde_json::from_value(Value::Object(map)).map_err(serde::de::Error::custom)
 }
 
 impl Request {
@@ -341,11 +364,11 @@ pub enum Call {
 struct NoParams {}
 
 fn params_of<T: DeserializeOwned>(params: Value) -> Result<T, ErrorBody> {
-    // No `params` at all reads as `{}`.
-    let params = if params.is_null() {
-        Value::Object(serde_json::Map::new())
-    } else {
-        params
+    // No `params` at all reads as `{}`; anything else must be an object (see [`object`]).
+    let params = match params {
+        Value::Null => Value::Object(serde_json::Map::new()),
+        Value::Object(_) => params,
+        _ => return Err(ErrorBody::new(ErrorCode::BadRequest)),
     };
     serde_json::from_value(params).map_err(|_| ErrorBody::new(ErrorCode::BadRequest))
 }
@@ -771,6 +794,7 @@ pub struct SettingsGetOk {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsSet {
+    #[serde(deserialize_with = "object")]
     pub settings: SettingsPatch,
 }
 
@@ -1188,6 +1212,7 @@ mod tests {
         assert_eq!(encode(&huge), Err(FrameError::TooLarge));
         assert_eq!(decode::<Request>(b""), Err(FrameError::Empty));
         assert_eq!(decode::<Request>(b"[1,2]"), Err(FrameError::Json));
+        assert_eq!(decode::<Request>(b"[1,\"status\"]"), Err(FrameError::Json));
         assert_eq!(decode::<Request>(b"{\"id\":1}"), Err(FrameError::Json));
         assert_eq!(
             decode::<Request>(&vec![b' '; MAX_FRAME + 1]),
