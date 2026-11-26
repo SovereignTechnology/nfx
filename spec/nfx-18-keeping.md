@@ -31,22 +31,25 @@ No conformance level requires it. A client that implements it claims it beside a
 
 ### 2.1 Watched
 
-- A client MUST NOT keep a video for the reason `watched` when its user left it before a minimum
-  amount of it was played. The minimum SHOULD be 60 s of media, and MUST NOT be less than 30 s.
-  Files fetched for a shorter play are deleted when the play ends, as before, unless another
-  reason (`downloaded`, `published`) keeps them.
-- Past the minimum, the client keeps the files it fetched for the play and records the reason
-  `watched`.
+- **The minimum** is an amount of a video's media played in one play. It SHOULD be 60 s, and
+  MUST NOT be less than 30 s.
+- While keeping is on (a client MAY let its user turn it off), a play of at least the minimum
+  keeps the files the client fetched for it and records the reason `watched`.
+- A shorter play adds no reason and removes none: a client MUST NOT keep a video for the reason
+  `watched` because of it, and a video already kept (for `watched` by an earlier play, or for
+  another reason) stays kept. Files fetched for a shorter play are deleted when the play ends,
+  as before, unless a reason the video already has keeps them.
 - **Finishing.** A client MAY then fetch the rest of the rendition it played, so that it becomes
   held. It MUST do so only from sources it does not pay (`free: true` beacons, an origin that
   asks no payment) and only from peers: it MUST NOT fetch over HTTPS in the background for
   keeping (decision record 0109), and an origin that is also a peer (an `nfxd` bridge) counts as
   a peer. It MUST NOT pay for finishing: money is spent only on what its user plays or asks to
   download. It fetches nothing for a rendition its user did not play.
-- **A video its user paid for** (NFX-07, NFX-08) is kept, past the minimum, as far as it was
-  played: the client fetches nothing more for keeping it. A shorter paid play is not kept for
-  the reason `watched` either, but what was paid for MAY stay where the client already stores
-  paid data instead of being deleted; it is then neither listed as kept nor announced.
+- **A video its user paid for** (NFX-07, NFX-08) is kept, after a play of at least the minimum,
+  as far as it was played: the client fetches nothing more for keeping it. A shorter paid play
+  adds no reason either, but what was paid for MAY stay where the client already stores paid
+  data instead of being deleted; unless the video is already kept, it is then neither listed as
+  kept nor announced.
 - Finishing yields to playback: a client SHOULD run at most a few finishing fetches at once and
   pause them while its user plays something.
 
@@ -175,9 +178,10 @@ What a client keeps is part of its user's privacy, so this document sets a floor
 
 A client claims "NFX-18" beside a level (NFX-11 §8) when it:
 
-1. keeps nothing for the reason `watched` from a play shorter than §2.1's minimum, finishes only
-   free renditions over peers, and pays only for what its user plays or asks to download (§2.1,
-   §2.2);
+1. while keeping is on and its cap allows (§2.4), keeps every play of at least §2.1's minimum
+   for the reason `watched` (a paid one as far as it was played); adds that reason for no
+   shorter play and removes none because of one; finishes only free renditions over peers; and
+   pays only for what its user plays or asks to download (§2.1, §2.2);
 2. bounds keeping by a budget and a cap, and evicts only `watched` videos (§2.4);
 3. verifies every file before storing, and on every read where §3 requires it (§3);
 4. announces held renditions only, with no private address, no port mapping of its own, and keys
