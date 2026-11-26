@@ -514,9 +514,11 @@ impl Shared {
             return Ok(None);
         }
         let answers = self.relays.publish_to(event, &turn.to).await?;
+        // A refusal's pause runs from its answer, not from before a slow publish.
+        let replied = tokio::time::Instant::now();
         for (url, answer) in &answers {
             self.share
-                .answered(url, answer.as_ref().copied().map_err(String::as_str), now);
+                .answered(url, answer.as_ref().copied().map_err(String::as_str), replied);
         }
         let accepted = answers.values().filter(|r| r.is_ok()).count();
         if accepted == 0 {
