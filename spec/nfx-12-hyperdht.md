@@ -57,10 +57,22 @@ It is added to `endpoints` in NFX-03 beacon content, beside any other endpoints.
 - **Size.** The endpoint takes 229 bytes of a gossip envelope's 4 KiB (NFX-06 §4). Beside it, an
   envelope still carries the iroh tickets of 17 renditions plus `meta`, against 18 without it
   (`beacon-hyperdht.json`, `gossip_budget`).
+- **`renditions`** (optional): the ids of the renditions whose `init` and `segment` files the
+  seeder serves on this endpoint, with the same rule as an `https` endpoint's (NFX-03 §4). Absent,
+  it serves every rendition. Present, it is a non-empty array of distinct rendition ids, none
+  `meta`, and the seeder still serves the hash list and every meta file. A seeder of some
+  renditions (NFX-18) names them here, so a watcher does not dial it for a rendition it lacks.
+
+  ```json
+  { "t": "hyperdht", "peer": "<64-hex>", "bind": "<128-hex>", "renditions": ["720p"] }
+  ```
+
 - **Strict parsing.** A reader that implements this profile parses the endpoint strictly, as it
   does every endpoint type it knows (NFX-03 §4): a `peer` that is not 64 lowercase hex, a `bind`
-  that is not 128 lowercase hex, or a `bind` that does not verify against `peer` makes the
-  **whole beacon** invalid. A reader that does not implement the profile skips the endpoint.
+  that is not 128 lowercase hex, a `bind` that does not verify against `peer`, or a malformed
+  `renditions` makes the **whole beacon** invalid. A reader that does not implement the profile
+  skips the endpoint. A reader of the earlier draft, which did not know `renditions`, reads the
+  endpoint as serving every rendition and is answered `missing` (§4) for a file it lacks.
 - **The `hyper` endpoint is deprecated.** The previous draft of this document defined
   `{"t":"hyper","drive":"<64-hex>"}`. It is never emitted. A reader that parses it keeps parsing
   it (the M1 beacon vector carries one) and never dials it.
@@ -237,7 +249,8 @@ An implementation is conformant when it passes those fixtures and the cross-impl
 - **Paid concurrency** (§5): one outstanding request per session until sovtech decides the
   half-window credit bound.
 - **Partial seeders.** A seeder whose NFX-03 `chunks` is not `"all"` answers requests for files it
-  lacks with `missing` or `refuse`. Whether it should also say which files it holds is open.
+  lacks with `missing` or `refuse`. It says which renditions it holds in `renditions` (§2); whether
+  it should also say which files of a rendition it holds is open.
 - **Verification while streaming.** A later `nfx/files/2` could carry incremental proofs, so a lie
   is caught before a whole file arrives. That needs a digest other than the signed sha256
   (NFX-05 §4), as BLAKE3 is for iroh.
@@ -251,3 +264,6 @@ An implementation is conformant when it passes those fixtures and the cross-impl
   request. The `hyperdht` endpoint and its `bind` replace `hyper`, which is deprecated. The
   Hyperdrive storage is gone, and the per-video topic becomes MAY. The open issues of the first
   draft (upload gating, the sidecar's runtime, partial drives) are void with it.
+- Draft 2026-11-26 — the `hyperdht` endpoint gains an optional `renditions` (§2), as the `https`
+  endpoint has (NFX-03 §4), for seeders of some renditions (NFX-18, decision record 0110). New
+  cases in `beacon-hyperdht.json`.
