@@ -31,9 +31,10 @@ No conformance level requires it. A client that implements it claims it beside a
 
 ### 2.1 Watched
 
-- A client MUST NOT keep anything for a video its user left before a minimum amount of it was
-  played. The minimum SHOULD be 60 s of media, and MUST NOT be less than 30 s. Files fetched
-  for a shorter play are deleted when the play ends, as before.
+- A client MUST NOT keep a video for the reason `watched` when its user left it before a minimum
+  amount of it was played. The minimum SHOULD be 60 s of media, and MUST NOT be less than 30 s.
+  Files fetched for a shorter play are deleted when the play ends, as before, unless another
+  reason (`downloaded`, `published`) keeps them.
 - Past the minimum, the client keeps the files it fetched for the play and records the reason
   `watched`.
 - **Finishing.** A client MAY then fetch the rest of the rendition it played, so that it becomes
@@ -42,8 +43,10 @@ No conformance level requires it. A client that implements it claims it beside a
   keeping (decision record 0109), and an origin that is also a peer (an `nfxd` bridge) counts as
   a peer. It MUST NOT pay for finishing: money is spent only on what its user plays or asks to
   download. It fetches nothing for a rendition its user did not play.
-- **A video its user paid for** (NFX-07, NFX-08) is kept as far as it was played: the client
-  fetches nothing more for keeping it.
+- **A video its user paid for** (NFX-07, NFX-08) is kept, past the minimum, as far as it was
+  played: the client fetches nothing more for keeping it. A shorter paid play is not kept for
+  the reason `watched` either, but what was paid for MAY stay where the client already stores
+  paid data instead of being deleted; it is then neither listed as kept nor announced.
 - Finishing yields to playback: a client SHOULD run at most a few finishing fetches at once and
   pause them while its user plays something.
 
@@ -172,8 +175,9 @@ What a client keeps is part of its user's privacy, so this document sets a floor
 
 A client claims "NFX-18" beside a level (NFX-11 §8) when it:
 
-1. keeps nothing for a play shorter than §2.1's minimum, finishes only free renditions over
-   peers, and pays only for what its user plays or asks to download (§2.1, §2.2);
+1. keeps nothing for the reason `watched` from a play shorter than §2.1's minimum, finishes only
+   free renditions over peers, and pays only for what its user plays or asks to download (§2.1,
+   §2.2);
 2. bounds keeping by a budget and a cap, and evicts only `watched` videos (§2.4);
 3. verifies every file before storing, and on every read where §3 requires it (§3);
 4. announces held renditions only, with no private address, no port mapping of its own, and keys
