@@ -1,8 +1,9 @@
 //! NFX wire formats (`spec/`): namespaces and the `n` tag (NFX-01), kind-38504
 //! manifests (NFX-02), kind-20464 beacons (NFX-03), hash lists and playlists (NFX-05),
 //! gossip envelopes (NFX-06), vouchers (NFX-08), mesh signaling over Nostr (NFX-10 §6,
-//! with NIP-44 v2), STUN service announcements and the STUN selection rules (NFX-10 §1),
-//! canonical JSON (NFX-11 §9), seeder ratings (NFX-16) and seeder lookup (NFX-17).
+//! with NIP-44 v2) and the file channel's messages (§6.10), STUN service announcements and
+//! the STUN selection rules (NFX-10 §1), canonical JSON (NFX-11 §9), seeder ratings (NFX-16)
+//! and seeder lookup (NFX-17).
 //!
 //! Everything here is pure: no I/O, no clock (callers pass `now`), no RNG (callers pass
 //! keys and nonces). The same code is built natively and for `wasm32-unknown-unknown`, so
@@ -13,6 +14,7 @@
 pub mod beacon;
 pub mod deletion;
 pub mod event;
+pub mod file_channel;
 pub mod gossip;
 pub mod hashlist;
 pub mod lookup;

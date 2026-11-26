@@ -31,6 +31,7 @@ import initWasm, {
   verifyStunAnnouncement,
 } from './out/wasm/nfx_wasm.js';
 import type { MeshStats, OriginSource, RemoteCandidates, Signaling } from './src/api';
+import * as fc from './src/file-channel';
 import {
   EndpointBook,
   MAX_ICE_SERVERS,
@@ -1147,6 +1148,18 @@ throws('vector beacon past its expiration', () => verifyBeacon(JSON.stringify(ve
   };
   const room = new MeshRoom(v.room.stream_swarm_id);
   eq('room key', room.pubkey, v.room.pubkey);
+  {
+    const vr = v as unknown as {
+      video_rooms: { address: string; video_room_id: string; pubkey: string }[];
+      video_room_refused: { name: string; address: string }[];
+    };
+    for (const r of vr.video_rooms) {
+      eq(`video room id of ${r.address.slice(0, 12)}…`, MeshRoom.videoRoomId(r.address), r.video_room_id);
+      eq(`video room key of ${r.address.slice(0, 12)}…`, MeshRoom.forVideo(r.address).pubkey, r.pubkey);
+      eq('a video room is the room of its id', new MeshRoom(r.video_room_id).pubkey, r.pubkey);
+    }
+    for (const r of vr.video_room_refused) throws(`video room refused: ${r.name}`, () => MeshRoom.forVideo(r.address));
+  }
   const session = (role: 'offerer' | 'answerer') =>
     new MeshSession(hex(v.secret_keys_DO_NOT_USE[role]!), hex(v.sessions[role].session_id));
   const off = session('offerer');
@@ -2037,6 +2050,112 @@ refuses('httpWindow beside peers only', () => checkSegmentSource({ segmentSource
   gone.abort();
   eq('probe: already aborted', (await probeWebRtc([], 60_000, standIn([], { hang: true }).C, gone.signal)).ok, false);
   eq('probe: an empty candidate ends gathering (older engines)', (await probeWebRtc([], 5000, standIn([host, { candidate: '' }], { hang: true }).C)).udp, 1);
+}
+
+// ---- the file channel (NFX-10 §6.10) --------------------------------------------------------
+{
+  const hex = (h: string): Uint8Array => Uint8Array.from(h.match(/../g) ?? [], (b) => parseInt(b, 16));
+  const toHex = (b: Uint8Array): string => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  type Msg = { name: string; hex: string; req?: number; sha256?: string; root?: string; bytes_hex?: string; flags?: number; reads_as_flags?: number; whole?: string[]; part?: string[]; read_only?: boolean };
+  const v = JSON.parse(readFileSync(join(here, '../../spec/test-vectors/file-channel.json'), 'utf8')) as {
+    label: string;
+    limits: Record<string, number>;
+    root: string;
+    messages: Msg[];
+    transfers: Record<'hash_list' | 'init', { sha256: string; size: number; messages: string[] }> & {
+      three_data_messages: { size: number; sha256: string; req: number; get_hex: string; messages: { length: number; head_hex: string; sha256: string }[] };
+    };
+    beacons_answer: { events: fc.NostrEvent[]; text: string; messages: string[] };
+  };
+  eq('file channel: label', v.label, fc.LABEL);
+  eq('file channel: limits', [v.limits.max_message, v.limits.max_data, v.limits.max_open_requests, v.limits.max_have_json, v.limits.max_have_ids, v.limits.max_beacons, v.limits.max_beacons_answer], [fc.MAX_MESSAGE, fc.MAX_DATA, fc.MAX_OPEN_REQUESTS, fc.MAX_HAVE_JSON, fc.MAX_HAVE_IDS, fc.MAX_BEACONS, fc.MAX_BEACONS_ANSWER]);
+  for (const m of v.messages) {
+    const bytes = hex(m.hex);
+    let got: fc.Message;
+    try {
+      got = fc.decode(bytes);
+    } catch (e) {
+      eq(`file channel: ${m.name} reads`, String(e), 'no error');
+      continue;
+    }
+    eq(`file channel: ${m.name} type`, got.t, m.name.split('-')[0]);
+    if (m.req !== undefined && 'req' in got) eq(`file channel: ${m.name} req`, got.req, m.req);
+    if (got.t === 'get') eq(`file channel: ${m.name} sha`, got.sha, m.sha256);
+    if (got.t === 'list') eq(`file channel: ${m.name} root`, got.root, m.root);
+    if (got.t === 'data') eq(`file channel: ${m.name} bytes`, toHex(got.bytes), m.bytes_hex);
+    if (got.t === 'hello') eq(`file channel: ${m.name} flags`, got.flags & (fc.FLAG_FILES | fc.FLAG_BEACONS), m.reads_as_flags ?? m.flags);
+    if (got.t === 'have') eq(`file channel: ${m.name} ids`, [got.have.whole, got.have.part], [m.whole, m.part]);
+    if (!m.read_only) eq(`file channel: ${m.name} written as read`, toHex(fc.encode(got)), m.hex);
+  }
+  const received = (msgs: Uint8Array[]): { req: number; sha: string; file: Uint8Array } => {
+    const first = fc.decode(msgs[0]!);
+    if (first.t !== 'get') throw new Error('a transfer begins with get');
+    const parts: Uint8Array[] = [];
+    msgs.slice(1).forEach((m, i) => {
+      const d = fc.decode(m);
+      if (d.t === 'data' && d.req === first.req) parts.push(d.bytes);
+      else if (d.t === 'end' && d.req === first.req) eq('file channel: end comes last', i, msgs.length - 2);
+      else eq('file channel: an unexpected message in a transfer', d.t, 'data or end');
+    });
+    const file = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for (const p of parts) {
+      file.set(p, at);
+      at += p.length;
+    }
+    return { req: first.req, sha: first.sha, file };
+  };
+  for (const key of ['hash_list', 'init'] as const) {
+    const t = v.transfers[key];
+    const msgs = t.messages.map(hex);
+    const { req, sha, file } = received(msgs);
+    eq(`file channel: ${key} transfer`, [sha, sha256Hex(file), file.length], [t.sha256, t.sha256, t.size]);
+    eq(`file channel: ${key} written as sent`, fc.dataMessages(req, file).map(toHex), t.messages.slice(1));
+  }
+  eq('file channel: the hash list is asked for by the root', v.transfers.hash_list.sha256, v.root);
+  const big = v.transfers.three_data_messages;
+  const bigFile = Uint8Array.from({ length: big.size }, (_, i) => i % 251);
+  eq('file channel: the three-message file', sha256Hex(bigFile), big.sha256);
+  const bigMsgs = fc.dataMessages(big.req, bigFile);
+  eq('file channel: three data messages, then end', bigMsgs.map((m) => [m.length, toHex(m.subarray(0, 16)), sha256Hex(m)]), big.messages.map((m) => [m.length, m.head_hex, m.sha256]));
+  const ba = v.beacons_answer;
+  eq('file channel: a beacons answer is written as the vector', new TextDecoder().decode(fc.beaconsAnswer(ba.events)), ba.text);
+  eq('file channel: and read back', fc.readBeaconsAnswer(new TextEncoder().encode(ba.text)), ba.events);
+  eq('file channel: its messages', ba.messages, [toHex(fc.encode({ t: 'beacons', req: 3 })), ...fc.dataMessages(3, new TextEncoder().encode(ba.text)).map(toHex)]);
+
+  const bad = JSON.parse(readFileSync(join(here, '../../spec/test-vectors/file-channel-invalid.json'), 'utf8')) as {
+    messages: { name: string; hex: string }[];
+    sequences: { name: string; sent: string[] }[];
+    beacons_refused: { name: string; text: string }[];
+  };
+  for (const m of bad.messages) throws(`file channel refuses ${m.name}`, () => fc.decode(hex(m.hex)));
+  for (const s of bad.sequences) {
+    const ch = new fc.Channel();
+    const sent = s.sent.map(hex);
+    let early = '';
+    sent.slice(0, -1).forEach((m, i) => {
+      try {
+        ch.read(m);
+      } catch (e) {
+        early ||= `message ${i}: ${String(e)}`;
+      }
+    });
+    eq(`file channel: ${s.name} reads up to its last message`, early, '');
+    throws(`file channel: ${s.name} closes the channel`, () => ch.read(sent[sent.length - 1]!));
+  }
+  for (const b of bad.beacons_refused) throws(`file channel refuses the beacons answer ${b.name}`, () => fc.readBeaconsAnswer(new TextEncoder().encode(b.text)));
+  // The book: a third get of one file is answered missing at once, and is never open.
+  const ch = new fc.Channel();
+  ch.read(Uint8Array.of(4, 1, 0));
+  const get = (req: number) => fc.encode({ t: 'get', req, sha: v.root });
+  for (const [req, want] of [[1, 'serve'], [2, 'serve'], [3, 'missing']] as const) {
+    const r = ch.read(get(req));
+    eq(`file channel: get ${req} of one file`, r.t === 'request' ? r.admit : r.t, want);
+    if (want === 'serve') eq('file channel: its answer closes it', ch.answered(req), true);
+  }
+  eq('file channel: nothing open after', ch.openCount, 0);
+  throws('file channel: a req that is not a u32', () => fc.encode({ t: 'end', req: 2 ** 32 }));
+  throws('file channel: an empty file', () => fc.dataMessages(1, new Uint8Array(0)));
 }
 
 console.log(`unit: ${ran - bad}/${ran} ok`);

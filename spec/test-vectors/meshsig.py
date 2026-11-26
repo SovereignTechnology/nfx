@@ -23,6 +23,7 @@ KIND = 25050
 PROTOCOL = "nfx-mesh/1"
 APP = "nfx"
 ROOM_LABEL = b"nfx/1/web/room"
+VIDEO_ROOM_PREFIX = "nfx/1/web/video/"
 PRESENCE_TTL = 90
 MAX_AGE = 60
 MAX_FUTURE = 30
@@ -290,6 +291,28 @@ def meshsig_vectors(keypair, schnorr_id_pubkey, nostr_event) -> dict:
         r0, rs, n = room_secret(swarm)
         rooms.append({"stream_swarm_id": swarm, "h0": r0.hex(), "rehashes": n, "secret": rs.hex(),
                       "pubkey": xonly(PrivateKey(rs))})
+    # Video rooms (NFX-10 §6.9): the prefix and the manifest's address, derived as a stream room is.
+    creator_pk = xonly(keypair("nfx-test-vector/creator"))
+    other_creator_pk = xonly(keypair("nfx-test-vector/video-room-other-creator"))
+    video_rooms = []
+    for addr in (f"38504:{creator_pk}:nfx:mainnet:1:salt-flats-dusk",
+                 f"38504:{other_creator_pk}:nfx:mainnet:1:salt-flats-dusk",
+                 f"38504:{creator_pk}:nfx:testnet:1:mesh-e2e"):
+        vid = VIDEO_ROOM_PREFIX + addr
+        r0, rs, n = room_secret(vid)
+        video_rooms.append({"address": addr, "video_room_id": vid, "h0": r0.hex(), "rehashes": n,
+                            "secret": rs.hex(), "pubkey": xonly(PrivateKey(rs))})
+    assert len({r["pubkey"] for r in video_rooms}) == len(video_rooms)
+    # Addresses a video room is never derived from: the derivation refuses them.
+    video_room_refused = [
+        {"name": "manifest-kind-38505", "address": f"38505:{creator_pk}:nfx:mainnet:1:salt-flats-dusk"},
+        {"name": "creator-uppercase", "address": f"38504:{creator_pk.upper()}:nfx:mainnet:1:salt-flats-dusk"},
+        {"name": "creator-63-hex", "address": f"38504:{creator_pk[:63]}:nfx:mainnet:1:salt-flats-dusk"},
+        {"name": "no-video-id", "address": f"38504:{creator_pk}:nfx:mainnet:1"},
+        {"name": "namespace-not-nfx", "address": f"38504:{creator_pk}:xyz:mainnet:1:salt-flats-dusk"},
+        {"name": "already-a-room-id", "address": VIDEO_ROOM_PREFIX + f"38504:{creator_pk}:nfx:mainnet:1:salt-flats-dusk"},
+        {"name": "empty", "address": ""},
+    ]
     # No swarm ID that needs a rehash is known (an h0 out of range has probability ~2^-128),
     # so the step is pinned from forced out-of-range values.
     forced = []
@@ -371,7 +394,10 @@ def meshsig_vectors(keypair, schnorr_id_pubkey, nostr_event) -> dict:
         "description": "NFX-10 §6 signaling over Nostr (kind 25050, i = nfx-mesh/1), signaling-compatible "
                        "with the NIP-DC draft §§2, 4-6. 'rooms': room secret = the first h_i in range "
                        "(0 < h_i < n), h_0 = sha256(utf8('nfx/1/web/room') || 0x00 || utf8(stream swarm ID)), "
-                       "h_(i+1) = sha256(h_i); P = its BIP-340 x-only key. 'rehash' pins that step from "
+                       "h_(i+1) = sha256(h_i); P = its BIP-340 x-only key. 'video_rooms' (NFX-10 §6.9) derive the "
+                       "same way from the video room ID 'nfx/1/web/video/' || the manifest address "
+                       "'38504:<creator>:<namespace>:<video-id>'; a derivation MUST refuse every "
+                       "'video_room_refused' address. 'rehash' pins that step from "
                        "forced out-of-range values (no swarm ID needing one is known). 'events' are checked "
                        "at 'now' in room P by the session that each directed event's p names; the "
                        "lower session pubkey is the offerer. Offer and answer content is NIP-44 v2 "
@@ -391,6 +417,8 @@ def meshsig_vectors(keypair, schnorr_id_pubkey, nostr_event) -> dict:
         "presence_ttl": PRESENCE_TTL,
         "max_content": MAX_CONTENT,
         "rooms": rooms,
+        "video_rooms": video_rooms,
+        "video_room_refused": video_room_refused,
         "rehash": forced,
         "room": {"stream_swarm_id": SWARM, "pubkey": xonly(room)},
         "sessions": {

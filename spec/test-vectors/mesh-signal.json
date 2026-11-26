@@ -1,5 +1,5 @@
 {
-  "description": "NFX-10 §6 signaling over Nostr (kind 25050, i = nfx-mesh/1), signaling-compatible with the NIP-DC draft §§2, 4-6. 'rooms': room secret = the first h_i in range (0 < h_i < n), h_0 = sha256(utf8('nfx/1/web/room') || 0x00 || utf8(stream swarm ID)), h_(i+1) = sha256(h_i); P = its BIP-340 x-only key. 'rehash' pins that step from forced out-of-range values (no swarm ID needing one is known). 'events' are checked at 'now' in room P by the session that each directed event's p names; the lower session pubkey is the offerer. Offer and answer content is NIP-44 v2 (offerer <-> answerer conversation key) of the complete SDP, with the fixed nonces given; 'roomproof' gives each event's challenge, preimage and id (NIP-DC §2: sig = BIP-340 by the room secret over id, here aux_rand = 32 zero bytes like every signature in these vectors). 'connect_with_unknown_tag' MUST be accepted. 'nip44_reference' are cases copied from the official NIP-44 vectors, which an implementation of these events should also pass.",
+  "description": "NFX-10 §6 signaling over Nostr (kind 25050, i = nfx-mesh/1), signaling-compatible with the NIP-DC draft §§2, 4-6. 'rooms': room secret = the first h_i in range (0 < h_i < n), h_0 = sha256(utf8('nfx/1/web/room') || 0x00 || utf8(stream swarm ID)), h_(i+1) = sha256(h_i); P = its BIP-340 x-only key. 'video_rooms' (NFX-10 §6.9) derive the same way from the video room ID 'nfx/1/web/video/' || the manifest address '38504:<creator>:<namespace>:<video-id>'; a derivation MUST refuse every 'video_room_refused' address. 'rehash' pins that step from forced out-of-range values (no swarm ID needing one is known). 'events' are checked at 'now' in room P by the session that each directed event's p names; the lower session pubkey is the offerer. Offer and answer content is NIP-44 v2 (offerer <-> answerer conversation key) of the complete SDP, with the fixed nonces given; 'roomproof' gives each event's challenge, preimage and id (NIP-DC §2: sig = BIP-340 by the room secret over id, here aux_rand = 32 zero bytes like every signature in these vectors). 'connect_with_unknown_tag' MUST be accepted. 'nip44_reference' are cases copied from the official NIP-44 vectors, which an implementation of these events should also pass.",
   "secret_keys_DO_NOT_USE": {
     "offerer": "a50a2e0bff57f514b9cfd3cc980648ad388a84a3b53d549216b641ec50a04ab7",
     "answerer": "32f06ec01d9e71db7465cdc310b1505201922bb47bf696d01aba85c273586be5",
@@ -31,6 +31,62 @@
       "rehashes": 0,
       "secret": "09fcbb912f33de3360a957876230f553715e1d63e487170ca0a096bbe36b08ad",
       "pubkey": "c0524faaaad0a94c8ea3baebbdced060ad8c2e41b897cb42735597795523bcdf"
+    }
+  ],
+  "video_rooms": [
+    {
+      "address": "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk",
+      "video_room_id": "nfx/1/web/video/38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk",
+      "h0": "8e635ff4f9769cdcdbb0ca73fe52abbc61f8eb5e2364f6b7fb48656aa050d03a",
+      "rehashes": 0,
+      "secret": "8e635ff4f9769cdcdbb0ca73fe52abbc61f8eb5e2364f6b7fb48656aa050d03a",
+      "pubkey": "2ef308b669a47da8eb1e845c3924f97350ef72208f2868a6a5c9d0827a979c0a"
+    },
+    {
+      "address": "38504:f4f0c1958e8c26f211459ae7d8c84e3fe139e869183fa62e73d330dc36c352b1:nfx:mainnet:1:salt-flats-dusk",
+      "video_room_id": "nfx/1/web/video/38504:f4f0c1958e8c26f211459ae7d8c84e3fe139e869183fa62e73d330dc36c352b1:nfx:mainnet:1:salt-flats-dusk",
+      "h0": "11100681993d2bf963db97bc93d7de79254ba71171fa1231cb322a1c27eba3f9",
+      "rehashes": 0,
+      "secret": "11100681993d2bf963db97bc93d7de79254ba71171fa1231cb322a1c27eba3f9",
+      "pubkey": "87fafc42f422508c774246a249e9d57e9c211b16312fc90e3604236f7bbead89"
+    },
+    {
+      "address": "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:testnet:1:mesh-e2e",
+      "video_room_id": "nfx/1/web/video/38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:testnet:1:mesh-e2e",
+      "h0": "9117a1c289117e3bc0468b7217fb77a7e785e7b0491c8d6a7c21a77dce4dc2b6",
+      "rehashes": 0,
+      "secret": "9117a1c289117e3bc0468b7217fb77a7e785e7b0491c8d6a7c21a77dce4dc2b6",
+      "pubkey": "cf07481eddd05be8901113d4aca073734a7b9a81ee3b864cccbb8ae6dc7cef95"
+    }
+  ],
+  "video_room_refused": [
+    {
+      "name": "manifest-kind-38505",
+      "address": "38505:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+    },
+    {
+      "name": "creator-uppercase",
+      "address": "38504:0BE0A67ACEFACEBE95ED0D4253828D5524D8F314E7D65D2F153C1FB6B820250F:nfx:mainnet:1:salt-flats-dusk"
+    },
+    {
+      "name": "creator-63-hex",
+      "address": "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250:nfx:mainnet:1:salt-flats-dusk"
+    },
+    {
+      "name": "no-video-id",
+      "address": "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1"
+    },
+    {
+      "name": "namespace-not-nfx",
+      "address": "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:xyz:mainnet:1:salt-flats-dusk"
+    },
+    {
+      "name": "already-a-room-id",
+      "address": "nfx/1/web/video/38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+    },
+    {
+      "name": "empty",
+      "address": ""
     }
   ],
   "rehash": [
