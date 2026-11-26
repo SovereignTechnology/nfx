@@ -259,7 +259,9 @@ async function main(): Promise<void> {
     query: string,
     until: string,
     timeout: number,
-  ): Promise<{ v: View; firstFrameMs: number | null; sockets: string[] }> {
+    // Kept open this long after `until` before the snapshot, so what the page does then is seen.
+    settleMs = 0,
+  ): Promise<{ v: View; firstFrameMs: number | null; sockets: string[]; asked: number }> {
     const sockets: string[] = [];
     const consoles: string[] = [];
     const p = await (await browser.newContext()).newPage();
@@ -280,7 +282,10 @@ async function main(): Promise<void> {
       );
       await p.waitForFunction(until, null, { timeout });
       await Promise.race([playing, new Promise((r) => setTimeout(r, 200))]);
-      return { v: await state(p), firstFrameMs, sockets };
+      if (settleMs > 0) await new Promise((r) => setTimeout(r, settleMs));
+      // The origin's count is read with the page still open, after the settle time.
+      const v = await state(p);
+      return { v, firstFrameMs, sockets, asked: g.asked() };
     } catch (e) {
       const page = await p
         .evaluate(() => ({ log: (document.getElementById('log')?.textContent ?? '').slice(-6000), state: (window as any).__nfx }))
@@ -464,15 +469,15 @@ async function main(): Promise<void> {
       `relay=${encodeURIComponent(relay)}&segmentSource=peers-only`,
       `(() => { const s = window.__nfx; return s.errors.length > 0 || (s.blocked !== null && s.waits.length > 0); })()`,
       60_000,
+      3_000,
     );
-    await new Promise((r) => setTimeout(r, 3_000));
-    results.blockedPeersOnly = { why: five.v.blocked, waits: five.v.waits, playing: five.v.playing, originAsked: g.asked() };
+    results.blockedPeersOnly = { why: five.v.blocked, waits: five.v.waits, playing: five.v.playing, originAsked: five.asked };
     fail('blocked, peers-only', [
       five.v.errors.length !== 0 ? `errors ${JSON.stringify(five.v.errors)}` : '',
       five.v.blocked === null ? 'not reported as blocked' : '',
       five.v.waits[0] !== 'waiting:no-peer' ? `waits ${JSON.stringify(five.v.waits)}` : '',
       five.v.playing ? 'it played, with no peer and no HTTPS' : '',
-      g.asked() !== 0 ? `the origin was asked for ${g.asked()} segments` : '',
+      five.asked !== 0 ? `the origin was asked for ${five.asked} segments` : '',
     ], results.blockedPeersOnly);
   } finally {
     await noUdp.close();
