@@ -1122,7 +1122,7 @@ beacon a reader MUST refuse.
   HTTPS" now hold only for a player that still asks origins for segments. A player that asks
   peers only SHOULD say when it waits for a peer and when the browser's WebRTC gathers no
   UDP candidate. Playlists, init segments and the hash list still come from an origin.
-- Draft 2026-11-26 (ADR 01NN): browsers start without an origin. §6.9 adds a **video room**
+- Draft 2026-11-26 (ADR 0112): browsers start without an origin. §6.9 adds a **video room**
   per video, `nfx/1/web/video/` and the manifest's address, its key derived as the stream
   rooms' are, so a page that holds only the signed manifest meets peers before it has the
   hash list; only a session that wants files offers there, and one that serves sends its

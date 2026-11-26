@@ -221,7 +221,7 @@ server generalizes to an origin when its admin pins NFX-05 content.
   and wrote the paths from the host's root, while NFX-03 §4 already had a beacon's
   `https` endpoint serve `GET <base>/<sha256>` under a base path, and the M1 player
   already fetched under one.
-- 2026-11-26 (**an exception to the freeze rule**, proposed in ADR 01NN; for the maintainer,
+- 2026-11-26 (**an exception to the freeze rule**, proposed in ADR 0112; for the maintainer,
   sovtech, to decide over a `specver` bump, which would change every namespace, room key and
   manifest): a browser needs no origin to start. §6 no longer says every network needs an
   origin for "browser genesis": a browser can take its start-up files from peers over

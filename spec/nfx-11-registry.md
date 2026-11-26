@@ -310,6 +310,6 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   (NFX-04 §3 as amended in place 2026-11-24): the UDP port on which the relay's own host
   answers STUN. A client that uses its relays' STUN servers (NFX-10 §1) also passes the new
   `relay-stun.json` (source `test-vectors/stunad.py`). `stun-select.json` is unchanged.
-- 2026-11-26 (ADR 01NN) — §3 registers the web video room ID (NFX-10 §6.9) and the file
+- 2026-11-26 (ADR 0112) — §3 registers the web video room ID (NFX-10 §6.9) and the file
   channel `nfx-files/1` (NFX-10 §6.10), whose types 0 to 3 are NFX-12 §4's. Their vectors,
   `file-channel*.json` and `mesh-signal.json`'s `video_rooms`, join §7 with their generator.

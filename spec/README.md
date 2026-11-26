@@ -29,7 +29,7 @@ desktop shell.
 | NFX-02 | Catalog manifest (kind 38504) | **Frozen** (2026-09-24) | M1 |
 | NFX-03 | Availability beacons (kind 20464) | **Frozen** (2026-09-24) | M1 |
 | NFX-04 | Scoped relay profile | **Frozen** (2026-09-24; amended in place 2026-11-18, #96, and 2026-11-19, #104) | M1 |
-| NFX-05 | Segments & content integrity | **Frozen** (2026-09-24; amended in place 2026-11-26, ADR 01NN) | M1 |
+| NFX-05 | Segments & content integrity | **Frozen** (2026-09-24; amended in place 2026-11-26, ADR 0112) | M1 |
 | NFX-06 | iroh transport profile | **Frozen** (2026-09-24) | M1 |
 | NFX-07 | Payments — open mode | Draft | M2 |
 | NFX-08 | Payments — licensed mode & vouchers | Draft | M3 |
@@ -114,7 +114,7 @@ the repository license. Rationale and full context: `docs/decisions/0006-*` (f).
   who seeds a video and seeders answer at once with their signed beacon (kind 20465). No frozen
   document changes in this entry; a scoped relay can carry the kind only after a separate in-place
   amendment to NFX-04. New vectors `lookup*.json`. Issue #113.
-- 2026-11-26 — **an exception to the freeze rule**, proposed (ADR 01NN): frozen NFX-05 is
+- 2026-11-26 — **an exception to the freeze rule**, proposed (ADR 0112): frozen NFX-05 is
   amended in place so that a browser needs no origin to start. §6 no longer counts "browser
   genesis" among the reasons a network needs an origin, and having one becomes a SHOULD;
   §2 lets a hash list come from a peer too, trusted only because it hashes to `root`. No
