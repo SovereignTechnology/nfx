@@ -285,7 +285,43 @@ export interface MeshStats {
   peerList: MeshPeer[];
   /** The Nostr kind's signaling counters, and how many of its relay sockets are open; null for trackers. */
   signal: { open: number; sent: number; received: number; offers: number; answers: number } | null;
+  /** Where this session takes its segments from (`OpenCommon.segmentSource`). */
+  source: SegmentSource;
+  /**
+   * Segments fetched over HTTPS under `peers-then-https`: each is a rescue, a segment peers
+   * did not deliver in time. Always 0 under the other two.
+   */
+  rescues: number;
+  /** Whether playback is waiting, right now, for a peer to deliver the segment it needs. */
+  waiting: boolean;
+  /**
+   * Whether this browser's WebRTC can reach a peer at all (`probeWebRtc`): `ok` once it has
+   * gathered a UDP candidate, `blocked` when it gathered none (WebRTC is switched off, or
+   * kept to a proxy, by the browser's settings or an extension), `unknown` until the check
+   * ends.
+   */
+  webrtc: 'unknown' | 'ok' | 'blocked';
+  /**
+   * Milliseconds from the session's start to its first peer connection, to its first
+   * segment from a peer, and to its first segment from anywhere; null until each happens.
+   */
+  startup: { peerMs: number | null; peerSegmentMs: number | null; segmentMs: number | null };
 }
+
+/**
+ * Where a session with a mesh takes its media segments from. Playlists, init segments and
+ * the hash list come from an origin under all three (NFX-10 §1).
+ *
+ * - `https-first` (the default): the origin first for what playback needs next, peers for
+ *   the rest.
+ * - `peers-then-https`: peers first. A segment comes over HTTPS only as a rescue
+ *   (`MeshStats.rescues`, the `rescue` event): when no connected peer holds it once peers
+ *   have had `peerWaitMs` to connect, or when a peer holds it but playback is about to need
+ *   it and has asked for it for `peerWaitMs`.
+ * - `peers-only`: never HTTPS for a segment. With no peer to deliver one, playback waits
+ *   (the `waiting` event) for as long as it takes; nothing fails.
+ */
+export type SegmentSource = 'peers-then-https' | 'peers-only' | 'https-first';
 
 /**
  * One mesh peer, as the engine knows it. Its id and `via` come from the network (a peer or
@@ -420,6 +456,21 @@ export type PlayerEvent =
   | ({ type: 'rejected' } & Rejection)
   | { type: 'levels'; levels: Level[] }
   | { type: 'playing' }
+  /**
+   * The mesh cannot work in this browser: its WebRTC gathered no UDP candidate (`why` says
+   * what the check found). Sent at most once. Under `peers-then-https` every segment then
+   * comes over HTTPS at once; under `peers-only` nothing can play.
+   */
+  | { type: 'mesh'; state: 'blocked'; why: string }
+  /**
+   * Playback is waiting for a peer to deliver a segment (`segmentSource` other than
+   * `https-first`): `no-peer` when none is connected, `slow` when those connected have not
+   * delivered it. `resumed` follows when it arrives.
+   */
+  | { type: 'waiting'; reason: 'no-peer' | 'slow'; peers: number }
+  | { type: 'resumed' }
+  /** A segment came over HTTPS under `peers-then-https`: peers did not deliver it in time. */
+  | { type: 'rescue'; url: string }
   /** A fatal hls.js error (playback has stopped), or a refused `play()`. */
   | { type: 'error'; message: string };
 
@@ -445,7 +496,8 @@ export type PlayerEvent =
  * Beacon claims never remove an origin or a level: a beacon from any key can only change
  * the order above. And a level is never offered whose segments no source can deliver: the
  * mesh never adds a level, since a segment peers do not deliver in time comes over HTTP
- * from that origin, so a rendition it does not hold would only fail. hls.js is told of no
+ * from that origin (or, under `segmentSource` `peers-only`, is waited for), so a rendition
+ * the origin does not hold would only fail. hls.js is told of no
  * other level: the master playlist it reads is cut to those renditions' variants, matched
  * by playlist content name (NFX-10 §2), and a level outside them stops the session with an
  * `error` event before any segment is fetched.
@@ -497,8 +549,24 @@ export interface OpenCommon {
    * overrides the start `renditions` would give; past the last level it is ignored.
    */
   level?: number;
-  /** Seconds ahead of the playhead fetched over HTTP; the rest may come from peers (test knob). */
+  /**
+   * Seconds ahead of the playhead fetched over HTTP; the rest may come from peers (test
+   * knob). Only with `segmentSource` `https-first`.
+   */
   httpWindow?: number;
+  /**
+   * Where the mesh takes segments from (`SegmentSource`). Default `https-first`. The other
+   * two need `signaling`: `peers-only` without it is refused with a `TypeError`, and
+   * `peers-then-https` without it plays from the origin, as there is no mesh.
+   */
+  segmentSource?: SegmentSource;
+  /**
+   * How long peers get before HTTPS steps in under `peers-then-https`, in milliseconds, 0 to
+   * 30000. Default 4000. It is the wait for peers to connect at the start, the time
+   * playback must have asked for a segment a peer holds, and, as seconds of playback, how
+   * close playback must be to that segment.
+   */
+  peerWaitMs?: number;
 }
 
 /**
@@ -552,6 +620,21 @@ export interface Session {
    * the session keeps every source it knows and adds these (NFX-17 §4.3).
    */
   addSources(list: readonly (string | OriginSource)[]): void;
+  /**
+   * Take segments from `source` from now on (`SegmentSource`; `stats().mesh.source` says
+   * which is in use). An HTTPS download under way is never interrupted, and is counted as
+   * what it began as (a rescue or not). Going to `peers-only` stops every further request to
+   * an origin for a segment, so playback waits (`waiting`) whenever no peer delivers. Going
+   * back to `peers-then-https` puts the rescue rule in force at once, for a segment a peer is
+   * still sending too: one playback is about to need, and has asked for the whole wait, is
+   * then taken over HTTPS in the peer's place. The fetch windows change with the source; the
+   * cap on what the engine keeps does not: it is set when the session opens (512 MiB with
+   * peers first) and the engine reads it only then, so a session opened `https-first` keeps
+   * the engine's own cap after a switch. Throws a `TypeError` for a
+   * value `open()` would refuse. A session without a mesh has nothing to change: it throws
+   * for `peers-only` and ignores the others.
+   */
+  setSegmentSource(source: SegmentSource): void;
   stats(): Stats;
   /**
    * Where each open mesh peer's connection goes (`PeerAddress`, one per peer), read from the

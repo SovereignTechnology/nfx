@@ -28,8 +28,9 @@ const session = await open(videoElement, {
   renditions: ['720p', '360p'],                 // optional: allowed ids, preferred first
   signaling: { kind: 'nostr', relays: ['wss://relay.example'] }, // optional; none = no mesh
   // or: signaling: { kind: 'trackers', urls: ['wss://tracker.example'] },
+  segmentSource: 'peers-then-https',            // optional: 'https-first' (default), or 'peers-only'
   iceServers: [{ urls: 'stun:stun.example:3478' }], // optional, STUN only
-  onEvent: (ev) => {},                          // log, origin, verified, rejected, levels, playing, error
+  onEvent: (ev) => {},                          // log, origin, verified, rejected, levels, playing, mesh, waiting, resumed, rescue, error
   signal,                                       // optional: aborts open(), or ends the session
 });
 session.levels; session.setLevel(-1); session.stats(); // each level has its rendition `id`
@@ -39,6 +40,23 @@ session.destroy();                              // hls.js, its worker, the p2p l
 
 The types are in `src/api.ts`. `open()` also takes a bare `root` (with `video` and `segs` to
 bind the hash list) instead of `manifestJson`.
+
+**Where segments come from** (`segmentSource`, decision record 0109). With a mesh, the
+default is the origin first (`https-first`). `peers-then-https` takes each segment from a
+peer that holds it, and from the origin only as a rescue: when no connected peer holds the
+segment playback is asking for once peers have had `peerWaitMs` (4 s) to connect, or when a
+peer holds it but playback is about to need it. `peers-only` never asks an origin for a
+segment: playback waits for a peer. `stats().mesh` says which is in use (`source`), how many
+segments were rescued (`rescues`), whether playback is waiting for a peer (`waiting`), and
+how long the first peer and the first segments took (`startup`). The hash list, playlists
+and init segments come from an origin in all three. `session.setSegmentSource(source)`
+changes it while the session plays: a page can offer a switch that turns HTTPS off for
+segments (`peers-only`), and on again.
+
+At the start of a session with a mesh the library checks once whether the browser's WebRTC
+gathers a UDP candidate. If it gathers none (WebRTC is off, or kept to a proxy, by a setting
+or an extension), no peer can connect: `stats().mesh.webrtc` is `blocked` and a `mesh` event
+says why, so a page can tell the viewer instead of showing an origin as the only source.
 
 ### Where the bytes come from (stats for nerds, nfx #99)
 
@@ -178,12 +196,14 @@ npm ci
 npm run build          # the WASM (wasm-pack) and the test page, out/
 npm run build:lib      # the library: out-lib/player.js (minified) and its declarations
 npm run typecheck
-npm run unit           # sanitisers, the beacon endpoint book and availability, open()'s option checks, levels and probes, the remote candidate filter, relays' NIP-11 and STUN
+npm run unit           # sanitisers, the beacon endpoint book and availability, open()'s option checks, levels and probes, the remote candidate filter, relays' NIP-11 and STUN, where segments come from, the WebRTC check
+npm run unit:policy    # the engine's choice of source with peers first, over every input
 npm run e2e            # the test page end to end (cargo, ffmpeg, openssl, Chromium), held renditions and a hostile beacon included
 npm run e2e:mesh       # the mesh, the bridge, the library's lifecycle, trackers from a beacon
 eval "$(bash e2e-strfry.sh /var/tmp/strfry)"   # the stock relay, strfry at a pinned commit
 npm run e2e:nostr      # two browsers over Nostr only (strfry, no tracker), the origin cut
 npm run e2e:nostr-node # a browser and nfxd's mesh endpoint (full ICE) over strfry, the origin cut
+npm run e2e:peer-first # peers first: segments from nfxd's mesh endpoint from the first one, rescues, a browser with WebRTC blocked
 ```
 
 The suites build `nfxd` and `nfx-package` and run headless Chromium in fresh contexts, on
@@ -206,6 +226,14 @@ contract and its teardown; with no factory it behaves as published. The same pat
 the peer's `RTCPeerConnection` to `onPeerConnect`'s details (`PeerConnectDetails`, nfx #99), so
 `Session.addresses()` can read each connection's selected candidate pair; the engine still
 owns the connection. It is written to go upstream as it is.
+
+The patch also carries NFX's own choices, which are not meant for upstream as they are:
+`httpSegmentFetch` and `segmentFromOneSource` (NFX-17 §4.3), and `segmentPolicy` with
+`peerWaitMs` (decision record 0109): `peer-first` and `peer-only` take segments from the
+peers that announced them, fetch nothing over HTTP in the background, and use HTTP at most
+as a rescue for the segment playback is asking for (`peer-first` only). One pure function,
+`decidePeerModeSource` in `utils/stream.ts`, makes the choice; `policy-unit.ts` checks it
+over every input. `http-first`, the default, is the engine's published code path.
 
 `npm run engine` (part of every build) runs `engine/patch.mjs`, which checks before it
 writes anything: that `package-lock.json` pins the npm tarball at the integrity

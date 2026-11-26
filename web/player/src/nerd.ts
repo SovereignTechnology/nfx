@@ -113,6 +113,9 @@ export function nerdView(s: Stats, e: ElementSample, title: string | null): Nerd
     rows.push(['Uploaded', formatBytes(mesh.uploaded)]);
     rows.push(['Peers', `${mesh.connected} connected, ${mesh.peers} since start`]);
     rows.push(['Segments', `${mesh.segments.http} over HTTP, ${mesh.segments.p2p} from peers`]);
+    rows.push(['Segment source', mesh.source === 'peers-then-https' ? `peers, then HTTPS (${mesh.rescues} rescued)` : mesh.source === 'peers-only' ? 'peers only' : 'HTTPS first']);
+    rows.push(['WebRTC', mesh.webrtc === 'blocked' ? 'blocked in this browser: no UDP candidate' : mesh.webrtc === 'ok' ? 'ok' : 'checking']);
+    if (mesh.waiting) rows.push(['Waiting', mesh.connected === 0 ? 'for a peer' : 'for a connected peer to deliver']);
     if (mesh.signaling === 'nostr') {
       const sig = mesh.signal;
       rows.push(['Signaling', `Nostr, ${sig ? `${sig.open} of ` : ''}${mesh.relays.length} relays open`]);

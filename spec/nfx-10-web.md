@@ -21,6 +21,13 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   `validateP2PSegment` and `validateHTTPSegment`: the library completes a segment only
   after its validator accepts it, and it drops a peer that sent a bad one. Playlists and
   init segments never travel over the mesh.
+- **Where a segment comes from is the player's choice.** A player MAY ask an origin first
+  and peers for the rest (p2p-media-loader as published), or ask peers first and an origin
+  only for a segment no peer delivers in time, or ask peers only. The choice changes nothing
+  on the wire and no check: a segment is verified the same way whoever sent it. A player
+  that asks peers only plays while a peer that holds the segments can be reached, and not
+  otherwise (§6.8: there is no TURN); it SHOULD tell the viewer when it is waiting for a
+  peer, and when the browser's WebRTC cannot reach any (it gathers no UDP candidate).
 - **Finding trackers.** A page is configured with its network's tracker URLs, the same
   way it is configured with relays (NFX-04). A bridge's beacon `webrtc` endpoint (§2)
   names the trackers through which it can be reached.
@@ -35,7 +42,8 @@ through WebRTC and plain HTTPS. The key design point: **the files are identical*
   network's relays and trackers, and SHOULD NOT name a third party's: the STUN server
   learns every viewer's address. TURN is not part of NFX: a TURN server carries every
   byte, which is the browser's equivalent of a relay in the data path. A pair that cannot
-  connect directly falls back to a bridge or to HTTPS.
+  connect directly falls back to a bridge or, where the player still asks origins for
+  segments, to HTTPS.
 - **A seeder's beacon may name its STUN server.** A node that answers STUN Binding
   requests (RFC 8489; Binding only, no authentication) MAY announce it with an endpoint
   `{ "t": "stun", "addrs": ["<ip>:<port>", …] }`: 1 to 4 distinct addresses, each in
@@ -672,8 +680,9 @@ over 70 KiB (UTF-8) dropped unparsed.
 TURN is not part of NFX (§1), and this profile has none: no TURN server and no NIP-DC
 TURN (kind 25051), so no relay carries a byte of video. A pair that cannot punch
 (symmetric NAT on both sides, some CGNAT) fails at the connection timeout, and each page
-keeps fetching from its origin or a bridge. Issue #71 tracks the rest: native endpoints
-with full ICE, and a NAT test.
+keeps fetching from its origin or a bridge; a page that takes segments from peers only
+(§1) waits for a peer it can reach. Issue #71 tracks the rest: native endpoints with full
+ICE, and a NAT test.
 
 ## Changelog
 
@@ -829,3 +838,9 @@ with full ICE, and a NAT test.
   every address to be; a client that hides its address from a relay through a proxy, a VPN
   or Tor SHOULD NOT use it. The abuse bound and the privacy note now name relays. Nothing on the Nostr wire
   changes. New vectors `relay-stun.json`.
+- Draft 2026-11-26 (ADR 0109): §1 says where a segment comes from is the player's choice:
+  an origin first, peers first with an origin as the fallback, or peers only. Nothing on the
+  wire changes, and every segment is verified as before. §1's and §6.8's "falls back to
+  HTTPS" now hold only for a player that still asks origins for segments. A player that asks
+  peers only SHOULD say when it waits for a peer and when the browser's WebRTC gathers no
+  UDP candidate. Playlists, init segments and the hash list still come from an origin.

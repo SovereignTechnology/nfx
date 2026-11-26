@@ -7,8 +7,10 @@
 // the stats panel can read its selected candidate pair (nfx #99); and, for NFX-17 §4.3,
 // `httpSegmentFetch`, through which the player's own fetcher picks each segment's source, and
 // `segmentFromOneSource`, which starts every attempt from the segment's first byte instead of
-// resuming from bytes another source sent. Nothing else in the engine changes, and with none
-// of these set it behaves as published.
+// resuming from bytes another source sent; and `segmentPolicy` with `peerWaitMs` (decision
+// record 0109), under which segments come from peers first, or from peers only, and HTTP is
+// at most a rescue for the segment playback is asking for. Nothing else in the engine
+// changes, and with none of these set it behaves as published.
 //
 // Before anything is written, every input is checked against engine/pin.json:
 //   - package-lock.json pins the npm tarball by the integrity (sha512) recorded there, which
