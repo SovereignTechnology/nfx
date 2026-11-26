@@ -11,7 +11,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Write as _};
-use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
 use nostr_sdk::prelude::{Keys, PublicKey, ToBech32 as _};
@@ -127,23 +127,7 @@ impl KeyDir {
     /// directory that is a symlink, belongs to another user, or is open to group or
     /// others is refused.
     pub fn open(dir: &Path) -> Result<Self> {
-        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e.into()),
-        }
-        // `symlink_metadata`: a symlink here is refused, not followed.
-        let meta = std::fs::symlink_metadata(dir)?;
-        let refuse = |why: &str| Error::Config(format!("{}: key directory {why}", dir.display()));
-        if !meta.is_dir() {
-            return Err(refuse("is not a directory (a symlink is refused)"));
-        }
-        if meta.uid() != rustix::process::geteuid().as_raw() {
-            return Err(refuse("belongs to another user"));
-        }
-        if meta.mode() & 0o077 != 0 {
-            return Err(refuse("is open to group or others; chmod 700 it"));
-        }
+        crate::private::dir(dir, "key directory")?;
         Ok(Self {
             dir: dir.to_path_buf(),
         })
