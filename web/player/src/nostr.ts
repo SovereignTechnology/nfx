@@ -96,6 +96,78 @@ export function subscribe(
   };
 }
 
+/** `keepSubscribed`'s first wait before it opens an ended subscription again; it doubles to the most. */
+export const RESUBSCRIBE_MIN_MS = 1_000;
+export const RESUBSCRIBE_MAX_MS = 30_000;
+
+export interface ResubscribeTimers {
+  set(fn: () => void, ms: number): unknown;
+  clear(handle: unknown): void;
+}
+
+const runtimeTimers: ResubscribeTimers = {
+  set: (fn, ms) => setTimeout(fn, ms),
+  clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+};
+
+/**
+ * `subscribe`, opened again whenever it ends (the relay unreachable, the socket dropped, a
+ * CLOSED), after `RESUBSCRIBE_MIN_MS` doubling to `RESUBSCRIBE_MAX_MS`, and back to the first
+ * wait once the relay has answered (an event or EOSE). For live-only events such as beacons,
+ * which a relay never stores (decision record 0111): an ended subscription hears nothing more,
+ * even after the relay is back. `close` ends it for good. `open` and `timers` are for tests.
+ */
+export function keepSubscribed(
+  url: string,
+  filter: Filter | Filter[],
+  onEvent: (eventJson: string) => void,
+  open: typeof subscribe = subscribe,
+  timers: ResubscribeTimers = runtimeTimers,
+): Subscription {
+  let closed = false;
+  let wait = RESUBSCRIBE_MIN_MS;
+  let current: Subscription | null = null;
+  let timer: unknown;
+  const start = (): void => {
+    if (closed) return;
+    let answered = false;
+    let ended = false;
+    const sub = open(
+      url,
+      filter,
+      (json) => {
+        answered = true;
+        onEvent(json);
+      },
+      () => {
+        answered = true;
+      },
+      () => {
+        if (closed || ended) return;
+        ended = true;
+        if (current === sub) current = null;
+        if (answered) wait = RESUBSCRIBE_MIN_MS;
+        timer = timers.set(() => {
+          timer = undefined;
+          start();
+        }, wait);
+        wait = Math.min(wait * 2, RESUBSCRIBE_MAX_MS);
+      },
+    );
+    if (!ended) current = sub;
+  };
+  start();
+  return {
+    close() {
+      closed = true;
+      if (timer !== undefined) timers.clear(timer);
+      timer = undefined;
+      current?.close();
+      current = null;
+    },
+  };
+}
+
 /** Stored events matching `filter`: collected until EOSE, the end of the socket, or `timeoutMs`. */
 export function query(url: string, filter: Filter, timeoutMs: number): Promise<string[]> {
   return new Promise((resolve) => {

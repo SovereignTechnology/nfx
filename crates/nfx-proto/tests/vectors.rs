@@ -297,7 +297,8 @@ fn hyperdht_beacons_are_skipped_by_a_reader_without_nfx_12() {
         assert_eq!(b.content.skipped, ["hyperdht"], "{name}");
         seen += 1;
     }
-    assert_eq!(seen, 12);
+    // 12 cases, then 9 for the endpoint's optional `renditions` (NFX-12 §2, 2026-11-26).
+    assert_eq!(seen, 21);
 }
 
 #[test]

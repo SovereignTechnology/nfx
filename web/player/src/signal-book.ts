@@ -203,3 +203,13 @@ export function overBytes(text: string, limit: number): boolean {
   if (text.length * 3 <= limit) return false; // nor more than 3 per code unit
   return new TextEncoder().encode(text).length > limit;
 }
+
+/**
+ * A server-reflexive ICE candidate (a STUN server's answer): by `type` where the browser gives
+ * it, else by the candidate line's `typ` field.
+ */
+export function isServerReflexive(c: { readonly type?: string | null; readonly candidate?: string }): boolean {
+  if (c.type === 'srflx') return true;
+  if (c.type !== undefined && c.type !== null) return false;
+  return / typ srflx(?: |$)/.test(c.candidate ?? '');
+}

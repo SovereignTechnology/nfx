@@ -45,6 +45,7 @@ use nfx_node::node::{Node, NodeConfig};
 use nfx_node::nostr::{BEACON_TTL, ManifestQuery, Relays, sign_beacon};
 use nfx_node::origin::{Origin, SwarmPull, serve};
 use nfx_node::relay::{MayAdmit, ScopedRelay};
+use nfx_node::relay_share::RelayShare;
 use nfx_node::seed::Seeded;
 use nfx_node::store::{ContentStore as _, FsStore};
 use nfx_node::tracker::Tracker;
@@ -316,6 +317,10 @@ struct Shared {
     relays: Arc<Relays>,
     /// Answers viewers' asks, unless `no_lookup`.
     lookup: Option<Answerer>,
+    /// This key's share of each relay (NFX-03 §7): how many beacons go where, and which
+    /// relays asked it to slow down. nfxd cannot tell a scoped relay from a general one
+    /// yet, so every `--relay` gets the general relays' bound.
+    share: RelayShare,
     store: Arc<FsStore>,
     keys: Option<Keys>,
     pull: Arc<SwarmPull>,
@@ -515,6 +520,53 @@ impl Shared {
         Some(swarm.split())
     }
 
+    /// Send video `a`'s beacon to the relays whose turn it is ([`RelayShare`]). `None` when it
+    /// is due nowhere now; an error when no relay took it, or every relay asked to slow down.
+    async fn announce(&self, a: &str, event: &nfx_proto::event::Event) -> Result<Option<usize>> {
+        let now = tokio::time::Instant::now();
+        let all = self.relays.urls().await;
+        let turn = self.share.beacon(a, self.announced(), &all, now);
+        if turn.to.is_empty() {
+            if !all.is_empty() && turn.paused == all.len() {
+                return Err(nfx_node::NodeError::Relay(
+                    "every relay asked this node to slow down (rate-limited or blocked)".into(),
+                )
+                .into());
+            }
+            return Ok(None);
+        }
+        let answers = self.relays.publish_to(event, &turn.to).await?;
+        // A refusal's pause runs from its answer, not from before a slow publish.
+        let replied = tokio::time::Instant::now();
+        for (url, answer) in &answers {
+            self.share.answered(
+                url,
+                answer.as_ref().copied().map_err(String::as_str),
+                replied,
+            );
+        }
+        let accepted = answers.values().filter(|r| r.is_ok()).count();
+        if accepted == 0 {
+            return Err(nfx_node::NodeError::Relay(format!(
+                "no relay accepted beacon {} ({} refused)",
+                event.id,
+                answers.len()
+            ))
+            .into());
+        }
+        Ok(Some(accepted))
+    }
+
+    /// How many videos this node announces now.
+    fn announced(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter(|s| matches!(s, VideoState::Seeding | VideoState::Unannounced(_)))
+            .count()
+    }
+
     fn set(&self, a: &str, s: VideoState) {
         self.state
             .lock()
@@ -667,12 +719,14 @@ impl Shared {
                             if let Some(lookup) = &self.lookup {
                                 lookup.serve(a, event.clone(), content);
                             }
-                            self.relays.publish(&event).await
+                            self.announce(a, &event).await
                         }
-                        Err(e) => Err(e),
+                        Err(e) => Err(e.into()),
                     };
                     match sent {
-                        Ok(_) => self.set(a, VideoState::Seeding),
+                        Ok(Some(_)) => self.set(a, VideoState::Seeding),
+                        // Not this video's turn on any relay: it stands as it was.
+                        Ok(None) => {}
                         Err(e) => self.set(a, VideoState::Unannounced(e.to_string())),
                     }
                 }
@@ -691,6 +745,7 @@ impl Shared {
                             gossip_send(announcer, Op::Bye, &pubkey, content, &secret).await;
                         }
                         self.forget_swarms(manifest).await;
+                        self.share.forget(a);
                         self.set(a, VideoState::Deleted);
                         return Ok(());
                     }
@@ -1203,6 +1258,7 @@ impl Daemon {
             bridged: Mutex::new(BTreeMap::new()),
             renditions: cfg.renditions.clone(),
             lookup: lookup.clone(),
+            share: RelayShare::new(Duration::from_secs(BEACON_TTL / 2), []),
             deletion_check_every: cfg
                 .deletion_check_every
                 .unwrap_or(DELETION_CHECK_EVERY)
