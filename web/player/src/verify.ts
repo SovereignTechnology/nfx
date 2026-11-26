@@ -127,6 +127,18 @@ export class Anchor {
     return out;
   }
 
+  /** Each file the list names: its sha256, role and listed size (null when it gives none usable). */
+  files(): { sha256: string; role: string; size: number | null }[] {
+    const parsed = JSON.parse(this.list.toJSON()) as { files?: unknown };
+    const out: { sha256: string; role: string; size: number | null }[] = [];
+    for (const f of Array.isArray(parsed.files) ? (parsed.files as unknown[]) : []) {
+      const { sha256, role, size } = (f ?? {}) as { sha256?: unknown; role?: unknown; size?: unknown };
+      if (typeof sha256 !== 'string' || typeof role !== 'string') continue;
+      out.push({ sha256, role, size: typeof size === 'number' && Number.isSafeInteger(size) && size >= 0 ? size : null });
+    }
+    return out;
+  }
+
   /** The rendition id of the playlist at `url` (by its content name, NFX-10 §2), or null. */
   renditionOf(url: string): string | null {
     const hash = contentHash(url, location.href);

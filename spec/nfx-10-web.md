@@ -238,6 +238,11 @@ normal seeder upstream and a normal p2p-media-loader peer downstream.
 - **Protocol versions.** The stream swarm ID does not carry p2p-media-loader's peer
   protocol version. An incompatible future peer protocol therefore needs a new NFX swarm
   ID version (`nfx/2/web/…`), not a change to this one.
+- **A page that keeps** (§7) announces in a swarm the segments it holds in memory for the
+  play, and the stored segments of a rendition it holds whole (NFX-18 §1). It MUST NOT
+  announce the stored segments of a filling rendition, and MAY serve any stored segment a
+  peer asks for. It joins the swarm of a rendition it does not play only when it holds that
+  rendition whole (NFX-18 §4).
 
 ## 3. Payments in the browser
 
@@ -592,6 +597,10 @@ event's own signature (NIP-01) binds everything else.
 - A session key is a fresh random secp256k1 key for each page session (each `open()` in
   the reference library), never a user's identity key and never stored. One session key
   and one session id serve every room of the session.
+- A page that seeds kept videos (§7.4) uses one more session key, and session id, for each
+  kept video it seeds, made the same way. It MUST NOT seed two kept videos under one key,
+  nor seed under the key of a session that plays: a watcher's key is used to watch, and a
+  seeder's to serve (NFX-18 §4).
 - **Sign every event when it is sent** (`created_at` = now). Stock relays refuse
   ephemeral events older than about 60 s (strfry's default), so a signed event is never
   queued or replayed.
@@ -674,6 +683,12 @@ over 70 KiB (UTF-8) dropped unparsed.
   says so before it joins the mesh.
 - A session key is per session: a viewer is linkable across the rooms of one session
   (the renditions it plays), not across sessions, beyond what its IP address links.
+- A page that seeds kept videos (§7.4) is in the rooms of each of them for as long as it is
+  open. Its relays see its IP address in all of those rooms. One key per kept video keeps
+  anyone else in the rooms from listing them under one key; the IP address still links
+  them (NFX-18 §7).
+- What a page keeps (§7), every page of its origin can read and change, and so can whoever
+  controls that origin or a gateway in front of it.
 
 ### 6.8 No TURN
 
@@ -683,6 +698,63 @@ TURN (kind 25051), so no relay carries a byte of video. A pair that cannot punch
 keeps fetching from its origin or a bridge; a page that takes segments from peers only
 (§1) waits for a peer it can reach. Issue #71 tracks the rest: native endpoints with full
 ICE, and a NAT test.
+
+## 7. Keeping and serving
+
+A page MAY keep what its user watches, and serve it, as NFX-18 says for any keeping client.
+This section carries NFX-18 §5's rules for browsers, and says where a page that keeps takes
+each file from. Everything else (the reasons, the budget, the notice and the switch) is
+NFX-18's.
+
+### 7.1 Storage
+
+- A page keeps files in the browser's own storage for its origin (IndexedDB in the reference
+  library), within a cap its user can see and change, and within what the browser grants.
+  Browsers clear such storage on their own terms: a page cannot promise to keep anything.
+- A file is stored under the hash list root it belongs to and its sha256, never under a name
+  a peer, a transport or a swarm chose (NFX-18 §3). A page SHOULD write a file's bytes and
+  its index entry in one transaction, so that a store never holds one without the other.
+- Every page of an origin can read and write its storage. A page MUST verify a file's
+  sha256 each time it reads the file from storage, before it plays or serves it. A file that
+  fails is deleted and fetched again like any missing file (NFX-18 §3).
+- At the cap, a page removes videos kept only as `watched`, the least recently played
+  first, and never one that plays in any of its origin's tabs (NFX-18 §2.4).
+
+### 7.2 When a play is kept
+
+- A page MUST NOT write anything of a play before the minimum of NFX-18 §2.1. It counts
+  seconds of media actually played; a seek counts nothing. What a shorter play fetched is
+  dropped from memory when the play ends.
+- Past the minimum, it writes every file it fetched for the play and every file it fetches
+  later, each verified before it is stored. It fetches nothing over HTTPS for keeping
+  (NFX-18 §2.1, decision record 0109).
+- Keeping SHOULD NOT change what the player fetches ahead: what a page holds in storage does
+  not count against the memory the player budgets for segments ahead of the playhead.
+
+### 7.3 Where a file comes from
+
+A page that keeps, or that speaks the file channel (§6.10), asks for each file in tiers, in
+this order: its keep store; the file channel, which declines segments; HTTP origins.
+
+- A tier is asked by the file's HTTP path (`<root>`, or `<root>/<content name>`) and told
+  the sha256, role and size the hash list gives the file. It answers with bytes it has
+  verified, or with nothing; "not held" is an answer, not an error. The page verifies the
+  bytes again before it uses them.
+- A tier that answers nothing hands on to the next at once. Each tier but the last that can
+  still answer has a deadline, after which the next tier starts too; the first bytes that
+  verify are used, and the other tiers are stopped.
+- A file has failed only when every tier has failed it. A page with no origin to ask does
+  not fail a file for that.
+- A page MAY offer a rendition whose playlist and init its keep store holds, verified, as if
+  an origin had answered for it (§1).
+
+### 7.4 Serving
+
+- A page serves kept files only through the mesh (§2, §6), never over HTTP.
+- A page that seeds a kept video it is not playing uses a session key of its own for each
+  kept video it seeds (§6.4). One key for all of them would let anyone in its rooms list
+  everything it keeps.
+- At most one tab of an origin seeds at a time.
 
 ## Changelog
 
@@ -844,3 +916,11 @@ ICE, and a NAT test.
   HTTPS" now hold only for a player that still asks origins for segments. A player that asks
   peers only SHOULD say when it waits for a peer and when the browser's WebRTC gathers no
   UDP candidate. Playlists, init segments and the hash list still come from an origin.
+- Draft 2026-11-26 (ADR 0110): new §7 carries NFX-18 §5's rules for browsers: storage of the
+  page's origin, within a cap; files stored by root and sha256 and verified on every read;
+  nothing written before NFX-18's minimum of play; files taken from the keep store, then the
+  file channel, then HTTP, each tier with a deadline but the last that can answer, a file
+  failed only when every tier has; kept files served through the mesh only, one session key
+  per kept video seeded, one tab seeding at a time. §2 says which stored segments a page
+  announces, §6.4 adds the seeding keys, §6.7 what seeding and storage expose. Nothing on
+  the wire changes.

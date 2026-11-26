@@ -471,6 +471,8 @@ export type PlayerEvent =
   | { type: 'resumed' }
   /** A segment came over HTTPS under `peers-then-https`: peers did not deliver it in time. */
   | { type: 'rescue'; url: string }
+  /** Keeping (`OpenCommon.keep`) changed state (`KeepStats.state`); `why` says what happened. */
+  | { type: 'keep'; state: KeepState; why?: string }
   /** A fatal hls.js error (playback has stopped), or a refused `play()`. */
   | { type: 'error'; message: string };
 
@@ -567,7 +569,114 @@ export interface OpenCommon {
    * close playback must be to that segment.
    */
   peerWaitMs?: number;
+  /**
+   * Keep what this session plays, in the page's own storage, and replay it from there (NFX-18,
+   * NFX-10 §7). Off when left out: nothing is written, and nothing kept is read. See
+   * `KeepOptions`.
+   */
+  keep?: KeepOptions;
 }
+
+/**
+ * Keeping what is watched (NFX-18 §2.1, NFX-10 §7), for one session.
+ *
+ * Nothing is written until the session has played `minimumSeconds` of media (seconds that
+ * actually played: a seek counts nothing); a session that ends sooner writes nothing, and what
+ * it fetched is gone with it. From then on every file the session fetched for the video, and
+ * every one it fetches later, is verified and written to `store`, under the hash list's root
+ * and the file's sha256; playback never waits for a write. A later session of the same video
+ * takes every file the store holds from there first, checked against its sha256 again on each
+ * read: a copy that fails is dropped and fetched again. Nothing is fetched over HTTPS for
+ * keeping: what is kept is what was played.
+ */
+export interface KeepOptions {
+  /** From `openKeepStore()`. */
+  store: KeepStore;
+  /**
+   * Seconds of media played before anything is written. Default 60; 30 to 3600 (NFX-18 §2.1).
+   * A page served from a loopback host (tests) may go down to 1.
+   */
+  minimumSeconds?: number;
+}
+
+/** Why a video is kept (NFX-18 §1). This player keeps what is `watched`; `downloaded` is for a later one. */
+export type KeepReason = 'watched' | 'downloaded';
+
+/** One rendition of a kept video. */
+export interface KeptRendition {
+  id: string;
+  /** `held`: every file NFX-18 §1 names for it is stored and verified; `filling`: some of them. */
+  state: 'filling' | 'held';
+  reasons: KeepReason[];
+}
+
+/** A kept video, as `KeepStore.list()` gives it. */
+export interface KeptVideo {
+  /** Its hash list's root. */
+  root: string;
+  /** The hash list's `video`. */
+  video: string;
+  reasons: KeepReason[];
+  renditions: KeptRendition[];
+  /** Bytes and files stored. */
+  bytes: number;
+  files: number;
+  /** When it was first kept, and last played past the minimum (ms since the epoch). */
+  keptAt: number;
+  playedAt: number;
+}
+
+export interface KeepStoreOptions {
+  /**
+   * The most bytes kept, every video together: 16 MiB or more, default 2 GiB. At the cap, videos
+   * kept only because they were watched go, least recently played first, never one that plays
+   * (in this tab or another of the page's origin). The browser may grant less, and may clear
+   * the store on its own terms.
+   */
+  capBytes?: number;
+}
+
+/**
+ * The page's keep store (IndexedDB database `nfx-web-keep`), opened once with
+ * `openKeepStore()` and given to every session that keeps (`KeepOptions.store`).
+ */
+export interface KeepStore {
+  readonly capBytes: number;
+  /** Every kept video, the most recently played first. */
+  list(): Promise<KeptVideo[]>;
+  /** Bytes stored, every video together. */
+  usage(): Promise<number>;
+  /** Remove a kept video, everything of it. A session playing it keeps nothing more of it. */
+  remove(root: string): Promise<void>;
+  /** Resolves once every write queued so far has finished. */
+  idle(): Promise<void>;
+  /** Close the store once its writes are done; sessions opened with it keep nothing more. */
+  close(): void;
+}
+
+/** What a session has kept (`Stats.keep`). */
+export interface KeepStats {
+  /**
+   * `waiting`: not yet past the minimum, nothing written; `keeping`: past it, writing what is
+   * fetched; `full`: the store is at its cap and nothing in it may be removed; `failed`: the
+   * store could not be read or written; `removed`: the page removed this video while it played.
+   */
+  state: KeepState;
+  /** Seconds of media played, and the minimum. */
+  playedSeconds: number;
+  minimumSeconds: number;
+  /** Files, and their bytes, this session wrote. */
+  written: number;
+  writtenBytes: number;
+  /** Files this session read from the store, verified. */
+  fromStore: number;
+  /** Files read from the store that did not verify: dropped, and fetched again. */
+  refused: number;
+  /** The video's renditions the store holds whole. */
+  held: string[];
+}
+
+export type KeepState = 'waiting' | 'keeping' | 'full' | 'failed' | 'removed';
 
 /**
  * `open()`'s options. Either a signed manifest event, which the library verifies again
@@ -604,6 +713,8 @@ export interface Stats {
   originBytes: number;
   /** hls.js's bandwidth estimate, in bits per second (its default until it has measured). */
   bandwidthEstimate: number;
+  /** What the session keeps (`OpenCommon.keep`); null (or absent) when it keeps nothing. */
+  keep?: KeepStats | null;
 }
 
 /** One video playing in one element. */

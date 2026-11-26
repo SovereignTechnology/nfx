@@ -18,9 +18,13 @@
  *   byte. With a `signaling` (WebTorrent trackers, or Nostr relays with no tracker: NFX-10
  *   §6), the NFX-10 browser mesh (p2p-media-loader) joins in, its segments checked the same
  *   way. `destroy()` stops all of it.
+ * - `openKeepStore({ capBytes })`, then `open(el, { ..., keep: { store } })`: keep what is
+ *   watched past a minimum in the page's own storage and replay it from there first (NFX-18,
+ *   NFX-10 §7; ./keep/).
  *
  * Nothing here reads the page's URL or DOM beyond the element it is given, and nothing
- * here keeps state between sessions but the loaded WASM module.
+ * here keeps state between sessions but the loaded WASM module, and the keep store a page
+ * opens and passes in.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -35,11 +39,14 @@ import Hls, {
 } from 'hls.js';
 import { HlsJsP2PEngine } from 'p2p-media-loader-hlsjs';
 
-import { verifyManifest } from '../out/wasm/nfx_wasm.js';
+import { sha256Hex, verifyManifest } from '../out/wasm/nfx_wasm.js';
 import type {
   EndpointWatch,
   Endpoints,
   InitOptions,
+  KeepOptions,
+  KeepStore,
+  KeepStoreOptions,
   Level,
   MeshStats,
   OpenOptions,
@@ -91,6 +98,10 @@ import { MAX_REMOTE_CANDIDATES as SDP_MAX_REMOTE_CANDIDATES, filterRemoteSdp as 
 import { NostrSignaler } from './signal-nostr';
 import { StunFallbackBook } from './stun-fallback';
 import { resolveManifest as resolveOverRelays, watchEndpoints as watchBeacons } from './resolve';
+import { holdPlaying, lockedRoots, openIdbBackend } from './keep/idb';
+import { DEFAULT_MINIMUM_S, KeepSession, MAX_MINIMUM_S, MIN_MINIMUM_S } from './keep/session-store';
+import { DEFAULT_CAP_BYTES, Keeper, MIN_CAP_BYTES } from './keep/store';
+import { contentHash } from './levels';
 import { SessionSources, bufferedAhead } from './session-sources';
 import { capOpenHosts } from './sources';
 import { Anchor, MAX_HASH_LIST_BYTES, type ManifestBinding, loadWasm } from './verify';
@@ -235,6 +246,38 @@ export async function init(options: InitOptions = {}): Promise<void> {
   await loadWasm(options.wasmUrl);
 }
 
+/**
+ * Open the page's keep store (NFX-18, NFX-10 §7): IndexedDB database `nfx-web-keep` of the
+ * page's origin, at most `capBytes` (default 2 GiB, at least 16 MiB). Open it once and pass it
+ * to every session that keeps (`OpenCommon.keep`). Rejects where the browser gives the page no
+ * IndexedDB (some private windows): the page then plays without keeping.
+ */
+export async function openKeepStore(options: KeepStoreOptions = {}): Promise<KeepStore> {
+  const cap = options.capBytes ?? DEFAULT_CAP_BYTES;
+  if (!(Number.isSafeInteger(cap) && cap >= MIN_CAP_BYTES)) throw new TypeError(`nfx: capBytes must be a whole number of bytes, at least ${MIN_CAP_BYTES}`);
+  await loadWasm();
+  const backend = await openIdbBackend();
+  return new Keeper(backend, cap, { sha256: sha256Hex, now: () => Date.now(), lockedRoots, hold: holdPlaying });
+}
+
+/** Whether the page is served from a loopback host (tests), where a keep minimum below 30 s is allowed. */
+function loopbackPage(): boolean {
+  return typeof location !== 'undefined' && ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+}
+
+/** `keep` as `open()` takes it, or null; throws a `TypeError` for anything it refuses. */
+function checkKeep(keep: KeepOptions | undefined): { store: Keeper; minimumSeconds: number } | null {
+  if (keep === undefined) return null;
+  const store: unknown = typeof keep === 'object' && keep !== null ? keep.store : undefined;
+  if (!(store instanceof Keeper)) throw new TypeError('nfx: keep.store must be a store from openKeepStore()');
+  const floor = loopbackPage() ? 1 : MIN_MINIMUM_S;
+  const minimumSeconds = keep.minimumSeconds ?? DEFAULT_MINIMUM_S;
+  if (!(typeof minimumSeconds === 'number' && Number.isFinite(minimumSeconds) && minimumSeconds >= floor && minimumSeconds <= MAX_MINIMUM_S)) {
+    throw new TypeError(`nfx: keep.minimumSeconds must be ${floor} to ${MAX_MINIMUM_S}`);
+  }
+  return { store, minimumSeconds };
+}
+
 /** The current revision of the manifest at `a` across `relays` (`ws://` or `wss://` URLs). */
 export function resolveManifest(a: string, relays: string[], options: ResolveOptions = {}): Promise<ResolvedManifest> {
   return resolveOverRelays(a, relays, options.timeoutMs);
@@ -303,6 +346,7 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
     throw new TypeError('nfx: httpWindow must be 0 to 600 seconds');
   }
   const { segmentSource, peerWaitMs } = checkSegmentSource(options, signaling !== null);
+  const keeping = checkKeep(options.keep);
   if (signal?.aborted) throw abortError(signal);
   await loadWasm();
 
@@ -331,6 +375,54 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
   };
   const log = (m: string): void => emit({ type: 'log', message: m });
 
+  // Keeping (NFX-10 §7): the store is the first tier for every file, and learns what is played.
+  const keep =
+    keeping === null
+      ? null
+      : new KeepSession({
+          keeper: keeping.store,
+          root,
+          minimumSeconds: keeping.minimumSeconds,
+          sha256: sha256Hex,
+          log,
+          onState: (state, why) => emit({ type: 'keep', state, ...(why === undefined ? {} : { why }) }),
+        });
+  try {
+    if (keep !== null) await keep.start();
+    return await openWith(el, { root, binding, origins, wanted, signaling, iceServers, autoplay, level, httpWindow, segmentSource, peerWaitMs, signal }, keep, emit, log, () => {
+      dead = true;
+    });
+  } catch (e) {
+    keep?.close();
+    throw e;
+  }
+}
+
+interface Checked {
+  root: string;
+  binding: ManifestBinding | undefined;
+  origins: ReturnType<typeof checkOriginSources>;
+  wanted: string[] | null;
+  signaling: Signaling | null;
+  iceServers: RTCIceServer[];
+  autoplay: boolean;
+  level: number | undefined;
+  httpWindow: number | undefined;
+  segmentSource: SegmentSource;
+  peerWaitMs: number;
+  signal: AbortSignal | undefined;
+}
+
+/** `open()` once its options are checked. */
+async function openWith(
+  el: HTMLVideoElement,
+  c: Checked,
+  keep: KeepSession | null,
+  emit: (e: PlayerEvent) => void,
+  log: (m: string) => void,
+  silence: () => void,
+): Promise<Session> {
+  const { root, binding, origins, wanted, signaling, iceServers, autoplay, level, httpWindow, segmentSource, peerWaitMs, signal } = c;
   let anchor: Anchor | null = null;
   let renditions: string[] = [];
   const failures: string[] = [];
@@ -343,6 +435,7 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
   const sources = new SessionSources(
     root,
     origins.map((o) => ({ url: o.url, tier: o.tier, renditions: o.renditions })),
+    { providers: keep === null ? [] : [keep] },
   );
   sources.bind({ log, reject: (source, path) => skip(source, `${path} did not verify`) });
   const built: { list: Anchor | null } = { list: null };
@@ -370,20 +463,42 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
   const list = built.list;
   if (list === null) throw new Error('no origin served a hash list that verifies');
   sources.learnSizes(list.fileSizes());
+  const files = list.files();
+  sources.learnFiles(files, list.master);
+  keep?.learnList({
+    video: list.video,
+    files,
+    renditions: list.renditions.map((r) => ({ id: r.id, playlist: r.playlist, swarm: list.streamSwarmId(`/${root}/${r.playlist}.m3u8`) ?? null })),
+  });
+  // A hash list from the keep store names no origin that delivered it.
+  const fromHttp = sources.isProvider(delivered) ? null : delivered;
 
   // Which renditions the session offers is what a source answers for (nfx #85), asked of the
   // source that delivered the hash list first, then the rest. What beacons say an origin
   // serves (`hint`) only orders them.
   // In tier order, the deliverer first, and at most 3 open hosts asked (NFX-17 §4.2).
-  const tierOf = (o: { url: string; tier: number }): number => (o.url === delivered ? 0 : o.tier === 4 ? 3.5 : o.tier);
+  const tierOf = (o: { url: string; tier: number }): number => (o.url === fromHttp ? 0 : o.tier === 4 ? 3.5 : o.tier);
   const ranked = originOrder(origins, wanted).sort((x, y) => tierOf(x) - tierOf(y));
   const order = capOpenHosts(
     ranked.filter((o) => !sources.rejects(o.url)),
-    delivered,
+    fromHttp,
   );
   for (const { url: origin, renditions: hint } of order) {
     const loaded = list.at(origin);
     let picked: Selection;
+    // A rendition whose playlist and init the keep store holds is held here, whatever the origin answers.
+    const local = new Set<string>();
+    const httpProbe = initProbe(loaded);
+    const probe: Probe =
+      keep === null
+        ? httpProbe
+        : async (id, probeSignal) => {
+            if (await keptHere(keep, loaded, id)) {
+              local.add(id);
+              return 200;
+            }
+            return httpProbe(id, probeSignal);
+          };
     try {
       // A RangeError (an id the hash list lacks) ends open(), before any probe: every
       // origin serves the same list.
@@ -391,7 +506,7 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
         loaded.renditions.map((r) => r.id),
         wanted,
         hint,
-        initProbe(loaded),
+        probe,
         { signal },
       );
     } catch (e) {
@@ -404,18 +519,43 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
       skip(origin, `it holds none of the allowed renditions (${summary})`);
       continue;
     }
-    log(`${origin} holds ${renditions.join(', ')} of the allowed renditions (${summary})`);
+    const kept = renditions.filter((id) => local.has(id));
+    if (kept.length > 0) log(`kept here: ${kept.join(', ')} (playlist and init in the keep store)`);
+    log(`${origin} holds ${renditions.filter((id) => !local.has(id)).join(', ') || 'none'} of the allowed renditions (${summary})`);
     anchor = loaded;
-    emit({ type: 'origin', origin, ok: true });
+    // An origin that answered for none of them has served nothing yet.
+    if (kept.length < renditions.length) emit({ type: 'origin', origin, ok: true });
     break;
   }
   if (anchor === null) throw new Error(`no origin served a hash list that verifies and held an allowed rendition (${failures.join('; ')})`);
   if (signal?.aborted) throw abortError(signal);
   log(`hash list verified: ${anchor.size} files of ${anchor.video}${binding ? ' (bound to the manifest)' : ''}`);
   const levelRule = { renditions, preferStart: wanted !== null };
-  return start(el, anchor, { signaling, iceServers, autoplay, level, httpWindow, segmentSource, peerWaitMs, signal, ...levelRule, sources }, emit, log, () => {
-    dead = true;
-  });
+  return start(el, anchor, { signaling, iceServers, autoplay, level, httpWindow, segmentSource, peerWaitMs, signal, ...levelRule, sources, keep }, emit, log, silence);
+}
+
+/**
+ * Whether the keep store holds rendition `id` as an origin would answer for it (./probe.ts):
+ * its media playlist, read and verified, names an init that is read and verified too.
+ */
+async function keptHere(keep: KeepSession, anchor: Anchor, id: string): Promise<boolean> {
+  const r = anchor.renditions.find((x) => x.id === id);
+  if (r === undefined) return false;
+  const base = `${anchor.origin}/${anchor.root}/`;
+  const playlistUrl = `${base}${r.playlist}.m3u8`;
+  const bytes = await keep.readFile(r.playlist, verifies(anchor, playlistUrl));
+  if (bytes === null) return false;
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return false;
+  }
+  keep.learnPlaylist(text, id);
+  const init = initUrl(text, playlistUrl);
+  if (init === null || !init.startsWith(base) || !CONTENT_NAME.test(init.slice(base.length))) return false;
+  const sha = contentHash(init);
+  return sha !== null && (await keep.readFile(sha, verifies(anchor, init))) !== null;
 }
 
 /**
@@ -465,6 +605,8 @@ interface StartOptions {
   signal: AbortSignal | undefined;
   /** Where every file comes from (NFX-17 §§4.2-4.3). */
   sources: SessionSources;
+  /** What the session keeps (NFX-10 §7), or null. */
+  keep: KeepSession | null;
 }
 
 function start(
@@ -522,12 +664,14 @@ function start(
     loader: sourcedLoader(
       anchor,
       o.sources,
-      (sha256, url, bytes) => {
+      (sha256, url, bytes, source) => {
         verified += 1;
-        originBytes += bytes;
+        // Bytes the keep store served came from no origin.
+        if (!o.sources.isProvider(source)) originBytes += bytes;
         emit({ type: 'verified', sha256, url });
       },
       cut,
+      (text, rendition) => o.keep?.learnPlaylist(text, rendition),
     ),
     progressive: false,
     fragLoadPolicy: noRetry,
@@ -588,6 +732,12 @@ function start(
         (await o.sources.get(pathUnder(anchor, url), verifies(anchor, url), signal)).bytes,
       segmentFromOneSource: true,
     });
+    // Keeping: the engine's segments live in the session's storage, the keep store behind it.
+    const keep = o.keep;
+    if (keep !== null) {
+      keep.meshOn = true;
+      Object.assign(p2p.p2p.core, { customSegmentStorageFactory: () => keep.segmentStorage() });
+    }
     hls = new HlsWithP2P({ ...base, ...p2p } as never);
     engine = `hls.js ${Hls.version} + ${P2P_ENGINE}`;
     const filtered = nostr?.remoteCandidates === 'global' ? ' (remote candidates: global unicast UDP only)' : '';
@@ -662,6 +812,7 @@ function start(
       log(`mesh: waiting for ${peers === 0 ? 'a peer' : `${peers} connected peer(s) to deliver`}`);
     }, 500);
   }
+  o.keep?.attach(el);
   hls.on(Hls.Events.MANIFEST_PARSED, (_, d) => {
     if (dead) return;
     const ids = d.levels.map((l) => anchor.renditionOf(l.url[0] ?? ''));
@@ -712,6 +863,8 @@ function start(
     hls.destroy();
     nostr?.destroy();
     book.release();
+    // Nothing kept is deleted; writes already queued finish.
+    o.keep?.close();
     if (el.src.startsWith('blob:')) {
       el.removeAttribute('src');
       el.load();
@@ -758,6 +911,7 @@ function start(
               },
         originBytes,
         bandwidthEstimate: dead ? 0 : hls.bandwidthEstimate,
+        keep: o.keep?.stats() ?? null,
       };
     },
     addSources(list: readonly (string | OriginSource)[]): void {
@@ -807,8 +961,9 @@ function verifies(anchor: Anchor, url: string): (bytes: Uint8Array) => boolean {
 function sourcedLoader(
   anchor: Anchor,
   sources: SessionSources,
-  onVerified: (sha256: string, url: string, bytes: number) => void,
+  onVerified: (sha256: string, url: string, bytes: number, source: string) => void,
   masterText: (url: string, text: string) => string,
+  onPlaylist: (text: string, rendition: string | null) => void,
 ): new (config: HlsConfig) => Loader<LoaderContext> {
   return class SourcedLoader implements Loader<LoaderContext> {
     context: LoaderContext | null = null;
@@ -846,7 +1001,7 @@ function sourcedLoader(
         return;
       }
       sources.get(path, verifies(anchor, url), ctl.signal).then(
-        ({ bytes, firstByteMs, totalMs }) => {
+        ({ bytes, source, firstByteMs, totalMs }) => {
           if (stats.aborted) return;
           // The fetcher's own timing, so hls.js's bandwidth estimate sees the transfer time and
           // not an instant body after a long wait for the first byte.
@@ -863,14 +1018,16 @@ function sourcedLoader(
             fail(message(e));
             return;
           }
-          onVerified(sha, url, bytes.byteLength);
+          onVerified(sha, url, bytes.byteLength, source);
           let data: string | ArrayBuffer = bytes.slice().buffer;
           if (wantText) {
             try {
               const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
               if (sha === anchor.master) data = masterText(url, text);
               else {
-                sources.learnPlaylist(text, anchor.renditionOf(url));
+                const rendition = anchor.renditionOf(url);
+                sources.learnPlaylist(text, rendition);
+                onPlaylist(text, rendition);
                 data = text;
               }
             } catch (e) {
