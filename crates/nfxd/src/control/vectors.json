@@ -1,0 +1,1311 @@
+{
+  "requests": [
+    {
+      "name": "hello",
+      "class": "read",
+      "cap": null,
+      "json": {
+        "id": 1,
+        "method": "hello",
+        "params": {
+          "proto": 1,
+          "client": "nfx-manager/0.1.0"
+        }
+      }
+    },
+    {
+      "name": "hello without a client name",
+      "class": "read",
+      "cap": null,
+      "json": {
+        "id": 0,
+        "method": "hello",
+        "params": {
+          "proto": 1
+        }
+      }
+    },
+    {
+      "name": "status",
+      "class": "read",
+      "cap": "library",
+      "json": {
+        "id": 1,
+        "method": "status",
+        "params": {}
+      }
+    },
+    {
+      "name": "status with no params at all",
+      "class": "read",
+      "cap": "library",
+      "json": {
+        "id": 4294967295,
+        "method": "status"
+      }
+    },
+    {
+      "name": "list, first time",
+      "class": "read",
+      "cap": "library",
+      "json": {
+        "id": 1,
+        "method": "list",
+        "params": {}
+      }
+    },
+    {
+      "name": "list with the revision held",
+      "class": "read",
+      "cap": "library",
+      "json": {
+        "id": 1,
+        "method": "list",
+        "params": {
+          "rev": 41
+        }
+      }
+    },
+    {
+      "name": "sources",
+      "class": "read",
+      "cap": "library",
+      "json": {
+        "id": 1,
+        "method": "sources",
+        "params": {
+          "a": "38504:abababababababababababababababababababababababababababababababab:nfx:testnet:1:big-buck-bunny"
+        }
+      }
+    },
+    {
+      "name": "routes",
+      "class": "read",
+      "cap": "library",
+      "json": {
+        "id": 1,
+        "method": "routes",
+        "params": {
+          "a": "38504:abababababababababababababababababababababababababababababababab:nfx:testnet:1:big-buck-bunny"
+        }
+      }
+    },
+    {
+      "name": "settings.get",
+      "class": "read",
+      "cap": "settings",
+      "json": {
+        "id": 1,
+        "method": "settings.get",
+        "params": {}
+      }
+    },
+    {
+      "name": "settings.set relays and the cap",
+      "class": "change",
+      "cap": "settings",
+      "json": {
+        "id": 1,
+        "method": "settings.set",
+        "params": {
+          "settings": {
+            "relays": [
+              "wss://relay.example.org",
+              "wss://relay.example.net"
+            ],
+            "cap_bytes": 107374182400
+          }
+        }
+      }
+    },
+    {
+      "name": "settings.set seeding off",
+      "class": "change",
+      "cap": "settings",
+      "json": {
+        "id": 1,
+        "method": "settings.set",
+        "params": {
+          "settings": {
+            "seeding": false
+          }
+        }
+      }
+    },
+    {
+      "name": "settings.set iroh relays, none",
+      "class": "change",
+      "cap": "settings",
+      "json": {
+        "id": 1,
+        "method": "settings.set",
+        "params": {
+          "settings": {
+            "iroh_relays": []
+          }
+        }
+      }
+    },
+    {
+      "name": "lookup",
+      "class": "read",
+      "cap": "lookup",
+      "json": {
+        "id": 1,
+        "method": "lookup",
+        "params": {
+          "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+          "namespace": "nfx:testnet:1"
+        }
+      }
+    },
+    {
+      "name": "lookup, next page",
+      "class": "read",
+      "cap": "lookup",
+      "json": {
+        "id": 1,
+        "method": "lookup",
+        "params": {
+          "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+          "namespace": "nfx:testnet:1",
+          "cursor": "1795700000:sintel"
+        }
+      }
+    },
+    {
+      "name": "add",
+      "class": "change",
+      "cap": "library",
+      "json": {
+        "id": 1,
+        "method": "add",
+        "params": {
+          "a": "38504:abababababababababababababababababababababababababababababababab:nfx:testnet:1:big-buck-bunny"
+        }
+      }
+    },
+    {
+      "name": "pause",
+      "class": "change",
+      "cap": "library",
+      "json": {
+        "id": 1,
+        "method": "pause",
+        "params": {
+          "a": "38504:abababababababababababababababababababababababababababababababab:nfx:testnet:1:big-buck-bunny"
+        }
+      }
+    },
+    {
+      "name": "resume",
+      "class": "change",
+      "cap": "library",
+      "json": {
+        "id": 1,
+        "method": "resume",
+        "params": {
+          "a": "38504:abababababababababababababababababababababababababababababababab:nfx:testnet:1:big-buck-bunny"
+        }
+      }
+    },
+    {
+      "name": "remove, files stay",
+      "class": "destructive",
+      "cap": "library",
+      "json": {
+        "id": 1,
+        "method": "remove",
+        "params": {
+          "a": "38504:abababababababababababababababababababababababababababababababab:nfx:testnet:1:big-buck-bunny"
+        }
+      }
+    },
+    {
+      "name": "remove and delete the files",
+      "class": "destructive",
+      "cap": "library",
+      "json": {
+        "id": 1,
+        "method": "remove",
+        "params": {
+          "a": "38504:abababababababababababababababababababababababababababababababab:nfx:testnet:1:big-buck-bunny",
+          "delete_files": true
+        }
+      }
+    },
+    {
+      "name": "keys",
+      "class": "read",
+      "cap": "publish",
+      "json": {
+        "id": 1,
+        "method": "keys",
+        "params": {}
+      }
+    },
+    {
+      "name": "key.create",
+      "class": "change",
+      "cap": "publish",
+      "json": {
+        "id": 1,
+        "method": "key.create",
+        "params": {}
+      }
+    },
+    {
+      "name": "publish, title only",
+      "class": "change",
+      "cap": "publish",
+      "json": {
+        "id": 1,
+        "method": "publish",
+        "params": {
+          "package": "/home/me/videos/bunny.pkg",
+          "key": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+          "title": "Big Buck Bunny"
+        }
+      }
+    },
+    {
+      "name": "publish with everything",
+      "class": "change",
+      "cap": "publish",
+      "json": {
+        "id": 1,
+        "method": "publish",
+        "params": {
+          "package": "/home/me/videos/bunny.pkg",
+          "key": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+          "title": "Big Buck Bunny",
+          "description": "A large rabbit deals with three bullies.",
+          "alt": "A rabbit in a meadow",
+          "tags": [
+            "animation",
+            "blender"
+          ]
+        }
+      }
+    },
+    {
+      "name": "shutdown",
+      "class": "destructive",
+      "cap": "shutdown",
+      "json": {
+        "id": 1,
+        "method": "shutdown",
+        "params": {}
+      }
+    }
+  ],
+  "replies": [
+    {
+      "name": "hello",
+      "of": "hello",
+      "json": {
+        "id": 1,
+        "result": {
+          "proto": 1,
+          "version": "0.1.5",
+          "node": "abababababababababababababababababababababababababababababababab",
+          "caps": [
+            "library",
+            "lookup",
+            "publish",
+            "settings",
+            "shutdown"
+          ],
+          "pinned": [
+            "relays"
+          ],
+          "namespaces": [
+            "nfx:testnet:1"
+          ]
+        }
+      }
+    },
+    {
+      "name": "hello from a node with no key",
+      "of": "hello",
+      "json": {
+        "id": 1,
+        "result": {
+          "proto": 1,
+          "version": "0.1.5",
+          "caps": [
+            "settings"
+          ],
+          "pinned": [],
+          "namespaces": []
+        }
+      }
+    },
+    {
+      "name": "status",
+      "of": "status",
+      "json": {
+        "id": 1,
+        "result": {
+          "downloading": 1,
+          "seeding": 12,
+          "paused": 0,
+          "failed": 0,
+          "held_bytes": 48318382080,
+          "cap_bytes": 107374182400,
+          "relays": 3,
+          "relays_connected": 3,
+          "seeding_on": true
+        }
+      }
+    },
+    {
+      "name": "list, unchanged",
+      "of": "list",
+      "json": {
+        "id": 7,
+        "result": {
+          "rev": 41,
+          "unchanged": true
+        }
+      }
+    },
+    {
+      "name": "list",
+      "of": "list",
+      "json": {
+        "id": 7,
+        "result": {
+          "rev": 42,
+          "held_bytes": 48318382080,
+          "cap_bytes": 107374182400,
+          "videos": [
+            {
+              "a": "38504:abababababababababababababababababababababababababababababababab:nfx:testnet:1:big-buck-bunny",
+              "title": "Big Buck Bunny",
+              "state": "seeding",
+              "paused": false,
+              "reasons": [
+                "downloaded"
+              ],
+              "size": 276134947,
+              "held": 276134947,
+              "received": 276134947,
+              "seeders": 3,
+              "added_at": 1795800000
+            },
+            {
+              "a": "38504:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd:nfx:testnet:1:sintel",
+              "title": "",
+              "state": "failed",
+              "detail": "no seeder answered in time",
+              "paused": true,
+              "reasons": [
+                "watched",
+                "published"
+              ],
+              "size": 0,
+              "held": 0,
+              "received": 0,
+              "seeders": 0,
+              "added_at": 1795800100
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "list, empty and truncated flags",
+      "of": "list",
+      "json": {
+        "id": 1,
+        "result": {
+          "rev": 1,
+          "held_bytes": 0,
+          "cap_bytes": 21474836480,
+          "videos": [],
+          "truncated": true
+        }
+      }
+    },
+    {
+      "name": "sources",
+      "of": "sources",
+      "json": {
+        "id": 1,
+        "result": {
+          "peers": [
+            {
+              "peer": "9f2c41aa",
+              "bytes": 181403648,
+              "blobs": 212,
+              "open": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "routes",
+      "of": "routes",
+      "json": {
+        "id": 1,
+        "result": {
+          "routes": [
+            {
+              "peer": "9f2c41aa",
+              "path": "direct",
+              "addr": "203.0.113.7:41234",
+              "rtt_ms": 38
+            },
+            {
+              "peer": "17be0c55",
+              "path": "relay",
+              "addr": "relay.example.org"
+            },
+            {
+              "peer": "c0ffee00",
+              "path": "unknown"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "settings.get",
+      "of": "settings.get",
+      "json": {
+        "id": 1,
+        "result": {
+          "settings": {
+            "relays": [
+              "wss://relay.example.org"
+            ],
+            "iroh_relays": [],
+            "cap_bytes": 107374182400,
+            "seeding": true
+          },
+          "pinned": [
+            "relays"
+          ]
+        }
+      }
+    },
+    {
+      "name": "settings.set",
+      "of": "settings.set",
+      "json": {
+        "id": 1,
+        "result": {
+          "restarted": true
+        }
+      }
+    },
+    {
+      "name": "lookup",
+      "of": "lookup",
+      "json": {
+        "id": 1,
+        "result": {
+          "videos": [
+            {
+              "a": "38504:abababababababababababababababababababababababababababababababab:nfx:testnet:1:big-buck-bunny",
+              "title": "Big Buck Bunny",
+              "published_at": 1795700000,
+              "held": false
+            }
+          ],
+          "next": "1795700000:big-buck-bunny"
+        }
+      }
+    },
+    {
+      "name": "lookup, last page",
+      "of": "lookup",
+      "json": {
+        "id": 1,
+        "result": {
+          "videos": []
+        }
+      }
+    },
+    {
+      "name": "add",
+      "of": "add",
+      "json": {
+        "id": 1,
+        "result": {
+          "state": "resolving"
+        }
+      }
+    },
+    {
+      "name": "pause",
+      "of": "pause",
+      "json": {
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "name": "resume",
+      "of": "resume",
+      "json": {
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "name": "remove, files stayed",
+      "of": "remove",
+      "json": {
+        "id": 1,
+        "result": {
+          "deleted_bytes": 0
+        }
+      }
+    },
+    {
+      "name": "remove, files deleted",
+      "of": "remove",
+      "json": {
+        "id": 1,
+        "result": {
+          "deleted_bytes": 276134947
+        }
+      }
+    },
+    {
+      "name": "keys",
+      "of": "keys",
+      "json": {
+        "id": 1,
+        "result": {
+          "keys": [
+            "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+          ]
+        }
+      }
+    },
+    {
+      "name": "key.create",
+      "of": "key.create",
+      "json": {
+        "id": 1,
+        "result": {
+          "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+        }
+      }
+    },
+    {
+      "name": "publish",
+      "of": "publish",
+      "json": {
+        "id": 1,
+        "result": {
+          "a": "38504:abababababababababababababababababababababababababababababababab:nfx:testnet:1:big-buck-bunny",
+          "relays": 3
+        }
+      }
+    },
+    {
+      "name": "shutdown",
+      "of": "shutdown",
+      "json": {
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "name": "bad request",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "bad_request",
+          "message": "not a valid request"
+        }
+      }
+    },
+    {
+      "name": "unknown method",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "unknown_method",
+          "message": "no such method"
+        }
+      }
+    },
+    {
+      "name": "not found",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "not_found",
+          "message": "not found"
+        }
+      }
+    },
+    {
+      "name": "conflict",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "conflict",
+          "message": "already so"
+        }
+      }
+    },
+    {
+      "name": "invalid",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "invalid",
+          "message": "a value was refused"
+        }
+      }
+    },
+    {
+      "name": "pinned",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "pinned",
+          "message": "fixed by the node's command line"
+        }
+      }
+    },
+    {
+      "name": "over cap",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "over_cap",
+          "message": "over the storage cap"
+        }
+      }
+    },
+    {
+      "name": "rate limited",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "rate_limited",
+          "message": "too many requests"
+        }
+      }
+    },
+    {
+      "name": "too large",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "too_large",
+          "message": "the frame is over the limit"
+        }
+      }
+    },
+    {
+      "name": "unavailable",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "unavailable",
+          "message": "not available now"
+        }
+      }
+    },
+    {
+      "name": "denied",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "denied",
+          "message": "the node will not do that"
+        }
+      }
+    },
+    {
+      "name": "internal",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "internal",
+          "message": "the node failed"
+        }
+      }
+    },
+    {
+      "name": "unsupported version names the one spoken",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "unsupported_version",
+          "message": "protocol version not supported",
+          "proto": 1
+        }
+      }
+    },
+    {
+      "name": "invalid names the field",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "invalid",
+          "message": "a value was refused",
+          "field": "relays"
+        }
+      }
+    },
+    {
+      "name": "pinned names the setting",
+      "of": "error",
+      "json": {
+        "id": 1,
+        "error": {
+          "code": "pinned",
+          "message": "fixed by the node's command line",
+          "field": "relays"
+        }
+      }
+    },
+    {
+      "name": "too large, before any request was read",
+      "of": "error",
+      "json": {
+        "id": 0,
+        "error": {
+          "code": "too_large",
+          "message": "the frame is over the limit"
+        }
+      }
+    }
+  ],
+  "refused": [
+    {
+      "name": "an unknown method",
+      "code": "unknown_method",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "wallet.balance",
+        "params": {}
+      }
+    },
+    {
+      "name": "a method of the wrong case",
+      "code": "unknown_method",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "Status"
+      }
+    },
+    {
+      "name": "no method",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "params": {}
+      }
+    },
+    {
+      "name": "no id",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "method": "status"
+      }
+    },
+    {
+      "name": "an unknown top-level field",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "status",
+        "params": {},
+        "extra": 1
+      }
+    },
+    {
+      "name": "a negative id",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": -1,
+        "method": "status"
+      }
+    },
+    {
+      "name": "an id over 32 bits",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 4294967296,
+        "method": "status"
+      }
+    },
+    {
+      "name": "an id that is text",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": "1",
+        "method": "status"
+      }
+    },
+    {
+      "name": "not an object",
+      "code": "bad_request",
+      "field": null,
+      "json": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "a list of the fields",
+      "code": "bad_request",
+      "field": null,
+      "json": [
+        1,
+        "status"
+      ]
+    },
+    {
+      "name": "params that are a list",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "add",
+        "params": [
+          "38504:abababababababababababababababababababababababababababababababab:nfx:testnet:1:big-buck-bunny"
+        ]
+      }
+    },
+    {
+      "name": "params that are text",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "status",
+        "params": "x"
+      }
+    },
+    {
+      "name": "a parameter where none is taken",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "status",
+        "params": {
+          "verbose": true
+        }
+      }
+    },
+    {
+      "name": "a missing parameter",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "add",
+        "params": {}
+      }
+    },
+    {
+      "name": "an unknown parameter",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "add",
+        "params": {
+          "a": "38504:abababababababababababababababababababababababababababababababab:nfx:testnet:1:big-buck-bunny",
+          "force": true
+        }
+      }
+    },
+    {
+      "name": "a parameter of the wrong type",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "list",
+        "params": {
+          "rev": "41"
+        }
+      }
+    },
+    {
+      "name": "a negative revision",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "list",
+        "params": {
+          "rev": -1
+        }
+      }
+    },
+    {
+      "name": "hello with no version",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "hello",
+        "params": {
+          "client": "x"
+        }
+      }
+    },
+    {
+      "name": "an unknown setting",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "settings.set",
+        "params": {
+          "settings": {
+            "store": "/tmp/x"
+          }
+        }
+      }
+    },
+    {
+      "name": "settings.set with no settings",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "settings.set",
+        "params": {}
+      }
+    },
+    {
+      "name": "settings that are a list",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "settings.set",
+        "params": {
+          "settings": [
+            null,
+            null,
+            null,
+            true
+          ]
+        }
+      }
+    },
+    {
+      "name": "delete_files that is not a boolean",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "remove",
+        "params": {
+          "a": "38504:abababababababababababababababababababababababababababababababab:nfx:testnet:1:big-buck-bunny",
+          "delete_files": "yes"
+        }
+      }
+    },
+    {
+      "name": "an empty address",
+      "code": "invalid",
+      "field": "a",
+      "json": {
+        "id": 1,
+        "method": "add",
+        "params": {
+          "a": ""
+        }
+      }
+    },
+    {
+      "name": "an address over the limit",
+      "code": "invalid",
+      "field": "a",
+      "json": {
+        "id": 1,
+        "method": "pause",
+        "params": {
+          "a": "38504:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      }
+    },
+    {
+      "name": "a client name over the limit",
+      "code": "invalid",
+      "field": "client",
+      "json": {
+        "id": 1,
+        "method": "hello",
+        "params": {
+          "proto": 1,
+          "client": "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      }
+    },
+    {
+      "name": "no relays",
+      "code": "invalid",
+      "field": "relays",
+      "json": {
+        "id": 1,
+        "method": "settings.set",
+        "params": {
+          "settings": {
+            "relays": []
+          }
+        }
+      }
+    },
+    {
+      "name": "too many relays",
+      "code": "invalid",
+      "field": "relays",
+      "json": {
+        "id": 1,
+        "method": "settings.set",
+        "params": {
+          "settings": {
+            "relays": [
+              "wss://r0.example.org",
+              "wss://r1.example.org",
+              "wss://r2.example.org",
+              "wss://r3.example.org",
+              "wss://r4.example.org",
+              "wss://r5.example.org",
+              "wss://r6.example.org",
+              "wss://r7.example.org",
+              "wss://r8.example.org",
+              "wss://r9.example.org",
+              "wss://r10.example.org",
+              "wss://r11.example.org",
+              "wss://r12.example.org",
+              "wss://r13.example.org",
+              "wss://r14.example.org",
+              "wss://r15.example.org",
+              "wss://r16.example.org"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "a relay URL over the limit",
+      "code": "invalid",
+      "field": "relays",
+      "json": {
+        "id": 1,
+        "method": "settings.set",
+        "params": {
+          "settings": {
+            "relays": [
+              "wss://rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "too many iroh relays",
+      "code": "invalid",
+      "field": "iroh_relays",
+      "json": {
+        "id": 1,
+        "method": "settings.set",
+        "params": {
+          "settings": {
+            "iroh_relays": [
+              "https://i0.example.org",
+              "https://i1.example.org",
+              "https://i2.example.org",
+              "https://i3.example.org",
+              "https://i4.example.org",
+              "https://i5.example.org",
+              "https://i6.example.org",
+              "https://i7.example.org",
+              "https://i8.example.org"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "a cap under the least",
+      "code": "invalid",
+      "field": "cap_bytes",
+      "json": {
+        "id": 1,
+        "method": "settings.set",
+        "params": {
+          "settings": {
+            "cap_bytes": 1073741823
+          }
+        }
+      }
+    },
+    {
+      "name": "a cap over the most",
+      "code": "invalid",
+      "field": "cap_bytes",
+      "json": {
+        "id": 1,
+        "method": "settings.set",
+        "params": {
+          "settings": {
+            "cap_bytes": 1125899906842625
+          }
+        }
+      }
+    },
+    {
+      "name": "an empty namespace",
+      "code": "invalid",
+      "field": "namespace",
+      "json": {
+        "id": 1,
+        "method": "lookup",
+        "params": {
+          "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+          "namespace": ""
+        }
+      }
+    },
+    {
+      "name": "an empty cursor",
+      "code": "invalid",
+      "field": "cursor",
+      "json": {
+        "id": 1,
+        "method": "lookup",
+        "params": {
+          "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+          "namespace": "nfx:testnet:1",
+          "cursor": ""
+        }
+      }
+    },
+    {
+      "name": "an empty title",
+      "code": "invalid",
+      "field": "title",
+      "json": {
+        "id": 1,
+        "method": "publish",
+        "params": {
+          "package": "/p",
+          "key": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+          "title": ""
+        }
+      }
+    },
+    {
+      "name": "a title over the limit",
+      "code": "invalid",
+      "field": "title",
+      "json": {
+        "id": 1,
+        "method": "publish",
+        "params": {
+          "package": "/p",
+          "key": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+          "title": "ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt"
+        }
+      }
+    },
+    {
+      "name": "too many tags",
+      "code": "invalid",
+      "field": "tags",
+      "json": {
+        "id": 1,
+        "method": "publish",
+        "params": {
+          "package": "/p",
+          "key": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+          "title": "t",
+          "tags": [
+            "t0",
+            "t1",
+            "t2",
+            "t3",
+            "t4",
+            "t5",
+            "t6",
+            "t7",
+            "t8",
+            "t9",
+            "t10",
+            "t11",
+            "t12",
+            "t13",
+            "t14",
+            "t15",
+            "t16"
+          ]
+        }
+      }
+    },
+    {
+      "name": "an empty tag",
+      "code": "invalid",
+      "field": "tags",
+      "json": {
+        "id": 1,
+        "method": "publish",
+        "params": {
+          "package": "/p",
+          "key": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+          "title": "t",
+          "tags": [
+            ""
+          ]
+        }
+      }
+    },
+    {
+      "name": "an empty package path",
+      "code": "invalid",
+      "field": "package",
+      "json": {
+        "id": 1,
+        "method": "publish",
+        "params": {
+          "package": "",
+          "key": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+          "title": "t"
+        }
+      }
+    }
+  ]
+}

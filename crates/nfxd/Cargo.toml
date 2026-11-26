@@ -14,6 +14,7 @@ iroh.workspace = true
 nfx-node.workspace = true
 nfx-proto.workspace = true
 nostr-sdk.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["signal"] }
