@@ -159,7 +159,8 @@ every namespace, room key and manifest.
    - every tier's bytes pass the same `verify` as HTTP's, inside the provider (so it can move to
      another peer) and again in `SessionSources`: no provider is trusted;
    - each tier has a deadline before the next is asked, unless it is the last tier with a chance, which
-     then waits, as a page with peers only does;
+     then waits, as a page with peers only does; the file channel's is 4 s, the default of the
+     engine's `peerWaitMs`;
    - "every source failed" means every tier. With no HTTP source, `fetchFile`'s empty source set must
      not end the file at once (`web/player/src/fetcher.ts:288-292` throws under `once`, and otherwise
      waits 10 s on HTTP alone);
