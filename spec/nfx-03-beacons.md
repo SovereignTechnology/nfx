@@ -88,7 +88,7 @@ ignore tags they do not know (NFX-01 §4). No payments, no media.
     a reader that does not ignores it (NFX-01 §4) and reads the origin as serving every
     rendition. Such an origin still serves the hash list and every meta file, so a player
     can read the master playlist, and answers `404` for another rendition's files.
-- **Which addresses an `iroh` endpoint names** (amended 2026-11-26, decision record 0112).
+- **Which addresses an `iroh` endpoint names** (amended 2026-11-26, decision record 0114).
   `addrs`, and the direct addresses inside each ticket (NFX-06 §2), are where the seeder can be
   dialled. A beacon sent to a relay the seeder reaches at a public address SHOULD name there
   only public unicast addresses and the addresses the operator configured as external, as
@@ -192,7 +192,7 @@ edit in this spec is ever required to grow the relay set.
   beacon per key, bounded. A reader without the field reads such an origin as serving every
   rendition and may then meet `404` for one it does not; the `iroh` and `webrtc` endpoints
   already said which renditions they serve. Vectors: `beacon-renditions.json`.
-- 2026-11-26 (publisher rule, no `specver` bump: readers are unchanged; decision record 0112,
+- 2026-11-26 (publisher rule, no `specver` bump: readers are unchanged; decision record 0114,
   issue #132). §4: an `iroh` endpoint sent to a relay the seeder reaches at a public address
   names only public addresses and configured external ones, in `addrs` and in its tickets;
   private, shared, loopback, link-local and unique-local addresses go only to relays reached at

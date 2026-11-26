@@ -49,7 +49,7 @@
 //! for a network whose relays use a private CA, such as a test network. It changes which
 //! relay certificates are trusted, never how peers authenticate each other.
 //!
-//! **What a beacon names, and where** (NFX-03 §4 as amended 2026-11-26, decision record 0112).
+//! **What a beacon names, and where** (NFX-03 §4 as amended 2026-11-26, decision record 0114).
 //! A relay this node reaches at a public address gets beacons whose iroh endpoint (`addrs` and
 //! every ticket) names only the iroh relay, public direct addresses and any `--iroh-external`:
 //! never a private, shared (CGNAT, tailnet), loopback, link-local, unique-local, documentation

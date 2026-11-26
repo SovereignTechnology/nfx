@@ -27,7 +27,7 @@
 //!   WebRTC with full ICE, through NATs ([`nfx_node::mesh`]), or behind a DNAT through the
 //!   public address it is told ([`Config::mesh_public`]). Discovery is by room alone, so
 //!   beacons carry nothing for it.
-//! - **addresses** (NFX-03 §4 as amended 2026-11-26, decision record 0112): a relay this node
+//! - **addresses** (NFX-03 §4 as amended 2026-11-26, decision record 0114): a relay this node
 //!   reaches at a public address hears beacons naming only its iroh relay, public addresses
 //!   and [`Config::iroh_external`]; its private, loopback and link-local addresses go only to
 //!   relays it reaches at such an address, in a beacon signed apart

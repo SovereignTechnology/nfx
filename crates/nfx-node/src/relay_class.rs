@@ -1,5 +1,5 @@
 //! Which relays may hear this node's private addresses (NFX-03 §4 as amended 2026-11-26,
-//! decision record 0112).
+//! decision record 0114).
 //!
 //! A relay is [`RelayClass::Private`] when this node reaches it at an address of its own host
 //! or of a network it is on directly ([`crate::node::is_local`]: loopback, private, shared

@@ -1,4 +1,4 @@
-# 112. Private addresses only to relays on the seeder's own networks
+# 114. Private addresses only to relays on the seeder's own networks
 
 Date: 2026-11-26
 
