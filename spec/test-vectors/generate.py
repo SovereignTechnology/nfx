@@ -760,6 +760,33 @@ def main() -> int:
         held_case("renditions-not-a-string", "rendition ids are strings", [720]),
     ]
 
+    # ---- 8d. NFX-12 §2: the renditions a hyperdht endpoint serves ----
+    # The https rule of 8c on the hyperdht endpoint: optional, absent means every rendition. A
+    # seeder of some renditions, such as a viewer keeping what it watched (NFX-18), names them.
+    # Appended to beacon-hyperdht.json's lists, after the cases already there.
+    hd_valid += [
+        {"name": "hyperdht-names-one-rendition", "event": hd_beacon(
+            [dict(hyperdht_ep, renditions=["720p"])], chunks=5, free=True,
+            accepts_mints=None, price_hint=0)},
+        {"name": "iroh-hyperdht-and-webrtc-name-the-same-rendition", "event": hd_beacon(
+            [iroh_ep, dict(hyperdht_ep, renditions=["720p"]), webrtc_ep], chunks=5, free=True,
+            accepts_mints=None, price_hint=0)},
+    ]
+
+    def hd_held_case(name, reason, renditions):
+        return {"name": name, "reason": reason,
+                "event": hd_beacon([dict(hyperdht_ep, renditions=renditions), https_ep])}
+
+    hd_invalid += [
+        hd_held_case("renditions-empty", "present, it names 1 or more renditions", []),
+        hd_held_case("renditions-not-an-array", "an array of rendition ids", "720p"),
+        hd_held_case("renditions-null", "an array of rendition ids", None),
+        hd_held_case("renditions-meta", "`meta` is reserved (NFX-03 §4)", ["meta"]),
+        hd_held_case("renditions-empty-id", "rendition ids are non-empty", [""]),
+        hd_held_case("renditions-repeated", "distinct ids", ["720p", "720p"]),
+        hd_held_case("renditions-not-a-string", "rendition ids are strings", [720]),
+    ]
+
     # ---- 8a (cont.). NFX-12 nfx/files/1 and pay/1 over Protomux (§§4-5) ----
     def u32(n: int) -> bytes:
         return n.to_bytes(4, "little")
@@ -928,7 +955,10 @@ def main() -> int:
                            "+ seeder + \":\" + namespace)), RFC 8032. A reader implementing NFX-12 "
                            "MUST accept 'valid' and MUST reject every 'invalid' beacon whole; a "
                            "reader that does not implement it skips the endpoint and accepts them "
-                           "all (NFX-03 §4). 'gossip_budget' counts the renditions whose tickets "
+                           "all (NFX-03 §4). The optional 'renditions' follows the https "
+                           "endpoint's rule (NFX-03 §4): absent means every rendition; present, "
+                           "a non-empty array of distinct rendition ids, none of them 'meta'. "
+                           "'gossip_budget' counts the renditions whose tickets "
                            "fit in one NFX-06 §4 envelope with and without the endpoint.",
             "secret_keys_DO_NOT_USE": {"seeder": secrets["seeder"], "hyperdht_peer": peer_seed.hex(),
                                        "hyperdht_other": other_seed.hex()},

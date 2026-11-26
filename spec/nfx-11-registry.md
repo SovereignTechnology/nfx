@@ -57,7 +57,7 @@ implement:
 | `https` | NFX-05 §6 (optional `renditions`: the renditions its origin serves, NFX-03 §4) |
 | `webrtc` | NFX-10 §2 |
 | `stun` | NFX-10 §1 (a STUN server for browsers' `iceServers`) |
-| `hyperdht` | NFX-12 §2 (optional) |
+| `hyperdht` | NFX-12 §2 (optional; optional `renditions`, as `https`'s) |
 | `hyper` | deprecated: parsed, never emitted or dialed (NFX-12 §2) |
 
 Capability keys:
@@ -135,7 +135,7 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | pay/1 messages, valid and invalid (NFX-07 §2) | `test-vectors/pay1.json` |
 | Gossip envelope vector | `test-vectors/gossip.json` |
 | Derived identifiers (namespaces, topics, infohash) | `test-vectors/derived.json` |
-| `hyperdht` beacon endpoints, valid and invalid (NFX-12 §2) | `test-vectors/beacon-hyperdht.json` |
+| `hyperdht` beacon endpoints, valid and invalid, `renditions` included (NFX-12 §2) | `test-vectors/beacon-hyperdht.json` |
 | `stun` beacon endpoints, valid and invalid (NFX-10 §1) | `test-vectors/beacon-stun.json` |
 | Mesh signaling: rooms, room proofs, presence, offer and answer, NIP-44 v2 (NFX-10 §6) | `test-vectors/mesh-signal.json` |
 | Mesh signaling events that MUST be rejected or ignored (NFX-10 §6.5) | `test-vectors/mesh-signal-invalid.json` |
@@ -192,6 +192,11 @@ client that uses them claims it beside a level ("L2 + NFX-10 §1 STUN") and pass
 `stun-select.json`. A client that reads announcements, to show the directory they form, also
 passes `stun-announcement.json` as a reader. A client that uses the STUN servers of the
 relays it signals through (`nfx.stun_port`, NFX-04 §3) also passes `relay-stun.json`.
+
+Keeping and seeding what is watched (NFX-18) is optional, and no level requires it. A watcher
+that keeps what its user watches or downloads and seeds it claims it beside a level
+("L2 + NFX-18") against NFX-18 §8's checklist. If it emits a `hyperdht` endpoint, it passes the
+`renditions` cases of `beacon-hyperdht.json`.
 
 ## 9. Canonical JSON (`canon`)
 
@@ -306,3 +311,7 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   (NFX-04 §3 as amended in place 2026-11-24): the UDP port on which the relay's own host
   answers STUN. A client that uses its relays' STUN servers (NFX-10 §1) also passes the new
   `relay-stun.json` (source `test-vectors/stunad.py`). `stun-select.json` is unchanged.
+- 2026-11-26 (decision record 0110) — NFX-18, keeping and seeding what is watched: an optional
+  claim beside a level. The `hyperdht` endpoint gains an optional `renditions` (NFX-12 §2), with
+  the `https` endpoint's rule; `beacon-hyperdht.json` gains 2 valid and 7 invalid cases for it,
+  and the beacon schema checks it as it checks `https`'s.

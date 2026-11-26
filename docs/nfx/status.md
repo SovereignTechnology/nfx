@@ -343,6 +343,12 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
       is only served to the window and never announced, and the portmapper is off
       (`Config::seed_watched`, `Config::no_portmapper`). The desktop e2e runs both
       ways.
+      **Amended 2026-11-26 by sovtech (decision record 0110, NFX-18):** an app that keeps and
+      seeds what its user watches or downloads may do so by default, behind a notice (its IP
+      address and the list of what it seeds are public) and one switch that stops all
+      announcing. L4's protections stay as rules: no private address announced
+      (`NodeConfig::public_addrs_only`), no port mapping because of keeping, beacons never
+      under the user's identity key. The desktop viewer's default changes in its own PR.
   - **Gossip in `nfxd` (NFX-06 §4), opt-in.** With `--gossip`, every seeded or watched
     video joins its swarm.
     Seeders announce a signed `here` every 60 s and a `bye` on deletion, and every node
