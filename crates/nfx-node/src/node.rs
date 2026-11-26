@@ -18,6 +18,7 @@ use iroh_gossip::Gossip;
 pub use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::{PemObject, SectionKind};
 
+use crate::relay_class::RelayClass;
 use crate::transfers::TransferLog;
 use crate::{GOSSIP_ALPN, NodeError, Result};
 
@@ -122,6 +123,23 @@ pub fn is_public(addr: &SocketAddr) -> bool {
     }
 }
 
+/// Whether `ip` is an address of this host or of a network it is on directly: loopback,
+/// private (RFC 1918), shared (100.64.0.0/10: carrier NATs and tailnets), link-local, or
+/// unique-local (fc00::/7); an IPv4-mapped IPv6 address is read as its IPv4 address. Every
+/// such address is also not public ([`is_public`]), but not the other way round:
+/// documentation, benchmarking, NAT64, 6to4, Teredo and the other special-purpose blocks are
+/// neither, so a relay reached at one of them may be anywhere ([`crate::relay_class`]).
+#[must_use]
+pub fn is_local(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => {
+            let shared = v4.to_bits() & (u32::MAX << 22) == Ipv4Addr::new(100, 64, 0, 0).to_bits();
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || shared
+        }
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
+    }
+}
+
 /// `addr` with its relays and only those of its direct addresses that are public
 /// ([`is_public`]): every other direct address (the interface addresses of a host on a home
 /// or office network, behind a NAT or a DNAT) and any transport it does not know are dropped.
@@ -146,6 +164,26 @@ pub fn advertised(addr: EndpointAddr, external: &[SocketAddr]) -> EndpointAddr {
     let kept = only_public(addr);
     let external = external.iter().copied().map(TransportAddr::Ip);
     EndpointAddr::from_parts(kept.id, kept.addrs.into_iter().chain(external))
+}
+
+/// `seen`, the endpoint's own address, as [`Node::addr_for`] gives it to readers of `class`.
+/// For a relay on this host's own networks ([`RelayClass::Private`]): [`advertised`], after
+/// [`only_public`] when `public_only`. For any other reader ([`RelayClass::Public`]): only its
+/// relays and public direct addresses, plus the external addresses as given.
+#[must_use]
+pub fn advertised_to(
+    seen: EndpointAddr,
+    external: &[SocketAddr],
+    public_only: bool,
+    class: RelayClass,
+) -> EndpointAddr {
+    if public_only || class == RelayClass::Public {
+        // With external addresses, `advertised` keeps only public ones itself; without,
+        // it returns its input, here already public only.
+        advertised(only_public(seen), external)
+    } else {
+        advertised(seen, external)
+    }
 }
 
 /// How often iroh-blobs deletes untagged blobs. Seeded content is tagged; anything fetched
@@ -369,23 +407,33 @@ impl Node {
         self.router.endpoint().id()
     }
 
-    /// What to publish (tickets, beacons, `gossip peer:` lines): the endpoint id plus its
-    /// home relay and its direct addresses. With external addresses configured, those are
-    /// always in it and the other direct addresses only when public ([`advertised`]), so an
-    /// interface address behind a NAT or a DNAT is never published. With
-    /// `public_addrs_only`, the same holds with no external address ([`only_public`]). iroh
-    /// itself still tells a peer that is already connected all of its candidates (NAT
-    /// traversal, gossip peer data): this filters what reaches the world, not what a
-    /// connected peer learns.
+    /// What this node advertises at most (tickets and beacons for a relay on this host's own
+    /// networks, `gossip peer:` lines): the endpoint id plus its home relay and its direct
+    /// addresses. With external addresses configured, those are always in it and the other
+    /// direct addresses only when public ([`advertised`]), so an interface address behind a
+    /// NAT or a DNAT is never published. With `public_addrs_only`, the same holds with no
+    /// external address ([`only_public`]). Anything any other reader gets is
+    /// [`Node::addr_for`] with [`RelayClass::Public`]. iroh itself still tells a peer that is
+    /// already connected all of its candidates (NAT traversal, gossip peer data): this filters
+    /// what reaches the world, not what a connected peer learns.
     #[must_use]
     pub fn addr(&self) -> EndpointAddr {
-        let seen = self.router.endpoint().addr();
-        let seen = if self.public_only {
-            only_public(seen)
-        } else {
-            seen
-        };
-        advertised(seen, &self.external)
+        self.addr_for(RelayClass::Private)
+    }
+
+    /// What to publish where `class` reads it (NFX-03 §4 as amended 2026-11-26): for a relay
+    /// reached at an address of this host's own networks, [`Node::addr`]; for any other reader
+    /// (a relay reached at a public address, a gossip swarm), only the home relay, public
+    /// direct addresses and the external addresses, so that no LAN, VPN, tailnet or loopback
+    /// address reaches the world ([`advertised_to`]).
+    #[must_use]
+    pub fn addr_for(&self, class: RelayClass) -> EndpointAddr {
+        advertised_to(
+            self.router.endpoint().addr(),
+            &self.external,
+            self.public_only,
+            class,
+        )
     }
 
     #[must_use]
@@ -661,6 +709,141 @@ mod tests {
         // Nothing public at all: the id alone, never an empty-but-wrong list.
         let home = EndpointAddr::from_parts(id, [ip("192.168.1.20:7843")]);
         assert_eq!(only_public(home), EndpointAddr::from_parts(id, []));
+    }
+
+    #[test]
+    fn a_relay_on_this_hosts_networks_hears_every_address_and_any_other_only_public_ones() {
+        let id = runtime_id();
+        let relay: RelayUrl = "https://relay.example/".parse().unwrap();
+        let ip = |s: &str| TransportAddr::Ip(sa(s));
+        let seen = EndpointAddr::from_parts(
+            id,
+            [
+                TransportAddr::Relay(relay.clone()),
+                ip("192.168.1.20:7843"),
+                ip("100.100.1.2:7843"),
+                ip("[fd7a:115c:a1e0::5]:7843"),
+                ip("8.8.8.8:40000"),
+            ],
+        );
+        let public = EndpointAddr::from_parts(
+            id,
+            [TransportAddr::Relay(relay.clone()), ip("8.8.8.8:40000")],
+        );
+        // No external address: the relay's class decides.
+        assert_eq!(
+            advertised_to(seen.clone(), &[], false, RelayClass::Private),
+            seen
+        );
+        assert_eq!(
+            advertised_to(seen.clone(), &[], false, RelayClass::Public),
+            public
+        );
+        // `public_addrs_only`: public only, whoever reads it.
+        for class in [RelayClass::Private, RelayClass::Public] {
+            assert_eq!(advertised_to(seen.clone(), &[], true, class), public);
+        }
+        // An external address is kept as given for every reader, and with one even a relay on
+        // this host's networks hears no private address (as `advertised` always did).
+        let external = [sa("203.0.113.7:7843")];
+        let with_external = EndpointAddr::from_parts(
+            id,
+            [
+                TransportAddr::Relay(relay),
+                ip("8.8.8.8:40000"),
+                ip("203.0.113.7:7843"),
+            ],
+        );
+        for (only, class) in [
+            (false, RelayClass::Private),
+            (false, RelayClass::Public),
+            (true, RelayClass::Public),
+        ] {
+            assert_eq!(
+                advertised_to(seen.clone(), &external, only, class),
+                with_external
+            );
+        }
+    }
+
+    #[test]
+    fn local_addresses_are_this_hosts_and_its_own_networks_only() {
+        for local in [
+            "127.0.0.1",
+            "::1",
+            "10.0.0.1",
+            "172.16.5.4",
+            "192.168.0.1",
+            "100.64.0.1",
+            "100.127.255.255",
+            "169.254.1.1",
+            "fe80::1",
+            "fc00::1",
+            "fdff:ffff::1",
+            "::ffff:10.0.0.1",
+        ] {
+            let ip: IpAddr = local.parse().unwrap();
+            assert!(is_local(ip), "{local}");
+            assert!(!is_public(&SocketAddr::new(ip, 443)), "{local}");
+        }
+        for other in [
+            "8.8.8.8",
+            "100.63.255.255",
+            "100.128.0.0",
+            "172.15.0.1",
+            "172.32.0.1",
+            "192.0.2.1",
+            "198.18.0.1",
+            "0.0.0.0",
+            "255.255.255.255",
+            "224.0.0.1",
+            "::",
+            "2001:db8::1",
+            "64:ff9b::a00:1",
+            "2002:a00:1::1",
+            "fe00::1",
+            "ff02::1",
+            "::ffff:8.8.8.8",
+        ] {
+            assert!(!is_local(other.parse().unwrap()), "{other}");
+        }
+    }
+
+    /// A real endpoint bound to loopback: its address goes to a relay on this host and to no
+    /// other.
+    #[tokio::test]
+    async fn a_node_names_its_loopback_address_only_to_a_relay_on_this_host() {
+        let node = Node::spawn(NodeConfig {
+            no_portmapper: true,
+            bind_addr: Some(sa("127.0.0.1:0")),
+            ..NodeConfig::default()
+        })
+        .await
+        .unwrap();
+        let bound = node
+            .endpoint()
+            .bound_sockets()
+            .into_iter()
+            .find(|a| a.ip().is_loopback())
+            .expect("the loopback socket");
+        // iroh reports its bound address shortly after binding.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !node.addr().ip_addrs().any(|a| *a == bound) && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let private: Vec<SocketAddr> = node
+            .addr_for(RelayClass::Private)
+            .ip_addrs()
+            .copied()
+            .collect();
+        assert!(private.contains(&bound), "{private:?} lacks {bound}");
+        assert_eq!(node.addr(), node.addr_for(RelayClass::Private));
+        let public = node.addr_for(RelayClass::Public);
+        assert!(public.ip_addrs().all(is_public), "{public:?}");
+        assert!(!public.ip_addrs().any(|a| *a == bound), "{public:?}");
+        assert_eq!(public.id, node.id());
+        node.shutdown().await.unwrap();
     }
 
     /// A real endpoint: whatever interface addresses iroh finds, a `public_addrs_only` node

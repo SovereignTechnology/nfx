@@ -21,6 +21,7 @@ pub mod origin_pay;
 pub mod p2pml;
 pub mod pay;
 pub mod relay;
+pub mod relay_class;
 pub mod relay_share;
 mod relay_store;
 mod rtc_serve;

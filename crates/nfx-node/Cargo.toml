@@ -9,6 +9,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# The relay connections' own transport (crate::relay_class): nostr-sdk's message type and the
+# futures traits it re-exports, at the version nostr-sdk takes, adding no feature.
+async-wsocket = { version = "0.17.0", default-features = false }
 bytes.workspace = true
 # The mesh endpoint's session keys and NIP-44 nonces (crate::mesh). Already in the lock and in
 # this crate's tree (through iroh), at the version and features the money crates' closure
@@ -37,7 +40,11 @@ str0m.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tungstenite.workspace = true
-tokio-tungstenite.workspace = true
+# crate::relay_class dials relays itself and hands the TLS and websocket handshake to
+# tokio-tungstenite, as nostr-sdk's default transport does: the same TLS feature nostr-sdk
+# already turns on, and the same happy-eyeballs dialer, so nothing new is compiled.
+tokio-happy-eyeballs = "0.1.0"
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 base64.workspace = true
