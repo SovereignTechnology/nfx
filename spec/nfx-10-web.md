@@ -734,7 +734,7 @@ video room ID = "nfx/1/web/video/38504:" + creator key + ":" + namespace + ":" +
 - Its key pair is derived as in §6.1, with the video room ID in place of the stream swarm
   ID. No video room ID is a stream swarm ID: those continue `nfx/1/web/nfx:` (a namespace
   begins `nfx:`, NFX-01 §2) and this one `nfx/1/web/video/`. `mesh-signal.json` pins the
-  derivation (`video_rooms`).
+  derivation (`video_rooms`; pending, with §6.10's vectors).
 - A video room exists only in Nostr signaling: it has no tracker swarm. Its events are those
   of §§6.2–6.5, unchanged; presence content stays empty.
 
@@ -771,9 +771,11 @@ it first sees a peer's `connect` in the video room: a node at most once per 5 s 
 page at most once per 30 s per room, since most members of a busy room are pages.
 
 **Ending a connection.** A video-room connection exists to carry the file channel. The side
-that asked closes it once it holds what it wanted from that peer and 30 s have passed
-without a request of its own; the side that serves closes it 20 s after the last request it
-answered.
+that asked closes it once it holds what it wanted from that peer, none of its requests is
+open, and 30 s have passed since its last request. The side that serves closes it 20 s after
+it finished sending its last answer (the last message of a `data` … `end` transfer, or a
+`missing`, `busy` or `have`), and never while a request it admitted is open or bytes of an
+answer are still queued: a long transfer is never cut by this rule.
 
 **Beside the stream rooms.** The video room replaces nothing of §§6.1–6.6. It is where a
 page that holds only the manifest meets peers that hold the rest. Once the hash list has
@@ -843,13 +845,19 @@ name the roles in one exchange.
   requests interleaved.
 - `cancel` ends an open request: the server sends nothing more for it. A requester ignores
   any answer for a `req` that is not open; it may have crossed a `cancel`.
-- `list` asks which renditions of the hash list `root` the server holds. `have` answers
-  it: a JSON object `{"whole":[…],"part":[…]}`, two arrays of distinct rendition ids of that
-  hash list, at most 32 ids in all, no id in both. `whole` names the renditions whose media
-  playlist the server holds with every file that playlist names (its init and every
-  segment); `part` names those whose media playlist and init it holds with at least one
-  segment but not all. Both arrays are empty when it holds neither. A server that does not
-  hold that hash list answers `missing`.
+- `list` asks which renditions of the hash list `root` the server holds, for a hash list of
+  the channel's video only. `have` answers it: a JSON object `{"whole":[…],"part":[…]}`, two
+  arrays of distinct integers, each the index of a rendition in that hash list's
+  `renditions` (0 for the first), below 32 and below the list's length, no index in both. A
+  rendition is named by its place, not its id, so every `have` fits the bound whatever the
+  ids are (the largest, written compactly, is 107 bytes). A rendition after the 32nd cannot
+  be named, and a page offers none from peers (it looks at the first 32 only, below).
+  `whole` names the renditions whose media playlist the server holds with every file that
+  playlist names (its init and every segment); `part` names those whose media playlist and
+  init it holds with at least one segment but not all. Both arrays are empty when it holds
+  neither. A server answers `missing` for a hash list it does not hold, and for one of
+  another video even when it holds it, as for `get` (below). A requester ignores a `have`
+  that names an index at or past the list's length.
 - `beacons` asks for the server's beacons of the channel's video (below). The answer is
   `data` messages then `end`, whose bytes are a JSON array of 1 to 4 signed kind-20464
   events, each in the compact form of NFX-17 §1.2 and at most 16,384 bytes, the whole at
@@ -857,10 +865,11 @@ name the roles in one exchange.
 
 **What a server serves.** Only files listed in a hash list **of the channel's video** that
 it holds and has verified against its manifest's `root` (NFX-05 §§4–5), with a role other
-than `segment`, and that hash list itself. Any other `sha` is answered `missing`, even one it
-holds for another video, so a channel is never an oracle for what else a peer holds (as
-NFX-12 §4). A page serves only its session's hash list and files of it that it has verified
-in that session. A node serves from its store, which verifies on read, as it does segments.
+than `segment`, and that hash list itself. Any other `sha` is answered `missing`, even one
+it holds for another video, and `list` answers only for hash lists of the channel's video,
+so a channel is never an oracle for what else a peer holds (as NFX-12 §4). A page serves
+only its session's hash list and files of it that it has verified in that session. A node
+serves from its store, which verifies on read, as it does segments.
 
 **Receiver duties.** A requester:
 
@@ -902,15 +911,19 @@ has failed a file, it offers to more peers of the video room (§6.9) and waits f
 or 10 s, whichever comes first, before it tries again.
 
 **Which levels.** `have` does for peers what an `https` endpoint's `renditions` and an
-origin's answers do for origins (§1, NFX-03 §5). A page offers a level only for a rendition
-that a connected peer's `have` names in `whole`, and only once that rendition's media
-playlist and init have verified, from any peer. When no connected peer names any rendition
-in `whole` (a video whose seeders are gone, played from its viewers), it offers instead the
-renditions named in `part`, on the same condition: which segments each peer holds then comes
-from p2p-media-loader's announcements in the stream room, and a segment no peer holds is
-waited for, or rescued where the page may (below). A peer whose `have` names a rendition and
-then answers `missing` for its playlist or init has its `have` ignored for the rest of the
-session. A `have` orders peers and selects levels; it never makes a page trust a byte.
+origin's answers do for origins (§1, NFX-03 §5). A page looks only at the renditions it may
+offer: its allowed levels, among the first 32 of the hash list. It offers a level for an
+allowed rendition that a connected peer's `have` names in `whole`, and only once that
+rendition's media playlist and init have verified, from any peer. It probes the allowed
+renditions named only in `part` too, after those named in `whole`, within the same 8 s (step
+3 below), and offers them, on the same condition, when no allowed rendition named in `whole`
+has verified: none is named so (a video whose seeders are gone, played from its viewers), or
+the peers that name one answered `busy` or failed throughout. Which segments each peer holds
+then comes from p2p-media-loader's announcements in the stream room, and a segment no peer
+holds is waited for, or rescued where the page may (below). A peer whose `have` names a
+rendition and then answers `missing` for its playlist or init has its `have` ignored for the
+rest of the session. A `have` orders peers and selects levels; it never makes a page trust a
+byte.
 
 **Starting from a manifest.** A page that holds a video's signed manifest, verified (NFX-02
 §4), and signals over Nostr:
@@ -929,7 +942,8 @@ A page given origins as well MAY rescue a start-up file over HTTPS (§1): only t
 waiting for, and only once peers have had their wait (the reference library: `peerWaitMs`,
 4 s by default, for a first peer with a file channel, then the give-ups above). It offers its
 origins' renditions only when no peer confirms any within the 8 s of step 3. A page with no
-origin waits for peers, and SHOULD say that it is waiting.
+origin takes every file from peers, start-up files and segments, whatever source policy it was
+given (it has nothing to rescue with): it waits for peers, and SHOULD say that it is waiting.
 
 **Beacons over the file channel.** Beacons (NFX-03) travel through relays, which a page may
 not reach, and presence cannot carry one (§6.5: its content is empty). A server MAY answer
@@ -957,10 +971,11 @@ of keys whose beacon it received from a peer that has since delivered it a file 
 verified. So keys that only flood beacons are not spread by honest pages. A node that must
 not link its session key to its beacon key (§6.7) does not serve its own.
 
-**Vectors.** `file-channel.json` holds every message, a transfer that spans three `data`
-messages, a `have`, a `beacons` answer, and beacons a reader takes, with the tier it gives
-each; `file-channel-invalid.json` holds every message that MUST close the channel and every
-beacon a reader MUST refuse.
+**Vectors** (pending: they land with the reference implementation of this section, which
+adds the files and their generator, `filechan.py`). `file-channel.json` holds every message,
+a transfer that spans three `data` messages, a `have`, a `beacons` answer, and beacons a
+reader takes, with the tier it gives each; `file-channel-invalid.json` holds every message
+that MUST close the channel and every beacon a reader MUST refuse.
 
 ## Changelog
 
@@ -1138,6 +1153,6 @@ beacon a reader MUST refuse.
   origin is optional; start-up files are verified the same way over either and never travel
   over p2p-media-loader. §§2, 6, 6.1, 6.6, 6.7 and 6.8 follow. (Was: the hash list,
   playlists and init segments came from an origin only, and rooms needed the hash list.) New
-  vectors `file-channel.json` and `file-channel-invalid.json`; `mesh-signal.json` gains
-  `video_rooms`. NFX-05 §§2 and 6 are amended in place to match (an exception to the freeze
-  rule).
+  vectors `file-channel.json` and `file-channel-invalid.json`, and `mesh-signal.json` gains
+  `video_rooms`, all pending until the reference implementation adds them. NFX-05 §§2 and 6
+  are amended in place to match (an exception to the freeze rule).

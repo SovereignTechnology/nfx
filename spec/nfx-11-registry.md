@@ -139,10 +139,10 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | Derived identifiers (namespaces, topics, infohash) | `test-vectors/derived.json` |
 | `hyperdht` beacon endpoints, valid and invalid (NFX-12 §2) | `test-vectors/beacon-hyperdht.json` |
 | `stun` beacon endpoints, valid and invalid (NFX-10 §1) | `test-vectors/beacon-stun.json` |
-| Mesh signaling: rooms and video rooms, room proofs, presence, offer and answer, NIP-44 v2 (NFX-10 §§6, 6.9) | `test-vectors/mesh-signal.json` |
+| Mesh signaling: rooms and video rooms (video rooms pending, as the file channel's rows below), room proofs, presence, offer and answer, NIP-44 v2 (NFX-10 §§6, 6.9) | `test-vectors/mesh-signal.json` |
 | Mesh signaling events that MUST be rejected or ignored (NFX-10 §6.5) | `test-vectors/mesh-signal-invalid.json` |
-| File channel: every message, a transfer, `have`, a `beacons` answer, and the beacons a reader takes with their tier (NFX-10 §6.10) | `test-vectors/file-channel.json` |
-| File channel messages that MUST close the channel, and beacons a reader MUST refuse (NFX-10 §6.10) | `test-vectors/file-channel-invalid.json` |
+| File channel: every message, a transfer, `have`, a `beacons` answer, and the beacons a reader takes with their tier (NFX-10 §6.10) | `test-vectors/file-channel.json` (pending: added with the reference implementation) |
+| File channel messages that MUST close the channel, and beacons a reader MUST refuse (NFX-10 §6.10) | `test-vectors/file-channel-invalid.json` (pending, as above) |
 | STUN service announcements, valid and invalid (NFX-10 §1) | `test-vectors/stun-announcement.json` |
 | STUN server selection, and the addresses a client may take from Nostr (NFX-10 §1) | `test-vectors/stun-select.json` |
 | STUN at a relay's own host, from its NIP-11 `nfx.stun_port`, and its place in the selection (NFX-10 §1) | `test-vectors/relay-stun.json` |
@@ -151,7 +151,7 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | Seeder ratings, valid (NFX-16 §1) | `test-vectors/ratings.json` |
 | Invalid seeder ratings (every one MUST be rejected; NFX-16 §1) | `test-vectors/ratings-invalid.json` |
 | Seeder rating scores (NFX-16 §4) | `test-vectors/ratings-scoring.json` |
-| Generator (source of truth) | `test-vectors/generate.py` (with `pay1.py`, `ratings.py`, `meshsig.py`, `stunad.py` and `filechan.py`) |
+| Generator (source of truth) | `test-vectors/generate.py` (with `pay1.py`, `ratings.py`, `meshsig.py`, `stunad.py`; `filechan.py` pending, as above) |
 
 Vectors use throwaway keys whose *secret is published in the file* — never use them
 elsewhere. Regenerate and re-verify (needs `coincurve`):

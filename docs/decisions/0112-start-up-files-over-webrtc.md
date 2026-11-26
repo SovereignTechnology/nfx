@@ -77,12 +77,13 @@ every namespace, room key and manifest.
      video-room connection it is the only channel.
    - **Messages** are binary: a type byte, then the body. Types 0-3 are NFX-12 §4's `get`, `data`,
      `end` and `missing`, byte for byte; 4 `hello` (version 1, flags: serves files, serves beacons),
-     5 `cancel`, 6 `busy`, 7 `list` (which renditions of a `root`), 8 `have` (the rendition ids held
-     whole and those held in part), 9 `beacons`. A `data` message carries at most 16,379 bytes of
-     the file, so a whole message is at most 16 KiB, which every WebRTC stack carries; a file spans
-     as many as it needs. Request ids are never reused on a channel, so a `cancel` needs no answer:
-     anything that still arrives for it is ignored. A malformed message closes the channel. A new
-     message type takes a new label (`nfx-files/2`), as NFX-12 §3 rules for Protomux.
+     5 `cancel`, 6 `busy`, 7 `list` (which renditions of a `root`), 8 `have` (which of the hash
+     list's renditions are held whole and which in part, by their index in it), 9 `beacons`. A
+     `data` message carries at most 16,379 bytes of the file, so a whole message is at most 16 KiB,
+     which every WebRTC stack carries; a file spans as many as it needs. Request ids are never
+     reused on a channel, so a `cancel` needs no answer: anything that still arrives for it is
+     ignored. A malformed message closes the channel. A new message type takes a new label
+     (`nfx-files/2`), as NFX-12 §3 rules for Protomux.
    - **What is served**: the hash list (`get` of `root`) and the files of a hash list of the
      connection's video with any role but `segment`; never a segment, which stays on p2p-media-loader;
      never a file of another video, so a channel is no oracle for what else a peer holds.
@@ -106,14 +107,17 @@ every namespace, room key and manifest.
      4 s without a byte or below the floor, a hedge to a second peer after 2 s without a byte (at most
      3 at once), move on after `missing` or `busy`. Peers that delivered a verified file come first,
      then those whose `have` names the file's rendition, then the rest at random.
-3. **`have` replaces the origin probe.** A page offers a level only for a rendition that a connected
-   peer's `have` names as held whole and whose media playlist and init have verified, from any
-   peer. When no connected peer holds any rendition whole (a video whose seeders are gone, played
-   from its viewers), the renditions peers hold in part are offered instead, on the same condition;
-   p2p-media-loader's announcements then say which segments each holds, and a missing one is waited
-   for or rescued as the page may. A peer whose `have` names a rendition and then answers `missing`
-   for its playlist or init has its `have` ignored for the session. A node usually holds its
-   renditions whole; a page holds what it has watched, in part, unless it keeps the video whole.
+3. **`have` replaces the origin probe.** A page looks only at the renditions it may offer (its
+   allowed levels, among the hash list's first 32). It offers a level for an allowed rendition that
+   a connected peer's `have` names as held whole, once its media playlist and init have verified,
+   from any peer. Allowed renditions named only in part are probed too, after the whole ones, in the
+   same 8 s; the page offers them instead when no allowed rendition held whole verified (none is
+   held whole, as for a video whose seeders are gone, played from its viewers; or the peers that
+   hold it whole answered `busy` or failed throughout). p2p-media-loader's announcements then say
+   which segments each peer holds, and a missing one is waited for or rescued as the page may. A
+   peer whose `have` names a rendition and then answers `missing` for its playlist or init has its
+   `have` ignored for the session. A node usually holds its renditions whole; a page holds what it
+   has watched, in part, unless it keeps the video whole.
 4. **Bootstrap with only the manifest**: join the video room and offer to the peers met; `get` the
    hash list from one, hedge to another after 2 s; verify it; `list` the peers; `get` the master
    playlist and, for each allowed rendition (at most 32, six at a time, 8 s in all as the origin probe
@@ -127,7 +131,9 @@ every namespace, room key and manifest.
    above), only the file the bootstrap or the player is waiting for, and the levels are the peers'
    unless no peer confirms one in time, in which case the origin probe runs as today. Decision 0109's
    rule holds: nothing over HTTPS in the background. Under `peers-only`, nothing over HTTPS at all,
-   start-up files included; origins a caller gives are kept for a later switch.
+   start-up files included; origins a caller gives are kept for a later switch. **With no origin**
+   there is nothing to rescue with, so every mode behaves as `peers-only`, `https-first` included:
+   start-up files and segments come from peers, and `open()` waits for them (point 6).
 6. **`open()` with no origin.** `origins` may be empty when the caller passes `manifestJson` (a bare
    `root` has no address, so no video room) and Nostr `signaling`; otherwise a `TypeError` as today.
    With no origin, `open()` waits for peers (`waiting` with reason `no-peer`, and new `startup` events
@@ -149,9 +155,13 @@ every namespace, room key and manifest.
    those of keys in tiers 1 and 2, and of keys whose beacon it got from a peer that then delivered it
    a file that verified. Presence cannot carry beacons: readers drop a presence whose content is not
    empty (`crates/nfx-proto/src/signal.rs:472-474`), and NIP-DC defines it so.
-8. **Sources in tiers.** The web library's `SessionSources.get` (`web/player/src/session-sources.ts`)
-   asks file providers before its HTTP origins: the local store another change adds, then the file
-   channel. What this decision needs from that interface:
+8. **Sources in tiers.** The web library's `SessionSources.get`
+   (`web/player/src/session-sources.ts`) asks file providers before its HTTP origins: the local
+   store another change adds, then the file channel. Which tiers a start-up file goes through
+   follows `segmentSource` (point 5): under `peers-then-https`, the local store, the file channel,
+   then HTTP; under `peers-only`, the local store, then the file channel; under `https-first`, the
+   local store, then HTTP, and the file channel is a tier only when the session has no origin. What
+   this decision needs from that interface:
    - providers are keyed by the same path the HTTP tier uses (`<root>`, or `<root>/<content name>`)
      and are told the file's expected sha256, role and byte limit;
    - `get(file, verify, signal)` is async, takes an `AbortSignal`, and resolves to bytes or `null`
@@ -168,9 +178,10 @@ every namespace, room key and manifest.
      segment is never delayed by it.
 9. **nfxd** joins the video room of each video it serves while it has at least one of its stream
    rooms, counted in its room limit (`MAX_ROOMS`), never offers there, answers within the sub-limit,
-   closes a video-room connection 20 s after its last request, serves the file channel from its
-   store, which re-verifies on read, and answers `beacons` with its own newest beacon. As an offerer
-   in a stream room it opens the file channel after the first channel is open (str0m 0.24.1's
+   closes a video-room connection 20 s after it finished sending its last answer, never while a
+   request it admitted is open (NFX-10 §6.9), serves the file channel from its store, which
+   re-verifies on read, and answers `beacons` with its own newest beacon. As an offerer in a stream
+   room it opens the file channel after the first channel is open (str0m 0.24.1's
    `DirectApi::create_data_channel` opens a channel on the running association without SDP). A flag
    turns the file channel off.
 10. **The reference web client** stops waiting for a beacon that names an origin before it plays,
