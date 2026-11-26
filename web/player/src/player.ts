@@ -26,7 +26,8 @@
  * its own and before the creator's: the relay sees the viewer's address anyway. `&relayStun=0`
  * turns that off, for a viewer behind a proxy, a VPN or Tor. Test knobs, which change where
  * bytes come from and never whether they are checked: `&httpWindow=<s>` (seconds ahead
- * fetched over HTTP) and `&level=<n>` (pin a level).
+ * fetched over HTTP), `&level=<n>` (pin a level), and `&segmentSource=<peers-then-https|
+ * peers-only|https-first>` with `&peerWaitMs=<ms>` (where the mesh takes segments from).
  *
  * Which renditions it offers (NFX-03 §5, NFX-10 §1): by address, each beacon-named origin
  * goes to the library with the renditions its `https` endpoint names, as a hint, and the
@@ -47,6 +48,7 @@ import {
   MAX_RELAYS,
   MAX_TRACKERS,
   type MeshStats,
+  type SegmentSource,
   type OpenCommon,
   type OriginSource,
   type PlayerEvent,
@@ -89,6 +91,10 @@ interface State {
   levels: { id: string; height: number; bitrate: number }[];
   playing: boolean;
   errors: string[];
+  /** Peers first: the `waiting` and `resumed` events in order, the segments rescued over HTTPS, and why the mesh is blocked (or null). */
+  waits: string[];
+  rescues: string[];
+  blocked: string | null;
   readonly mesh: MeshStats | null;
   /** The stats panel (nfx #99). */
   readonly nerd: NerdPanel;
@@ -114,6 +120,9 @@ const st: State = {
   levels: [],
   playing: false,
   errors: [],
+  waits: [],
+  rescues: [],
+  blocked: null,
   get mesh(): MeshStats | null {
     return session?.stats().mesh ?? null;
   },
@@ -122,6 +131,8 @@ const st: State = {
   },
 };
 (window as unknown as { __nfx: State }).__nfx = st;
+/** For automation: change where the playing session takes its segments from. */
+(window as unknown as { __nfxSegmentSource: (source: SegmentSource) => void }).__nfxSegmentSource = (source) => session?.setSegmentSource(source);
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const nerd = nerdPanel({
@@ -162,6 +173,18 @@ const onEvent = (e: PlayerEvent): void => {
       break;
     case 'playing':
       st.playing = true;
+      break;
+    case 'waiting':
+      if (st.waits.length < 1000) st.waits.push(`waiting:${e.reason}`);
+      break;
+    case 'resumed':
+      if (st.waits.length < 1000) st.waits.push('resumed');
+      break;
+    case 'rescue':
+      if (st.rescues.length < 1000) st.rescues.push(e.url);
+      break;
+    case 'mesh':
+      st.blocked = e.why;
       break;
     case 'error':
       st.errors.push(e.message);
@@ -216,6 +239,9 @@ const common = {
   onEvent,
   httpWindow: whole(params.get('httpWindow'), 600),
   level: whole(params.get('level'), 16),
+  // Passed as given, so the library refuses a bad value itself.
+  ...(params.has('segmentSource') ? { segmentSource: params.get('segmentSource') as SegmentSource } : {}),
+  ...(params.has('peerWaitMs') ? { peerWaitMs: Number(params.get('peerWaitMs')) } : {}),
 } satisfies Partial<OpenCommon>;
 
 /** Open a session, and show it in `__nfx`. */
