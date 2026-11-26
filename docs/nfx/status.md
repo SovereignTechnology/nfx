@@ -16,7 +16,7 @@ rust-forward), `zizmor.yml`, `nightly.yml` (advisories, miri), `release.yml` and
 dormant twin: it runs nothing. What the sections below say of the private
 GitLab project, of GitLab CI and of its shared runner is as it stood before that.
 
-Updated 2026-11-26 · `main` = `481bb30` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
+Updated 2026-11-26 · `main` = `3d96bcc` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
 
 ## Since 2026-11-09
 
@@ -29,7 +29,7 @@ release commit on `main`.
   node and the packager prebuilt for linux-x64, free video only.
 - **2026-11-07, [0.1.1](releases/v0.1.1.md)** (published): the scoped relay's NIP-50 search
   matches a manifest's title.
-- **2026-11-16, [0.1.2](releases/v0.1.2.md)** (published): `nutflixd` serves browsers
+- **2026-11-16, [0.1.2](releases/v0.1.2.md)** (published): the node serves browsers
   through NATs with Nostr relays as the only signaling path (the mesh endpoint, NFX-10 §6);
   a STUN responder; seeders that hold only some renditions; one rendition by default; the
   browser player as a library.
@@ -37,8 +37,8 @@ release commit on `main`.
   mesh signaling (kind 25050, `--embed-relay-mesh`), by an amendment of frozen NFX-04 in
   place.
 - **2026-11-25, [0.1.4](releases/v0.1.4.md)** (not yet tagged): the embedded relay keeps its
-  manifests across a restart (`--state`); STUN servers are found over Nostr, with
-  `nutflixd stun`; stats for nerds; an opt-in remote candidate filter in the web library.
+  manifests across a restart (`--state`); STUN servers are found over Nostr, with the
+  node's `stun` subcommand; stats for nerds; an opt-in remote candidate filter in the web library.
   Decision records [0106](../decisions/0106-relay-manifest-persistence.md),
   [0107](../decisions/0107-stun-from-nostr-creator-or-fallback.md) and
   [0108](../decisions/0108-stun-at-your-own-relays.md).
@@ -67,6 +67,11 @@ Merged after the 0.1.4 release commit (`226fd79`), so in no release's notes:
   [0109](../decisions/0109-browsers-take-segments-from-peers-first.md)): `segmentSource`
   can take segments from peers first, with HTTPS as a rescue or not at all (`https-first`
   stays the default), and the player says when WebRTC is blocked.
+- **2026-11-26, a dead relay or STUN server no longer stops playback** (#130, `3d96bcc`;
+  [`relay_share.rs`](../../crates/nfx-node/src/relay_share.rs)): the web player reopens a
+  beacon subscription that ended and stops waiting on a STUN server that never answers;
+  `nutflixd` takes a host name in `--mesh-stun` and sends each video's beacon to every
+  `--relay` within a share of that relay, backing off when the relay says it is rate-limited.
 
 ## Since 2026-10-25
 

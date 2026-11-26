@@ -57,6 +57,7 @@ import {
   selectStunFallback,
   stunHost,
 } from './src/endpoints';
+import { RESUBSCRIBE_MAX_MS, RESUBSCRIBE_MIN_MS, keepSubscribed } from './src/nostr';
 import { RELAY_INFO_MAX_BYTES, RelayInfoCache, fetchRelayInfo, parseRelayInfo, relayInfoUrl } from './src/relay-info';
 import { RelayStunBook } from './src/relay-stun';
 import { StunFallbackBook } from './src/stun-fallback';
@@ -110,6 +111,7 @@ import {
   SenderLimiter,
   eventHead,
   eventId,
+  isServerReflexive,
   offersTo,
   overBytes,
 } from './src/signal-book';
@@ -1660,6 +1662,68 @@ interface VerifiedStunAnnouncement {
     ['-WW0100-abcdefghijk?', 2],
     ['-WW0100-abcdefghijk?', 1],
   ]);
+}
+
+{
+  // keepSubscribed (decision record 0111): an ended subscription is opened again, backing off.
+  type Opened = { onEvent: (j: string) => void; onEose: () => void; onEnd: (w: string) => void; closed: boolean };
+  const opened: Opened[] = [];
+  const open = ((_u: string, _f: unknown, onEvent: (j: string) => void, onEose: () => void, onEnd: (w: string) => void) => {
+    const o: Opened = { onEvent, onEose, onEnd, closed: false };
+    opened.push(o);
+    return { close: () => { o.closed = true; } };
+  }) as Parameters<typeof keepSubscribed>[3];
+  const due: { fn: () => void; ms: number; dead: boolean }[] = [];
+  const timers = {
+    set: (fn: () => void, ms: number) => { const t = { fn, ms, dead: false }; due.push(t); return t; },
+    clear: (h: unknown) => { (h as { dead: boolean }).dead = true; },
+  };
+  const fire = (): number => {
+    const t = due.find((x) => !x.dead);
+    if (t === undefined) return -1;
+    t.dead = true;
+    t.fn();
+    return t.ms;
+  };
+  const got: string[] = [];
+  const sub = keepSubscribed('wss://r.example', {}, (j) => got.push(j), open, timers);
+  const waits: number[] = [];
+  for (let i = 0; i < 7; i++) {
+    opened.at(-1)?.onEnd('websocket error');
+    opened.at(-1)?.onEnd('websocket closed'); // a second report of the same end is ignored
+    waits.push(fire());
+  }
+  eq('keepSubscribed: reopens after 1 s, doubling to 30 s', waits, [
+    RESUBSCRIBE_MIN_MS, 2_000, 4_000, 8_000, 16_000, RESUBSCRIBE_MAX_MS, RESUBSCRIBE_MAX_MS,
+  ]);
+  eq('keepSubscribed: one subscription per open', opened.length, 8);
+  opened.at(-1)?.onEvent('{"kind":20464}');
+  opened.at(-1)?.onEnd('websocket closed');
+  eq('keepSubscribed: events reach the caller; after an answer the first wait again', [got, fire()], [['{"kind":20464}'], RESUBSCRIBE_MIN_MS]);
+  sub.close();
+  eq('keepSubscribed: close closes the open subscription', [opened.length, opened.at(-1)?.closed], [9, true]);
+  opened.at(-1)?.onEnd('websocket closed'); // its own end, reported after close
+  eq('keepSubscribed: nothing reopens after close', [fire(), opened.length], [-1, 9]);
+  const sub2 = keepSubscribed('wss://r.example', {}, () => {}, open, timers);
+  opened.at(-1)?.onEnd('websocket error');
+  sub2.close();
+  eq('keepSubscribed: close cancels a pending reopen', [fire(), opened.length], [-1, 10]);
+}
+
+{
+  // ICE gathering ends shortly after the first server-reflexive candidate (decision record 0111).
+  const line = (typ: string): string => `candidate:1 1 udp 1686052607 203.0.113.9 50000 typ ${typ} raddr 0.0.0.0 rport 0`;
+  eq('srflx: by type, or by the typ field when the browser gives no type', [
+    isServerReflexive({ type: 'srflx', candidate: line('srflx') }),
+    isServerReflexive({ type: null, candidate: line('srflx') }),
+    isServerReflexive({ candidate: line('srflx') }),
+    isServerReflexive({ candidate: 'candidate:1 1 udp 1 203.0.113.9 50000 typ srflx' }),
+    isServerReflexive({ type: 'host', candidate: line('srflx') }),
+    isServerReflexive({ candidate: line('host') }),
+    isServerReflexive({ candidate: line('relay') }),
+    isServerReflexive({ candidate: 'candidate:1 1 udp 1 203.0.113.9 50000 typ srflxy' }),
+    isServerReflexive({}),
+  ], [true, true, true, true, false, false, false, false, false]);
 }
 
 {
