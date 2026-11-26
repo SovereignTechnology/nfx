@@ -14,6 +14,7 @@ macro_rules! status {
     }};
 }
 
+pub mod control;
 pub mod daemon;
 pub mod key;
 pub mod package;
