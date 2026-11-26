@@ -60,7 +60,8 @@ directory's.
 - **A client is lenient:** it ignores reply fields it does not know, and shows a state it
   does not know as "unknown". This is what lets an older window manage a newer node.
 - The first request on a connection must be `hello`. Anything else: `bad_request`.
-- An error's `message` is fixed text chosen by the node. It may name a field. It never
+- An error is `{"code": …, "message": …}`. `message` is fixed text chosen by the node.
+  `field`, when present, names the parameter or setting the error is about. Neither ever
   repeats a value the client sent.
 
 ### Error codes
@@ -202,7 +203,7 @@ start. Reply: `{"restarted": true}`. Until the restart is done other methods ans
 - `iroh_relays`: 0 to 8 URLs, `https://` only, the same rules.
 - `cap_bytes`: 1 GiB to 1 PiB.
 - `seeding`: off stops announcing and serving; files stay.
-- A pinned field: `pinned`. Any refused value: `invalid`, naming the field.
+- A pinned field: `pinned`. Any refused value: `invalid`. Both name the setting in `field`.
 - One `settings.set` per 10 s: `rate_limited`.
 - The store, the state directory and the key files are not settings. Nothing sets them
   after the node starts.
@@ -245,8 +246,8 @@ All take `{"a": "<address>"}`.
 ```
 
 The node stops the video and forgets it. `delete_files` defaults to false. With true it
-also deletes the video's files that no other kept video shares; reply
-`{"deleted_bytes": 276134947}`. For a video with the reason `published`, `delete_files`
+also deletes the video's files that no other kept video shares. Reply:
+`{"deleted_bytes": 276134947}`, with 0 when the files stayed. For a video with the reason `published`, `delete_files`
 is refused with `denied`: that copy may be the only one. (`nfxd` on a terminal can still
 do it.)
 
@@ -284,8 +285,8 @@ starts itself); otherwise `denied`. A node run by a service manager is stopped t
 
 ## 5. Versions
 
-- `proto` is 1. A node that receives another number answers `unsupported_version` with
-  `{"proto": 1}` beside the error, and the client says which side is older.
+- `proto` is 1. A node that receives another number answers `unsupported_version`, and
+  the error carries `"proto": 1`, so the client can say which side is older.
 - New methods, new capabilities, new reply fields and new `state` values do not change
   `proto`. A client finds a method by its capability.
 - A change to the meaning of anything that exists, or a new required parameter, bumps
