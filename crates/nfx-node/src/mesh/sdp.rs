@@ -110,6 +110,21 @@ pub fn count_kinds<I: IntoIterator<Item = String>>(kinds: I) -> String {
         .join(", ")
 }
 
+/// The largest message the peer whose SDP this is takes on its data channels (RFC 8841 §6):
+/// its `a=max-message-size`, 64 KiB when it names none, unbounded (`usize::MAX`) at 0.
+#[must_use]
+pub fn max_message_size(sdp: &str) -> usize {
+    let named = sdp
+        .lines()
+        .filter_map(|l| l.trim_end().strip_prefix("a=max-message-size:"))
+        .find_map(|v| v.trim().parse::<u64>().ok());
+    match named {
+        None => 65_536,
+        Some(0) => usize::MAX,
+        Some(n) => usize::try_from(n).unwrap_or(usize::MAX),
+    }
+}
+
 /// The kinds of the candidates in `sdp`, as [`filter_candidates`] left it, counted by
 /// [`count_kinds`].
 #[must_use]
@@ -128,6 +143,25 @@ pub fn candidate_kinds(sdp: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_message_size_follows_rfc_8841() {
+        let m = "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
+        assert_eq!(max_message_size(m), 65_536, "none named: 64 KiB");
+        assert_eq!(
+            max_message_size(&format!("{m}a=max-message-size:262144\r\n")),
+            262_144
+        );
+        assert_eq!(
+            max_message_size(&format!("{m}a=max-message-size:0\r\n")),
+            usize::MAX,
+            "0: unbounded"
+        );
+        assert_eq!(
+            max_message_size(&format!("{m}a=max-message-size:1200\r\n")),
+            1_200
+        );
+    }
 
     fn sa(s: &str) -> SocketAddr {
         s.parse().unwrap()

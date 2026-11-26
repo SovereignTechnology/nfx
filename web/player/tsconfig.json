@@ -29,6 +29,7 @@
     "e2e-keep.ts",
     "e2e-keep-fixture.ts",
     "keep-unit.ts",
+    "files-unit.ts",
     "e2e-nat/driver.ts"
   ]
 }

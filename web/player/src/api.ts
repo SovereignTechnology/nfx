@@ -306,6 +306,11 @@ export interface MeshStats {
    * segment from a peer, and to its first segment from anywhere; null until each happens.
    */
   startup: { peerMs: number | null; peerSegmentMs: number | null; segmentMs: number | null };
+  /**
+   * The file channel (NFX-10 §6.10), with Nostr signaling: start-up files from peers. Null
+   * with tracker signaling. (Optional only for readers of older stats.)
+   */
+  files?: FileChannelStats | null;
 }
 
 /**
@@ -476,6 +481,18 @@ export type PlayerEvent =
   /** A fatal hls.js error (playback has stopped), or a refused `play()`. */
   | { type: 'error'; message: string };
 
+/** `MeshStats.files`: start-up files over the file channel, so far. */
+export interface FileChannelStats {
+  /** Peers with a file channel whose `hello` said they serve files, now. */
+  peers: number;
+  /** Files they delivered that verified. */
+  files: number;
+  /** Their bytes. */
+  bytes: number;
+  /** Whether the session is in the video room (NFX-10 §6.9; `open()` was given the manifest). */
+  videoRoom: boolean;
+}
+
 /**
  * What `open()` plays, from where, and how.
  *
@@ -510,6 +527,15 @@ export interface OpenCommon {
    * query, fragment or credentials. A bare string makes no claim; an `OriginSource` names
    * the renditions it is said to serve, as a hint (`Endpoints.originSources` are such).
    * Either way `open()` asks the origin what it holds.
+   *
+   * **Peers first, from the manifest** (NFX-10 §§6.9-6.10). With Nostr `signaling`, every
+   * start-up file (hash list, playlists, inits) is asked of peers on the file channel before
+   * any origin, and an origin gets a file only once peers have had `peerWaitMs` (for a first
+   * peer) or have failed it. Given `manifestJson` too, the session joins the video's video room
+   * and finds those peers from the manifest alone, and `origins` may be empty: `open()` then
+   * waits for peers (until `signal` aborts), logging that it waits. Levels then are the
+   * renditions peers' `have` names, each once its playlist and init have verified; the origins'
+   * answers above count only when no peer confirms one within the 8 s.
    */
   origins: (string | OriginSource)[];
   /**
@@ -693,7 +719,14 @@ export type OpenOptions = OpenCommon &
 export interface Stats {
   /** `hls.js <v>`, with `+ p2p-media-loader <v>` when the mesh is on. */
   engine: string;
-  origin: string;
+  /**
+   * The base the session's URLs are built on: the origin whose answers chose its levels; when
+   * peers chose them (NFX-10 §6.10), the first origin given. `null` when `open()` was given
+   * none: every file comes from peers (the session's URLs then sit under a name that never
+   * resolves, and nothing is fetched from it). Which source delivered each file is
+   * `originBytes`, `mesh.bytes` and `mesh.files`.
+   */
+  origin: string | null;
   root: string;
   /** The video the hash list names. */
   video: string;
@@ -743,7 +776,9 @@ export interface Session {
    * peers first) and the engine reads it only then, so a session opened `https-first` keeps
    * the engine's own cap after a switch. Throws a `TypeError` for a
    * value `open()` would refuse. A session without a mesh has nothing to change: it throws
-   * for `peers-only` and ignores the others.
+   * for `peers-only` and ignores the others. A session opened with no origin is `peers-only`
+   * whatever it was given, and ignores a switch to another source until `addSources` adds an
+   * origin.
    */
   setSegmentSource(source: SegmentSource): void;
   stats(): Stats;

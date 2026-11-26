@@ -116,6 +116,8 @@ export function nerdView(s: Stats, e: ElementSample, title: string | null): Nerd
     rows.push(['Segment source', mesh.source === 'peers-then-https' ? `peers, then HTTPS (${mesh.rescues} rescued)` : mesh.source === 'peers-only' ? 'peers only' : 'HTTPS first']);
     rows.push(['WebRTC', mesh.webrtc === 'blocked' ? 'blocked in this browser: no UDP candidate' : mesh.webrtc === 'ok' ? 'ok' : 'checking']);
     if (mesh.waiting) rows.push(['Waiting', mesh.connected === 0 ? 'for a peer' : 'for a connected peer to deliver']);
+    const f = mesh.files;
+    if (f) rows.push(['Start-up files from peers', `${f.files} (${formatBytes(f.bytes)}), ${f.peers} with a file channel${f.videoRoom ? ', in the video room' : ''}`]);
     if (mesh.signaling === 'nostr') {
       const sig = mesh.signal;
       rows.push(['Signaling', `Nostr, ${sig ? `${sig.open} of ` : ''}${mesh.relays.length} relays open`]);
@@ -126,8 +128,10 @@ export function nerdView(s: Stats, e: ElementSample, title: string | null): Nerd
     }
     if (mesh.rejected.length > 0) rows.push(['Refused segments', String(mesh.rejected.length)]);
   }
-  const sources: NerdSource[] = [
-    {
+  const sources: NerdSource[] = [];
+  // No origin row for a session that has none (every file from peers).
+  if (s.origin !== null) {
+    sources.push({
       kind: 'origin',
       id: host(s.origin),
       key: s.origin,
@@ -137,8 +141,8 @@ export function nerdView(s: Stats, e: ElementSample, title: string | null): Nerd
       up: 0,
       segments: mesh === null ? null : mesh.segments.http,
       connected: true,
-    },
-  ];
+    });
+  }
   for (const p of mesh?.peerList ?? []) {
     sources.push({
       kind: 'webrtc',

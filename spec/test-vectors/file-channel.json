@@ -1,0 +1,460 @@
+{
+  "description": "NFX-10 §6.10, the file channel ('nfx-files/1'). Each message is one data-channel message: a type byte (get 0, data 1, end 2, missing 3, hello 4, cancel 5, busy 6, list 7, have 8, beacons 9), then its body; integers are u32 little endian. 'messages' MUST be read as named, and a writer writes each byte for byte, except those marked 'read_only' ('have' names renditions by their index in the hash list, 0 to 31; its members other than whole and part are ignored; hello flag bits other than 0 and 1 are ignored, and sent as 0). 'transfers' are a requester's get, then the server's data messages (at most 16,384 bytes each, file bytes in order) and end; 'three_data_messages' pins a 32,858-byte file by its rule, and each message by length, first 16 bytes and sha256. 'beacons_answer' is the bytes of a beacons answer (a JSON array of compact kind-20464 events, NFX-17 §1.2). 'reader' gives, at 'now' and for the video 'video', the tier a reader gives each beacon in 'take' (1: signed by the creator; 2: a key in 'trusted'; pool: any other), and in 'sequence' which of one peer's beacons it takes in order. The beacons it MUST refuse are in file-channel-invalid.json.",
+  "label": "nfx-files/1",
+  "version": 1,
+  "flags": {
+    "files": 1,
+    "beacons": 2
+  },
+  "limits": {
+    "max_message": 16384,
+    "max_data": 16379,
+    "max_open_requests": 8,
+    "max_have_json": 2048,
+    "max_have_ids": 32,
+    "max_beacons": 4,
+    "max_beacon_bytes": 16384,
+    "max_beacons_answer": 65536,
+    "max_future_s": 30
+  },
+  "root": "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3",
+  "messages": [
+    {
+      "name": "get",
+      "req": 7,
+      "sha256": "0445210eb8755a75f545c3ae58de1162d6ec6490ad8d197ed613d7bbe17f3569",
+      "hex": "00070000000445210eb8755a75f545c3ae58de1162d6ec6490ad8d197ed613d7bbe17f3569"
+    },
+    {
+      "name": "get-hash-list",
+      "req": 1,
+      "sha256": "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3",
+      "hex": "0001000000f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+    },
+    {
+      "name": "data",
+      "req": 7,
+      "bytes_hex": "4e46582d564543544f5220696e6974207365676d656e7420627974657320286e6f742061207265616c20664d503420696e6974290a",
+      "hex": "01070000004e46582d564543544f5220696e6974207365676d656e7420627974657320286e6f742061207265616c20664d503420696e6974290a"
+    },
+    {
+      "name": "end",
+      "req": 7,
+      "hex": "0207000000"
+    },
+    {
+      "name": "missing",
+      "req": 7,
+      "hex": "0307000000"
+    },
+    {
+      "name": "hello",
+      "version": 1,
+      "flags": 3,
+      "hex": "040103"
+    },
+    {
+      "name": "hello-asks-only",
+      "version": 1,
+      "flags": 0,
+      "hex": "040100"
+    },
+    {
+      "name": "hello-unknown-flag-bits",
+      "version": 1,
+      "flags": 253,
+      "reads_as_flags": 1,
+      "read_only": true,
+      "hex": "0401fd"
+    },
+    {
+      "name": "cancel",
+      "req": 7,
+      "hex": "0507000000"
+    },
+    {
+      "name": "busy",
+      "req": 7,
+      "hex": "0607000000"
+    },
+    {
+      "name": "list",
+      "req": 2,
+      "root": "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3",
+      "hex": "0702000000f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3"
+    },
+    {
+      "name": "have",
+      "req": 2,
+      "whole": [
+        0
+      ],
+      "part": [],
+      "hex": "08020000007b2277686f6c65223a5b305d2c2270617274223a5b5d7d"
+    },
+    {
+      "name": "have-all-32",
+      "req": 2,
+      "whole": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31
+      ],
+      "part": [],
+      "hex": "08020000007b2277686f6c65223a5b302c312c322c332c342c352c362c372c382c392c31302c31312c31322c31332c31342c31352c31362c31372c31382c31392c32302c32312c32322c32332c32342c32352c32362c32372c32382c32392c33302c33315d2c2270617274223a5b5d7d"
+    },
+    {
+      "name": "have-with-another-member",
+      "req": 2,
+      "whole": [],
+      "part": [
+        0
+      ],
+      "read_only": true,
+      "hex": "08020000007b2270617274223a5b305d2c2277686f6c65223a5b5d2c2276223a327d"
+    },
+    {
+      "name": "have-index-written-1.0",
+      "req": 2,
+      "whole": [
+        1
+      ],
+      "part": [],
+      "read_only": true,
+      "hex": "08020000007b2277686f6c65223a5b312e305d2c2270617274223a5b5d7d"
+    },
+    {
+      "name": "beacons",
+      "req": 3,
+      "hex": "0903000000"
+    },
+    {
+      "name": "end-req-max",
+      "req": 4294967295,
+      "hex": "02ffffffff"
+    }
+  ],
+  "transfers": {
+    "hash_list": {
+      "sha256": "f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3",
+      "size": 1496,
+      "messages": [
+        "0001000000f1100437515b27707bac1ac04219281227c459f405a4794eb8a917238d0298f3",
+        "01010000007b0a20202276223a20312c0a202022766964656f223a20226e66783a6d61696e6e65743a313a73616c742d666c6174732d6475736b222c0a20202266696c6573223a205b0a202020207b0a202020202020226e616d65223a20226d61737465722e6d337538222c0a20202020202022726f6c65223a2022706c61796c6973742d6d6173746572222c0a20202020202022736861323536223a202235326661633766366134326133646630363832633837306530343234633835636164623730633163303264313039333161613639323235616236393735333863222c0a2020202020202273697a65223a203231300a202020207d2c0a202020207b0a202020202020226e616d65223a2022723732302e6d337538222c0a20202020202022726f6c65223a2022706c61796c697374222c0a20202020202022736861323536223a202230323462323837646438363831343463316336366562336264353032356636613634663232343138663237643435353836386435336336306235663535356233222c0a2020202020202273697a65223a203433300a202020207d2c0a202020207b0a202020202020226e616d65223a2022696e69742d3732302e6d7034222c0a20202020202022726f6c65223a2022696e6974222c0a20202020202022736861323536223a202230343435323130656238373535613735663534356333616535386465313136326436656336343930616438643139376564363133643762626531376633353639222c0a2020202020202273697a65223a2035330a202020207d2c0a202020207b0a202020202020226e616d65223a2022736567302e6d3473222c0a20202020202022726f6c65223a20227365676d656e74222c0a20202020202022736861323536223a202236303164386466343066613738353464316533333661303465656336343163646337303564303835356332343036303935373037326161313631663439663062222c0a2020202020202273697a65223a2032372c0a202020202020226475725f6d73223a20323030300a202020207d2c0a202020207b0a202020202020226e616d65223a2022736567312e6d3473222c0a20202020202022726f6c65223a20227365676d656e74222c0a20202020202022736861323536223a202238656639373164613231613464306332316532306265346537623863326563393064636163666639663263343339343732393136323562303632343237613364222c0a2020202020202273697a65223a2032372c0a202020202020226475725f6d73223a20323030300a202020207d2c0a202020207b0a202020202020226e616d65223a2022736567322e6d3473222c0a20202020202022726f6c65223a20227365676d656e74222c0a20202020202022736861323536223a202233376433663666363566636166663662306131363163303266356534373933306464623130396333383162323365316465626461376139366665643333626438222c0a2020202020202273697a65223a2032372c0a202020202020226475725f6d73223a20323030300a202020207d2c0a202020207b0a202020202020226e616d65223a20227468756d622e6a7067222c0a20202020202022726f6c65223a20227468756d62222c0a20202020202022736861323536223a202238373931326364346334313839323930383465313230643663333766633831313561613664653238323834343061636636386634333331303232633837333439222c0a2020202020202273697a65223a2032370a202020207d0a20205d2c0a20202272656e646974696f6e73223a205b0a202020207b0a202020202020226964223a202237323070222c0a20202020202022706c61796c697374223a2022723732302e6d337538222c0a2020202020202262616e647769647468223a20323530303030302c0a20202020202022636f64656373223a2022617663312e3634303031662c6d7034612e34302e32222c0a202020202020227265736f6c7574696f6e223a20223132383078373230220a202020207d0a20205d0a7d0a",
+        "0201000000"
+      ]
+    },
+    "init": {
+      "file": "init-720.mp4",
+      "sha256": "0445210eb8755a75f545c3ae58de1162d6ec6490ad8d197ed613d7bbe17f3569",
+      "size": 53,
+      "messages": [
+        "00070000000445210eb8755a75f545c3ae58de1162d6ec6490ad8d197ed613d7bbe17f3569",
+        "01070000004e46582d564543544f5220696e6974207365676d656e7420627974657320286e6f742061207265616c20664d503420696e6974290a",
+        "0207000000"
+      ]
+    },
+    "three_data_messages": {
+      "rule": "byte i of the file is i mod 251",
+      "size": 32858,
+      "sha256": "a009971f233978103bc2265671cf2d420da3ce8798f19b269600a80ae7520937",
+      "req": 9,
+      "get_hex": "0009000000a009971f233978103bc2265671cf2d420da3ce8798f19b269600a80ae7520937",
+      "messages": [
+        {
+          "length": 16384,
+          "head_hex": "0109000000000102030405060708090a",
+          "sha256": "0f42f5c8ec0a624e7a8c97cfb42f88113f2d21cc7d9bc8d05908781090a26085"
+        },
+        {
+          "length": 16384,
+          "head_hex": "0109000000404142434445464748494a",
+          "sha256": "87d3c794b64bf52464a75ad38d7d691b3eea395dc4bb9252a1c6173fd265422b"
+        },
+        {
+          "length": 105,
+          "head_hex": "0109000000808182838485868788898a",
+          "sha256": "7f652959de2698595443585452e9669c7394bf220278884d041d85a8e67c165d"
+        },
+        {
+          "length": 5,
+          "head_hex": "0209000000",
+          "sha256": "b158c8c36565ac3ca80d6fb84f90df06e7a9768f5a5671126c5072d9bfc1724f"
+        }
+      ]
+    }
+  },
+  "beacons_answer": {
+    "events": [
+      {
+        "id": "59923dc62c8a602cc3a6c35c56a6288bf75b9543e9fa58113f6ffc7bf5f160d7",
+        "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+        "created_at": 1790000020,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000140"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b\",\"relay\":\"https://iroh-relay.example/\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagnhno3bgtru4wjpjbhqvviwuh3macref4op5sdkyl4xtbw4f4mtu\",\"meta\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagkhexm3ythb6omco6aeyiv66mbw3g7z244aeidl6z67j4rfpw7ko\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"renditions\":[\"720p\"]},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "fe6ae6dc34796b35c7852a9f9c41d6ea2728f53d58f73609cbd88021297da66ba8541ce017d7941a7fe49160579d0c197f199d4d1d07a66ec60a5e5922036eb5"
+      },
+      {
+        "id": "80b47195ab09675de83f48958ba644b168e8d288547669ad2de7374e85e2a16e",
+        "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+        "created_at": 1790000010,
+        "kind": 20464,
+        "tags": [
+          [
+            "n",
+            "nfx:mainnet:1"
+          ],
+          [
+            "a",
+            "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+          ],
+          [
+            "expiration",
+            "1790000130"
+          ]
+        ],
+        "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b\",\"relay\":\"https://iroh-relay.example/\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagnhno3bgtru4wjpjbhqvviwuh3macref4op5sdkyl4xtbw4f4mtu\",\"meta\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagkhexm3ythb6omco6aeyiv66mbw3g7z244aeidl6z67j4rfpw7ko\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"renditions\":[\"720p\"]},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+        "sig": "77135f6033923ff9da3aadce08730953fe69c251108805c3830de85b86c61490d013bc7b2d8965ad0648aa94875e72ac85849d97de071c7d9a0afe49c79af32c"
+      }
+    ],
+    "text": "[{\"id\":\"59923dc62c8a602cc3a6c35c56a6288bf75b9543e9fa58113f6ffc7bf5f160d7\",\"pubkey\":\"84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb\",\"created_at\":1790000020,\"kind\":20464,\"tags\":[[\"n\",\"nfx:mainnet:1\"],[\"a\",\"38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk\"],[\"expiration\",\"1790000140\"]],\"content\":\"{\\\"v\\\":1,\\\"video\\\":\\\"nfx:mainnet:1:salt-flats-dusk\\\",\\\"endpoints\\\":[{\\\"t\\\":\\\"iroh\\\",\\\"node\\\":\\\"b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b\\\",\\\"relay\\\":\\\"https://iroh-relay.example/\\\",\\\"addrs\\\":[\\\"203.0.113.10:11204\\\"],\\\"tickets\\\":{\\\"720p\\\":\\\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagnhno3bgtru4wjpjbhqvviwuh3macref4op5sdkyl4xtbw4f4mtu\\\",\\\"meta\\\":\\\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagkhexm3ythb6omco6aeyiv66mbw3g7z244aeidl6z67j4rfpw7ko\\\"}},{\\\"t\\\":\\\"https\\\",\\\"url\\\":\\\"https://seed.example/nfx\\\"},{\\\"t\\\":\\\"webrtc\\\",\\\"tracker_urls\\\":[\\\"wss://tracker.example/announce\\\"],\\\"renditions\\\":[\\\"720p\\\"]},{\\\"t\\\":\\\"hyper\\\",\\\"drive\\\":\\\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\\\"}],\\\"chunks\\\":\\\"all\\\",\\\"price_hint\\\":1,\\\"accepts_mints\\\":[\\\"https://mint.example\\\"],\\\"free\\\":false}\",\"sig\":\"fe6ae6dc34796b35c7852a9f9c41d6ea2728f53d58f73609cbd88021297da66ba8541ce017d7941a7fe49160579d0c197f199d4d1d07a66ec60a5e5922036eb5\"},{\"id\":\"80b47195ab09675de83f48958ba644b168e8d288547669ad2de7374e85e2a16e\",\"pubkey\":\"0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f\",\"created_at\":1790000010,\"kind\":20464,\"tags\":[[\"n\",\"nfx:mainnet:1\"],[\"a\",\"38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk\"],[\"expiration\",\"1790000130\"]],\"content\":\"{\\\"v\\\":1,\\\"video\\\":\\\"nfx:mainnet:1:salt-flats-dusk\\\",\\\"endpoints\\\":[{\\\"t\\\":\\\"iroh\\\",\\\"node\\\":\\\"b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b\\\",\\\"relay\\\":\\\"https://iroh-relay.example/\\\",\\\"addrs\\\":[\\\"203.0.113.10:11204\\\"],\\\"tickets\\\":{\\\"720p\\\":\\\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagnhno3bgtru4wjpjbhqvviwuh3macref4op5sdkyl4xtbw4f4mtu\\\",\\\"meta\\\":\\\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagkhexm3ythb6omco6aeyiv66mbw3g7z244aeidl6z67j4rfpw7ko\\\"}},{\\\"t\\\":\\\"https\\\",\\\"url\\\":\\\"https://seed.example/nfx\\\"},{\\\"t\\\":\\\"webrtc\\\",\\\"tracker_urls\\\":[\\\"wss://tracker.example/announce\\\"],\\\"renditions\\\":[\\\"720p\\\"]},{\\\"t\\\":\\\"hyper\\\",\\\"drive\\\":\\\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\\\"}],\\\"chunks\\\":\\\"all\\\",\\\"price_hint\\\":1,\\\"accepts_mints\\\":[\\\"https://mint.example\\\"],\\\"free\\\":false}\",\"sig\":\"77135f6033923ff9da3aadce08730953fe69c251108805c3830de85b86c61490d013bc7b2d8965ad0648aa94875e72ac85849d97de071c7d9a0afe49c79af32c\"}]",
+    "messages": [
+      "0903000000",
+      "01030000005b7b226964223a2235393932336463363263386136303263633361366333356335366136323838626637356239353433653966613538313133663666666337626635663136306437222c227075626b6579223a2238343632366663303531396639396461623366363261393166366139616662623032396539323935616462346633343066383264306239313633326330386662222c22637265617465645f6174223a313739303030303032302c226b696e64223a32303436342c2274616773223a5b5b226e222c226e66783a6d61696e6e65743a31225d2c5b2261222c2233383530343a306265306136376163656661636562653935656430643432353338323864353532346438663331346537643635643266313533633166623662383230323530663a6e66783a6d61696e6e65743a313a73616c742d666c6174732d6475736b225d2c5b2265787069726174696f6e222c2231373930303030313430225d5d2c22636f6e74656e74223a227b5c22765c223a312c5c22766964656f5c223a5c226e66783a6d61696e6e65743a313a73616c742d666c6174732d6475736b5c222c5c22656e64706f696e74735c223a5b7b5c22745c223a5c2269726f685c222c5c226e6f64655c223a5c22623032336338336562323738343734643837616436613364656264353038343963343534333237303666336630633536653963363235363765333636396533625c222c5c2272656c61795c223a5c2268747470733a2f2f69726f682d72656c61792e6578616d706c652f5c222c5c2261646472735c223a5b5c223230332e302e3131332e31303a31313230345c225d2c5c227469636b6574735c223a7b5c22373230705c223a5c22626c6f626163796368736236776a34656f746d68767676643332367662626534697662736f62787436646377356864636b7a37646d327064776169336e623268693464746869787336326c736e357563323474666e727178736c7466706271773234646d6d7578716361676c616279717672637861676e686e6f33626774727534776a706a626871767669777568336d6163726566346f703573646b796c34787462773466346d74755c222c5c226d6574615c223a5c22626c6f626163796368736236776a34656f746d68767676643332367662626534697662736f62787436646377356864636b7a37646d327064776169336e623268693464746869787336326c736e357563323474666e727178736c7466706271773234646d6d7578716361676c616279717672637861676b6865786d3379746862366f6d636f36616579697636366d62773367377a323434616569646c367a36376a3472667077376b6f5c227d7d2c7b5c22745c223a5c2268747470735c222c5c2275726c5c223a5c2268747470733a2f2f736565642e6578616d706c652f6e66785c227d2c7b5c22745c223a5c227765627274635c222c5c22747261636b65725f75726c735c223a5b5c227773733a2f2f747261636b65722e6578616d706c652f616e6e6f756e63655c225d2c5c2272656e646974696f6e735c223a5b5c22373230705c225d7d2c7b5c22745c223a5c2268797065725c222c5c2264726976655c223a5c22363330363561383138336235326161653230323631626130306564373334376664336136393163663732373734393932663666363736663432393365366133375c227d5d2c5c226368756e6b735c223a5c22616c6c5c222c5c2270726963655f68696e745c223a312c5c22616363657074735f6d696e74735c223a5b5c2268747470733a2f2f6d696e742e6578616d706c655c225d2c5c22667265655c223a66616c73657d222c22736967223a226665366165366463333437393662333563373835326139663963343164366561323732386635336435386637333630396362643838303231323937646136366261383534316365303137643739343161376665343931363035373964306331393766313939643464316430376136366563363061356535393232303336656235227d2c7b226964223a2238306234373139356162303936373564653833663438393538626136343462313638653864323838353437363639616432646537333734653835653261313665222c227075626b6579223a2230626530613637616365666163656265393565643064343235333832386435353234643866333134653764363564326631353363316662366238323032353066222c22637265617465645f6174223a313739303030303031302c226b696e64223a32303436342c2274616773223a5b5b226e222c226e66783a6d61696e6e65743a31225d2c5b2261222c2233383530343a306265306136376163656661636562653935656430643432353338323864353532346438663331346537643635643266313533633166623662383230323530663a6e66783a6d61696e6e65743a313a73616c742d666c6174732d6475736b225d2c5b2265787069726174696f6e222c2231373930303030313330225d5d2c22636f6e74656e74223a227b5c22765c223a312c5c22766964656f5c223a5c226e66783a6d61696e6e65743a313a73616c742d666c6174732d6475736b5c222c5c22656e64706f696e74735c223a5b7b5c22745c223a5c2269726f685c222c5c226e6f64655c223a5c22623032336338336562323738343734643837616436613364656264353038343963343534333237303666336630633536653963363235363765333636396533625c222c5c2272656c61795c223a5c2268747470733a2f2f69726f682d72656c61792e6578616d706c652f5c222c5c2261646472735c223a5b5c223230332e302e3131332e31303a31313230345c225d2c5c227469636b6574735c223a7b5c22373230705c223a5c22626c6f626163796368736236776a34656f746d68767676643332367662626534697662736f62787436646377356864636b7a37646d327064776169336e623268693464746869787336326c736e357563323474666e727178736c7466706271773234646d6d7578716361676c616279717672637861676e686e6f33626774727534776a706a626871767669777568336d6163726566346f703573646b796c34787462773466346d74755c222c5c226d6574615c223a5c22626c6f626163796368736236776a34656f746d68767676643332367662626534697662736f62787436646377356864636b7a37646d327064776169336e623268693464746869787336326c736e357563323474666e727178736c7466706271773234646d6d7578716361676c616279717672637861676b6865786d3379746862366f6d636f36616579697636366d62773367377a323434616569646c367a36376a3472667077376b6f5c227d7d2c7b5c22745c223a5c2268747470735c222c5c2275726c5c223a5c2268747470733a2f2f736565642e6578616d706c652f6e66785c227d2c7b5c22745c223a5c227765627274635c222c5c22747261636b65725f75726c735c223a5b5c227773733a2f2f747261636b65722e6578616d706c652f616e6e6f756e63655c225d2c5c2272656e646974696f6e735c223a5b5c22373230705c225d7d2c7b5c22745c223a5c2268797065725c222c5c2264726976655c223a5c22363330363561383138336235326161653230323631626130306564373334376664336136393163663732373734393932663666363736663432393365366133375c227d5d2c5c226368756e6b735c223a5c22616c6c5c222c5c2270726963655f68696e745c223a312c5c22616363657074735f6d696e74735c223a5b5c2268747470733a2f2f6d696e742e6578616d706c655c225d2c5c22667265655c223a66616c73657d222c22736967223a223737313335663630333339323366663964613361616463653038373330393533666536396332353131303838303563333833306465383562383663363134393064303133626337623264383936356164303634386161393438373565373261633835383439643937646530373163376439613061666534396337396166333263227d5d",
+      "0203000000"
+    ]
+  },
+  "reader": {
+    "now": 1790000030,
+    "video": "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk",
+    "creator": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+    "trusted": [
+      "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb"
+    ],
+    "take": [
+      {
+        "name": "the creator's own",
+        "event": {
+          "id": "80b47195ab09675de83f48958ba644b168e8d288547669ad2de7374e85e2a16e",
+          "pubkey": "0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f",
+          "created_at": 1790000010,
+          "kind": 20464,
+          "tags": [
+            [
+              "n",
+              "nfx:mainnet:1"
+            ],
+            [
+              "a",
+              "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+            ],
+            [
+              "expiration",
+              "1790000130"
+            ]
+          ],
+          "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b\",\"relay\":\"https://iroh-relay.example/\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagnhno3bgtru4wjpjbhqvviwuh3macref4op5sdkyl4xtbw4f4mtu\",\"meta\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagkhexm3ythb6omco6aeyiv66mbw3g7z244aeidl6z67j4rfpw7ko\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"renditions\":[\"720p\"]},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+          "sig": "77135f6033923ff9da3aadce08730953fe69c251108805c3830de85b86c61490d013bc7b2d8965ad0648aa94875e72ac85849d97de071c7d9a0afe49c79af32c"
+        },
+        "tier": 1
+      },
+      {
+        "name": "a key with a positive trusted score",
+        "event": {
+          "id": "59923dc62c8a602cc3a6c35c56a6288bf75b9543e9fa58113f6ffc7bf5f160d7",
+          "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+          "created_at": 1790000020,
+          "kind": 20464,
+          "tags": [
+            [
+              "n",
+              "nfx:mainnet:1"
+            ],
+            [
+              "a",
+              "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+            ],
+            [
+              "expiration",
+              "1790000140"
+            ]
+          ],
+          "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b\",\"relay\":\"https://iroh-relay.example/\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagnhno3bgtru4wjpjbhqvviwuh3macref4op5sdkyl4xtbw4f4mtu\",\"meta\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagkhexm3ythb6omco6aeyiv66mbw3g7z244aeidl6z67j4rfpw7ko\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"renditions\":[\"720p\"]},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+          "sig": "fe6ae6dc34796b35c7852a9f9c41d6ea2728f53d58f73609cbd88021297da66ba8541ce017d7941a7fe49160579d0c197f199d4d1d07a66ec60a5e5922036eb5"
+        },
+        "tier": 2
+      },
+      {
+        "name": "any other key: a pool entry",
+        "event": {
+          "id": "f6039f04fd7affbcc9c6fdd92e28d998257ad97fbd5e3c87ea45eecf015a4c21",
+          "pubkey": "bff3da3328928e031a6921e1d31a4e535fa051d05ab0fc0538823701755448ae",
+          "created_at": 1790000025,
+          "kind": 20464,
+          "tags": [
+            [
+              "n",
+              "nfx:mainnet:1"
+            ],
+            [
+              "a",
+              "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+            ],
+            [
+              "expiration",
+              "1790000145"
+            ]
+          ],
+          "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b\",\"relay\":\"https://iroh-relay.example/\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagnhno3bgtru4wjpjbhqvviwuh3macref4op5sdkyl4xtbw4f4mtu\",\"meta\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagkhexm3ythb6omco6aeyiv66mbw3g7z244aeidl6z67j4rfpw7ko\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"renditions\":[\"720p\"]},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+          "sig": "a3599807ebdded86e2bac39dd3d695c8cc6b36b2be2789b797babb90f86be5bfc28b7cb4287b7507426029e67a14e05c3c6c4d6d65aaf16a30a6ec8431eaa22b"
+        },
+        "tier": "pool"
+      },
+      {
+        "name": "30 s ahead of the reader's clock",
+        "event": {
+          "id": "a5f4f849daf71c6889d04ab2cb825651c5d90c22529d6c521dd63be16dc84a0d",
+          "pubkey": "bff3da3328928e031a6921e1d31a4e535fa051d05ab0fc0538823701755448ae",
+          "created_at": 1790000060,
+          "kind": 20464,
+          "tags": [
+            [
+              "n",
+              "nfx:mainnet:1"
+            ],
+            [
+              "a",
+              "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+            ],
+            [
+              "expiration",
+              "1790000180"
+            ]
+          ],
+          "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b\",\"relay\":\"https://iroh-relay.example/\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagnhno3bgtru4wjpjbhqvviwuh3macref4op5sdkyl4xtbw4f4mtu\",\"meta\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagkhexm3ythb6omco6aeyiv66mbw3g7z244aeidl6z67j4rfpw7ko\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"renditions\":[\"720p\"]},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+          "sig": "ad99eb6fa66d466e9b64ab321b6e687ee5ff94c4fdddfc704d24f0e959ae9b63494c72debb2fe3ee071517b99f678e5372cad1e55572c93d1782fe00b9569862"
+        },
+        "tier": "pool"
+      }
+    ],
+    "sequence": {
+      "description": "read in order from one peer: per signer the newest is kept, an older one is refused",
+      "events": [
+        {
+          "id": "59923dc62c8a602cc3a6c35c56a6288bf75b9543e9fa58113f6ffc7bf5f160d7",
+          "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+          "created_at": 1790000020,
+          "kind": 20464,
+          "tags": [
+            [
+              "n",
+              "nfx:mainnet:1"
+            ],
+            [
+              "a",
+              "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+            ],
+            [
+              "expiration",
+              "1790000140"
+            ]
+          ],
+          "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b\",\"relay\":\"https://iroh-relay.example/\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagnhno3bgtru4wjpjbhqvviwuh3macref4op5sdkyl4xtbw4f4mtu\",\"meta\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagkhexm3ythb6omco6aeyiv66mbw3g7z244aeidl6z67j4rfpw7ko\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"renditions\":[\"720p\"]},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+          "sig": "fe6ae6dc34796b35c7852a9f9c41d6ea2728f53d58f73609cbd88021297da66ba8541ce017d7941a7fe49160579d0c197f199d4d1d07a66ec60a5e5922036eb5"
+        },
+        {
+          "id": "18bd990f32b32219b57cad946b92dea394e4eab59462c876ffc71bef18f89db5",
+          "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+          "created_at": 1790000005,
+          "kind": 20464,
+          "tags": [
+            [
+              "n",
+              "nfx:mainnet:1"
+            ],
+            [
+              "a",
+              "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+            ],
+            [
+              "expiration",
+              "1790000125"
+            ]
+          ],
+          "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b\",\"relay\":\"https://iroh-relay.example/\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagnhno3bgtru4wjpjbhqvviwuh3macref4op5sdkyl4xtbw4f4mtu\",\"meta\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagkhexm3ythb6omco6aeyiv66mbw3g7z244aeidl6z67j4rfpw7ko\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"renditions\":[\"720p\"]},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+          "sig": "a72565324a171900f0436463be4dbb81c565180b1559aa91deda4a01578684eef005ce03dab54f9a12c75f48e6b5dbd3f0b189396c02153f85d6fddd74f52dba"
+        },
+        {
+          "id": "d5b27cf52abc7c19e3187366373e6e2d8513ea6361a4a86062fb47b1f8e0a695",
+          "pubkey": "84626fc0519f99dab3f62a91f6a9afbb029e9295adb4f340f82d0b91632c08fb",
+          "created_at": 1790000025,
+          "kind": 20464,
+          "tags": [
+            [
+              "n",
+              "nfx:mainnet:1"
+            ],
+            [
+              "a",
+              "38504:0be0a67acefacebe95ed0d4253828d5524d8f314e7d65d2f153c1fb6b820250f:nfx:mainnet:1:salt-flats-dusk"
+            ],
+            [
+              "expiration",
+              "1790000145"
+            ]
+          ],
+          "content": "{\"v\":1,\"video\":\"nfx:mainnet:1:salt-flats-dusk\",\"endpoints\":[{\"t\":\"iroh\",\"node\":\"b023c83eb278474d87ad6a3debd50849c45432706f3f0c56e9c62567e3669e3b\",\"relay\":\"https://iroh-relay.example/\",\"addrs\":[\"203.0.113.10:11204\"],\"tickets\":{\"720p\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagnhno3bgtru4wjpjbhqvviwuh3macref4op5sdkyl4xtbw4f4mtu\",\"meta\":\"blobacychsb6wj4eotmhvvvd326vbbe4ivbsobxt6dcw5hdckz7dm2pdwai3nb2hi4dthixs62lsn5uc24tfnrqxsltfpbqw24dmmuxqcaglabyqvrcxagkhexm3ythb6omco6aeyiv66mbw3g7z244aeidl6z67j4rfpw7ko\"}},{\"t\":\"https\",\"url\":\"https://seed.example/nfx\"},{\"t\":\"webrtc\",\"tracker_urls\":[\"wss://tracker.example/announce\"],\"renditions\":[\"720p\"]},{\"t\":\"hyper\",\"drive\":\"63065a8183b52aae20261ba00ed7347fd3a691cf72774992f6f676f4293e6a37\"}],\"chunks\":\"all\",\"price_hint\":1,\"accepts_mints\":[\"https://mint.example\"],\"free\":false}",
+          "sig": "97c48d0dbe7689257d5671c9c83f46675e54a7dc54f5d325ff9462fa35defada74cee18c8d04c651d7a3ff2bed1bfcf6557c800454b05881f9f754b02fba41d4"
+        }
+      ],
+      "taken": [
+        true,
+        false,
+        true
+      ]
+    }
+  }
+}

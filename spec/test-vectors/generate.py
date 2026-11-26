@@ -42,6 +42,7 @@ from ratings import ratings_vectors  # noqa: E402  (NFX-16)
 from meshsig import meshsig_vectors  # noqa: E402  (NFX-10 §6)
 from stunad import stunad_vectors  # noqa: E402  (NFX-10 §1, STUN servers named over Nostr)
 from lookup import lookup_vectors  # noqa: E402  (NFX-17)
+from filechan import filechan_vectors  # noqa: E402  (NFX-10 §6.10)
 
 
 def uvarint(n: int) -> bytes:
@@ -503,6 +504,13 @@ def main() -> int:
             target[path[-1]] = value
         return m
 
+    def thirty_three_renditions(h):
+        # 32 more renditions, each with a playlist entry of its own (distinct name and sha256).
+        for i in range(32):
+            name = f"x{i}.m3u8"
+            h["files"].append({"name": name, "role": "playlist", "sha256": f"{i + 1:064x}", "size": 100})
+            h["renditions"].append(dict(h["renditions"][0], id=f"x{i}", playlist=name))
+
     hashlist_invalid = [
         hashlist_case("root-mismatch", "sha256(bytes) must equal the manifest root", lambda h: None,
                       root_override="00" * 32),
@@ -522,6 +530,8 @@ def main() -> int:
                       set_field(["files", 3, "name"], "init-720.mp4")),
         hashlist_case("duplicate-rendition-playlist", "renditions name distinct playlists (NFX-05 §2)",
                       lambda h: h["renditions"].append(dict(h["renditions"][0], id="480p", bandwidth=1_000_000))),
+        hashlist_case("33-renditions", "at most 32 renditions (NFX-05 §2), otherwise valid",
+                      thirty_three_renditions, segs=len(files) + 32),
     ]
     path_like = r720.replace((fhash["seg-1"] + ".m4s").encode(), b"seg/0001.m4s")
     unlisted = r720.replace(fhash["seg-1"].encode(), ("ab" * 32).encode())
@@ -986,6 +996,9 @@ def main() -> int:
         **meshsig_vectors(keypair, schnorr_id_pubkey, nostr_event),
         **stunad_vectors(keypair, nostr_event),
         **lookup_vectors(keypair, schnorr_id_pubkey, nostr_event, secrets, a_tag, beacon_content),
+        **filechan_vectors(keypair, schnorr_id_pubkey, nostr_event, namespace=NAMESPACE, a_tag=a_tag,
+                           root=root, hashlist_bytes=hashlist_bytes, fabricated=fabricated,
+                           files=files, beacon_content=beacon_content),
         "files1.json": files1,
         "canon.json": {
             "description": "NFX-11 §9 canonical JSON. 'input' is received JSON text; 'canon' "

@@ -768,6 +768,31 @@ fn rooms_derive_from_stream_swarm_ids() {
 }
 
 #[test]
+fn video_rooms_derive_from_manifest_addresses() {
+    let v = vector!("mesh-signal.json");
+    let rooms = v["video_rooms"].as_array().unwrap();
+    assert!(rooms.len() >= 3);
+    for r in rooms {
+        let addr = str_of(r, "address");
+        let id = signal::video_room_id(addr).unwrap();
+        assert_eq!(id, str_of(r, "video_room_id"));
+        assert!(id.starts_with(signal::VIDEO_ROOM_PREFIX));
+        assert_eq!(hex::encode(room_h0(&id)), str_of(r, "h0"));
+        let room = Room::video(addr).unwrap();
+        assert_eq!(hex::encode(room.secret()), str_of(r, "secret"));
+        assert_eq!(room.pubkey(), str_of(r, "pubkey"));
+    }
+    for bad in v["video_room_refused"].as_array().unwrap() {
+        let addr = str_of(bad, "address");
+        assert!(
+            signal::video_room_id(addr).is_err(),
+            "{} must be refused",
+            str_of(bad, "name")
+        );
+    }
+}
+
+#[test]
 fn events_are_reproduced_read_and_opened() {
     let v = vector!("mesh-signal.json");
     let now = v["now"].as_u64().unwrap();
@@ -1276,4 +1301,195 @@ fn a_relay_admits_valid_lookup_events() {
     let size = |e: &Event| serde_json::to_string(e).unwrap().len();
     assert!(size(&event(&v["ask"])) <= lookup::MAX_ASK_BYTES);
     assert!(size(&event(&v["tell"])) <= lookup::MAX_TELL_BYTES);
+}
+
+fn hex_bytes(v: &Value) -> Vec<u8> {
+    hex::decode(v.as_str().unwrap()).unwrap()
+}
+
+/// A requester's view of one transfer: its `get`, then the server's data messages and `end`.
+fn received_file(messages: &[Vec<u8>]) -> (u32, [u8; 32], Vec<u8>) {
+    use nfx_proto::file_channel::Message;
+    let Message::Get { req, sha } = Message::decode(&messages[0]).unwrap() else {
+        panic!("a transfer begins with get")
+    };
+    let mut file = Vec::new();
+    for (i, m) in messages[1..].iter().enumerate() {
+        match Message::decode(m).unwrap() {
+            Message::Data { req: r, bytes } => {
+                assert_eq!(r, req);
+                file.extend_from_slice(bytes);
+            }
+            Message::End { req: r } => {
+                assert_eq!(r, req);
+                assert_eq!(i, messages.len() - 2, "end comes last");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    (req, sha, file)
+}
+
+#[test]
+fn file_channel_messages_read_and_write_as_the_vector() {
+    use nfx_proto::file_channel::{self as fc, Message};
+    let v = vector!("file-channel.json");
+    assert_eq!(str_of(&v, "label"), fc::LABEL);
+    let limits = &v["limits"];
+    assert_eq!(limits["max_message"], fc::MAX_MESSAGE);
+    assert_eq!(limits["max_data"], fc::MAX_DATA);
+    assert_eq!(limits["max_open_requests"], fc::MAX_OPEN_REQUESTS);
+    assert_eq!(limits["max_have_json"], fc::MAX_HAVE_JSON);
+    assert_eq!(limits["max_have_ids"], fc::MAX_HAVE_IDS);
+    assert_eq!(limits["max_beacons"], fc::MAX_BEACONS);
+    assert_eq!(limits["max_beacons_answer"], fc::MAX_BEACONS_ANSWER);
+    for m in v["messages"].as_array().unwrap() {
+        let name = str_of(m, "name");
+        let bytes = hex_bytes(&m["hex"]);
+        let got = Message::decode(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let kind = name.split('-').next().unwrap();
+        assert_eq!(fc::TYPES[usize::from(bytes[0])], kind, "{name}");
+        if let Some(req) = m["req"].as_u64() {
+            assert_eq!(u64::from(got.req().unwrap()), req, "{name}");
+        }
+        match &got {
+            Message::Get { sha, .. } => assert_eq!(hex::encode(sha), str_of(m, "sha256")),
+            Message::List { root, .. } => assert_eq!(hex::encode(root), str_of(m, "root")),
+            Message::Data { bytes, .. } => assert_eq!(*bytes, &hex_bytes(&m["bytes_hex"])[..]),
+            Message::Hello { flags, .. } => {
+                let want = m["reads_as_flags"]
+                    .as_u64()
+                    .or(m["flags"].as_u64())
+                    .unwrap();
+                assert_eq!(
+                    u64::from(flags & (fc::FLAG_FILES | fc::FLAG_BEACONS)),
+                    want,
+                    "{name}"
+                );
+            }
+            Message::Have { have, .. } => {
+                let ids = |k: &str| -> Vec<u8> {
+                    m[k].as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|x| u8::try_from(x.as_u64().unwrap()).unwrap())
+                        .collect()
+                };
+                assert_eq!(have.whole, ids("whole"), "{name}");
+                assert_eq!(have.part, ids("part"), "{name}");
+            }
+            _ => {}
+        }
+        if m["read_only"].as_bool() != Some(true) {
+            assert_eq!(got.encode().unwrap(), bytes, "{name} is written as read");
+        }
+    }
+}
+
+#[test]
+fn file_channel_transfers_rebuild_their_files() {
+    use nfx_proto::file_channel as fc;
+    let v = vector!("file-channel.json");
+    let t = &v["transfers"];
+    for key in ["hash_list", "init"] {
+        let msgs: Vec<Vec<u8>> = t[key]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(hex_bytes)
+            .collect();
+        let (req, sha, file) = received_file(&msgs);
+        assert_eq!(hex::encode(sha), str_of(&t[key], "sha256"), "{key}");
+        assert_eq!(
+            hex::encode(sha256(&file)),
+            str_of(&t[key], "sha256"),
+            "{key}"
+        );
+        assert_eq!(file.len() as u64, t[key]["size"].as_u64().unwrap());
+        assert_eq!(fc::data_messages(req, &file).unwrap(), msgs[1..], "{key}");
+    }
+    assert_eq!(str_of(&t["hash_list"], "sha256"), str_of(&v, "root"));
+    let big_v = &t["three_data_messages"];
+    let size = usize::try_from(big_v["size"].as_u64().unwrap()).unwrap();
+    let big: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    assert_eq!(hex::encode(sha256(&big)), str_of(big_v, "sha256"));
+    let req = u32::try_from(big_v["req"].as_u64().unwrap()).unwrap();
+    let msgs = fc::data_messages(req, &big).unwrap();
+    let want = big_v["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), want.len());
+    assert_eq!(msgs.len(), 4, "three data, then end");
+    for (m, w) in msgs.iter().zip(want) {
+        assert_eq!(m.len() as u64, w["length"].as_u64().unwrap());
+        assert_eq!(hex::encode(&m[..m.len().min(16)]), str_of(w, "head_hex"));
+        assert_eq!(hex::encode(sha256(m)), str_of(w, "sha256"));
+    }
+}
+
+#[test]
+fn file_channel_beacons_answers_are_one_spelling() {
+    use nfx_proto::file_channel as fc;
+    let v = vector!("file-channel.json");
+    let a = &v["beacons_answer"];
+    let events: Vec<Event> = a["events"].as_array().unwrap().iter().map(event).collect();
+    let text = str_of(a, "text");
+    assert_eq!(fc::beacons_answer(&events).unwrap(), text.as_bytes());
+    assert_eq!(fc::read_beacons_answer(text.as_bytes()).unwrap(), events);
+    let msgs: Vec<Vec<u8>> = a["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(hex_bytes)
+        .collect();
+    assert_eq!(msgs[0], fc::Message::Beacons { req: 3 }.encode().unwrap());
+    let (_, _, body) = received_file(
+        &[fc::Message::Get {
+            req: 3,
+            sha: [0; 32],
+        }
+        .encode()
+        .unwrap()]
+        .into_iter()
+        .chain(msgs[1..].iter().cloned())
+        .collect::<Vec<_>>(),
+    );
+    assert_eq!(body, text.as_bytes());
+    let bad = vector!("file-channel-invalid.json");
+    for case in bad["beacons_refused"].as_array().unwrap() {
+        assert!(
+            fc::read_beacons_answer(str_of(case, "text").as_bytes()).is_err(),
+            "{} must be refused",
+            str_of(case, "name")
+        );
+    }
+}
+
+#[test]
+fn file_channel_protocol_errors_close_the_channel() {
+    use nfx_proto::file_channel::{Channel, Message};
+    let v = vector!("file-channel-invalid.json");
+    for m in v["messages"].as_array().unwrap() {
+        assert!(
+            Message::decode(&hex_bytes(&m["hex"])).is_err(),
+            "{} must be refused",
+            str_of(m, "name")
+        );
+    }
+    for s in v["sequences"].as_array().unwrap() {
+        let name = str_of(s, "name");
+        let sent: Vec<Vec<u8>> = s["sent"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(hex_bytes)
+            .collect();
+        let mut ch = Channel::default();
+        for (i, m) in sent.iter().enumerate() {
+            let got = ch.read(m);
+            if i + 1 == sent.len() {
+                assert!(got.is_err(), "{name}: the last message closes the channel");
+            } else {
+                got.unwrap_or_else(|e| panic!("{name}: message {i}: {e}"));
+            }
+        }
+    }
 }

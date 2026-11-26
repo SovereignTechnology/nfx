@@ -3,7 +3,9 @@
 //! with no tracker. Signaling-compatible with the NIP-DC draft §§2, 4–6 (its room proof,
 //! presence, offer and answer); not a NIP-DC implementation.
 //!
-//! - [`Room`]: one per stream swarm (NFX-10 §2), its key derived from the swarm ID.
+//! - [`Room`]: one per stream swarm (NFX-10 §2), its key derived from the swarm ID; and one per
+//!   video, its **video room** (§6.9), derived from the manifest's address alone
+//!   ([`video_room_id`], [`Room::video`]).
 //! - [`Session`]: a page's (or node's) per-session key and id; it builds every event, and
 //!   opens the offers and answers sent to it.
 //! - [`read`]: the reader's checks, in an order that does the cheap ones first and decrypts
@@ -26,6 +28,9 @@ pub const PROTOCOL: &str = "nfx-mesh/1";
 pub const APP: &str = "nfx";
 /// The label the room secret is derived under.
 pub const ROOM_LABEL: &str = "nfx/1/web/room";
+/// The prefix of every video room ID (NFX-10 §6.9). No stream swarm ID begins with it: those
+/// continue `nfx/1/web/nfx:`, since a namespace begins `nfx:`.
+pub const VIDEO_ROOM_PREFIX: &str = "nfx/1/web/video/";
 /// A presence's lifetime: `expiration - created_at` is at most this, and senders use it.
 pub const PRESENCE_TTL: u64 = 90;
 /// How often a session repeats its presence, in seconds.
@@ -62,6 +67,18 @@ pub fn room_h0(stream_swarm_id: &str) -> [u8; 32] {
     sha256(&pre)
 }
 
+/// The video room ID of a manifest address `38504:<creator key>:<namespace>:<video-id>` (the
+/// `a` value of the video's beacons and lookups): [`VIDEO_ROOM_PREFIX`] then that address
+/// (NFX-10 §6.9). Refuses anything that is not a kind-38504 address with a 64-lowercase-hex
+/// creator and a valid `<namespace>:<video-id>`.
+pub fn video_room_id(manifest_address: &str) -> Result<String> {
+    let (creator, video) = crate::beacon::parse_a_tag(manifest_address)?;
+    Ok(format!(
+        "{VIDEO_ROOM_PREFIX}{}:{creator}:{video}",
+        crate::KIND_MANIFEST
+    ))
+}
+
 /// Whether `h` is a secp256k1 secret key: `0 < h < n`, read big-endian.
 #[must_use]
 pub fn is_valid_scalar(h: &[u8; 32]) -> bool {
@@ -78,6 +95,12 @@ impl Room {
             h = sha256(&h);
         }
         Self::from_secret(h).expect("a valid scalar")
+    }
+
+    /// The video room of a manifest address (NFX-10 §6.9): derived as a stream room is, from
+    /// [`video_room_id`].
+    pub fn video(manifest_address: &str) -> Result<Self> {
+        Ok(Self::derive(&video_room_id(manifest_address)?))
     }
 
     /// A room from its secret (tests and vectors).
@@ -708,6 +731,36 @@ mod tests {
             b.answer(&room, a.pubkey(), "abc", SDP, &[6; 32], 1)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_video_room_is_named_by_the_manifest_address_and_never_a_stream_room() {
+        let creator = "a".repeat(64);
+        let addr = format!("38504:{creator}:nfx:regtest:1:mesh-e2e");
+        assert_eq!(
+            video_room_id(&addr).unwrap(),
+            format!("nfx/1/web/video/38504:{creator}:nfx:regtest:1:mesh-e2e")
+        );
+        let video = Room::video(&addr).unwrap();
+        assert_eq!(
+            video.pubkey(),
+            Room::derive(&format!("nfx/1/web/video/{addr}")).pubkey()
+        );
+        assert_ne!(
+            video.pubkey(),
+            Room::derive("nfx/1/web/nfx:regtest:1:mesh-e2e/720p").pubkey()
+        );
+        let other = format!("38504:{}:nfx:regtest:1:mesh-e2e", "b".repeat(64));
+        assert_ne!(video.pubkey(), Room::video(&other).unwrap().pubkey());
+        for bad in [
+            String::new(),
+            format!("38505:{creator}:nfx:regtest:1:mesh-e2e"),
+            format!("38504:{}:nfx:regtest:1:mesh-e2e", "A".repeat(64)),
+            format!("38504:{creator}:nfx:regtest:1"),
+            format!("nfx/1/web/video/{addr}"),
+        ] {
+            assert!(video_room_id(&bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -6,6 +6,9 @@
 //! Neither downloads from browsers: they serve from the node's content store, which
 //! re-verifies every file on read, and ignore the segment data and announcements peers send.
 //!
+//! The mesh's connections also carry the file channel (NFX-10 §6.10, [`crate::file_serve`])
+//! when [`Conn::files_allowed`] is set: the bridge's never do.
+//!
 //! Per connection: requests are budgeted ([`PEER_BURST`], [`PEER_RATE`]; a peer over its
 //! budget is dropped), queued bytes are capped ([`MAX_QUEUED`]; a peer that does not read is
 //! dropped), and a new request cancels the upload in progress, as the protocol requires. Per
@@ -18,16 +21,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use nfx_proto::file_channel as fc;
 use nfx_proto::hashlist::{HashList, Role};
-use str0m::channel::ChannelId;
+use str0m::channel::{ChannelConfig, ChannelId};
 use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
 
+use crate::file_serve::{FileChan, Verdict, VideoFiles};
 use crate::p2pml::{self, Command, Reassembler};
 use crate::store::ContentStore;
 
 /// An open connection that asks for nothing for this long is dropped.
+/// The smallest peer `max-message-size` the file channel runs over: its largest `have` with
+/// its header (NFX-10 §6.10). Below it the channel is closed when it opens.
+pub const MIN_FILES_MESSAGE: usize = 5 + fc::MAX_HAVE_JSON;
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Segment bytes per data-channel message.
 const CHUNK: usize = 16 * 1024;
@@ -234,6 +242,16 @@ pub(crate) struct Conn {
     /// ICE found a working pair, and DTLS is up on it.
     pub ice_up: bool,
     pub dtls_up: bool,
+    /// The file channel may open on this connection (a mesh connection: NFX-10 §6.10).
+    pub files_allowed: bool,
+    /// A video-room connection (§6.9): the file channel is its only channel.
+    pub files_only: bool,
+    /// The open file channel.
+    pub files: Option<FileChan>,
+    /// We opened the file channel (the offerer of a stream-room connection), or tried to.
+    pub files_asked: bool,
+    /// The peer's `max-message-size` (RFC 8841 §6), from its SDP: no message we send is larger.
+    pub max_message: usize,
 }
 
 impl Conn {
@@ -255,6 +273,35 @@ impl Conn {
             served: 0,
             ice_up: false,
             dtls_up: false,
+            files_allowed: false,
+            files_only: false,
+            files: None,
+            files_asked: false,
+            max_message: 65_536,
+        }
+    }
+
+    /// The offerer of a stream-room connection opens the file channel once the first channel
+    /// is open, never with the offer (§6.10): a peer that predates it takes the first channel
+    /// that opens as p2p-media-loader's.
+    pub(crate) fn open_files_channel(&mut self) {
+        if self.files_allowed && !self.files_only && !self.files_asked && self.channel.is_some() {
+            self.files_asked = true;
+            self.rtc.direct_api().create_data_channel(ChannelConfig {
+                label: fc::LABEL.into(),
+                ..Default::default()
+            });
+        }
+    }
+
+    /// Close the file channel: a protocol error, or no `hello`. A video-room connection, which
+    /// exists to carry it, closes with it.
+    fn close_files(&mut self) {
+        if let Some(f) = self.files.take() {
+            self.rtc.direct_api().close_data_channel(f.id);
+        }
+        if self.files_only {
+            self.dead = true;
         }
     }
 }
@@ -296,6 +343,18 @@ impl Uploader {
     /// write while its send buffer is full; the rest waits for network input (the peer's
     /// acknowledgements), which is what frees the buffer. `swarm` is the connection's.
     pub(crate) fn pump(&mut self, p: &mut Conn, swarm: Option<&Swarm>, now: Instant) {
+        self.pump_with(p, swarm, None, now);
+    }
+
+    /// [`pump`](Self::pump), with what the connection's file channel may serve: the hash
+    /// lists of its room's video.
+    pub(crate) fn pump_with(
+        &mut self,
+        p: &mut Conn,
+        swarm: Option<&Swarm>,
+        files: Option<&VideoFiles>,
+        now: Instant,
+    ) {
         loop {
             loop {
                 match p.rtc.poll_output() {
@@ -306,7 +365,7 @@ impl Uploader {
                     Ok(Output::Transmit(t)) => {
                         let _ = self.socket.try_send_to(&t.contents, t.destination);
                     }
-                    Ok(Output::Event(e)) => self.event(p, e, swarm, now),
+                    Ok(Output::Event(e)) => self.event(p, e, swarm, files, now),
                     Err(_) => {
                         p.dead = true;
                         return;
@@ -316,20 +375,71 @@ impl Uploader {
             if p.dead {
                 return;
             }
-            let (Some(id), Some((_, msg))) = (p.channel, p.out.front()) else {
+            let main = self.write_main(p);
+            if p.dead {
                 return;
-            };
-            match p.rtc.channel(id).map(|mut c| c.write(true, msg)) {
-                Some(Ok(true)) => {
-                    if let Some((_, m)) = p.out.pop_front() {
-                        p.queued -= m.len();
-                    }
+            }
+            let file = self.write_files(p);
+            if p.dead {
+                return;
+            }
+            if !main && !file {
+                break;
+            }
+        }
+        if let Some(due) = p.files.as_ref().and_then(FileChan::hello_due) {
+            if now >= due {
+                p.close_files();
+            } else {
+                p.wake = p.wake.min(due);
+            }
+        }
+    }
+
+    /// Write the next message of the segment channel. Whether one went.
+    fn write_main(&mut self, p: &mut Conn) -> bool {
+        let (Some(id), Some((_, msg))) = (p.channel, p.out.front()) else {
+            return false;
+        };
+        match p.rtc.channel(id).map(|mut c| c.write(true, msg)) {
+            Some(Ok(true)) => {
+                if let Some((_, m)) = p.out.pop_front() {
+                    p.queued -= m.len();
                 }
-                Some(Ok(false)) => return,
-                _ => {
-                    p.dead = true;
-                    return;
-                }
+                true
+            }
+            Some(Ok(false)) => false,
+            _ => {
+                p.dead = true;
+                false
+            }
+        }
+    }
+
+    /// Write the next message of the file channel, reading the next file's bytes in while the
+    /// channel holds less than 256 KiB. Whether one went.
+    fn write_files(&mut self, p: &mut Conn) -> bool {
+        let Conn { rtc, files, .. } = p;
+        let Some(f) = files else {
+            return false;
+        };
+        let Some(mut ch) = rtc.channel(f.id) else {
+            return false;
+        };
+        let (cache, store) = (&mut self.cache, &*self.store);
+        f.refill(ch.buffered_amount(), &mut |sha| cache.get(sha, store));
+        let Some((_, msg)) = f.out.front() else {
+            return false;
+        };
+        match ch.write(true, msg) {
+            Ok(true) => {
+                f.out.pop_front();
+                true
+            }
+            Ok(false) => false,
+            Err(_) => {
+                p.close_files();
+                false
             }
         }
     }
@@ -349,21 +459,66 @@ impl Uploader {
         }
     }
 
-    fn event(&mut self, p: &mut Conn, e: Event, swarm: Option<&Swarm>, now: Instant) {
+    fn event(
+        &mut self,
+        p: &mut Conn,
+        e: Event,
+        swarm: Option<&Swarm>,
+        files: Option<&VideoFiles>,
+        now: Instant,
+    ) {
         match e {
-            // One data channel per connection: a second open is ignored.
-            Event::ChannelOpen(id, _) if p.channel.is_none() => {
-                p.channel = Some(id);
-                p.active = now;
-                let loaded = swarm.map(|s| announceable(&s.loaded)).unwrap_or_default();
-                queue(
-                    p,
-                    None,
-                    &Command::Announcement {
-                        loaded,
-                        loading: vec![],
-                    },
+            // A mesh connection takes the file channel by its label alone (one), the first
+            // other channel as p2p-media-loader's (none on a video-room connection), and closes
+            // any other.
+            Event::ChannelOpen(id, label) if p.files_allowed => {
+                if label == fc::LABEL && p.files.is_none() && p.max_message >= MIN_FILES_MESSAGE {
+                    p.files = Some(FileChan::new(id, now, p.max_message));
+                    p.active = now;
+                } else if label != fc::LABEL && p.channel.is_none() && !p.files_only {
+                    self.open_main(p, id, swarm, now);
+                } else {
+                    p.rtc.direct_api().close_data_channel(id);
+                }
+            }
+            // One data channel per bridge connection: a second open is ignored.
+            Event::ChannelOpen(id, _) if p.channel.is_none() => self.open_main(p, id, swarm, now),
+            Event::ChannelData(d) if p.files.as_ref().is_some_and(|f| f.id == d.id) => {
+                let empty = VideoFiles::default();
+                let files = files.unwrap_or(&empty);
+                let store = &*self.store;
+                let global = &mut self.budget;
+                let Conn {
+                    files: chan,
+                    budget,
+                    ..
+                } = p;
+                let Some(f) = chan else {
+                    return;
+                };
+                let before = f.last_answer;
+                let verdict = f.read(
+                    &d.data,
+                    files,
+                    store,
+                    now,
+                    &mut || budget.take(now, PEER_BURST, PEER_RATE),
+                    &mut || global.take(now, GLOBAL_BURST, GLOBAL_RATE),
                 );
+                if f.last_answer != before {
+                    p.active = now;
+                }
+                match verdict {
+                    Verdict::Fine => {}
+                    Verdict::Close => p.close_files(),
+                    Verdict::Drop => p.dead = true,
+                }
+            }
+            Event::ChannelClose(id) if p.files.as_ref().is_some_and(|f| f.id == id) => {
+                p.files = None;
+                if p.files_only {
+                    p.dead = true;
+                }
             }
             Event::ChannelData(d) if Some(d.id) == p.channel => {
                 // Raw segment data would only follow a request of ours, and nothing here
@@ -386,6 +541,21 @@ impl Uploader {
             Event::Connected => p.dtls_up = true,
             _ => {}
         }
+    }
+
+    /// The segment channel opened: announce what the swarm holds.
+    fn open_main(&mut self, p: &mut Conn, id: ChannelId, swarm: Option<&Swarm>, now: Instant) {
+        p.channel = Some(id);
+        p.active = now;
+        let loaded = swarm.map(|s| announceable(&s.loaded)).unwrap_or_default();
+        queue(
+            p,
+            None,
+            &Command::Announcement {
+                loaded,
+                loading: vec![],
+            },
+        );
     }
 
     fn command(&mut self, p: &mut Conn, cmd: Command, swarm: Option<&Swarm>, now: Instant) {

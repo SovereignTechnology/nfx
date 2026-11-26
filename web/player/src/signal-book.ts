@@ -76,6 +76,13 @@ export class PresenceBook {
     return p !== undefined && p.expiration > now;
   }
 
+  /** The peers present at `now`. */
+  presentPeers(now: number): string[] {
+    const out: string[] = [];
+    for (const [k, p] of this.#peers) if (p.expiration > now) out.push(k);
+    return out;
+  }
+
   /** Forget peers whose presence ended (a disconnect once no event older than it is fresh). */
   prune(now: number): void {
     for (const [k, p] of this.#peers) {

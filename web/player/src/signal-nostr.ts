@@ -17,6 +17,18 @@
  *   claims a peer from the engine before negotiating and reports each peer connected or
  *   failed, so the engine keeps its peer de-duplication and limits.
  *
+ * The file channel (NFX-10 §6.10): on a stream-room connection the offerer opens an
+ * `nfx-files/1` channel once the first is open, never with the offer, and either side takes a
+ * channel of that label, by its label alone, as the connection's file channel: it goes to the
+ * session's `onFileChannel` (./file-peer.ts reads it), never to p2p-media-loader.
+ *
+ * The video room (NFX-10 §6.9, `NostrSignaler.videoRoom`): a `RoomClient` in the room named by
+ * the manifest's address, which a page joins before it holds the hash list. There it offers
+ * only while it wants start-up files, whatever the order of keys, only to present peers it is
+ * not connected to, at most `VIDEO_PENDING_OFFERS` pending, picked at random; each offer
+ * carries the file channel alone, which goes to `onFileChannel` (never to the engine). It
+ * answers no offer there: a page that serves no start-up files does not.
+ *
  * Every event is built, signed, checked and decrypted by nfx-proto in WASM (MeshSession,
  * MeshRoom), the same code native peers use. Every event is signed when it is sent: stock
  * relays refuse ephemeral events older than about 60 s. Relays and events are untrusted:
@@ -27,6 +39,8 @@
 import { PeerConnectError } from 'p2p-media-loader-core';
 
 import { MeshRoom, MeshSession } from '../out/wasm/nfx_wasm.js';
+
+import { LABEL as FILE_CHANNEL_LABEL, MIN_PEER_MESSAGE } from './file-channel';
 
 import type { RemoteCandidates } from './api';
 import type { RelayStunBook } from './relay-stun';
@@ -52,6 +66,8 @@ export { LIMITS, PresenceBook, SeenIds, SenderLimiter, eventId, nowSeconds, offe
 export const PRESENCE_INTERVAL_MS = 30_000;
 export const KIND_SIGNAL = 25050;
 export const PROTOCOL = 'nfx-mesh/1';
+/** A video room's offers of ours pending at once, at most (NFX-10 §6.9). */
+export const VIDEO_PENDING_OFFERS = 3;
 const FRESH_SECONDS = 60;
 const DEFAULT_ICE_GATHERING_TIMEOUT_MS = 5_000;
 /**
@@ -361,6 +377,11 @@ export class NostrSignaler {
   readonly stats: SignalerStats = { sent: 0, received: 0, offers: 0, answers: 0 };
   readonly #rooms = new Set<RoomClient>();
   #destroyed = false;
+  /**
+   * Given each file channel a connection of this session carries (NFX-10 §6.10), with the
+   * peer's session key; null (the default): such a channel is closed.
+   */
+  onFileChannel: ((peer: string, channel: RTCDataChannel, room: 'stream' | 'video') => void) | null = null;
 
   constructor(
     readonly relays: readonly string[],
@@ -374,6 +395,36 @@ export class NostrSignaler {
   ) {
     this.session = newSession();
     this.pool = new RelayPool(relays, log);
+  }
+
+  /**
+   * Join the video room of the manifest at `manifestA` (NFX-10 §6.9). `wanting` says whether
+   * the page still wants start-up files (it offers only then), `connected` whether it already
+   * reaches a peer (in any room). Its file channels go to `onFileChannel`.
+   */
+  videoRoom(
+    manifestA: string,
+    o: {
+      rtcConfig: () => RTCConfiguration | undefined;
+      wanting: () => boolean;
+      connected: (peer: string) => boolean;
+      iceGatheringTimeout?: () => number;
+      connectionTimeout?: () => number;
+    },
+  ): RoomClient {
+    const ctx: SignalingContext = {
+      infoHash: '',
+      streamSwarmId: MeshRoom.videoRoomId(manifestA),
+      peerId: this.session.pubkey,
+      rtcConfig: o.rtcConfig,
+      claimPeer: (peer) => !o.connected(peer),
+      shouldGenerateOffers: o.wanting,
+      ...(o.iceGatheringTimeout ? { iceGatheringTimeout: o.iceGatheringTimeout } : {}),
+      ...(o.connectionTimeout ? { connectionTimeout: o.connectionTimeout } : {}),
+    };
+    const client = new RoomClient(ctx, this, () => this.#rooms.delete(client), 'video');
+    if (!this.#destroyed) this.#rooms.add(client);
+    return client;
   }
 
   /** p2p-media-loader's `signalingClientFactory`: one client per stream swarm. */
@@ -468,7 +519,13 @@ export class RoomClient {
   #started = false;
   #destroyed = false;
 
-  constructor(ctx: SignalingContext, signaler: NostrSignaler, forget: () => void) {
+  /** A stream room (the engine's), or a video room (NFX-10 §6.9). */
+  readonly kind: 'stream' | 'video';
+  /** The video room's connections, by peer: closed with their file channel, or on destroy. */
+  readonly #videoConns = new Map<string, RTCPeerConnection>();
+
+  constructor(ctx: SignalingContext, signaler: NostrSignaler, forget: () => void, kind: 'stream' | 'video' = 'stream') {
+    this.kind = kind;
     this.#ctx = ctx;
     this.#s = signaler;
     this.#forget = forget;
@@ -571,11 +628,14 @@ export class RoomClient {
    * offer to that peer is still backing off.
    */
   #maybeOffer(peer: string): void {
-    if (this.#negotiating.has(peer) || !offersTo(this.#me, peer)) return;
+    const video = this.kind === 'video';
+    if (this.#negotiating.has(peer) || (!video && !offersTo(this.#me, peer))) return;
+    if (video && this.#videoConns.has(peer)) return;
     if (this.#negotiating.size >= LIMITS.negotiationsPerRoom) return;
     let offering = 0;
     for (const n of this.#negotiating.values()) if (n.role === 'offerer') offering += 1;
-    if (offering >= LIMITS.pendingOffersPerRoom || !this.#backoff.allowed(peer, Date.now())) return;
+    const cap = video ? VIDEO_PENDING_OFFERS : LIMITS.pendingOffersPerRoom;
+    if (offering >= cap || !this.#backoff.allowed(peer, Date.now())) return;
     if (!this.#ctx.shouldGenerateOffers() || !this.#ctx.claimPeer(peer)) return;
     void this.#offer(peer);
   }
@@ -589,7 +649,23 @@ export class RoomClient {
     }
   }
 
+  /**
+   * A video room: offer to more of its present peers, picked at random, up to the pending
+   * cap (the file channel's provider asks when every peer has failed a file).
+   */
+  offerMore(): void {
+    if (this.kind !== 'video' || this.#destroyed || this.#room === null) return;
+    const peers = this.#presence.presentPeers(nowSeconds());
+    for (let i = peers.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [peers[i], peers[j]] = [peers[j]!, peers[i]!];
+    }
+    for (const p of peers) this.#maybeOffer(p);
+  }
+
   #onOffer(peer: string, offerId: string, content: string): void {
+    // A page serves no start-up files, so it answers no video-room offer (NFX-10 §6.9).
+    if (this.kind === 'video') return;
     const held = this.#negotiating.get(peer);
     if (held && (held.role === 'answerer' || offersTo(this.#me, peer))) return; // ours stands, or a repeat
     if (!held && this.#negotiating.size >= LIMITS.negotiationsPerRoom) return;
@@ -640,6 +716,10 @@ export class RoomClient {
       return null;
     }
     if (extra.length > 0) this.#s.pool.log(`mesh: no STUN mapping: also asking ${extra.length} seeder STUN server(s) for one peer`);
+    // The peer's file channel, whenever it opens it: by its label alone, for the connection's life.
+    pc.addEventListener('datachannel', (e: RTCDataChannelEvent) => {
+      if (e.channel.label === FILE_CHANNEL_LABEL) this.#fileChannel(peer, e.channel, pc);
+    });
     const n: Negotiation = { role, pc, fallback: extra.length > 0, offerId, answer: null, superseded: false, abort: new AbortController() };
     this.#negotiating.set(peer, n);
     return n;
@@ -650,7 +730,9 @@ export class RoomClient {
     if (n === null) return;
     const { pc } = n;
     try {
-      const channel = pc.createDataChannel('webtorrent', this.#ctx.channelConfig);
+      const video = this.kind === 'video';
+      // In a video room the file channel is the only channel, opened with the offer.
+      const channel = video ? pc.createDataChannel(FILE_CHANNEL_LABEL) : pc.createDataChannel('webtorrent', this.#ctx.channelConfig);
       channel.binaryType = 'arraybuffer';
       await pc.setLocalDescription(await pc.createOffer());
       await this.#gathered(pc, n.abort.signal);
@@ -678,7 +760,24 @@ export class RoomClient {
       this.#check(n, peer);
       this.#negotiating.delete(peer);
       this.#backoff.connected(peer);
+      if (video) {
+        this.#videoConns.set(peer, pc);
+        open.addEventListener('close', () => {
+          if (this.#videoConns.get(peer) === pc) this.#videoConns.delete(peer);
+          pc.close();
+        });
+        this.#fileChannel(peer, open, pc);
+        return;
+      }
       this.#emit('peerConnected', { peerId: peer, connection: pc, channel: open });
+      // The offerer opens the file channel once the first is open (NFX-10 §6.10).
+      if (this.#s.onFileChannel !== null) {
+        try {
+          this.#fileChannel(peer, pc.createDataChannel(FILE_CHANNEL_LABEL), pc);
+        } catch {
+          // a closed connection: nothing to open
+        }
+      }
     } catch (e) {
       if (!n.superseded && !this.#destroyed) this.#backoff.failed(peer, Date.now());
       this.#failed(n, peer, e);
@@ -816,7 +915,8 @@ export class RoomClient {
         else if (c.readyState === 'closing' || c.readyState === 'closed') queueMicrotask(onClose);
       };
       const onChannel = (e: RTCDataChannelEvent): void => {
-        if (channel === null) bind(e.channel);
+        // The file channel is never p2p-media-loader's, whenever it opens.
+        if (channel === null && e.channel.label !== FILE_CHANNEL_LABEL) bind(e.channel);
       };
       // The answerer's wait also covers its own answer's gathering and the trip back.
       const wait =
@@ -839,6 +939,29 @@ export class RoomClient {
         }
       };
     });
+  }
+
+  /** A file channel of a connection with `peer`: the session's, or closed when it takes none. */
+  #fileChannel(peer: string, channel: RTCDataChannel, pc: RTCPeerConnection): void {
+    const take = this.#s.onFileChannel;
+    // A peer whose `max-message-size` is below the longest `have` with its header gets no
+    // file channel (NFX-10 §6.10); the size is known once the SCTP transport is up.
+    const tooSmall = (): boolean => (pc.sctp?.maxMessageSize ?? Infinity) < MIN_PEER_MESSAGE;
+    if (take === null || this.#destroyed || tooSmall()) {
+      channel.close();
+      return;
+    }
+    if (channel.readyState !== 'open') {
+      channel.addEventListener('open', () => {
+        if (tooSmall()) channel.close();
+      }, { once: true });
+    }
+    try {
+      take(peer, channel, this.kind);
+    } catch (e) {
+      globalThis.reportError?.(e);
+      channel.close();
+    }
   }
 
   /**
@@ -864,6 +987,8 @@ export class RoomClient {
       n.pc.close();
     }
     this.#negotiating.clear();
+    for (const pc of this.#videoConns.values()) pc.close();
+    this.#videoConns.clear();
     this.#listeners.clear();
     this.#room?.free();
     this.#room = null;
