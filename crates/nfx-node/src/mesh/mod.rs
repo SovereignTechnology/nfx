@@ -30,6 +30,16 @@
 //!   the socket's own address behind the DNAT, nor a private mapping.
 //! - **Serving** is the bridge's ([`crate::rtc_serve`]): only verified segments of held
 //!   renditions, under the same per-peer caps. It never takes bytes from a peer.
+//! - **Start-up files** (NFX-10 §§6.9–6.10, [`Mesh::serve_files`]): beside its stream rooms,
+//!   the endpoint joins the **video room** of each video whose hash list it was given, and its
+//!   connections carry the **file channel** (`nfx-files/1`), on which it serves that hash list
+//!   and its files of every role but `segment` ([`crate::file_serve`]). As offerer of a
+//!   stream-room connection it opens the file channel once the first channel is open. In a
+//!   video room it never offers (it wants no file); it answers offers there while it holds
+//!   fewer video-room connections than a quarter of [`MeshConfig::max_peers`] (at least
+//!   [`MIN_VIDEO_ROOM_PEERS`]), sends its presence out of turn (at most every 5 s) when a new
+//!   peer appears and it has room for one, and closes a video-room connection
+//!   [`file_serve::VIDEO_ROOM_IDLE`] after the last request it answered.
 //! - **Discovery is by room alone** (§6): a page that plays a rendition joins its room and
 //!   meets every node present there. Beacons need no new endpoint for it, but a page and a
 //!   node meet only on a relay both use.
@@ -97,6 +107,7 @@ use self::book::{
     NEGOTIATIONS_PER_ROOM, OfferBackoff, PENDING_OFFERS_PER_ROOM, PresenceBook, SeenIds,
     SenderLimiter,
 };
+use crate::file_serve::{self, VideoFiles};
 use crate::node::is_public;
 use crate::nostr::{from_nostr, to_nostr};
 use crate::rtc_serve::{Conn, IDLE_TIMEOUT, Swarm, Uploader, announceable, queue, received};
@@ -113,8 +124,11 @@ pub const MAX_PEERS: usize = 16;
 pub const MAX_PEERS_LIMIT: usize = crate::bridge::MAX_PEERS_LIMIT;
 /// Connections in one room (or `max_peers`, when that is smaller).
 pub const MAX_PEERS_PER_ROOM: usize = 16;
-/// Rooms joined at most: renditions held beyond this join none.
+/// Rooms joined at most: renditions held beyond this join none. Video rooms count.
 pub const MAX_ROOMS: usize = 256;
+/// Video-room connections at once (NFX-10 §6.9): a quarter of [`MeshConfig::max_peers`],
+/// and at least this.
+pub const MIN_VIDEO_ROOM_PEERS: usize = 2;
 /// How long candidates are gathered before the first room is joined.
 pub const GATHER_TIMEOUT: Duration = Duration::from_secs(5);
 /// An offer unanswered this long has failed.
@@ -242,8 +256,10 @@ pub struct MeshStatus {
     pub candidates: Vec<String>,
     /// The STUN servers asked now: the configured ones, then those learnt from Nostr.
     pub stun: Vec<String>,
-    /// Rooms joined.
+    /// Stream rooms joined (NFX-10 §6.1).
     pub rooms: usize,
+    /// Video rooms joined (§6.9), counted apart so `rooms` reads as it always has.
+    pub video_rooms: usize,
     /// Connections negotiating, and open.
     pub connecting: usize,
     pub open: usize,
@@ -316,12 +332,20 @@ pub struct LinkFailure {
     pub remote: String,
 }
 
-/// One rendition's room to join.
+/// One rendition's room to join, or a video's (§6.9).
 struct RoomSpec {
     room: Room,
     segments: Vec<String>,
     /// The video's address without its creator: the fallback scopes beacons by it.
     video: String,
+    kind: RoomKind,
+}
+
+/// A stream room (§6.1), or a video room (§6.9) with its manifest's address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RoomKind {
+    Stream,
+    Video { manifest_a: String },
 }
 
 enum Control {
@@ -330,6 +354,15 @@ enum Control {
     Forget(Vec<String>, String),
     /// Read this manifest's beacons for `stun` endpoints.
     Beacons(String),
+    /// Serve this hash list's start-up files (by its root) in the manifest's video room and
+    /// on the file channels of its video.
+    ServeFiles {
+        manifest_a: String,
+        root: String,
+        list: Arc<HashList>,
+    },
+    /// Stop serving the start-up files of this manifest, and leave its video room.
+    ForgetFiles(String),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -513,6 +546,7 @@ impl Mesh {
             started: now,
             rooms: HashMap::new(),
             waiting: Vec::new(),
+            files: HashMap::new(),
             subs: Vec::new(),
             sub_seq: 0,
             next_sub_check: now,
@@ -590,6 +624,7 @@ impl Mesh {
                 room: Room::derive(&video.web_stream_swarm_id(&id)),
                 segments,
                 video: video.to_string(),
+                kind: RoomKind::Stream,
             });
             ids.push(id);
         }
@@ -614,6 +649,32 @@ impl Mesh {
             .collect();
         self.control
             .send(Control::Forget(rooms, video.to_string()))
+            .await
+            .map_err(|_| NodeError::Transport("the mesh stopped".into()))
+    }
+
+    /// Serve the start-up files of a verified hash list (NFX-10 §6.10): `manifest_a` is its
+    /// manifest's address (`38504:<creator>:<namespace>:<video-id>`) and `root` its `root`.
+    /// The endpoint joins that video room (§6.9) while it is in a stream room of the video
+    /// ([`Mesh::serve`] first), and serves the list and its files of every role but `segment`
+    /// there and on the file channels of the video's stream rooms. [`Mesh::forget_files`]
+    /// undoes it.
+    pub async fn serve_files(&self, manifest_a: &str, root: &str, list: &HashList) -> Result<()> {
+        Room::video(manifest_a)?;
+        self.control
+            .send(Control::ServeFiles {
+                manifest_a: manifest_a.to_owned(),
+                root: root.to_owned(),
+                list: Arc::new(list.clone()),
+            })
+            .await
+            .map_err(|_| NodeError::Transport("the mesh stopped".into()))
+    }
+
+    /// Stop serving the start-up files of `manifest_a`, and leave its video room.
+    pub async fn forget_files(&self, manifest_a: &str) -> Result<()> {
+        self.control
+            .send(Control::ForgetFiles(manifest_a.to_owned()))
             .await
             .map_err(|_| NodeError::Transport("the mesh stopped".into()))
     }
@@ -819,6 +880,10 @@ struct RoomState {
     /// The video's address without its creator (`<namespace>:<video-id>`), as a beacon's `a`
     /// ends: the fallback counts a beacon only for the peers of its own video.
     video: String,
+    kind: RoomKind,
+    /// What this room's file channels may serve: the hash lists of its video (a video room:
+    /// of its manifest only).
+    files: VideoFiles,
 }
 
 struct State {
@@ -842,6 +907,8 @@ struct State {
     rooms: HashMap<String, RoomState>,
     /// Rooms to join once candidates are gathered.
     waiting: Vec<RoomSpec>,
+    /// The hash lists whose start-up files are served, by manifest address.
+    files: HashMap<String, VideoFiles>,
     /// Our subscriptions, each with its filter.
     subs: Vec<(ns::SubscriptionId, ns::Filter)>,
     sub_seq: u64,
@@ -1049,7 +1116,12 @@ impl State {
             .chain(self.fallback.servers.iter().map(|(_, a)| a))
             .map(ToString::to_string)
             .collect();
-        s.rooms = self.rooms.len();
+        s.video_rooms = self
+            .rooms
+            .values()
+            .filter(|r| matches!(r.kind, RoomKind::Video { .. }))
+            .count();
+        s.rooms = self.rooms.len() - s.video_rooms;
         s.open = self.links.iter().filter(|l| l.opened).count();
         s.connecting = self.links.len() - s.open;
         *self.status.lock().unwrap_or_else(PoisonError::into_inner) = s;
@@ -1083,6 +1155,49 @@ impl State {
                     self.resubscribe_stun().await;
                 }
             }
+            Control::ServeFiles {
+                manifest_a,
+                root,
+                list,
+            } => {
+                let video = list.video.clone();
+                self.files
+                    .entry(manifest_a.clone())
+                    .or_default()
+                    .insert(root, list);
+                let kind = RoomKind::Video {
+                    manifest_a: manifest_a.clone(),
+                };
+                let known = self.rooms.values().any(|r| r.kind == kind)
+                    || self.waiting.iter().any(|w| w.kind == kind);
+                if !known && let Ok(room) = Room::video(&manifest_a) {
+                    self.waiting.push(RoomSpec {
+                        room,
+                        segments: Vec::new(),
+                        video,
+                        kind,
+                    });
+                }
+                self.refresh_files();
+                if self.gathered {
+                    self.join_waiting().await;
+                }
+            }
+            Control::ForgetFiles(manifest_a) => {
+                self.files.remove(&manifest_a);
+                let kind = RoomKind::Video { manifest_a };
+                self.waiting.retain(|w| w.kind != kind);
+                let keys: Vec<String> = self
+                    .rooms
+                    .iter()
+                    .filter(|(_, r)| r.kind == kind)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                if self.leave(&keys) {
+                    self.resubscribe().await;
+                }
+                self.refresh_files();
+            }
             Control::Forget(keys, video) => {
                 if let Some(n) = &mut self.nostr_stun {
                     // `38504:<creator>:<video>`: the watched addresses of that video.
@@ -1093,19 +1208,22 @@ impl State {
                 }
                 self.waiting
                     .retain(|s| !keys.iter().any(|k| k == s.room.pubkey()));
-                let mut changed = false;
-                for k in &keys {
-                    if let Some(r) = self.rooms.remove(k) {
-                        changed = true;
-                        if let Ok(ev) = self.session.disconnect(&r.room, unix_now()) {
-                            self.publish(&ev);
-                        }
-                    }
-                    for l in self.links.iter_mut().filter(|l| &l.conn.swarm == k) {
-                        l.conn.dead = true;
-                        l.superseded = true;
-                    }
-                }
+                let mut changed = self.leave(&keys);
+                // A video room stays only while a stream room of its video does (§6.9).
+                let orphans: Vec<String> = self
+                    .rooms
+                    .iter()
+                    .filter(|(_, r)| {
+                        matches!(r.kind, RoomKind::Video { .. })
+                            && !self
+                                .rooms
+                                .values()
+                                .any(|s| s.kind == RoomKind::Stream && s.video == r.video)
+                    })
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                changed |= self.leave(&orphans);
+                self.refresh_files();
                 if changed {
                     self.resubscribe().await;
                 }
@@ -1117,12 +1235,89 @@ impl State {
         }
     }
 
+    /// Leave these rooms (a `disconnect` in each) and end their connections. Whether one was
+    /// joined.
+    fn leave(&mut self, keys: &[String]) -> bool {
+        let mut changed = false;
+        for k in keys {
+            if let Some(r) = self.rooms.remove(k) {
+                changed = true;
+                if let Ok(ev) = self.session.disconnect(&r.room, unix_now()) {
+                    self.publish(&ev);
+                }
+            }
+            for l in self.links.iter_mut().filter(|l| &l.conn.swarm == k) {
+                l.conn.dead = true;
+                l.superseded = true;
+            }
+        }
+        changed
+    }
+
+    /// What each room's file channels may serve: a stream room, the hash lists of every
+    /// manifest of its video; a video room, those of its manifest.
+    fn refresh_files(&mut self) {
+        for r in self.rooms.values_mut() {
+            r.files = match &r.kind {
+                RoomKind::Video { manifest_a } => {
+                    self.files.get(manifest_a).cloned().unwrap_or_default()
+                }
+                RoomKind::Stream => {
+                    let mut all = VideoFiles::default();
+                    for (a, f) in &self.files {
+                        // `38504:<creator>:<namespace>:<video-id>` ends with the room's video.
+                        if a.splitn(3, ':').nth(2) == Some(r.video.as_str()) {
+                            all.extend(f);
+                        }
+                    }
+                    all
+                }
+            };
+        }
+    }
+
+    /// Video-room connections open or negotiating, and whether one more fits.
+    fn video_room_free(&self) -> bool {
+        let cap = (self.max_peers / 4).max(MIN_VIDEO_ROOM_PEERS);
+        self.links
+            .iter()
+            .filter(|l| !l.conn.dead && l.conn.files_only)
+            .count()
+            < cap
+    }
+
+    fn is_video_room(&self, key: &str) -> bool {
+        self.rooms
+            .get(key)
+            .is_some_and(|r| matches!(r.kind, RoomKind::Video { .. }))
+    }
+
+    /// A connection of this endpoint in room `key`: it carries the file channel, and in a
+    /// video room only that.
+    fn new_conn(&self, rtc: Rtc, key: &str, peer: &str, now: Instant) -> Conn {
+        let mut conn = Conn::new(rtc, key.to_owned(), peer.to_owned(), now);
+        conn.files_allowed = true;
+        conn.files_only = self.is_video_room(key);
+        conn
+    }
+
     /// Join the rooms waiting for candidates: subscribe, then announce presence in each.
     async fn join_waiting(&mut self) {
         let mut joined = Vec::new();
-        for spec in std::mem::take(&mut self.waiting) {
+        let mut specs = std::mem::take(&mut self.waiting);
+        // Stream rooms first: a video room is joined only beside one of its video's (§6.9).
+        specs.sort_by_key(|s| s.kind != RoomKind::Stream);
+        for spec in specs {
             let key = spec.room.pubkey().to_owned();
             if self.rooms.len() >= MAX_ROOMS && !self.rooms.contains_key(&key) {
+                continue;
+            }
+            if spec.kind != RoomKind::Stream
+                && !self
+                    .rooms
+                    .values()
+                    .any(|r| r.kind == RoomKind::Stream && r.video == spec.video)
+            {
                 continue;
             }
             let loaded = self.uploader.loaded(&spec.segments);
@@ -1139,6 +1334,8 @@ impl State {
                 backoff: OfferBackoff::default(),
                 reannounce_at: Instant::now(),
                 video: spec.video.clone(),
+                kind: spec.kind.clone(),
+                files: VideoFiles::default(),
             });
             r.swarm = Swarm {
                 segments: spec.segments,
@@ -1149,8 +1346,13 @@ impl State {
         if joined.is_empty() {
             return;
         }
+        self.refresh_files();
         // Peers already connected in a room that grew hear its new state.
-        for l in self.links.iter_mut().filter(|l| l.opened) {
+        for l in self
+            .links
+            .iter_mut()
+            .filter(|l| l.opened && l.conn.channel.is_some())
+        {
             if let Some(r) = self.rooms.get(&l.conn.swarm)
                 && joined.contains(&l.conn.swarm)
             {
@@ -1598,7 +1800,14 @@ impl State {
                 continue;
             }
             let late = !l.opened && now >= l.deadline;
-            let idle = l.opened && now.duration_since(l.conn.active) > IDLE_TIMEOUT;
+            let idle = l.opened
+                && if l.conn.files_only {
+                    l.conn.files.as_ref().is_none_or(|f| {
+                        !f.busy() && now.duration_since(f.last_answer) > file_serve::VIDEO_ROOM_IDLE
+                    })
+                } else {
+                    now.duration_since(l.conn.active) > IDLE_TIMEOUT
+                };
             if late
                 || idle
                 || (l.conn.wake <= now && l.conn.rtc.handle_input(Input::Timeout(now)).is_err())
@@ -1644,11 +1853,9 @@ impl State {
                 loaded: announceable(&loaded),
                 loading: vec![],
             };
-            for l in self
-                .links
-                .iter_mut()
-                .filter(|l| l.opened && !l.conn.dead && &l.conn.swarm == key)
-            {
+            for l in self.links.iter_mut().filter(|l| {
+                l.opened && !l.conn.dead && l.conn.channel.is_some() && &l.conn.swarm == key
+            }) {
                 queue(&mut l.conn, None, &announcement);
             }
             r.swarm.loaded = loaded;
@@ -1663,9 +1870,17 @@ impl State {
                 continue;
             }
             let served = l.conn.served;
-            let swarm = self.rooms.get(&l.conn.swarm).map(|r| &r.swarm);
-            self.uploader.pump(&mut l.conn, swarm, now);
-            if !l.opened && l.conn.channel.is_some() {
+            let room = self.rooms.get(&l.conn.swarm);
+            if l.offerer {
+                l.conn.open_files_channel();
+            }
+            self.uploader.pump_with(
+                &mut l.conn,
+                room.map(|r| &r.swarm),
+                room.map(|r| &r.files),
+                now,
+            );
+            if !l.opened && (l.conn.channel.is_some() || l.conn.files.is_some()) {
                 l.opened = true;
                 self.counts.opened += 1;
             }
@@ -1737,9 +1952,11 @@ impl State {
         };
         let now = unix_now();
         let me = self.me().to_owned();
+        let video_free = self.video_room_free();
         let Some(room) = self.rooms.get_mut(&key) else {
             return;
         };
+        let video_room = matches!(room.kind, RoomKind::Video { .. });
         if room.seen.has(&ev.id) {
             return;
         }
@@ -1756,9 +1973,12 @@ impl State {
                 {
                     return;
                 }
-                if signal::offers_to(&me, &r.sender) {
+                // In a video room this node never offers (it wants no file, §6.9); a newcomer
+                // there hears of it out of turn while it has room for another connection.
+                if !video_room && signal::offers_to(&me, &r.sender) {
                     self.maybe_offer(&key, &r.sender);
-                } else if new && Instant::now() >= room.reannounce_at {
+                } else if new && (!video_room || video_free) && Instant::now() >= room.reannounce_at
+                {
                     // A newcomer that is to offer heard nothing of this node yet (relays keep
                     // no ephemeral event): tell it now rather than at the next round.
                     room.reannounce_at = Instant::now() + REANNOUNCE_EVERY;
@@ -1854,7 +2074,10 @@ impl State {
     /// free negotiation, fewer than 4 offers of ours are pending, and no failed offer to the
     /// peer is still backing off.
     fn maybe_offer(&mut self, key: &str, peer: &str) {
-        if !signal::offers_to(self.me(), peer) || self.link(key, peer).is_some() {
+        if !signal::offers_to(self.me(), peer)
+            || self.link(key, peer).is_some()
+            || self.is_video_room(key)
+        {
             return;
         }
         if self.negotiating(key) >= NEGOTIATIONS_PER_ROOM || !self.has_room(key) {
@@ -1893,8 +2116,9 @@ impl State {
         self.counts.offers += 1;
         // What the offer names, the fallback's mappings for this peer included.
         let local_kinds = sdp::candidate_kinds(&offer_sdp);
+        let conn = self.new_conn(rtc, key, peer, now);
         self.links.push(Link {
-            conn: Conn::new(rtc, key.to_owned(), peer.to_owned(), now),
+            conn,
             offerer: true,
             offer_id: ev.id,
             pending: Some(pending),
@@ -1916,7 +2140,10 @@ impl State {
             if !l.opened && (!l.offerer || signal::offers_to(self.me(), &r.sender)) {
                 return;
             }
-        } else if self.negotiating(key) >= NEGOTIATIONS_PER_ROOM || !self.has_room(key) {
+        } else if self.negotiating(key) >= NEGOTIATIONS_PER_ROOM
+            || !self.has_room(key)
+            || (self.is_video_room(key) && !self.video_room_free())
+        {
             return;
         }
         let now = Instant::now();
@@ -1963,8 +2190,9 @@ impl State {
         self.counts.answers += 1;
         // What the answer names, the fallback's mappings for this peer included.
         let local_kinds = sdp::candidate_kinds(&answer_sdp);
+        let conn = self.new_conn(rtc, key, &r.sender, now);
         self.links.push(Link {
-            conn: Conn::new(rtc, key.to_owned(), r.sender.clone(), now),
+            conn,
             offerer: false,
             offer_id: r.id.clone(),
             pending: None,

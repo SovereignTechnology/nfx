@@ -886,7 +886,7 @@ fn iroh_addrs(
 /// One line of what the mesh endpoint is doing, printed when it changes.
 fn mesh_line(s: &nfx_node::mesh::MeshStatus) -> String {
     format!(
-        "mesh: {} room(s), candidates [{}]{}, {} open, {} connecting; offers {}, answers {}, opened {}, failed {}, segments served {}; stun [{}]",
+        "mesh: {} room(s), candidates [{}]{}, {} open, {} connecting; offers {}, answers {}, opened {}, failed {}, segments served {}; stun [{}]; video rooms {}",
         s.rooms,
         s.candidates.join(", "),
         if s.gathered { "" } else { " (gathering)" },
@@ -898,6 +898,7 @@ fn mesh_line(s: &nfx_node::mesh::MeshStatus) -> String {
         s.failed,
         s.served,
         s.stun.join(", "),
+        s.video_rooms,
     )
 }
 

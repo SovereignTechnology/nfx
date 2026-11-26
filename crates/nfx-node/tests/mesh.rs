@@ -8,12 +8,16 @@
 //! same behind a DNAT: the endpoint bound on loopback and told a public address, which the
 //! peer alone reaches, through a DNAT in the test. Then two endpoints in one room, which find
 //! and connect to each other the same way; and an endpoint with two STUN servers, one of which
-//! lies about its mapping, which a browser still reaches.
+//! lies about its mapping, which a browser still reaches. And the file channel (§§6.9-6.10):
+//! a browser that holds only the manifest meets the endpoint in the video room and takes the
+//! hash list, a `have` and the start-up files from it, never a segment; and on a stream-room
+//! connection the endpoint, as offerer, opens the file channel after the first.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -25,6 +29,7 @@ use nfx_node::p2pml::{self, Command, Reassembler};
 use nfx_node::store::ContentStore;
 use nfx_node::unix_now;
 use nfx_proto::event::Event;
+use nfx_proto::file_channel::{self as fc, Message};
 use nfx_proto::hashlist::{HashList, Role};
 use nfx_proto::namespace::VideoAddr;
 use nfx_proto::signal::{self, Parsed, Received, Room, Session, Signal};
@@ -108,6 +113,19 @@ struct Browser {
     addr: SocketAddr,
     /// The DNAT in front of the endpoint, when there is one.
     dnat: Option<Dnat>,
+    /// The label of the one channel its offers carry, and whether it offers whatever the
+    /// order of keys (a session that wants start-up files in a video room, §6.9).
+    offer_label: &'static str,
+    always_offers: bool,
+}
+
+/// An answer on the file channel.
+#[derive(Debug, PartialEq)]
+enum Got {
+    File(Vec<u8>),
+    Have(fc::Have),
+    Missing,
+    Busy,
 }
 
 /// A DNAT in front of the endpoint, as the browser's datagrams meet it. What the browser
@@ -143,6 +161,8 @@ impl Browser {
             socket,
             addr,
             dnat: None,
+            offer_label: "webtorrent",
+            always_offers: false,
         }
     }
 
@@ -187,10 +207,10 @@ impl Browser {
     /// Negotiate with `mesh` through the relay, whichever side the glare rule makes offer.
     /// Returns the connection and the endpoint's SDP (its answer or offer).
     async fn negotiate(&mut self, mesh: &str) -> (Rtc, String) {
-        if signal::offers_to(self.session.pubkey(), mesh) {
+        if self.always_offers || signal::offers_to(self.session.pubkey(), mesh) {
             let mut rtc = self.rtc();
             let mut api = rtc.sdp_api();
-            api.add_channel("webtorrent".into());
+            api.add_channel(self.offer_label.into());
             let (offer, pending): (SdpOffer, SdpPendingOffer) = api.apply().unwrap();
             let sdp = offer.to_sdp_string();
             // The offer goes again, freshly signed, every 3 s until it is answered: one sent
@@ -275,6 +295,119 @@ impl Browser {
             Some(d) if from == d.bind && d.opened => Some(d.public),
             Some(_) => None,
         }
+    }
+
+    /// One step of the connection: hand `rtc` the next datagram (or a timeout) by `wake`.
+    async fn step(&mut self, rtc: &mut Rtc, wake: Instant, buf: &mut [u8]) {
+        let wait = wake
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(100));
+        let got = tokio::time::timeout(wait, self.socket.recv_from(buf)).await;
+        match got
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|(n, from)| self.route_in(from).map(|source| (n, source)))
+        {
+            Some((n, source)) => {
+                let input = Input::Receive(
+                    Instant::now(),
+                    Receive {
+                        proto: Protocol::Udp,
+                        source,
+                        destination: self.addr,
+                        contents: (&buf[..n]).try_into().unwrap(),
+                    },
+                );
+                rtc.handle_input(input).unwrap();
+            }
+            None => rtc.handle_input(Input::Timeout(Instant::now())).unwrap(),
+        }
+    }
+
+    /// Drive `rtc` until a file channel is open (whichever side opened it) and the
+    /// endpoint's `hello` has come, then send `asks` (each one message) and gather the last
+    /// answer of each request. Returns the endpoint's `hello` flags, the labels of every
+    /// channel that opened, in order, and the answers by `req`.
+    async fn ask_files(
+        &mut self,
+        rtc: &mut Rtc,
+        asks: &[Message<'_>],
+    ) -> (u8, Vec<String>, HashMap<u32, Got>) {
+        let deadline = Instant::now() + WAIT;
+        let mut files: Option<ChannelId> = None;
+        let mut labels = Vec::new();
+        let mut flags = None;
+        let mut sent = false;
+        let mut partial: HashMap<u32, Vec<u8>> = HashMap::new();
+        let mut got = HashMap::new();
+        let mut buf = vec![0u8; 2048];
+        while got.len() < asks.len() {
+            assert!(
+                Instant::now() < deadline,
+                "no answers on the file channel: {got:?}"
+            );
+            let wake = loop {
+                match rtc.poll_output().unwrap() {
+                    Output::Timeout(t) => break t,
+                    Output::Transmit(t) => {
+                        if let Some(to) = self.route_out(t.destination) {
+                            self.socket.send_to(&t.contents, to).await.unwrap();
+                        }
+                    }
+                    Output::Event(RtcEvent::ChannelOpen(id, label)) => {
+                        if label == fc::LABEL {
+                            files = Some(id);
+                            let hello = Message::Hello {
+                                version: 1,
+                                flags: 0,
+                            };
+                            rtc.channel(id)
+                                .unwrap()
+                                .write(true, &hello.encode().unwrap())
+                                .unwrap();
+                        }
+                        labels.push(label);
+                    }
+                    Output::Event(RtcEvent::ChannelData(d)) if Some(d.id) == files => {
+                        match Message::decode(&d.data).unwrap() {
+                            Message::Hello { flags: f, .. } => flags = Some(f),
+                            Message::Data { req, bytes } => {
+                                partial.entry(req).or_default().extend_from_slice(bytes);
+                            }
+                            Message::End { req } => {
+                                got.insert(
+                                    req,
+                                    Got::File(partial.remove(&req).unwrap_or_default()),
+                                );
+                            }
+                            Message::Missing { req } => {
+                                got.insert(req, Got::Missing);
+                            }
+                            Message::Busy { req } => {
+                                got.insert(req, Got::Busy);
+                            }
+                            Message::Have { req, have } => {
+                                got.insert(req, Got::Have(have));
+                            }
+                            other => panic!("the endpoint sent {other:?}"),
+                        }
+                    }
+                    Output::Event(_) => {}
+                }
+            };
+            if let (Some(id), Some(_), false) = (files, flags, sent) {
+                sent = true;
+                for m in asks {
+                    rtc.channel(id)
+                        .unwrap()
+                        .write(true, &m.encode().unwrap())
+                        .unwrap();
+                }
+                continue;
+            }
+            self.step(rtc, wake, &mut buf).await;
+        }
+        (flags.unwrap(), labels, got)
     }
 
     /// Drive `rtc` over the socket until the data channel is open, then ask for segment 0
@@ -427,6 +560,172 @@ async fn a_browser_fetches_a_segment(browser_offers: bool, public: Option<Socket
     } else {
         assert_eq!((s.offers, s.answers), (1, 0));
     }
+    mesh.shutdown().await;
+    browser.client.shutdown().await;
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+fn sha32(hex_: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    hex::decode_to_slice(hex_, &mut out).unwrap();
+    out
+}
+
+/// What the browser asks the endpoint on the file channel, and what it must get: the hash
+/// list, `have` naming the one rendition whole, the init and the thumbnail; `missing` for a
+/// segment and for a file of no video; `missing` for `beacons` (the endpoint does not set
+/// that bit).
+fn check_start_up_files(v: &common::Vector, store: &dyn ContentStore, got: &HashMap<u32, Got>) {
+    let root = v.manifest.root_hex();
+    let file = |role: Role| {
+        v.list
+            .files
+            .iter()
+            .find(|f| f.role == role)
+            .unwrap()
+            .sha256
+            .clone()
+    };
+    assert_eq!(
+        got[&1],
+        Got::File(store.get(&root).unwrap()),
+        "the hash list"
+    );
+    assert_eq!(
+        got[&2],
+        Got::Have(fc::Have {
+            whole: vec!["720p".into()],
+            part: vec![],
+        })
+    );
+    assert_eq!(got[&3], Got::File(store.get(&file(Role::Init)).unwrap()));
+    assert_eq!(got[&4], Got::File(store.get(&file(Role::Thumb)).unwrap()));
+    assert_eq!(got[&5], Got::Missing, "a segment never travels here");
+    assert_eq!(got[&6], Got::Missing, "a file of no video");
+    assert_eq!(got[&7], Got::Missing, "no beacons bit");
+}
+
+fn start_up_asks(v: &common::Vector) -> Vec<Message<'static>> {
+    let file = |role: Role| sha32(&v.list.files.iter().find(|f| f.role == role).unwrap().sha256);
+    let root = sha32(&v.manifest.root_hex());
+    vec![
+        Message::Get { req: 1, sha: root },
+        Message::List { req: 2, root },
+        Message::Get {
+            req: 3,
+            sha: file(Role::Init),
+        },
+        Message::Get {
+            req: 4,
+            sha: file(Role::Thumb),
+        },
+        Message::Get {
+            req: 5,
+            sha: file(Role::Segment),
+        },
+        Message::Get {
+            req: 6,
+            sha: [7; 32],
+        },
+        Message::Beacons { req: 7 },
+    ]
+}
+
+/// A browser that holds only the manifest: it joins the video room (NFX-10 §6.9), offers
+/// with the file channel as the only channel whatever the order of keys, and takes the
+/// start-up files from the endpoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_browser_with_only_the_manifest_takes_the_start_up_files_in_the_video_room() {
+    let (_relay, url) = relay().await;
+    let d = dir("video-room");
+    let (store, v) = common::vector_store(&d);
+    let store = Arc::new(store);
+    let mesh = Mesh::start(store.clone(), config(&url)).await.unwrap();
+    mesh.serve(&v.list, &*store, None).await.unwrap();
+    until(&mesh, "the stream room is joined", |s| {
+        s.gathered && s.rooms == 1
+    })
+    .await;
+    let a = v.manifest.a_tag();
+    mesh.serve_files(&a, &v.manifest.root_hex(), &v.list)
+        .await
+        .unwrap();
+    until(&mesh, "the video room is joined", |s| {
+        s.rooms == 1 && s.video_rooms == 1
+    })
+    .await;
+
+    // Whatever the order of keys: in a video room the one that wants files offers.
+    let session = loop {
+        let s = Session::new(rand_bytes(), rand_bytes()).unwrap();
+        if !signal::offers_to(s.pubkey(), mesh.session_key()) {
+            break s;
+        }
+    };
+    let mut browser = Browser::join(&url, Room::video(&a).unwrap(), session).await;
+    browser.offer_label = fc::LABEL;
+    browser.always_offers = true;
+    let (mut rtc, _) = browser.negotiate(mesh.session_key()).await;
+    let asks = start_up_asks(&v);
+    let (flags, labels, got) = browser.ask_files(&mut rtc, &asks).await;
+    assert_eq!(flags, fc::FLAG_FILES);
+    assert_eq!(labels, [fc::LABEL]);
+    check_start_up_files(&v, &*store, &got);
+    let s = until(&mesh, "open", |s| s.open >= 1).await;
+    assert_eq!(
+        (s.offers, s.answers, s.failed),
+        (0, 1, 0),
+        "the endpoint never offers there"
+    );
+
+    // Forgotten: it leaves the video room.
+    mesh.forget_files(&a).await.unwrap();
+    until(&mesh, "the video room is left", |s| {
+        s.rooms == 1 && s.video_rooms == 0
+    })
+    .await;
+    mesh.shutdown().await;
+    browser.client.shutdown().await;
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// On a stream-room connection the endpoint, as offerer, opens the file channel once the
+/// first channel is open, and serves the same start-up files on it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_endpoint_that_offers_opens_the_file_channel_after_the_first() {
+    let (_relay, url) = relay().await;
+    let d = dir("stream-room-files");
+    let (store, v) = common::vector_store(&d);
+    let store = Arc::new(store);
+    let mesh = Mesh::start(store.clone(), config(&url)).await.unwrap();
+    mesh.serve(&v.list, &*store, None).await.unwrap();
+    mesh.serve_files(&v.manifest.a_tag(), &v.manifest.root_hex(), &v.list)
+        .await
+        .unwrap();
+    until(&mesh, "both rooms are joined", |s| {
+        s.gathered && s.rooms == 1 && s.video_rooms == 1
+    })
+    .await;
+    let video = VideoAddr::parse(&v.list.video).unwrap();
+    let room = Room::derive(&video.web_stream_swarm_id("720p"));
+    // The endpoint's key is the lower: it offers.
+    let session = loop {
+        let s = Session::new(rand_bytes(), rand_bytes()).unwrap();
+        if signal::offers_to(mesh.session_key(), s.pubkey()) {
+            break s;
+        }
+    };
+    let mut browser = Browser::join(&url, room, session).await;
+    let (mut rtc, _) = browser.negotiate(mesh.session_key()).await;
+    let asks = start_up_asks(&v);
+    let (flags, labels, got) = browser.ask_files(&mut rtc, &asks).await;
+    assert_eq!(flags, fc::FLAG_FILES);
+    assert_eq!(
+        labels,
+        ["nfx", fc::LABEL],
+        "the file channel opens after the first"
+    );
+    check_start_up_files(&v, &*store, &got);
     mesh.shutdown().await;
     browser.client.shutdown().await;
     let _ = std::fs::remove_dir_all(&d);

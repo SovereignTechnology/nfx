@@ -19,8 +19,9 @@ use tokio::net::UdpSocket;
 use super::book::{OfferBackoff, PENDING_OFFERS_PER_ROOM, PresenceBook, SeenIds, SenderLimiter};
 use super::{
     Control, FAILURES_KEPT, FailStage, LinkFailure, MAX_NAMED, MAX_PEERS_PER_ROOM, MeshStatus,
-    NAMED_PER_KEY, NostrStun, RoomState, State, Stun, StunFallback,
+    NAMED_PER_KEY, NostrStun, RoomKind, RoomState, State, Stun, StunFallback,
 };
+use crate::file_serve::VideoFiles;
 use crate::nostr::to_nostr;
 use crate::rtc_serve::{Swarm, Uploader};
 use crate::unix_now;
@@ -53,6 +54,7 @@ async fn state(max_peers: usize) -> State {
         started: now,
         rooms: HashMap::new(),
         waiting: Vec::new(),
+        files: HashMap::new(),
         subs: Vec::new(),
         sub_seq: 0,
         next_sub_check: later,
@@ -81,6 +83,8 @@ async fn state(max_peers: usize) -> State {
             backoff: OfferBackoff::default(),
             reannounce_at: now,
             video: "nfx:mainnet:1:salt-flats-dusk".into(),
+            kind: RoomKind::Stream,
+            files: VideoFiles::default(),
         },
     );
     s
