@@ -107,7 +107,10 @@ ignore tags they do not know (NFX-01 §4). No payments, no media.
 
 ## 5. Client use
 
-1. REQ `{ "kinds": [20464], "#n": [ns], "#a": [a-tag…] }` against scoped relays.
+1. REQ `{ "kinds": [20464], "#n": [ns], "#a": [a-tag…] }` against scoped relays, and
+   SHOULD also against the general relays the client reads its catalog from (§7: seeders
+   may announce there too). It merges what every relay returns by §2 (the newest live
+   beacon per key), so a relay that is down costs nothing but its share.
 2. Keep live table; drop on `expiration`; verify content against §4 loosely (this is
    untrusted data) — endpoints come from it, trust never does.
 3. Prefer iroh endpoints when a ticket for the wanted rendition exists; fall back to
@@ -136,9 +139,35 @@ edit in this spec is ever required to grow the relay set.
 
 - A beacon cannot poison (all payloads verify per NFX-05) and cannot overcharge
   (quotes verified in NFX-07). The worst beacon bugs are *withholding* and *noise*.
-- Do not bridge beacon volume onto general public relays: a busy network at TTL 60 is
-  O(swarm) msgs/min, which public relays will rate-limit into uselessness. Beacons
-  live on NFX-04 relays. This is the "split by churn" rule of the design.
+- **Beacons on general public relays, within a bound.** A seeder SHOULD publish its
+  beacons to the network's scoped relays (NFX-04), and MAY also publish them to general
+  public relays, so that the network keeps working when its scoped relays are
+  unreachable. On each general relay, per seeder key:
+  - at most **30 events a minute** in total, beacons and NFX-17 tells together;
+  - beacons at most **20 a minute**, 10 videos at the §3 cadence. A seeder with more
+    videos SHOULD rotate which beacons go to general relays, so that each video is
+    announced in turn, and keeps the full cadence on scoped relays;
+  - NFX-17 tells keep **10 a minute** that beacons never take, and MAY use unused beacon
+    share up to 15 a minute. Beacons never use the tells' share, so neither can push the
+    other out: a flood of asks cannot silence the beacons, and a large catalog cannot
+    silence the tells;
+  - on a `rate-limited:` or `blocked:` answer (NIP-01 `OK` false) the seeder stops
+    sending to that relay and backs off, doubling from 1 minute up to 30 minutes.
+
+  Scoped relays are bound only by NFX-04 §2 and NFX-17's own limits. Why the bound: a
+  busy network at TTL 60 is O(swarm) messages a minute, and a public relay rate-limits or
+  bans a key or address that floods it (in testing, one refused the project's home
+  address and another rate-limited it). The bound caps each seeder's share of each relay,
+  so the volume a relay sees grows with the number of seeders that chose it, not with
+  catalog size. This replaces the original "split by churn" rule, under which beacons
+  lived only on NFX-04 relays and a network whose scoped relays were unreachable had no
+  availability at all (decision record 0110).
+- A general relay checks nothing: anyone can publish a kind-20464 event with any `n` and
+  `a` there, for any video. Such a beacon is as untrusted as any other (§5 step 2): it can
+  name endpoints that withhold or are slow, never bytes that verify (NFX-05). Scoped
+  relays that admit beacons only for allow-listed creators' videos (NFX-04 §1) filter
+  this noise; general relays do not, so a client SHOULD bound how many keys it keeps per
+  video (§5 step 4) whatever relay they came from.
 
 ## Changelog
 
@@ -179,3 +208,14 @@ edit in this spec is ever required to grow the relay set.
   beacon per key, bounded. A reader without the field reads such an origin as serving every
   rendition and may then meet `404` for one it does not; the `iroh` and `webrtc` endpoints
   already said which renditions they serve. Vectors: `beacon-renditions.json`.
+- **Amended in place 2026-11-26, an exception to the freeze rule (the maintainer's
+  decision, sovtech, 2026-11-26: the spec is not locked yet; decision record 0110).** §7: a
+  seeder MAY publish beacons to general public relays as well as scoped ones, within a
+  per-relay bound (30 events a minute per key, beacons at most 20, NFX-17 tells 10 reserved
+  and up to 15, back-off on `rate-limited:` or `blocked:`); the "split by churn" rule, under
+  which beacons lived only on NFX-04 relays, is gone, and a note says what a general relay
+  does not check. §5 step 1: a client SHOULD also read beacons from the general relays it
+  reads its catalog from, and merges by §2. Why: on 2026-11-26 the network's one scoped
+  relay was unreachable for 45 minutes and no client found any seeder. No artifact, schema
+  or vector changes; a seeder that publishes to scoped relays only, and a reader that reads
+  them only, behave as before and stay conformant.
