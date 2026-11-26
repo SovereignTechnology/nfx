@@ -79,6 +79,7 @@ import {
   PEER_STORAGE_MIB,
   PEER_WAIT_MS,
   PeerBook,
+  PlayIntent,
   type ProbeConnection,
   checkSegmentSource,
   meshConfig,
@@ -1826,6 +1827,25 @@ refuses('httpWindow beside peers only', () => checkSegmentSource({ segmentSource
   eq('rescues: none with HTTPS first', plain.rescues, 0);
 }
 
+// ---- PlayIntent: is playing what was last asked of the element? --------------------------------
+{
+  const auto = new PlayIntent(true);
+  eq('intent: autoplay asks for playback from the start', auto.wanted, true);
+  auto.paused();
+  eq('intent: paused before the first frame, nothing is asked any more', auto.wanted, false);
+  auto.played();
+  eq('intent: played again', auto.wanted, true);
+  auto.refused();
+  eq('intent: a refused play() asks for nothing until a gesture plays it', auto.wanted, false);
+  auto.played();
+  eq('intent: the gesture', auto.wanted, true);
+  const manual = new PlayIntent(false);
+  eq('intent: without autoplay nothing is asked until someone plays', manual.wanted, false);
+  manual.played();
+  manual.paused();
+  eq('intent: play then pause', manual.wanted, false);
+}
+
 // ---- probeWebRtc: can this browser's WebRTC reach anyone? (stand-in connections) ------------
 {
   type Ev = { candidate: { candidate?: string; protocol?: string | null } | null };
@@ -1898,6 +1918,36 @@ refuses('httpWindow beside peers only', () => checkSegmentSource({ segmentSource
   await sleep(20);
   stuckCtl.abort();
   eq('probe: or at the abort', [(await stuckPending).ok, stuckClosed], [false, 2]);
+  // An offer that settles after the time limit: nothing more is asked of the closed connection.
+  let lateDescriptions = 0;
+  let lateClosed = 0;
+  const late2 = class {
+    createDataChannel(): unknown {
+      return {};
+    }
+    createOffer(): Promise<{ type: string; sdp: string }> {
+      return new Promise((ok) => setTimeout(() => ok({ type: 'offer', sdp: 'v=0' }), 120));
+    }
+    async setLocalDescription(): Promise<void> {
+      lateDescriptions += 1;
+    }
+    addEventListener(): void {
+      return undefined;
+    }
+    close(): void {
+      lateClosed += 1;
+    }
+  } as unknown as ProbeConnection;
+  const lateOffer = await probeWebRtc([], 40, late2);
+  await sleep(160);
+  eq('probe: an offer that settles after the time limit is dropped, not applied to the closed connection', [lateOffer.ok, lateDescriptions, lateClosed], [false, 0, 1]);
+  const lateCtl = new AbortController();
+  const latePending = probeWebRtc([], 60_000, late2, lateCtl.signal);
+  await sleep(20);
+  lateCtl.abort();
+  await latePending;
+  await sleep(160);
+  eq('probe: nor one that settles after the abort', [lateDescriptions, lateClosed], [0, 2]);
   const hung = standIn([], { hang: true });
   const before = Date.now();
   const late = await probeWebRtc([], 60, hung.C);

@@ -349,26 +349,38 @@ async function main(): Promise<void> {
     try {
       await p.goto(`${pages}/?origin=${encodeURIComponent(g.url)}&root=${meta.root}&signal=nostr&level=0&relay=${encodeURIComponent(nodeRelay)}&segmentSource=peers-then-https&peerWaitMs=500`);
       await p.waitForFunction(played(4), null, { timeout: 120_000 });
-      await p.evaluate(() => (window as any).__nfxSegmentSource('peers-only'));
-      // Every segment request from the switch on counts: only one already on its way to the
-      // origin (sent before the switch, not yet arrived) is let through, with 300 ms.
-      await new Promise((r) => setTimeout(r, 300));
-      const askedAtOff = g.asked();
+      // The switch, and the page's own clock at it: every segment request the page STARTS
+      // from here on is found below in its resource timings, whenever it reaches the origin.
+      const switchedAt = await p.evaluate(() => {
+        (window as any).__nfxSegmentSource('peers-only');
+        return performance.now();
+      });
       // A download already under way may still finish before the page's own counter is read.
-      await new Promise((r) => setTimeout(r, 2_200));
+      await new Promise((r) => setTimeout(r, 2_500));
       const off = await state(p);
+      const askedAtOff = g.asked();
       await p.waitForFunction(() => { const s = (window as any).__nfx; return s.errors.length > 0 || s.waits[s.waits.length - 1] === 'waiting:no-peer'; }, null, { timeout: 90_000 });
       const starved = await state(p);
       const askedWhileOff = g.asked() - askedAtOff;
+      // Segment requests of the origin that the page started after the switch (ms after it).
+      const startedAfterSwitch = await p.evaluate(
+        ([at, origin]) =>
+          performance
+            .getEntriesByType('resource')
+            .filter((e) => e.name.startsWith(origin as string) && e.name.endsWith('.m4s') && e.startTime >= (at as number))
+            .map((e) => Math.round(e.startTime - (at as number))),
+        [switchedAt, g.url] as const,
+      );
       await p.evaluate(() => (window as any).__nfxSegmentSource('peers-then-https'));
       await p.waitForFunction((t: number) => { const s = (window as any).__nfx; return s.errors.length > 0 || (s.waits[s.waits.length - 1] === 'resumed' && (document.querySelector('video') as HTMLVideoElement).currentTime > t + 3); }, starved.t, { timeout: 60_000 });
       const on = await state(p);
-      results.switched = { off: { t: off.t, http: off.mesh?.segments?.http }, starved: { t: starved.t, http: starved.mesh?.segments?.http, waits: starved.waits }, askedWhileOff, on: { t: on.t, http: on.mesh?.segments?.http, source: on.mesh?.source } };
+      results.switched = { off: { t: off.t, http: off.mesh?.segments?.http }, starved: { t: starved.t, http: starved.mesh?.segments?.http, waits: starved.waits }, askedWhileOff, startedAfterSwitch, on: { t: on.t, http: on.mesh?.segments?.http, source: on.mesh?.source } };
       fail('switch', [
         [...off.errors, ...starved.errors, ...on.errors].length !== 0 ? `errors ${JSON.stringify([...off.errors, ...starved.errors, ...on.errors])}` : '',
         starved.mesh?.source !== 'peers-only' ? `source ${starved.mesh?.source} after switching HTTPS off` : '',
         starved.mesh?.segments?.http !== off.mesh?.segments?.http ? `segments over HTTP went from ${off.mesh?.segments?.http} to ${starved.mesh?.segments?.http} with HTTPS off` : '',
         askedWhileOff !== 0 ? `the origin was asked for ${askedWhileOff} segments with HTTPS off` : '',
+        startedAfterSwitch.length !== 0 ? `the page started ${startedAfterSwitch.length} segment requests after the switch (${startedAfterSwitch.join(', ')} ms after it)` : '',
         starved.waits[starved.waits.length - 1] !== 'waiting:no-peer' ? `waits ${JSON.stringify(starved.waits)}` : '',
         on.mesh?.source !== 'peers-then-https' ? `source ${on.mesh?.source} after switching HTTPS on` : '',
         !(on.mesh?.segments?.http > starved.mesh?.segments?.http) ? 'no rescue after switching HTTPS back on' : '',

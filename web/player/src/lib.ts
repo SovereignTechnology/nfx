@@ -76,6 +76,7 @@ import {
   MAX_TRACKERS as MESH_MAX_TRACKERS,
   type MeshTuning,
   PeerBook,
+  PlayIntent,
   checkSegmentSource,
   meshConfig,
   probeWebRtc,
@@ -632,8 +633,14 @@ function start(
   el.addEventListener('playing', onPlaying);
   // Peers first: say when playback has nothing to play because no peer has delivered the
   // next segment (`waiting`), and when it goes on (`resumed`). The element is the judge: it
-  // lacks data to play on, and playing is what was asked of it: it is not paused, or
-  // `autoplay` is on and it has not started yet. An element left paused waits for no one.
+  // lacks data to play on, and playing is what was last asked of it (`PlayIntent`: `autoplay`,
+  // then its last play or pause). An element left paused, or paused before its first frame,
+  // waits for no one.
+  const intent = new PlayIntent(o.autoplay);
+  const onPlay = (): void => intent.played();
+  const onPause = (): void => intent.paused();
+  el.addEventListener('play', onPlay);
+  el.addEventListener('pause', onPause);
   let waitTimer: ReturnType<typeof setInterval> | undefined;
   if (mesh !== null) {
     const meshStats = mesh;
@@ -641,8 +648,7 @@ function start(
     waitTimer = setInterval(() => {
       if (dead) return;
       // With HTTPS first the origin delivers what peers do not: there is no wait to report.
-      const asked = !el.paused || (o.autoplay && !playing);
-      const starved = meshStats.source !== 'https-first' && el.readyState < HAVE_FUTURE_DATA && !el.ended && asked;
+      const starved = meshStats.source !== 'https-first' && el.readyState < HAVE_FUTURE_DATA && !el.ended && intent.wanted;
       starvedSince = starved ? (starvedSince ?? performance.now()) : null;
       const waiting = starvedSince !== null && performance.now() - starvedSince >= WAITING_AFTER_MS;
       if (waiting === meshStats.waiting) return;
@@ -677,7 +683,10 @@ function start(
     emit({ type: 'levels', levels: levels.map((l) => ({ ...l })) });
     log(`levels: ${levels.map((l) => `${l.id} (${l.height}p)`).join(' ')}`);
     if (o.autoplay) {
-      el.play().catch((e: unknown) => emit({ type: 'error', message: `play: ${String(e)}` }));
+      el.play().catch((e: unknown) => {
+        intent.refused();
+        emit({ type: 'error', message: `play: ${String(e)}` });
+      });
     }
   });
   hls.on(Hls.Events.ERROR, (_, d) => {
@@ -692,6 +701,8 @@ function start(
     silence();
     o.signal?.removeEventListener('abort', destroy);
     el.removeEventListener('playing', onPlaying);
+    el.removeEventListener('play', onPlay);
+    el.removeEventListener('pause', onPause);
     if (waitTimer !== undefined) clearInterval(waitTimer);
     probing.abort();
     // hls.js stops its loaders and its worker, detaches the media (revoking the
