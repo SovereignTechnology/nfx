@@ -12,7 +12,7 @@
 //!          [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>] [--embed-relay-lookup]]
 //!          [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]…
 //!          [--stun <ip:port> [--stun-public <ip:port>]]
-//!          [--mesh-relay <wss url>… [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]… [--mesh-max-peers <n>]
+//!          [--mesh-relay <wss url>… [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port|host:port>]… [--mesh-max-peers <n>]
 //!           [--mesh-stun-from-nostr=false]]
 //!          [--allow-creator <hex>]… [--gossip [--gossip-peer <id>@<ip:port|relay-url>]…]
 //!          [--rating-root <npub|hex> --general-relay <url>… [--rating-trusted <npub|hex>]…]
@@ -37,6 +37,12 @@
 //! `https` endpoints' `renditions`, `chunks` as a count). An id the hash list lacks fails
 //! that item, naming the ids it has. The choice is per item because rendition ids are per
 //! video: each hash list names its own.
+//!
+//! `run` sends each video's beacon to every `--relay` every 30 s, within a share of each
+//! relay (NFX-03 §7): at most 20 beacons a minute per relay, so past 10 videos the videos take
+//! turns there, and a relay that answers `rate-limited:` or `blocked:` gets nothing for 1
+//! minute, doubling to 30, until it accepts again. nfxd cannot tell a scoped relay from a
+//! general one yet, so the share applies to every `--relay`.
 //!
 //! `--iroh-relay-ca` names a PEM file of CA certificates (at most 4 in all, 8 KiB each, 64 KiB
 //! a file) that the `--iroh-relay`s' TLS may chain to, beside the compiled-in Mozilla roots:
@@ -144,7 +150,9 @@
 //! NFX-04 §1, as `--embed-relay-mesh` makes nfxd's own), with no tracker
 //! and no TURN. Its ICE agent is a full one, so it works behind a NAT: `--mesh-stun <ip:port>`
 //! (repeatable, at most 4; a public node's `--stun`, say) names STUN servers that tell it its
-//! public mapping, and the gateway is asked for a port when it can map one. `--mesh-bind`
+//! public mapping. A `host:port` is resolved once at start, to an address of `--mesh-bind`'s
+//! family; a name that does not resolve then is skipped with a note, and the node starts anyway,
+//! so list more than one. The gateway is asked for a port when it can map one. `--mesh-bind`
 //! fixes its UDP address (default: an ephemeral port, the host address the one the route out
 //! leaves from); `--mesh-max-peers` caps its connections (default 16, at most 1024). Its
 //! session key is fresh every run, never `--key`. Off by default. **Privacy:** joining a room
@@ -203,7 +211,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>] [--embed-relay-lookup]] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port>]... [--mesh-max-peers <n>] [--mesh-stun-from-nostr=false]]
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>] [--embed-relay-lookup]] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port|host:port>]... [--mesh-max-peers <n>] [--mesh-stun-from-nostr=false]]
   nfxd stun --bind <ip:port> [--public <ip:port>] [--announce --key <file> --relay <url>... --network <ns>...]
 
   --mesh-relay runs the mesh endpoint (NFX-10 §6): browsers meet this node in the rooms of
@@ -267,6 +275,66 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `--mesh-stun` values: `ip:port`, or `host:port` with a DNS name, resolved once here, at
+/// start (decision record 0110). A name that does not resolve within 5 s, or has no address of
+/// `--mesh-bind`'s family, is skipped with a note: a STUN server's DNS never stops the node.
+/// `check_mesh` then checks the addresses as it checks literal ones.
+async fn mesh_stun(values: &[String], mesh: bool, v4: bool) -> Result<Vec<std::net::SocketAddr>> {
+    use nfx_node::mesh::MAX_STUN;
+    if values.len() > MAX_STUN {
+        return Err(Error::Config(format!("--mesh-stun: at most {MAX_STUN}")));
+    }
+    let mut out = Vec::with_capacity(values.len());
+    for v in values {
+        if let Ok(a) = v.parse() {
+            out.push(a);
+            continue;
+        }
+        let Some((host, port)) = stun_name(v) else {
+            return Err(Error::Config(format!(
+                "--mesh-stun {v}: not an ip:port or host:port"
+            )));
+        };
+        if !mesh {
+            // `check_mesh` says why; resolving first would only delay it.
+            return Err(Error::Config("--mesh-stun needs --mesh-relay".into()));
+        }
+        let found = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::lookup_host((host, port)),
+        )
+        .await;
+        match found {
+            Ok(Ok(mut addrs)) => match addrs.find(|a| a.is_ipv4() == v4) {
+                Some(a) => out.push(a),
+                None => {
+                    status!("nfxd: --mesh-stun {v}: no address of --mesh-bind's family; skipped")
+                }
+            },
+            _ => status!("nfxd: --mesh-stun {v}: does not resolve now; skipped"),
+        }
+    }
+    Ok(out)
+}
+
+/// `host:port` where host is a DNS name with a dot (labels of lowercase letters, digits and
+/// inner hyphens) and port is 1 to 65535 in plain digits.
+fn stun_name(v: &str) -> Option<(&str, u16)> {
+    let (host, port) = v.rsplit_once(':')?;
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let port: u16 = port.parse().ok().filter(|p| *p != 0)?;
+    let label = |l: &str| {
+        (1..=63).contains(&l.len())
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+            && l.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    (host.len() <= 253 && host.contains('.') && host.split('.').all(label)).then_some((host, port))
 }
 
 fn bad_usage() -> Error {
@@ -508,13 +576,12 @@ async fn run(args: &[String]) -> Result<()> {
         stun_public: addr("stun-public")?,
         mesh_relays: all(&f, "mesh-relay"),
         mesh_bind: addr("mesh-bind")?,
-        mesh_stun: all(&f, "mesh-stun")
-            .iter()
-            .map(|v| {
-                v.parse()
-                    .map_err(|_| Error::Config(format!("--mesh-stun {v}: not an ip:port")))
-            })
-            .collect::<Result<_>>()?,
+        mesh_stun: mesh_stun(
+            &all(&f, "mesh-stun"),
+            !all(&f, "mesh-relay").is_empty(),
+            addr("mesh-bind")?.is_none_or(|b| b.is_ipv4()),
+        )
+        .await?,
         mesh_max_peers: count(&f, "mesh-max-peers")?,
         mesh_public: ip_port(&f, "mesh-public")?,
         namespaces: all(&f, "namespace")
@@ -932,7 +999,7 @@ fn gossip_peers(values: &[String]) -> Result<Vec<iroh::EndpointAddr>> {
 mod tests {
     use super::{
         bridge_max_peers, flags, gossip_peers, ip_port, iroh_addrs, items, link_failure_lines,
-        port, pubkey_hex, relay_cas, write_lines,
+        mesh_stun, port, pubkey_hex, relay_cas, stun_name, write_lines,
     };
     use nfx_node::mesh::{FailStage, LinkFailure};
 
@@ -1350,5 +1417,63 @@ mod tests {
         let err = port(&f, name).unwrap_err().to_string();
         assert!(err.contains("--embed-relay-stun-port given twice"), "{err}");
         assert!(flags(&args(&["--embed-relay-stun-port"]), &known).is_err());
+    }
+
+    #[test]
+    fn stun_name_takes_a_dns_name_and_a_port() {
+        assert_eq!(
+            stun_name("stun.cloudflare.com:3478"),
+            Some(("stun.cloudflare.com", 3478))
+        );
+        assert_eq!(
+            stun_name("stun.l.google.com:19302"),
+            Some(("stun.l.google.com", 19302))
+        );
+        for bad in [
+            "localhost:3478",
+            "stun.example.com",
+            "stun.example.com:",
+            "stun.example.com:0",
+            "stun.example.com:+3478",
+            "stun.example.com:70000",
+            "Stun.example.com:3478",
+            "-stun.example.com:3478",
+            "stun..example.com:3478",
+            "stun_x.example.com:3478",
+            "user@stun.example.com:3478",
+            "[::1]:3478",
+        ] {
+            assert_eq!(stun_name(bad), None, "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mesh_stun_keeps_literals_and_skips_a_name_that_does_not_resolve() {
+        let v = |xs: &[&str]| xs.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+        let got = mesh_stun(&v(&["192.0.2.1:3478", "nfx-test.invalid:3478"]), true, true)
+            .await
+            .unwrap();
+        assert_eq!(got, vec!["192.0.2.1:3478".parse().unwrap()]);
+        let err = mesh_stun(&v(&["stun x:1"]), true, true).await.unwrap_err();
+        assert!(
+            err.to_string().contains("not an ip:port or host:port"),
+            "{err}"
+        );
+        let err = mesh_stun(&v(&["stun.example.com:3478"]), false, true)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("--mesh-stun needs --mesh-relay"),
+            "{err}"
+        );
+        let five = v(&[
+            "192.0.2.1:1",
+            "192.0.2.1:2",
+            "192.0.2.1:3",
+            "192.0.2.1:4",
+            "192.0.2.1:5",
+        ]);
+        let err = mesh_stun(&five, true, true).await.unwrap_err();
+        assert!(err.to_string().contains("at most 4"), "{err}");
     }
 }
