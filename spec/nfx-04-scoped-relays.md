@@ -186,3 +186,7 @@ redundancy comes from many operators).
   conformant as before, and so is a reader that ignores it; no reader of NFX-02, -03 or -05
   changes behaviour. A bump would have re-derived every room key and republished every
   manifest, for no reader's benefit. The reasons are in decision record 0108.
+- **Clarified in place 2026-11-26, with no change of behaviour.** §7 names the reference
+  headless node `nutflixd`; it was `nfxd` until the repository and its binaries were renamed
+  that day. No rule, wire format or artifact changes: a name in an example of who embeds a
+  relay, fixed in place as the status model allows for clarifications.
