@@ -97,11 +97,26 @@ A seeder that answers lookups:
   rest unverified. It checks that its overall and per-video budgets have room before verifying, and
   charges them only after. It keeps per-asker state only for an ask it answered, in a capped map.
 - **Treats each relay separately.** It remembers an ask by (id, relay) for at least 120 s. It answers
-  on every relay the ask arrives on within 10 s of the first arrival, reusing one signed tell and
-  charging its budget once, so one relay that swallows tells cannot silence it on the others.
-- Embeds its **newest periodic beacon**. It signs a new one only if the newest has under 30 s to
-  live, which keeps a tell useful to a viewer whose clock differs from the seeder's by up to 30 s.
-- On an empty budget simply does not answer. The periodic beacon covers it.
+  on every relay the ask arrives on within 10 s of the first arrival, reusing one signed tell per
+  address class (below) and charging the budgets in the table once, so one relay that swallows tells
+  cannot silence it on the others.
+- **Keeps within each general relay's share** (NFX-03 §7). On a general relay every tell, a reused
+  one included, comes out of the seeder's share of that relay: 10 tells a minute that its beacons
+  never take, up to 15 when its beacons leave share unused, and 30 events a minute with its beacons.
+  A tell with no room on a relay is not sent there. On a scoped relay that lists the kind (§5), only
+  this document's limits apply.
+- **Backs off** on a `rate-limited:` or `blocked:` answer to a tell (NIP-01 `OK` false): it stops
+  sending tells and beacons to that relay, for 1 minute, doubling each time up to 30 minutes, as
+  NFX-03 §7 says for beacons. An accepted event resets the pause; no answer counts as neither.
+- Embeds its **newest periodic beacon for the relay's address class**. A tell sent to a relay the
+  seeder reaches at a public address embeds a beacon that names only public and configured
+  external addresses; a beacon naming private, shared, loopback, link-local or unique-local
+  addresses goes only in a tell to a relay reached at such an address (NFX-03 §4, decision record
+  0114). When the two beacons differ, it signs a tell for each and never sends a tell made for one
+  class to a relay of the other. A relay whose class is not known is treated as public. It signs a
+  new beacon only if the newest has under 30 s to live, which keeps a tell useful to a viewer whose
+  clock differs from the seeder's by up to 30 s.
+- On an empty budget or share simply does not answer. The periodic beacon covers it.
 
 | Budget | Value |
 |---|---|
@@ -143,7 +158,9 @@ it learned only from tells apart from what it heard broadcast:
   closes that relay's tell subscription. One relay's flood does not end the others'.
 - It holds seeders heard only through tells in a **separate pool of at most 16 keys per video**.
   A pool entry MUST NOT displace, or take a slot from, a seeder heard as a broadcast beacon. A key
-  later heard broadcast leaves the pool.
+  later heard broadcast leaves the pool. **The creator's own beacon is never a pool entry:** a tell
+  whose embedded beacon is signed by the creator named in its `a` (§4.2 tier 1) is held as if it had
+  been heard broadcast, since the creator's key, unlike a fresh one, is named by the manifest.
 - A pool entry adds **no weight** to the counts NFX-03 §5 ranks renditions and origins by.
 - It uses **only a pool entry's `https` endpoints**. Trackers, STUN servers, iroh and HyperDHT
   endpoints named only by the pool MUST NOT be used: each would learn the viewer's address.
@@ -258,11 +275,12 @@ asks or not.
 ## 5. Relays
 
 **Which relays.** Any relay that carries ephemeral events (NIP-01) carries lookups unchanged, and a
-viewer and a seeder need one relay in common. This document intends lookups to work on general
-relays: NFX-03 §7 is there to keep *continuous* beacon volume, which grows with the swarm, off them,
-and a tell is sent only in reply to an ask and within the budgets of §3. But a tell does embed a
-beacon, and NFX-04 §4 says "beacons NEVER to public relays", so that text must be clarified before a
-conformant seeder answers on one (§8).
+viewer and a seeder need one relay in common. Lookups work on general relays: a tell is sent only
+in reply to an ask, within the budgets of §3 and the seeder's share of each general relay (NFX-03
+§7), and NFX-04 §4 lets beacons, and so tells, which embed one, reach general relays within that
+share. **Which general relays:** the ones the client reads its catalog and beacons from (NFX-04 §4).
+A seeder listens for asks there, and a viewer sends its ask to at most 3 of them (§4). Nothing in
+this document names a relay.
 
 A **scoped relay** (NFX-04) refuses kind 20465 unless it lists 20465 in its NIP-11 `nfx.kinds`.
 Frozen NFX-04 §1 does not yet allow one to: that takes an in-place amendment, recorded as an
@@ -355,13 +373,14 @@ checks both.
 
 - Registering kind 20465 in `nostr-protocol/registry-of-kinds`. It was unclaimed in the NIPs table
   and that registry on 2026-11-22.
-- The NFX-04 amendment that lets a scoped relay carry the kind, and a clarification of NFX-03 §7 and
-  NFX-04 §4 for tells on general relays (§5).
+- The NFX-04 amendment that lets a scoped relay carry the kind. (General relays carry it within
+  NFX-03 §7's share, decision record 0111, §5.)
 - Vectors for embedded events with the wrong JSON types, for readers in languages that parse loosely.
-- Which general relays viewers and seeders should share, so that a lookup works without a scoped
-  relay.
 - Whether a node holding a live beacon may forward it for a seeder that does not answer. Version 1
   allows only the beacon's own signer.
+- Whether a seeder may answer for a video it keeps (NFX-18) but leaves out of the current beacon
+  round past its cap, by signing a beacon on demand instead of embedding its newest periodic one.
+  Such signing would stay inside §3's budgets and the relay's share.
 - Whether asks need proof of work in practice.
 - Whether stock relays keep ephemeral events, and for how long, in the default configurations of
   the relays this project tests against.
@@ -374,3 +393,8 @@ checks both.
 - Draft 2026-11-24 — §4.2 (choosing sources) and §4.3 (fetching from several sources) close the two
   requirements §8 held open before any viewer implements this, after a review found that ordering
   by arrival time, fixed deadlines and failures in a row could each be gamed.
+- Draft 2026-11-26 — general relays (decision records 0111 and 0114): §3, tells come out of the
+  seeder's NFX-03 §7 share of each general relay and back off on `rate-limited:` or `blocked:`, and
+  a tell embeds only a beacon whose addresses suit the relay's address class; §4.1, the creator's own
+  beacon is never a pool entry; §5, lookups use the relays the client reads its catalog from, which
+  closes that §8 item; §8 adds on-demand beacons for kept videos.
