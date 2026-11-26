@@ -1796,7 +1796,27 @@ refuses('httpWindow beside peers only', () => checkSegmentSource({ segmentSource
   eq('rescues: segments are still counted by source', counted.segments, { http: 2, p2p: 1 });
   counted.source = 'https-first';
   fire('onSegmentLoaded', { downloadSource: 'http', segment: { url: 'https://o.example/r/c.m4s' } });
-  eq('rescues: the count follows the source the session has now', [counted.rescues, counted.segments.http], [2, 3]);
+  eq('rescues: with no start heard, the count follows the source the session has now', [counted.rescues, counted.segments.http], [2, 3]);
+  // The source can change while a download runs: what it was when the download began counts.
+  const seg = (name: string): { runtimeId: string; url: string } => ({ runtimeId: `rt-${name}`, url: `https://o.example/r/${name}.m4s` });
+  counted.source = 'peers-then-https';
+  fire('onSegmentStart', { downloadSource: 'http', segment: seg('d') });
+  counted.source = 'peers-only';
+  fire('onSegmentLoaded', { downloadSource: 'http', segment: seg('d') });
+  eq('rescues: one that began as a rescue is one, though HTTPS was switched off before it ended', [counted.rescues, rescued.at(-1)], [3, 'https://o.example/r/d.m4s']);
+  counted.source = 'https-first';
+  fire('onSegmentStart', { downloadSource: 'http', segment: seg('e') });
+  counted.source = 'peers-then-https';
+  fire('onSegmentLoaded', { downloadSource: 'http', segment: seg('e') });
+  eq('rescues: one that began with HTTPS first is not one, though peers came first by its end', counted.rescues, 3);
+  fire('onSegmentStart', { downloadSource: 'http', segment: seg('f') });
+  fire('onSegmentAbort', { downloadSource: 'http', segment: seg('f') });
+  counted.source = 'https-first';
+  fire('onSegmentLoaded', { downloadSource: 'http', segment: seg('f') });
+  eq('rescues: an aborted download is forgotten', counted.rescues, 3);
+  fire('onSegmentStart', { downloadSource: 'p2p', segment: seg('g') });
+  fire('onSegmentLoaded', { downloadSource: 'p2p', peerId: 'p1', segment: seg('g') });
+  eq('rescues: a segment from a peer is never one', counted.rescues, 3);
   eq('startup: the first peer and the first segments are timed', [counted.startup.peerMs, counted.startup.peerSegmentMs, counted.startup.segmentMs].map((x) => typeof x === 'number' && x >= 0), [true, true, true]);
   const plain = blank();
   const cfg2 = meshConfig({} as never, trackers, [], plain, () => undefined, {});
@@ -1851,6 +1871,33 @@ refuses('httpWindow beside peers only', () => checkSegmentSource({ segmentSource
   eq('probe: gathering ended with nothing', [none.ok, none.udp, /no network candidate/.test(none.why)], [false, 0, true]);
   const onlyTcp = await probeWebRtc([], 50, standIn([tcp]).C);
   eq('probe: TCP alone reaches no mesh peer', [onlyTcp.ok, /no UDP candidate \(1 other\)/.test(onlyTcp.why)], [false, true]);
+  // An offer that never settles: the time limit ends the probe, and the connection is closed.
+  let stuckClosed = 0;
+  const stuck = class {
+    createDataChannel(): unknown {
+      return {};
+    }
+    createOffer(): Promise<{ type: string; sdp: string }> {
+      return new Promise(() => undefined);
+    }
+    async setLocalDescription(): Promise<void> {
+      return undefined;
+    }
+    addEventListener(): void {
+      return undefined;
+    }
+    close(): void {
+      stuckClosed += 1;
+    }
+  } as unknown as ProbeConnection;
+  const stuckAt = Date.now();
+  const never = await probeWebRtc([], 60, stuck);
+  eq('probe: an offer that never settles ends at the time limit, closed', [never.ok, Date.now() - stuckAt < 1000, stuckClosed], [false, true, 1]);
+  const stuckCtl = new AbortController();
+  const stuckPending = probeWebRtc([], 60_000, stuck, stuckCtl.signal);
+  await sleep(20);
+  stuckCtl.abort();
+  eq('probe: or at the abort', [(await stuckPending).ok, stuckClosed], [false, 2]);
   const hung = standIn([], { hang: true });
   const before = Date.now();
   const late = await probeWebRtc([], 60, hung.C);

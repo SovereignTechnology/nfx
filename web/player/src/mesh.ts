@@ -223,11 +223,18 @@ export async function probeWebRtc(
       });
       timer = setTimeout(resolve, timeoutMs);
     });
-    pc.createDataChannel('nfx-probe');
-    await pc.setLocalDescription(await pc.createOffer());
+    // Starting is bounded like gathering: an offer or a local description that never settles
+    // ends at the time limit, or the abort, with the connection closed below.
+    const failure: { why: string | null } = { why: null };
+    const started = (async (): Promise<void> => {
+      pc.createDataChannel('nfx-probe');
+      await pc.setLocalDescription(await pc.createOffer());
+    })().catch((e: unknown) => {
+      failure.why = `WebRTC failed to start: ${e instanceof Error ? e.message : String(e)}`;
+    });
+    await Promise.race([started, gathered]);
+    if (failure.why !== null) return { ok: false, udp, why: failure.why };
     await gathered;
-  } catch (e) {
-    return { ok: false, udp, why: `WebRTC failed to start: ${e instanceof Error ? e.message : String(e)}` };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     if (stop !== undefined) signal?.removeEventListener('abort', stop);
@@ -500,6 +507,11 @@ export function meshConfig(
       : { ...segmentWindows(source, tuning), segmentMemoryStorageLimit: PEER_STORAGE_MIB };
   const startedAt = performance.now();
   const since = (): number => Math.round(performance.now() - startedAt);
+  // Whether each HTTP download under way began as a rescue: the source can change while it
+  // runs (`Session.setSegmentSource`), and what it was when the download began is what counts.
+  const httpBeganAsRescue = new Map<string, boolean>();
+  const segmentKey = (d: { segment?: { runtimeId?: unknown; url?: unknown } }): string =>
+    typeof d.segment?.runtimeId === 'string' ? d.segment.runtimeId : typeof d.segment?.url === 'string' ? d.segment.url : '';
   const check = (source: 'http' | 'p2p') =>
     async (url: string, byteRange: unknown, data: ArrayBuffer): Promise<boolean> => {
       // NFX files are whole content-addressed files; a byte range is never a valid request.
@@ -544,18 +556,33 @@ export function meshConfig(
           stats.uploaded += n;
           if (peerId !== undefined) book.sent(peerId, n);
         });
-        e.addEventListener('onSegmentLoaded', (d: { downloadSource?: string; peerId?: string; segment?: { url?: unknown } }) => {
+        e.addEventListener('onSegmentStart', (d: { downloadSource?: string; segment?: { runtimeId?: unknown; url?: unknown } }) => {
+          if (d.downloadSource !== 'http') return;
+          // Bounded: a download that neither loads, fails nor aborts would otherwise stay.
+          if (httpBeganAsRescue.size >= 256) httpBeganAsRescue.clear();
+          httpBeganAsRescue.set(segmentKey(d), stats.source === 'peers-then-https');
+        });
+        const forget = (d: { downloadSource?: string; segment?: { runtimeId?: unknown; url?: unknown } }): void => {
+          if (d.downloadSource === 'http') httpBeganAsRescue.delete(segmentKey(d));
+        };
+        e.addEventListener('onSegmentError', forget);
+        e.addEventListener('onSegmentAbort', forget);
+        e.addEventListener('onSegmentLoaded', (d: { downloadSource?: string; peerId?: string; segment?: { runtimeId?: unknown; url?: unknown } }) => {
           if (d.downloadSource === 'p2p' || d.downloadSource === 'http') {
             stats.segments[d.downloadSource] += 1;
             stats.startup.segmentMs ??= since();
           }
           if (d.downloadSource === 'p2p') stats.startup.peerSegmentMs ??= since();
           if (d.downloadSource === 'p2p' && d.peerId !== undefined) book.segment(d.peerId);
-          // Peers come first (now: the source can change while the session plays), and
-          // this one came over HTTP: a rescue.
-          if (d.downloadSource === 'http' && stats.source === 'peers-then-https') {
-            stats.rescues += 1;
-            tuning.onRescue?.(typeof d.segment?.url === 'string' ? d.segment.url : '');
+          // This one came over HTTP, and peers came first when its download began: a rescue.
+          if (d.downloadSource === 'http') {
+            const key = segmentKey(d);
+            const rescue = httpBeganAsRescue.get(key) ?? stats.source === 'peers-then-https';
+            httpBeganAsRescue.delete(key);
+            if (rescue) {
+              stats.rescues += 1;
+              tuning.onRescue?.(typeof d.segment?.url === 'string' ? d.segment.url : '');
+            }
           }
         });
         // The patched engine hands over the peer's RTCPeerConnection (PeerConnectDetails).

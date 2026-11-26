@@ -350,10 +350,13 @@ async function main(): Promise<void> {
       await p.goto(`${pages}/?origin=${encodeURIComponent(g.url)}&root=${meta.root}&signal=nostr&level=0&relay=${encodeURIComponent(nodeRelay)}&segmentSource=peers-then-https&peerWaitMs=500`);
       await p.waitForFunction(played(4), null, { timeout: 120_000 });
       await p.evaluate(() => (window as any).__nfxSegmentSource('peers-only'));
-      // A download already under way may still finish.
-      await new Promise((r) => setTimeout(r, 2_500));
-      const off = await state(p);
+      // Every segment request from the switch on counts: only one already on its way to the
+      // origin (sent before the switch, not yet arrived) is let through, with 300 ms.
+      await new Promise((r) => setTimeout(r, 300));
       const askedAtOff = g.asked();
+      // A download already under way may still finish before the page's own counter is read.
+      await new Promise((r) => setTimeout(r, 2_200));
+      const off = await state(p);
       await p.waitForFunction(() => { const s = (window as any).__nfx; return s.errors.length > 0 || s.waits[s.waits.length - 1] === 'waiting:no-peer'; }, null, { timeout: 90_000 });
       const starved = await state(p);
       const askedWhileOff = g.asked() - askedAtOff;

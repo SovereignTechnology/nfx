@@ -52,7 +52,9 @@ are a Draft, in place. Nothing on the wire changes.
    connected peers have not delivered), then `resumed`.
 6. **It can change while a session plays.** `Session.setSegmentSource` hands the running
    engine the settings of another source, so a page can give its viewer a switch that turns
-   HTTPS off for segments, and on again. A download under way finishes where it started.
+   HTTPS off for segments, and on again. An HTTPS download under way is never interrupted,
+   and is counted as what it began as. A download from a peer follows the new source's
+   rule: turning HTTPS back on lets a segment playback is starving for be rescued at once.
 7. **Not on the mesh yet.** The hash list, playlists and init segments still come from an
    origin under all three, and levels are still those an origin holds (NFX-10 §1). A page
    that offers "no HTTPS" should say so.

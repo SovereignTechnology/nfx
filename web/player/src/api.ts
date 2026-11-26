@@ -622,9 +622,12 @@ export interface Session {
   addSources(list: readonly (string | OriginSource)[]): void;
   /**
    * Take segments from `source` from now on (`SegmentSource`; `stats().mesh.source` says
-   * which is in use). A download under way finishes where it started. Going to `peers-only`
-   * stops every further request to an origin for a segment, so playback waits (`waiting`)
-   * whenever no peer delivers; going back lets rescues resume. Throws a `TypeError` for a
+   * which is in use). An HTTPS download under way is never interrupted, and is counted as
+   * what it began as (a rescue or not). Going to `peers-only` stops every further request to
+   * an origin for a segment, so playback waits (`waiting`) whenever no peer delivers. Going
+   * back to `peers-then-https` puts the rescue rule in force at once, for a segment a peer is
+   * still sending too: one playback is about to need, and has asked for the whole wait, is
+   * then taken over HTTPS in the peer's place. Throws a `TypeError` for a
    * value `open()` would refuse. A session without a mesh has nothing to change: it throws
    * for `peers-only` and ignores the others.
    */

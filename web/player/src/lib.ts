@@ -632,7 +632,8 @@ function start(
   el.addEventListener('playing', onPlaying);
   // Peers first: say when playback has nothing to play because no peer has delivered the
   // next segment (`waiting`), and when it goes on (`resumed`). The element is the judge: it
-  // lacks data to play on, and the viewer has not paused it.
+  // lacks data to play on, and playing is what was asked of it: it is not paused, or
+  // `autoplay` is on and it has not started yet. An element left paused waits for no one.
   let waitTimer: ReturnType<typeof setInterval> | undefined;
   if (mesh !== null) {
     const meshStats = mesh;
@@ -640,7 +641,8 @@ function start(
     waitTimer = setInterval(() => {
       if (dead) return;
       // With HTTPS first the origin delivers what peers do not: there is no wait to report.
-      const starved = meshStats.source !== 'https-first' && el.readyState < HAVE_FUTURE_DATA && !el.ended && (!el.paused || !playing);
+      const asked = !el.paused || (o.autoplay && !playing);
+      const starved = meshStats.source !== 'https-first' && el.readyState < HAVE_FUTURE_DATA && !el.ended && asked;
       starvedSince = starved ? (starvedSince ?? performance.now()) : null;
       const waiting = starvedSince !== null && performance.now() - starvedSince >= WAITING_AFTER_MS;
       if (waiting === meshStats.waiting) return;
