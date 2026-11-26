@@ -4,7 +4,9 @@
 #   ffmpeg clip → nfx-package → nfxd seeder with an embedded scoped relay; the app in test
 #   mode watches the address before the manifest exists, the manifest is published, the app
 #   learns the seeder from a verified beacon, plays over nfx:// with bytes fetched over iroh
-#   and verified, and ends up seeding the video itself. The first run also has seeder
+#   and verified, keeps it once enough has played (2 s here, a minute for a user: the clip
+#   is 12 s long) and ends up seeding the video itself, kept in its kept.json and history.
+#   With sharing off it plays, keeps nothing and only serves. The first run also has seeder
 #   ratings (NFX-16) on, read from the embedded relay, which holds none: playback must not
 #   change.
 # NFX_E2E_DISPLAY=xvfb runs the app on a private Xvfb (X11) instead, where GNOME Shell
@@ -64,7 +66,7 @@ wait_for "$work/seeder.log" 'embedded relay: ws://' 30
 relay=$(grep -oE 'ws://[0-9.:]+' "$work/seeder.log" | head -1)
 
 # The app, in its own headless display server, with its own data dir: once with sharing off
-# (the default: it plays and only serves), once with sharing on (it plays and seeds).
+# (it plays and only serves), once with sharing on (the default: it plays, keeps and seeds).
 start_app() { # share tag [more JSON fields]
   local json
   json=$(printf '{"a":"%s","relays":["%s"],"share":%s%s}' "$a" "$relay" "$1" "${3:-}")
@@ -101,7 +103,14 @@ wait_for "$work/app-private.log" '"step":"watching"' 90
 "$bin/nfxd" publish --key "$work/creator.key" --relay "$relay" --package "$work/pkg" \
   --title "Desktop e2e" > /dev/null 2>&1
 check_app private played-not-shared || { echo "desktop e2e: FAIL (sharing off)"; exit 1; }
+grep -qF "\"$a\"" "$work/app-private/history.json" \
+  || { echo "desktop e2e: FAIL (sharing off: not in the history)"; exit 1; }
+if grep -qF "\"$a\"" "$work/app-private/kept.json" 2>/dev/null; then
+  echo "desktop e2e: FAIL (sharing off: kept)"; exit 1
+fi
 # With sharing on, the next beacon (within 60 s) names the seeder.
-start_app true shared
+start_app true shared ',"keep_after_s":2'
 check_app shared played-and-seeding || { echo "desktop e2e: FAIL (sharing on)"; exit 1; }
+grep -qF "\"$a\"" "$work/app-shared/kept.json" \
+  || { echo "desktop e2e: FAIL (sharing on: not kept)"; exit 1; }
 echo "desktop e2e: PASS"

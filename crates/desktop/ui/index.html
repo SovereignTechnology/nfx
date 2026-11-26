@@ -41,9 +41,32 @@
   .nerd .closed { color: var(--muted); }
   .nerd-menu { position: absolute; z-index: 3; background: var(--panel); border: 1px solid var(--line); padding: 2px; }
   .tools { display: flex; gap: 8px; }
+  button.secondary { background: #333; color: var(--text); font-weight: 400; }
+  /* The one-time notice about keeping and seeding (NFX-18 §6). */
+  .notice { border-color: #7a5a00; background: #241d0c; }
+  .notice p { margin: 6px 0; }
+  .notice button { margin-right: 6px; }
+  li.hist { align-items: center; font-size: 13px; }
+  li.hist .info { flex: 1; min-width: 0; }
+  li.hist .info strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  li.hist .meta { color: var(--muted); font-size: 12px; }
+  li.hist button { margin: 0; padding: 3px 10px; }
 </style>
 <main>
   <h1>NFX</h1>
+  <section class="notice" id="keep-notice" role="alertdialog" aria-labelledby="keep-notice-title" hidden>
+    <strong id="keep-notice-title">This app keeps and seeds what you watch</strong>
+    <p>A video you watch for a minute or more is kept on this computer and seeded to other
+    viewers while the app runs, so that more people can watch it. While it seeds,
+    <strong>this computer's public IP address and the list of videos it seeds are
+    public</strong>, signed with this node's key. No address on your home network is
+    announced, and your router is never asked to open a port.</p>
+    <p>You can turn it off at any time with "Seed videos I watch" below. Videos already kept
+    then stay on this computer until you remove them from History. Nothing is kept until you
+    answer.</p>
+    <button id="notice-keep" type="button">Keep seeding</button>
+    <button id="notice-off" type="button" class="secondary">Turn seeding off</button>
+  </section>
   <section>
     <div class="row">
       <div>
@@ -73,6 +96,11 @@
     <div class="tools"><button id="nerd-toggle" type="button" aria-pressed="false" title="Stats for nerds (n, or right-click the video)">Stats for nerds</button></div>
   </section>
   <section>
+    <label>History (kept on this computer only)</label>
+    <ul id="history"></ul>
+    <p class="note" id="history-empty">Nothing watched yet.</p>
+  </section>
+  <section>
     <label>Videos on this node</label>
     <ul id="status"></ul>
   </section>
@@ -81,10 +109,17 @@
     <textarea id="relays" spellcheck="false"></textarea>
     <label for="iroh">iroh relays (one per line, optional)</label>
     <textarea id="iroh" spellcheck="false"></textarea>
-    <label class="check"><input type="checkbox" id="share"> Share videos I watch</label>
-    <p class="note">Off by default. When on, each video you watch is fetched whole and
-    seeded to other viewers. That announces it publicly, signed with this node's key and
-    with this computer's network addresses.</p>
+    <label class="check"><input type="checkbox" id="share"> Seed videos I watch</label>
+    <p class="note">On by default. A video you watch for a minute or more is kept on this
+    computer and seeded to other viewers while the app runs, and again after a restart. That
+    makes this computer's public IP address and the list of videos it seeds public, signed
+    with this node's key. No address on your home network is announced, and your router is
+    never asked to open a port. Turning it off stops all announcing at once; kept videos stay
+    until you remove them from History.</p>
+    <label for="cap">Space for kept videos (GiB)</label>
+    <input id="cap" type="number" min="1" step="1" inputmode="numeric">
+    <p class="note">When kept videos would take more, the ones watched least recently are
+    deleted first, never the one playing.</p>
     <label for="rating-root">Seeder ratings: your npub (optional)</label>
     <input id="rating-root" autocomplete="off" spellcheck="false" placeholder="npub1…">
     <label for="general">General relays for ratings (one per line, wss://…)</label>

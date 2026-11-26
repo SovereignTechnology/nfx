@@ -922,6 +922,190 @@ async fn a_viewer_that_does_not_share_plays_but_never_announces() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_that_keeps_on_request_seeds_only_once_told_and_lets_go_on_release() {
+    use n0_future::StreamExt as _;
+
+    let (_iroh, iroh_url) = iroh_relay().await;
+    let seed_dir = tmp("keep-seed");
+    let (event, manifest, list) = vector_package(&seed_dir);
+    let (a, root) = (manifest.a_tag(), manifest.root_hex());
+    let seeder = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: seed_dir.join("store"),
+        iroh_relays: vec![iroh_url.clone()],
+        seed: vec![a.clone()],
+        embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let relay_url = seeder.relay_url.clone().unwrap();
+    let client = Relays::connect(std::slice::from_ref(&relay_url), Duration::from_secs(10))
+        .await
+        .unwrap();
+    // The desktop viewer's settings: it keeps when its user has watched long enough.
+    let viewer_dir = tmp("keep-viewer");
+    let viewer = std::sync::Arc::new(
+        Daemon::start(Config {
+            keys: Some(Keys::generate()),
+            store: viewer_dir.clone(),
+            relays: vec![relay_url.clone()],
+            iroh_relays: vec![iroh_url.clone()],
+            internal_origin: true,
+            seed_watched: true,
+            keep_on_request: true,
+            no_portmapper: true,
+            public_addrs_only: true,
+            ..Config::default()
+        })
+        .await
+        .unwrap(),
+    );
+    assert!(
+        viewer.keep(&a).is_err(),
+        "only a video watched here is kept"
+    );
+
+    let watching = {
+        let (viewer, a) = (viewer.clone(), a.clone());
+        tokio::spawn(async move { viewer.watch(&a, WAIT).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    client.publish(&event).await.unwrap();
+    assert_eq!(watching.await.unwrap().unwrap().root, manifest.root);
+    until_state(&viewer, &a, &VideoState::Serving).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        viewer.state()[&a],
+        VideoState::Serving,
+        "a watch alone keeps nothing"
+    );
+
+    assert!(viewer.keep(&a).unwrap(), "kept");
+    assert!(!viewer.keep(&a).unwrap(), "kept once");
+    until_state(&viewer, &a, &VideoState::Seeding).await;
+    let store = FsStore::open(&viewer_dir).unwrap();
+    assert!(nfxd::keep::is_whole(&store, &root), "fetched whole");
+
+    // Released: nothing of it runs or is tagged; its files are the caller's to delete.
+    viewer.release(&a, &root).await.unwrap();
+    assert!(!viewer.state().contains_key(&a), "forgotten");
+    let mut tags = viewer
+        .node()
+        .blobs()
+        .tags()
+        .list_prefix(nfx_node::seed::tag_prefix(&root))
+        .await
+        .unwrap();
+    assert!(tags.next().await.is_none(), "untagged");
+    assert!(nfxd::keep::is_whole(&store, &root), "the files stay");
+
+    // Watched and kept again, it starts afresh.
+    viewer.watch(&a, WAIT).await.unwrap();
+    until_state(&viewer, &a, &VideoState::Serving).await;
+    assert!(viewer.keep(&a).unwrap(), "kept afresh");
+    until_state(&viewer, &a, &VideoState::Seeding).await;
+
+    client.shutdown().await;
+    std::sync::Arc::try_unwrap(viewer)
+        .ok()
+        .expect("sole owner")
+        .shutdown()
+        .await;
+    seeder.shutdown().await;
+    assert_eq!(
+        nfxd::keep::delete_video(&store, &root, &[]),
+        list.files.len() + 1,
+        "every file and the hash list"
+    );
+    assert!(!nfxd::keep::is_whole(&store, &root));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keeping_viewer_fetches_under_an_id_its_beacons_never_name() {
+    let (_iroh, iroh_url) = iroh_relay().await;
+    let seed_dir = tmp("apart-seed");
+    let (event, manifest, _) = vector_package(&seed_dir);
+    let a = manifest.a_tag();
+    let seeder = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: seed_dir.join("store"),
+        iroh_relays: vec![iroh_url.clone()],
+        seed: vec![a.clone()],
+        embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    // An operator's seeder keeps one endpoint for both.
+    assert_eq!(seeder.node().fetch_id(), seeder.node().id());
+    let relay_url = seeder.relay_url.clone().unwrap();
+    let client = Relays::connect(std::slice::from_ref(&relay_url), Duration::from_secs(10))
+        .await
+        .unwrap();
+    let mut beacons = client
+        .watch_beacons(manifest.addr.namespace(), std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    client.publish(&event).await.unwrap();
+    // The desktop viewer's settings.
+    let viewer_keys = Keys::generate();
+    let viewer = Daemon::start(Config {
+        keys: Some(viewer_keys.clone()),
+        store: tmp("apart-viewer"),
+        relays: vec![relay_url.clone()],
+        iroh_relays: vec![iroh_url.clone()],
+        internal_origin: true,
+        seed_watched: true,
+        keep_on_request: true,
+        no_portmapper: true,
+        public_addrs_only: true,
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let (serving, fetching) = (viewer.node().id(), viewer.node().fetch_id());
+    assert_ne!(
+        serving, fetching,
+        "the viewer fetches under the id it serves with"
+    );
+
+    viewer.watch(&a, WAIT).await.unwrap();
+    assert!(viewer.keep(&a).unwrap(), "kept");
+    until_state(&viewer, &a, &VideoState::Seeding).await;
+
+    // The seeder was dialled for the watch and for the keep from the fetching id alone: it
+    // has never met the id the viewer serves with.
+    let met = seeder.node().endpoint();
+    assert!(
+        met.remote_info(fetching).await.is_some(),
+        "the seeder was never dialled from the fetching id"
+    );
+    assert!(
+        met.remote_info(serving).await.is_none(),
+        "the seeder was dialled from the id the viewer serves with"
+    );
+
+    // What the viewer announces names the id it serves with, never the one it fetches with.
+    let beacon = next_beacon_from(&mut beacons, &viewer_keys.public_key().to_hex()).await;
+    let node = beacon
+        .content
+        .endpoints
+        .iter()
+        .find_map(|e| match e {
+            nfx_proto::beacon::Endpoint::Iroh { node, .. } => Some(node.clone()),
+            _ => None,
+        })
+        .expect("an iroh endpoint");
+    assert_eq!(node, serving.to_string());
+    assert_ne!(node, fetching.to_string());
+
+    client.shutdown().await;
+    viewer.shutdown().await;
+    seeder.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn rating_settings_that_cannot_work_are_refused_at_start() {
     // NFX-16: ratings are read only with the user's key and general relays, and every
     // key is 64 lowercase hex by the time it reaches the daemon.

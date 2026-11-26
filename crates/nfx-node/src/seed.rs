@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use iroh_blobs::api::TempTag;
 use iroh_blobs::api::blobs::{AddBytesOptions, AddPathOptions, ImportMode};
 use iroh_blobs::hashseq::HashSeq;
 use iroh_blobs::ticket::BlobTicket;
@@ -11,9 +12,16 @@ use nfx_proto::hashlist::HashList;
 use nfx_proto::namespace::VideoAddr;
 
 use crate::node::Node;
-use crate::store::ContentStore;
+use crate::store::{ContentStore, is_sha256_name};
 use crate::video::{check_held, held_files, meta_members, rendition_members};
 use crate::{NodeError, Result};
+
+/// The iroh-blobs tags of a seeded video's collections start with this: `meta`, then
+/// `r/<rendition id>` for each held rendition.
+#[must_use]
+pub fn tag_prefix(root: &str) -> String {
+    format!("nfx/{root}/")
+}
 
 /// Tickets for a seeded video: the `meta` collection and one per held rendition.
 #[derive(Debug, Clone)]
@@ -78,14 +86,18 @@ impl Node {
             check_held(&list, ids)?;
         }
 
-        let mut meta_hashes = Vec::new();
+        // Members are held by temporary tags until their collection is tagged by name.
+        let mut meta_members_held = Vec::new();
         for sha in meta_members(root, &list) {
             if sha != root {
                 list.check_playlist_or_other(&store.get(&sha)?, &sha)?;
             }
-            meta_hashes.push(self.import(store, &sha).await?);
+            meta_members_held.push(self.import(store, &sha).await?);
         }
-        let meta = self.ticket(self.add_seq(&meta_hashes).await?);
+        let meta = self.ticket(
+            self.add_seq(&meta_members_held, &format!("{}meta", tag_prefix(root)))
+                .await?,
+        );
 
         let mut renditions = BTreeMap::new();
         for r in &list.renditions {
@@ -98,11 +110,12 @@ impl Node {
                 .find(|f| f.name == r.playlist)
                 .ok_or_else(|| NodeError::Collection(format!("no playlist for {}", r.id)))?;
             let members = rendition_members(&list, &store.get(&playlist.sha256)?)?;
-            let mut hashes = Vec::with_capacity(members.len());
+            let mut held = Vec::with_capacity(members.len());
             for sha in &members {
-                hashes.push(self.import(store, sha).await?);
+                held.push(self.import(store, sha).await?);
             }
-            renditions.insert(r.id.clone(), self.ticket(self.add_seq(&hashes).await?));
+            let name = format!("{}r/{}", tag_prefix(root), r.id);
+            renditions.insert(r.id.clone(), self.ticket(self.add_seq(&held, &name).await?));
         }
         let chunks = if renditions.len() == list.renditions.len() {
             Chunks::All
@@ -149,11 +162,28 @@ impl Node {
         }
     }
 
+    /// Drop the tags that keep the video `root`'s collections in iroh-blobs ([`Node::seed`]
+    /// names them after its root), so that the next garbage collection frees every blob no
+    /// other tagged collection holds. Its files stay where they are: the NFX store is the
+    /// caller's. Seeding it again tags it again. Returns how many tags were dropped.
+    pub async fn unseed(&self, root: &str) -> Result<u64> {
+        if !is_sha256_name(root) {
+            return Err(NodeError::Collection(format!("not a root: {root:?}")));
+        }
+        self.blobs()
+            .tags()
+            .delete_prefix(tag_prefix(root))
+            .await
+            .map_err(NodeError::transport)
+    }
+
     /// Import a verified store file into iroh-blobs: by reference when the store has a
-    /// path (store files are content-addressed and never change), by copy otherwise.
-    async fn import(&self, store: &dyn ContentStore, sha: &str) -> Result<Hash> {
+    /// path (store files are content-addressed and never change), by copy otherwise. Only a
+    /// temporary tag holds it: what keeps it is the named tag of a collection it is in, so
+    /// [`Node::unseed`] can let it go.
+    async fn import(&self, store: &dyn ContentStore, sha: &str) -> Result<TempTag> {
         let bytes = store.get(sha)?; // re-verifies against the name
-        let tag = match store.path_of(sha) {
+        match store.path_of(sha) {
             Some(path) => {
                 self.blobs()
                     .add_path_with_opts(AddPathOptions {
@@ -161,30 +191,33 @@ impl Node {
                         format: BlobFormat::Raw,
                         mode: ImportMode::TryReference,
                     })
+                    .temp_tag()
                     .await
             }
-            None => self.blobs().add_bytes(bytes).await,
+            None => self.blobs().add_bytes(bytes).temp_tag().await,
         }
-        .map_err(NodeError::transport)?;
-        Ok(tag.hash)
+        .map_err(NodeError::transport)
     }
 
-    async fn add_seq(&self, members: &[Hash]) -> Result<Hash> {
-        let seq: HashSeq = members.iter().copied().collect();
-        let tag = self
+    /// A collection of `members`, tagged `name`: seeding the same video again replaces the
+    /// tag rather than adding one.
+    async fn add_seq(&self, members: &[TempTag], name: &str) -> Result<Hash> {
+        let seq: HashSeq = members.iter().map(TempTag::hash).collect();
+        let held = self
             .blobs()
             .add_bytes_with_opts(AddBytesOptions {
                 data: seq.into_inner(),
                 format: BlobFormat::HashSeq,
             })
+            .temp_tag()
             .await
             .map_err(NodeError::transport)?;
         self.blobs()
             .tags()
-            .create(HashAndFormat::hash_seq(tag.hash))
+            .set(name, HashAndFormat::hash_seq(held.hash()))
             .await
             .map_err(NodeError::transport)?;
-        Ok(tag.hash)
+        Ok(held.hash())
     }
 
     fn ticket(&self, hash: Hash) -> BlobTicket {

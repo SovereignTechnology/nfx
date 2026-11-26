@@ -22,6 +22,8 @@ async function loadSettings() {
   $('relays').value = s.relays.join('\n');
   $('iroh').value = s.iroh_relays.join('\n');
   $('share').checked = s.share;
+  $('cap').value = String(s.cap_gib);
+  $('keep-notice').hidden = s.keep_notice_seen;
   $('rating-root').value = s.rating_root;
   $('general').value = s.general_relays.join('\n');
   $('trusted').value = s.rating_trusted.join('\n');
@@ -45,7 +47,20 @@ async function refreshStatus() {
   return rows;
 }
 
+/** Stop the player and forget the video playing. */
+function stopPlayer() {
+  if (hls) hls.destroy();
+  hls = null;
+  const v = $('v');
+  v.removeAttribute('src');
+  v.load();
+  playing = null;
+}
+
 async function watch(a) {
+  // The last play ends here: the app deletes its files unless it was kept.
+  sendProgress();
+  stopPlayer();
   say('Resolving the manifest and waiting for a seeder…');
   report('watching', { a });
   const w = await invoke('watch', { a });
@@ -53,10 +68,12 @@ async function watch(a) {
   say(`Playing ${w.video}. Every file is checked against its sha256 before it plays.`);
   report('resolved', { root: w.root, title: w.title });
   playing = { a: w.a, root: w.root, title: w.title };
-  if (hls) hls.destroy();
+  Object.assign(track, { played: 0, last: null, sent: 0 });
+  refreshHistory().catch(() => {});
   const video = $('v');
   if (!window.Hls || !Hls.isSupported()) throw new Error('MediaSource unavailable');
-  hls = new Hls();
+  // Resume where the history says playback was.
+  hls = new Hls(w.resume > 5 ? { startPosition: w.resume } : {});
   hls.on(Hls.Events.MANIFEST_PARSED, (_, d) => {
     report('levels', { levels: d.levels.map((l) => l.height) });
     video.play().catch((e) => report('play-error', { error: String(e) }));
@@ -71,6 +88,94 @@ async function watch(a) {
   hls.loadSource(`${base}/${w.root}/master.m3u8`);
   hls.attachMedia(video);
 }
+
+// ---- Keeping and history -------------------------------------------------------------
+// The app keeps a video once a minute of it has played (NFX-18 §2.1), so the page counts
+// the seconds played, not where playback is: a seek is not watching.
+const track = { played: 0, last: null, sent: 0 };
+
+function sendProgress() {
+  if (!playing) return;
+  const v = $('v');
+  track.sent = Date.now();
+  // A video watched to its end starts from the beginning next time.
+  const position = v.ended ? 0 : v.currentTime;
+  invoke('progress', { a: playing.a, position, played: track.played }).catch(() => {});
+}
+
+$('v').addEventListener('timeupdate', () => {
+  const v = $('v');
+  if (!playing) return;
+  if (track.last !== null && !v.paused && !v.seeking) {
+    const d = v.currentTime - track.last;
+    if (d > 0 && d < 2) track.played += d;
+  }
+  track.last = v.currentTime;
+  if (Date.now() - track.sent >= (test ? 1000 : 5000)) sendProgress();
+});
+$('v').addEventListener('seeking', () => {
+  track.last = null;
+});
+$('v').addEventListener('pause', sendProgress);
+$('v').addEventListener('ended', sendProgress);
+
+function clock(secs) {
+  return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+}
+
+async function refreshHistory() {
+  const items = await invoke('history');
+  $('history-empty').hidden = items.length > 0;
+  $('history').replaceChildren(
+    ...items.map((h) => {
+      const li = document.createElement('li');
+      li.className = 'hist';
+      const info = document.createElement('div');
+      info.className = 'info';
+      const at = h.position > 0 ? ` · at ${clock(h.position)}` : '';
+      info.append(cell('strong', h.title || h.a), cell('div', `${new Date(h.watched_at * 1000).toLocaleString()}${at} · ${h.state}`, 'meta'));
+      const again = cell('button', 'Watch');
+      again.type = 'button';
+      again.addEventListener('click', () => {
+        $('a').value = h.a;
+        watch(h.a).catch((e) => say(String(e)));
+      });
+      const remove = cell('button', 'Remove', 'secondary');
+      remove.type = 'button';
+      remove.title = h.kept ? 'Remove it from the history and delete the copy kept on this computer' : 'Remove it from the history';
+      remove.addEventListener('click', () => removeVideo(h.a));
+      li.append(info, again, remove);
+      return li;
+    }),
+  );
+  return items;
+}
+
+async function removeVideo(a) {
+  if (playing && playing.a === a) {
+    stopPlayer();
+    $('title').textContent = '';
+  }
+  try {
+    await invoke('remove', { a });
+    say("Removed from the history, and this computer's copy deleted.");
+  } catch (e) {
+    say(String(e));
+  }
+  refreshHistory().catch(() => {});
+}
+
+async function answerNotice(share) {
+  try {
+    await invoke('answer_keep_notice', { share });
+    await loadSettings();
+    say(share ? 'Seeding stays on: a video you watch for a minute is kept and seeded.' : 'Seeding is off: nothing is kept or announced.');
+  } catch (e) {
+    say(String(e));
+  }
+}
+$('notice-keep').addEventListener('click', () => answerNotice(true));
+$('notice-off').addEventListener('click', () => answerNotice(false));
 
 // ---- Stats for nerds (nfx #99): where the bytes come from -----------------------------
 // Seeders by a short id; their addresses only behind "Show addresses", which is off each
@@ -309,16 +414,25 @@ document.addEventListener('keydown', (e) => {
 
 $('play').addEventListener('click', () => watch($('a').value.trim()).catch((e) => say(String(e))));
 $('save').addEventListener('click', async () => {
+  const cap = Number($('cap').value);
+  if (!Number.isInteger(cap) || cap < 1) {
+    say('Space for kept videos: a whole number of GiB, 1 or more.');
+    return;
+  }
   try {
     await invoke('save_settings', {
-      relays: lines($('relays').value),
-      irohRelays: lines($('iroh').value),
-      share: $('share').checked,
-      ratingRoot: $('rating-root').value.trim(),
-      ratingTrusted: lines($('trusted').value),
-      generalRelays: lines($('general').value),
+      form: {
+        relays: lines($('relays').value),
+        iroh_relays: lines($('iroh').value),
+        share: $('share').checked,
+        cap_gib: cap,
+        rating_root: $('rating-root').value.trim(),
+        rating_trusted: lines($('trusted').value),
+        general_relays: lines($('general').value),
+      },
     });
     say('Node restarted with the new settings.');
+    refreshHistory().catch(() => {});
   } catch (e) {
     say(String(e));
   }
@@ -326,11 +440,14 @@ $('save').addEventListener('click', async () => {
 
 (async () => {
   await loadSettings();
+  refreshHistory().catch(() => {});
   setInterval(() => refreshStatus().catch(() => {}), 2000);
+  setInterval(() => refreshHistory().catch(() => {}), 5000);
   test = await invoke('test_config');
   if (!test) return;
   // Test mode: play the address, then wait until playback passes 3 s and the node has
-  // fetched the video whole and seeds it (sharing on), or only serves it (sharing off).
+  // kept the video, fetched it whole and seeds it (sharing on), or only serves it (sharing
+  // off). The history must say the same.
   const video = $('v');
   $('a').value = test.a;
   try {
@@ -348,6 +465,10 @@ $('save').addEventListener('click', async () => {
     if (video.currentTime > 3 && settled) {
       clearInterval(tick);
       report(test.share ? 'played-and-seeding' : 'played-not-shared', { t: Math.round(video.currentTime * 10) / 10, state });
+      const items = await refreshHistory().catch(() => []);
+      const item = items.find((h) => h.a === playing.a);
+      const historyOk = Boolean(item && item.kept === test.share);
+      report('history', { kept: item ? item.kept : null, state: item ? item.state : null });
       // Stats for nerds: the seeder the bytes came from, then its address behind the switch.
       let ok = false;
       try {
@@ -359,7 +480,7 @@ $('save').addEventListener('click', async () => {
         const routes = await invoke('nerd_addresses', { root: playing.root });
         const row = peers.find((p) => p.down > 0);
         const route = row && routes.find((r) => r.peer.startsWith(row.id));
-        ok = Boolean(row && route && route.address && route.path !== 'unknown');
+        ok = historyOk && Boolean(row && route && route.address && route.path !== 'unknown');
         report('nerd-check', { peers: peers.length, bytes: row ? row.down : 0, path: route ? route.path : null, addressShown: Boolean(route && route.address) });
         nerdClose();
       } catch (e) {

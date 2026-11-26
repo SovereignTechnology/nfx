@@ -14,7 +14,9 @@
 //!   the swarm as well as from beacons, once it knows a first peer to join through.
 //! - **watch** (at runtime, [`Daemon::watch`]): what a viewer does. Hold the video on the
 //!   origin so playback can start from on-demand pulls, and fetch it whole in the
-//!   background to seed it.
+//!   background to seed it, at once or when the viewer keeps it ([`Daemon::keep`]).
+//!   [`Daemon::release`] lets a video go again. A node that seeds what it watches fetches
+//!   under an iroh identity of its own, never the one its beacons name (NFX-18 §4).
 //! - **held renditions** ([`Config::renditions`]): a video may be held in only some of its
 //!   renditions. Its hash list and meta collection are still held whole (every playlist
 //!   included), and of the renditions only the named ones: fetched, seeded, served by the
@@ -125,8 +127,16 @@ pub struct Config {
     pub embed_relay: Option<SocketAddr>,
     /// After a [`Daemon::watch`] plays, fetch the whole video and seed it: announce it
     /// publicly, signed with this node's key, with this node's addresses. Off by default:
-    /// a viewer shares only when it chooses to, and otherwise announces nothing.
+    /// a viewer shares only when it chooses to, and otherwise announces nothing. With it,
+    /// or with `keep_on_request`, every fetch dials from a second iroh endpoint with a
+    /// fresh key that serves nothing (`NodeConfig::fetch_apart`): a seeder this node watches
+    /// from never learns the id its beacons name (NFX-18 §4).
     pub seed_watched: bool,
+    /// With `seed_watched`, a watch never starts that fetch: [`Daemon::keep`] does, once the
+    /// viewer decides to keep the video (the desktop app: after its user has played a
+    /// minute of it, NFX-18 §2.1). Off: the first watch that plays starts it. With it, the
+    /// node fetches apart even while `seed_watched` is off.
+    pub keep_on_request: bool,
     /// Never ask the local gateway to open a port (see `NodeConfig::no_portmapper`).
     pub no_portmapper: bool,
     /// Publish no direct address that is not public in tickets and beacons (see
@@ -292,7 +302,14 @@ pub struct Daemon {
     watching: Mutex<std::collections::BTreeSet<String>>,
     /// Addresses being fetched, seeded or served.
     handled: Mutex<std::collections::BTreeSet<String>>,
+    /// Addresses fetched whole to be seeded, or seeded: `seed`, `fetch`, and what a watch
+    /// or [`Daemon::keep`] started.
+    kept: Mutex<std::collections::BTreeSet<String>>,
+    /// Each video's own tasks (its job, beacon watch and swarm learner), by address, so
+    /// that [`Daemon::release`] can stop them.
+    video_tasks: Mutex<BTreeMap<String, Vec<JoinHandle<()>>>>,
     seed_watched: bool,
+    keep_on_request: bool,
 }
 
 struct Shared {
@@ -326,6 +343,8 @@ struct Shared {
     /// This node's own pubkey: its own beacons and envelopes are never learned.
     own: Option<String>,
     state: Arc<Mutex<BTreeMap<String, VideoState>>>,
+    /// The manifest each address last resolved to, for [`Daemon::release`].
+    manifests: Mutex<BTreeMap<String, Verified<Manifest>>>,
     /// Why seeding waits for an iroh relay ([`come_online`]); `None` once one is reached,
     /// after [`RELAY_WAIT`], or when there is nothing to wait for.
     relay_wait: watch::Receiver<Option<String>>,
@@ -568,6 +587,10 @@ impl Shared {
             if let Ok(found) = self.relays.manifests(&query, CONNECT_TIMEOUT).await
                 && let Some(m) = found.into_iter().next()
             {
+                self.manifests
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(a.to_owned(), m.clone());
                 return Ok(m);
             }
             tokio::time::sleep(RETRY).await;
@@ -1121,6 +1144,9 @@ impl Daemon {
                 blobs_dir: Some(state.join("iroh-blobs")),
                 no_portmapper: cfg.no_portmapper,
                 public_addrs_only: cfg.public_addrs_only,
+                // A viewer that seeds what it watches; an operator's seeder (`nfxd run`) keeps
+                // one endpoint.
+                fetch_apart: cfg.seed_watched || cfg.keep_on_request,
                 bind_addr: cfg.iroh_bind,
                 external_addrs: cfg.iroh_external.clone(),
                 ..NodeConfig::default()
@@ -1242,6 +1268,7 @@ impl Daemon {
             tracker,
             own: cfg.keys.as_ref().map(|k| k.public_key().to_hex()),
             state: state.clone(),
+            manifests: Mutex::new(BTreeMap::new()),
             relay_wait,
         });
 
@@ -1286,18 +1313,25 @@ impl Daemon {
             (&cfg.fetch, |s, a| Box::pin(s.run_fetch(a))),
             (&cfg.pull, |s, a| Box::pin(s.run_pull(a))),
         ];
+        let mut video_tasks: BTreeMap<String, Vec<JoinHandle<()>>> = BTreeMap::new();
         for a in cfg.fetch.iter().chain(&cfg.pull) {
-            tasks.push(tokio::spawn(shared.clone().learn_from_swarm(a.clone())));
+            video_tasks
+                .entry(a.clone())
+                .or_default()
+                .push(tokio::spawn(shared.clone().learn_from_swarm(a.clone())));
         }
         for (list, job) in jobs {
             for a in list {
                 shared.set(a, VideoState::Resolving);
-                let (shared, a) = (shared.clone(), a.clone());
-                tasks.push(tokio::spawn(async move {
-                    if let Err(e) = job(shared.clone(), a.clone()).await {
-                        shared.set(&a, VideoState::Failed(e.to_string()));
-                    }
-                }));
+                let (shared, owned) = (shared.clone(), a.clone());
+                video_tasks
+                    .entry(a.clone())
+                    .or_default()
+                    .push(tokio::spawn(async move {
+                        if let Err(e) = job(shared.clone(), owned.clone()).await {
+                            shared.set(&owned, VideoState::Failed(e.to_string()));
+                        }
+                    }));
             }
         }
 
@@ -1328,6 +1362,9 @@ impl Daemon {
             tasks: Mutex::new(tasks),
             watching: Mutex::new(cfg.fetch.iter().chain(&cfg.pull).cloned().collect()),
             seed_watched: cfg.seed_watched,
+            keep_on_request: cfg.keep_on_request,
+            kept: Mutex::new(cfg.seed.iter().chain(&cfg.fetch).cloned().collect()),
+            video_tasks: Mutex::new(video_tasks),
             handled: Mutex::new(
                 cfg.seed
                     .iter()
@@ -1351,18 +1388,22 @@ impl Daemon {
         self.shared.origin.clone()
     }
 
-    fn spawn(&self, task: impl std::future::Future<Output = ()> + Send + 'static) {
-        self.tasks
+    /// Run a task of the video `a`'s: [`Daemon::release`] stops it, as shutdown does.
+    fn spawn_for(&self, a: &str, task: impl std::future::Future<Output = ()> + Send + 'static) {
+        self.video_tasks
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .entry(a.to_owned())
+            .or_default()
             .push(tokio::spawn(task));
     }
 
     /// Watch a video, as a viewer: learn seeders from its beacons, resolve its manifest,
     /// and hold it on the origin, so playback can start while misses are pulled on demand.
     /// With `seed_watched` (and a key) it is then fetched whole in the background and
-    /// seeded; otherwise it is only served here and never announced. Returns the manifest
-    /// once the origin holds it, or an error after `timeout`. Watching twice is harmless.
+    /// seeded, at once or, with `keep_on_request`, when [`Daemon::keep`] says so; otherwise
+    /// it is only served here and never announced. Returns the manifest once the origin
+    /// holds it, or an error after `timeout`. Watching twice is harmless.
     pub async fn watch(&self, a: &str, timeout: Duration) -> Result<Verified<Manifest>> {
         let origin = self
             .shared
@@ -1395,14 +1436,14 @@ impl Daemon {
                     .entry(a.to_owned())
                     .or_insert(VideoState::Resolving);
                 let (pull, own) = (self.shared.pull.clone(), self.own.clone());
-                self.spawn(async move {
+                self.spawn_for(a, async move {
                     while let Some(beacon) = beacons.next().await {
                         if Some(&beacon.seeder) != own.as_ref() {
                             pull.learn(&beacon);
                         }
                     }
                 });
-                self.spawn(self.shared.clone().learn_from_swarm(a.to_owned()));
+                self.spawn_for(a, self.shared.clone().learn_from_swarm(a.to_owned()));
             }
         }
         let shared = self.shared.clone();
@@ -1430,18 +1471,103 @@ impl Daemon {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(a.to_owned());
         if first {
-            if self.seed_watched && shared.keys.is_some() {
-                let (shared, a) = (shared.clone(), a.to_owned());
-                self.spawn(async move {
-                    if let Err(e) = shared.clone().run_fetch(a.clone()).await {
-                        shared.set(&a, VideoState::Failed(e.to_string()));
-                    }
-                });
-            } else {
+            if self.seed_watched && !self.keep_on_request && shared.keys.is_some() {
+                self.start_keeping(a);
+            } else if !self.is_kept(a) {
                 shared.set(a, VideoState::Serving);
             }
         }
         Ok(manifest)
+    }
+
+    fn is_kept(&self, a: &str) -> bool {
+        self.kept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(a)
+    }
+
+    /// Fetch `a` whole, then seed it, unless that already runs. Whether it started.
+    fn start_keeping(&self, a: &str) -> bool {
+        let first = self
+            .kept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(a.to_owned());
+        if first {
+            let (shared, owned) = (self.shared.clone(), a.to_owned());
+            self.spawn_for(a, async move {
+                if let Err(e) = shared.clone().run_fetch(owned.clone()).await {
+                    shared.set(&owned, VideoState::Failed(e.to_string()));
+                }
+            });
+        }
+        first
+    }
+
+    /// Keep a video being watched: fetch it whole in the background, then seed it, as
+    /// `seed_watched` does at the first watch. For a node with `keep_on_request`, whose
+    /// viewer decides when (NFX-18 §2.1). Only a video watched here can be kept, so what is
+    /// kept follows from what was played. Needs `seed_watched` and a key. Returns whether
+    /// it started; a video already kept here is left as it is.
+    pub fn keep(&self, a: &str) -> Result<bool> {
+        if !self.seed_watched {
+            return Err(Error::Config("keeping needs seed_watched".into()));
+        }
+        if self.shared.keys.is_none() {
+            return Err(Error::Config("keeping needs a key".into()));
+        }
+        if self.is_kept(a) {
+            return Ok(false);
+        }
+        let watched = self
+            .watching
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(a);
+        if !watched {
+            return Err(Error::Config(format!("{a}: not watched here")));
+        }
+        Ok(self.start_keeping(a))
+    }
+
+    /// Let go of the video `a`, whose hash list is `root`: its fetch, seeding, beacon watch
+    /// and swarm learner stop (no more beacons, lookup answers or swarms for it), its state
+    /// is forgotten, and its iroh-blobs tags are dropped ([`Node::unseed`]), so the next
+    /// garbage collection frees what no other video holds. Its files stay in the store:
+    /// deleting them is the caller's, which knows what else it keeps. A later watch or keep
+    /// starts afresh. Releasing a video this node never had is harmless.
+    pub async fn release(&self, a: &str, root: &str) -> Result<()> {
+        let tasks = self
+            .video_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(a)
+            .unwrap_or_default();
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+        for set in [&self.watching, &self.handled, &self.kept] {
+            set.lock().unwrap_or_else(PoisonError::into_inner).remove(a);
+        }
+        let manifest = self
+            .shared
+            .manifests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(a);
+        if let Some(manifest) = manifest {
+            self.shared.forget_swarms(&manifest).await;
+        }
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(a);
+        self.node.unseed(root).await?;
+        Ok(())
     }
 
     /// Each video's state, by `a` tag.
@@ -1474,7 +1600,18 @@ impl Daemon {
     /// blobs store is released even while a pending call still holds this daemon, so a
     /// new daemon can open the same store at once.
     pub async fn shutdown(&self) {
-        let tasks = std::mem::take(&mut *self.tasks.lock().unwrap_or_else(PoisonError::into_inner));
+        let mut tasks =
+            std::mem::take(&mut *self.tasks.lock().unwrap_or_else(PoisonError::into_inner));
+        tasks.extend(
+            std::mem::take(
+                &mut *self
+                    .video_tasks
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+            )
+            .into_values()
+            .flatten(),
+        );
         for task in &tasks {
             task.abort();
         }

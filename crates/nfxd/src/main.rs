@@ -609,6 +609,7 @@ async fn run(args: &[String]) -> Result<()> {
         internal_origin: false,
         // `run` seeds only what `--seed` names, and a seeder may use the portmapper.
         seed_watched: false,
+        keep_on_request: false,
         no_portmapper: false,
         // An operator's seeder publishes what it has, as before; `--iroh-external` narrows it.
         public_addrs_only: false,

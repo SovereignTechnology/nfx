@@ -6,17 +6,32 @@ address (`38504:<creator>:<namespace>:<video-id>`). It then:
    (NFX-03);
 2. plays over `nfx://` while the video is fetched over iroh. Every file is checked
    against its sha256 before it plays (NFX-05 §4);
-3. seeds the video only if sharing is on ("Share videos I watch", the `share` setting):
-   it then fetches the whole video and seeds it. Sharing is off by default. Without it
-   the video is only served to the window, the app announces nothing, and it never asks
-   the router to open a port;
-4. orders the seeders it pulls from by seeder ratings (NFX-16) only if they are set up:
+3. keeps and seeds what its user watches (NFX-18, decision record 0110), unless "Seed
+   videos I watch" (the `share` setting) is off. It is on by default, existing installs
+   included, and the page says once what that makes public before anything is kept:
+   - a video played for a minute (seeks not counted) is fetched whole in the background
+     and seeded while the app runs, and again after a restart (`kept.json`). One left
+     before the minute keeps nothing: its files are deleted when the next play starts, or
+     at the next start;
+   - seeding announces each kept video publicly, signed with this node's key, with this
+     computer's public address. No address that is not public is announced
+     (`public_addrs_only`), and the router is never asked to open a port, sharing or not.
+     It fetches under an iroh identity of its own, a fresh key at every start that serves
+     nothing, so a seeder it watches from never learns the id its beacons name (NFX-18 §4);
+   - kept videos share a disk cap (`cap_gib`, 20 GiB by default): the least recently
+     watched are deleted first to make room, never the one playing; at most 100 are kept,
+     and at most 20 videos or 16 GiB start to be kept in any hour (NFX-18 §2.4);
+   - turning sharing off stops all announcing at once. Kept files stay, and play;
+4. keeps a history of what was watched (when, where playback was, at most 500 videos) on
+   this computer only, with each video's kept and seeding state. "Remove" takes a video
+   off it and deletes this computer's copy;
+5. orders the seeders it pulls from by seeder ratings (NFX-16) only if they are set up:
    the user's npub and at least one general relay. The node then reads the user's follow
    and mute lists and the ratings of those they follow, and tries well-rated seeders
    first. Ratings never block a seeder, and the app publishes none. Reading one's own
    lists tells those relays that this computer's address goes with that key, so this is
    off by default too;
-5. shows where the bytes came from in "Stats for nerds" (right-click the video, the button
+6. shows where the bytes came from in "Stats for nerds" (right-click the video, the button
    under it, or `n`; nfx #99): each iroh seeder by a short id with the bytes and blobs it
    sent, what this node serves to browsers, and the player's own numbers (resolution,
    buffer, dropped frames). Seeders' addresses and whether a path is direct or through a
@@ -52,8 +67,10 @@ The data directory is the app's data dir, or `NFX_DESKTOP_DATA`:
 | Path | What |
 |---|---|
 | `node.key` | This node's Nostr key, mode 0600, created on first run. Never printed; only the public key is shown. |
-| `settings.json` | `relays` (Nostr scoped relays), `iroh_relays` (the network's own iroh relays; none disables relaying, so direct connections only), `share` (`false` unless turned on), and for seeder ratings `rating_root` (the user's key, hex; unset = off), `rating_trusted` (more keys, hex) and `general_relays`. |
-| `store/` | Content by sha256. `store/.nfxd/` holds iroh-blobs' index. |
+| `settings.json` | `version` (1; a file without it is from before keeping, and sharing turns on when it is read), `relays` (Nostr scoped relays), `iroh_relays` (the network's own iroh relays; none disables relaying, so direct connections only), `share` (keep and seed what is watched; `true` unless turned off), `keep_notice_seen` (the user answered the notice; nothing is kept before), `cap_gib` (disk space for kept videos), and for seeder ratings `rating_root` (the user's key, hex; unset = off), `rating_trusted` (more keys, hex) and `general_relays`. Written whole and atomically. |
+| `kept.json` | The kept videos: `a`, `root`, `title`, `size` (bytes, once whole), `kept_at`, `last_watched`. Seeded again at start while sharing is on: from the store when whole, fetched first otherwise. A file that cannot be read stops the start-up sweep of the store. |
+| `history.json` | What was watched: `a`, `title`, `position` (seconds), `watched_at`. Never published. |
+| `store/` | Content by sha256: the kept videos and the one playing. Files no kept video uses are deleted at start. `store/.nfxd/` holds iroh-blobs' index. |
 
 ## Security
 
@@ -68,3 +85,9 @@ The data directory is the app's data dir, or `NFX_DESKTOP_DATA`:
   the key it was given.
 - **Relays must be `ws://` or `wss://`.** Addresses and deletions are handled with
   `nfx-proto`'s parser, never a generic Nostr one (NFX-02 §2).
+- **Watching and seeding use different iroh identities** (NFX-18 §4). The node runs two
+  iroh endpoints over one blobs store: one serves and is the only one named in tickets and
+  beacons; the other only dials, has a fresh key at every start and refuses every incoming
+  connection. Every fetch, a watch's on-demand pulls included, goes out from the second, so
+  a seeder that serves this computer a video cannot tie that watch to what it seeds. Both
+  share this computer's IP address and the network's iroh relays, which see both ids.

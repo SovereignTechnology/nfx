@@ -330,6 +330,17 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
     - the app watches before the manifest exists;
     - once the manifest is published, the app plays 360p and 720p past 3 s and ends up
       seeding the video.
+  - **Since 2026-11-26 it keeps and seeds what its user watches, on by default** (decision
+    record 0110, NFX-18; it replaces the opt-in of L4 below). A video played for a minute is
+    fetched whole and seeded, and seeded again after a restart (`kept.json`); one left
+    before the minute keeps nothing. Kept videos share a disk cap (20 GiB by default), the
+    least recently watched making room. A one-time notice says that this computer's public
+    IP address and the list of what it seeds are public, and the switch stops all
+    announcing at once, leaving the files. `public_addrs_only` is always on and the
+    portmapper always off, sharing or not, and every fetch dials from a second iroh
+    endpoint with a fresh key that serves nothing, so the id its beacons name is never the
+    one it watches with (NFX-18 §4, nfx-node `fetch_apart`). A local history shows each video's state, and
+    removing one deletes this computer's copy (`crates/desktop/README.md`).
 - **M1 hardening (2026-09-24,
   [`reviews/2026-09-24-hardening.md`](reviews/2026-09-24-hardening.md)):**
   - **Independent audit, then fixes (2026-09-24,
