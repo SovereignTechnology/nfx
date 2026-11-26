@@ -33,6 +33,9 @@ use crate::p2pml::{self, Command, Reassembler};
 use crate::store::ContentStore;
 
 /// An open connection that asks for nothing for this long is dropped.
+/// The smallest peer `max-message-size` the file channel runs over: its largest `have` with
+/// its header (NFX-10 §6.10). Below it the channel is closed when it opens.
+pub const MIN_FILES_MESSAGE: usize = 5 + fc::MAX_HAVE_JSON;
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Segment bytes per data-channel message.
 const CHUNK: usize = 16 * 1024;
@@ -247,6 +250,8 @@ pub(crate) struct Conn {
     pub files: Option<FileChan>,
     /// We opened the file channel (the offerer of a stream-room connection), or tried to.
     pub files_asked: bool,
+    /// The peer's `max-message-size` (RFC 8841 §6), from its SDP: no message we send is larger.
+    pub max_message: usize,
 }
 
 impl Conn {
@@ -272,6 +277,7 @@ impl Conn {
             files_only: false,
             files: None,
             files_asked: false,
+            max_message: 65_536,
         }
     }
 
@@ -466,8 +472,8 @@ impl Uploader {
             // other channel as p2p-media-loader's (none on a video-room connection), and closes
             // any other.
             Event::ChannelOpen(id, label) if p.files_allowed => {
-                if label == fc::LABEL && p.files.is_none() {
-                    p.files = Some(FileChan::new(id, now));
+                if label == fc::LABEL && p.files.is_none() && p.max_message >= MIN_FILES_MESSAGE {
+                    p.files = Some(FileChan::new(id, now, p.max_message));
                     p.active = now;
                 } else if label != fc::LABEL && p.channel.is_none() && !p.files_only {
                     self.open_main(p, id, swarm, now);

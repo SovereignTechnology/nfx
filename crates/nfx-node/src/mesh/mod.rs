@@ -2191,7 +2191,8 @@ impl State {
         self.counts.answers += 1;
         // What the answer names, the fallback's mappings for this peer included.
         let local_kinds = sdp::candidate_kinds(&answer_sdp);
-        let conn = self.new_conn(rtc, key, &r.sender, now);
+        let mut conn = self.new_conn(rtc, key, &r.sender, now);
+        conn.max_message = sdp::max_message_size(&filtered);
         self.links.push(Link {
             conn,
             offerer: false,
@@ -2242,6 +2243,7 @@ impl State {
             _ => false,
         };
         if accepted {
+            l.conn.max_message = sdp::max_message_size(&filtered);
             l.deadline = now + OPEN_TIMEOUT;
         } else {
             l.refused = true;

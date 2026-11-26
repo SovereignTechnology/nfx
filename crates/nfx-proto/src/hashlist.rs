@@ -11,6 +11,9 @@ use crate::{Error, Result, sha256};
 
 /// Rendition id reserved for the metadata collection (NFX-03 §4, NFX-06 §2).
 pub const RESERVED_RENDITION_ID: &str = "meta";
+/// The most renditions a hash list has (NFX-05 §2): what a file channel's `have` can name
+/// (NFX-10 §6.10) and a page probes.
+pub const MAX_RENDITIONS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -103,6 +106,12 @@ impl HashList {
         }
         if self.renditions.is_empty() {
             return Err(bad("`renditions` is empty"));
+        }
+        if self.renditions.len() > MAX_RENDITIONS {
+            return Err(bad(format!(
+                "more than {MAX_RENDITIONS} renditions ({})",
+                self.renditions.len()
+            )));
         }
         let mut ids = BTreeSet::new();
         let mut playlist_names = BTreeSet::new();

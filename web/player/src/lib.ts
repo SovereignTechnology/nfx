@@ -91,7 +91,7 @@ import {
   relayUrl as meshRelayUrl,
   trackerUrl as meshTrackerUrl,
 } from './mesh';
-import { type Probe, type Selection, describe as describeProbes, initUrl, probeStatus, selectRenditions } from './probe';
+import { PROBE_CONCURRENCY, type Probe, type ProbeOutcome, type Selection, describe as describeProbes, initUrl, probeAll, probeStatus, selectRenditions } from './probe';
 import { fetchRelayInfo as fetchNip11, parseRelayInfo as parseNip11 } from './relay-info';
 import { RelayStunBook } from './relay-stun';
 import { MAX_REMOTE_CANDIDATES as SDP_MAX_REMOTE_CANDIDATES, filterRemoteSdp as filterSdp } from './remote-sdp';
@@ -685,16 +685,25 @@ async function peerLevels(
         await sources.get(pathUnder(loaded, init), verifies(loaded, init), probeSignal, true);
         return 200;
       };
-      let picked: Selection;
+      // Two queues side by side in the one 8 s window, half the probes each (all of them for
+      // one when the other is empty), so whole renditions that stall never keep the part ones
+      // from being probed (§6.10 "Which levels").
+      const share = (other: readonly string[]): number => (other.length > 0 ? Math.ceil(PROBE_CONCURRENCY / 2) : PROBE_CONCURRENCY);
+      let outcomes: Map<string, ProbeOutcome>;
       try {
-        picked = await selectRenditions(ids, wanted, either, probe, { signal });
+        const [w, p] = await Promise.all([
+          named.whole.length > 0 ? probeAll(named.whole, probe, { concurrency: share(named.part), signal }) : new Map<string, ProbeOutcome>(),
+          named.part.length > 0 ? probeAll(named.part, probe, { concurrency: share(named.whole), signal }) : new Map<string, ProbeOutcome>(),
+        ]);
+        outcomes = new Map([...w, ...p]);
       } catch (e) {
         if (signal?.aborted) throw abortError(signal);
         throw e;
       }
-      const summary = describeProbes(picked.outcomes);
-      const whole = picked.renditions.filter((id) => named.whole.includes(id));
-      const chosen = whole.length > 0 ? whole : picked.renditions.filter((id) => named.part.includes(id));
+      const verified = sessionRenditions(ids, wanted, [...outcomes].filter(([, o]) => o.held).map(([id]) => id));
+      const summary = describeProbes(outcomes);
+      const whole = verified.filter((id) => named.whole.includes(id));
+      const chosen = whole.length > 0 ? whole : verified.filter((id) => named.part.includes(id));
       if (chosen.length > 0) {
         log(`peers hold ${chosen.join(', ')} of the allowed renditions${whole.length > 0 ? '' : ', in part'} (${summary})`);
         return chosen;

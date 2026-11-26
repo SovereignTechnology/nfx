@@ -144,11 +144,16 @@ pub(crate) struct FileChan {
     pub last_answer: Instant,
     /// Requests answered with a file.
     pub served: u64,
+    /// The most file bytes in one `data` message: [`fc::MAX_DATA`], less for a peer whose
+    /// `max-message-size` is lower (RFC 8841 §6.1).
+    pub max_data: usize,
 }
 
 impl FileChan {
     /// A channel just opened: our `hello` goes first.
-    pub(crate) fn new(id: str0m::channel::ChannelId, now: Instant) -> Self {
+    /// A file channel to a peer that takes messages of at most `max_message` bytes (its SDP's
+    /// `max-message-size`): `data` messages carry at most that less their 5-byte header.
+    pub(crate) fn new(id: str0m::channel::ChannelId, now: Instant, max_message: usize) -> Self {
         let hello = Message::Hello {
             version: fc::VERSION,
             flags: fc::FLAG_FILES,
@@ -166,6 +171,7 @@ impl FileChan {
             out,
             last_answer: now,
             served: 0,
+            max_data: max_message.saturating_sub(5).clamp(1, fc::MAX_DATA),
         }
     }
 
@@ -278,7 +284,7 @@ impl FileChan {
                 self.answer(req, &Message::End { req });
                 continue;
             }
-            let end = (*at + fc::MAX_DATA).min(bytes.len());
+            let end = (*at + self.max_data).min(bytes.len());
             let chunk = bytes.slice(*at..end);
             *at = end;
             let m = Message::Data { req, bytes: &chunk };
@@ -448,7 +454,7 @@ mod tests {
     }
 
     fn chan(now: Instant) -> FileChan {
-        let mut f = FileChan::new(id(), now);
+        let mut f = FileChan::new(id(), now, 65_536);
         f.out.clear(); // our hello
         f
     }
@@ -476,6 +482,54 @@ mod tests {
         x.store.remove(&x.init_a).unwrap();
         let have = x.files.have(&x.root, &x.store).unwrap();
         assert!(have.whole.is_empty(), "no init, no rendition");
+    }
+
+    #[test]
+    fn data_messages_fit_the_peers_max_message_size() {
+        let x = fixture();
+        let now = Instant::now();
+        let mut f = FileChan::new(id(), now, 4_096);
+        f.out.clear(); // our hello
+        let (mut yes, mut yes2) = (|| true, || true);
+        for m in [
+            Message::Hello {
+                version: fc::VERSION,
+                flags: 0,
+            },
+            Message::Get {
+                req: 1,
+                sha: sha(&x.big_sha),
+            },
+        ] {
+            let v = f.read(
+                &m.encode().unwrap(),
+                &x.files,
+                &x.store,
+                now,
+                &mut yes,
+                &mut yes2,
+            );
+            assert_eq!(v, Verdict::Fine);
+        }
+        let got = drain(&mut f, &x.store);
+        assert!(got.len() > 2, "the file spans several messages");
+        assert!(
+            got.iter().all(|m| m.len() <= 4_096),
+            "none past the peer's limit"
+        );
+        let bytes: Vec<u8> = got
+            .iter()
+            .filter_map(|m| match Message::decode(m).unwrap() {
+                Message::Data { bytes, .. } => Some(bytes.to_vec()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(
+            bytes,
+            x.store.get(&x.big_sha).unwrap(),
+            "every byte, in order"
+        );
     }
 
     #[test]
@@ -716,7 +770,7 @@ mod tests {
     #[test]
     fn a_peer_with_no_hello_is_late_after_3_s() {
         let now = Instant::now();
-        let f = FileChan::new(id(), now);
+        let f = FileChan::new(id(), now, 65_536);
         assert_eq!(f.hello_due(), Some(now + HELLO_TIMEOUT));
         assert_eq!(
             Message::decode(&f.out[0].1).unwrap(),
