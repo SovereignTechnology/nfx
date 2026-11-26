@@ -44,6 +44,8 @@ are a Draft, in place. Nothing on the wire changes.
 4. **Bounded reach.** With peers first the engine fetches 30 s ahead of playback and keeps
    at most 512 MiB, where unconfigured it reaches 6000 s and 4096 MiB: an nfxd serves a
    connection 60 requests at once and 20 a second after, and drops one that asks faster.
+   The 30 s windows follow a later switch of source; the 512 MiB cap is set when a session
+   opens with peers first, since the engine reads it only then.
 5. **The player says what it found.** At the start of a session with a mesh it checks once
    whether the browser's WebRTC gathers a UDP candidate (one throwaway connection, asking
    only the STUN servers the mesh would ask anyway). If none: a `mesh` event and

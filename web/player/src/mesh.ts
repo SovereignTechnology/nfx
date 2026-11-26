@@ -99,7 +99,11 @@ export const MAX_PEER_WAIT_MS = 30_000;
  * (`rtc_serve.rs`): at NFX-05's 2 s segments this is 15 requests, then one every 2 s.
  */
 export const PEER_AHEAD_SECONDS = 30;
-/** With peers first, the most the engine keeps of fetched segments, in MiB (its default is 4096). */
+/**
+ * With peers first, the most the engine keeps of fetched segments, in MiB (its default is 4096).
+ * Set only when a session opens in a peer mode: the engine reads it once, when its storage starts,
+ * so `setSegmentSource` cannot change it later.
+ */
 export const PEER_STORAGE_MIB = 512;
 
 const SEGMENT_SOURCES: readonly SegmentSource[] = ['peers-then-https', 'peers-only', 'https-first'];

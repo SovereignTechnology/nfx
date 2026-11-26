@@ -627,7 +627,10 @@ export interface Session {
    * an origin for a segment, so playback waits (`waiting`) whenever no peer delivers. Going
    * back to `peers-then-https` puts the rescue rule in force at once, for a segment a peer is
    * still sending too: one playback is about to need, and has asked for the whole wait, is
-   * then taken over HTTPS in the peer's place. Throws a `TypeError` for a
+   * then taken over HTTPS in the peer's place. The fetch windows change with the source; the
+   * cap on what the engine keeps does not: it is set when the session opens (512 MiB with
+   * peers first) and the engine reads it only then, so a session opened `https-first` keeps
+   * the engine's own cap after a switch. Throws a `TypeError` for a
    * value `open()` would refuse. A session without a mesh has nothing to change: it throws
    * for `peers-only` and ignores the others.
    */
