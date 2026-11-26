@@ -129,6 +129,9 @@ pub struct Config {
     pub seed_watched: bool,
     /// Never ask the local gateway to open a port (see `NodeConfig::no_portmapper`).
     pub no_portmapper: bool,
+    /// Publish no direct address that is not public in tickets and beacons (see
+    /// `NodeConfig::public_addrs_only`): for a viewer on a home network.
+    pub public_addrs_only: bool,
     /// Embed a WebTorrent tracker for the browser mesh (NFX-10 §2) listening here. It
     /// admits exactly the per-rendition swarms of the videos this node seeds or holds.
     pub embed_tracker: Option<SocketAddr>,
@@ -1117,6 +1120,7 @@ impl Daemon {
                 relay_cas: cfg.iroh_relay_cas.clone(),
                 blobs_dir: Some(state.join("iroh-blobs")),
                 no_portmapper: cfg.no_portmapper,
+                public_addrs_only: cfg.public_addrs_only,
                 bind_addr: cfg.iroh_bind,
                 external_addrs: cfg.iroh_external.clone(),
                 ..NodeConfig::default()

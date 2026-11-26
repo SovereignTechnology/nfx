@@ -610,6 +610,8 @@ async fn run(args: &[String]) -> Result<()> {
         // `run` seeds only what `--seed` names, and a seeder may use the portmapper.
         seed_watched: false,
         no_portmapper: false,
+        // An operator's seeder publishes what it has, as before; `--iroh-external` narrows it.
+        public_addrs_only: false,
     };
     let daemon = Daemon::start(cfg).await?;
     if let Some(url) = &daemon.relay_url {
