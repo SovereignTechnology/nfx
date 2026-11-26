@@ -1,4 +1,6 @@
-//! The iroh side of a peer: one endpoint serving iroh-blobs and `nfx/gossip/1`.
+//! The iroh side of a peer: one endpoint serving iroh-blobs and `nfx/gossip/1`, and, for a
+//! node that serves what it fetches, a second one its fetches dial from
+//! (`NodeConfig::fetch_apart`).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
@@ -196,6 +198,14 @@ pub struct NodeConfig {
     /// watches: what it announces must not map the user's home network. Off: as before,
     /// every direct address iroh found is published unless `external_addrs` is set.
     pub public_addrs_only: bool,
+    /// Fetch under an identity of its own: every fetch dials from a second endpoint, with a
+    /// fresh key at every start, that accepts no protocol and is never in a ticket or a
+    /// beacon ([`Node::fetch_id`]). The endpoint that serves ([`Node::id`]) then never
+    /// dials a seeder, so a seeder this node fetches from cannot tie what it watches to
+    /// what it announces (NFX-18 §4). Both share the one blobs store. The second endpoint
+    /// uses the same relays (and relay-only mode), binds random ports and never asks the
+    /// gateway to open one. Off: one endpoint does both, as before.
+    pub fetch_apart: bool,
 }
 
 /// The secret key is never printed.
@@ -212,12 +222,16 @@ impl std::fmt::Debug for NodeConfig {
             .field("bind_addr", &self.bind_addr)
             .field("external_addrs", &self.external_addrs)
             .field("public_addrs_only", &self.public_addrs_only)
+            .field("fetch_apart", &self.fetch_apart)
             .finish()
     }
 }
 
 pub struct Node {
     router: Router,
+    /// What fetches dial from with `NodeConfig::fetch_apart`: no router, so it serves
+    /// nothing. `None`: the router's endpoint dials.
+    fetcher: Option<Endpoint>,
     blobs: Store,
     gossip: Gossip,
     relays: Vec<RelayUrl>,
@@ -244,19 +258,9 @@ impl Node {
                 "more than {MAX_EXTERNAL_ADDRS} external addresses"
             )));
         }
-        let mut builder = Endpoint::builder(presets::Minimal);
-        builder = if cfg.relays.is_empty() {
-            builder.relay_mode(RelayMode::Disabled)
-        } else {
-            builder.relay_mode(RelayMode::Custom(
-                cfg.relays.iter().cloned().collect::<RelayMap>(),
-            ))
-        };
+        let mut builder = endpoint_builder(&cfg);
         if let Some(key) = cfg.secret_key {
             builder = builder.secret_key(SecretKey::from(key));
-        }
-        if cfg.relay_only {
-            builder = builder.clear_ip_transports();
         }
         if let Some(addr) = cfg.bind_addr {
             builder = builder.bind_addr(addr).map_err(NodeError::transport)?;
@@ -267,18 +271,30 @@ impl Node {
         if cfg.no_portmapper {
             builder = builder.portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
         }
-        if !cfg.relay_cas.is_empty() {
-            builder = builder.ca_tls_config(
-                iroh::tls::CaTlsConfig::default().with_extra_roots(cfg.relay_cas.clone()),
-            );
-        }
-        if let Some(lookup) = cfg.lookup {
+        if let Some(lookup) = cfg.lookup.clone() {
             builder = builder.address_lookup(lookup);
         }
         // The node's own book, filled only through `learn_addr` (filtered).
         let book = MemoryLookup::new();
         builder = builder.address_lookup(book.clone());
         let endpoint = builder.bind().await.map_err(NodeError::transport)?;
+        // No key given, so iroh makes a fresh one; no ALPN, so every incoming connection is
+        // refused; no address lookup but what a ticket says.
+        let fetcher = if cfg.fetch_apart {
+            let bound = endpoint_builder(&cfg)
+                .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+                .bind()
+                .await;
+            match bound {
+                Ok(fetcher) => Some(fetcher),
+                Err(e) => {
+                    endpoint.close().await;
+                    return Err(NodeError::transport(e));
+                }
+            }
+        } else {
+            None
+        };
         let gc = || GcConfig {
             interval: GC_INTERVAL,
             add_protected: None,
@@ -308,6 +324,7 @@ impl Node {
         }
         Ok(Self {
             router: router.spawn(),
+            fetcher,
             blobs,
             gossip,
             relays: cfg.relays,
@@ -325,12 +342,13 @@ impl Node {
         &self.transfers
     }
 
-    /// Dial `addr` for `alpn`, within [`CONNECT_TIMEOUT`]. Only direct IP addresses and
-    /// this network's own relays are used: a ticket from an untrusted beacon cannot make
-    /// the node contact a relay host of the sender's choosing.
+    /// Dial `addr` for `alpn`, within [`CONNECT_TIMEOUT`], from the endpoint fetches dial
+    /// from ([`Node::fetch_id`]). Only direct IP addresses and this network's own relays
+    /// are used: a ticket from an untrusted beacon cannot make the node contact a relay
+    /// host of the sender's choosing.
     pub async fn dial(&self, addr: &EndpointAddr, alpn: &[u8]) -> Result<Connection> {
         let addr = self.trusted(addr);
-        tokio::time::timeout(CONNECT_TIMEOUT, self.endpoint().connect(addr, alpn))
+        tokio::time::timeout(CONNECT_TIMEOUT, self.dialer().connect(addr, alpn))
             .await
             .map_err(|_| NodeError::Transport("connect timed out".into()))?
             .map_err(NodeError::transport)
@@ -364,9 +382,24 @@ impl Node {
         self.relay_only
     }
 
+    /// The id of the endpoint that serves: the one in tickets and beacons.
     #[must_use]
     pub fn id(&self) -> EndpointId {
         self.router.endpoint().id()
+    }
+
+    /// The id fetches dial from: with `NodeConfig::fetch_apart` a fresh one at every start
+    /// that is never published, otherwise [`Node::id`].
+    #[must_use]
+    pub fn fetch_id(&self) -> EndpointId {
+        self.dialer().id()
+    }
+
+    /// The endpoint fetches dial from.
+    pub(crate) fn dialer(&self) -> &Endpoint {
+        self.fetcher
+            .as_ref()
+            .unwrap_or_else(|| self.router.endpoint())
     }
 
     /// What to publish (tickets, beacons, `gossip peer:` lines): the endpoint id plus its
@@ -418,12 +451,37 @@ impl Node {
     /// holders of this node remain (their calls then fail). A node reopened on the same
     /// `blobs_dir` afterwards finds its database free.
     pub async fn close(&self) -> Result<()> {
+        if let Some(fetcher) = &self.fetcher {
+            fetcher.close().await;
+        }
         let routed = self.router.shutdown().await.map_err(NodeError::transport);
         // The router's shutdown normally stops the store already (then this reports that
         // the store is gone); calling it anyway makes the release independent of that.
         let _ = self.blobs.shutdown().await;
         routed
     }
+}
+
+/// An endpoint builder with what both of a node's endpoints share: its relays (or none),
+/// relay-only mode, and the extra CA roots for those relays.
+fn endpoint_builder(cfg: &NodeConfig) -> iroh::endpoint::Builder {
+    let mut builder = Endpoint::builder(presets::Minimal);
+    builder = if cfg.relays.is_empty() {
+        builder.relay_mode(RelayMode::Disabled)
+    } else {
+        builder.relay_mode(RelayMode::Custom(
+            cfg.relays.iter().cloned().collect::<RelayMap>(),
+        ))
+    };
+    if cfg.relay_only {
+        builder = builder.clear_ip_transports();
+    }
+    if !cfg.relay_cas.is_empty() {
+        builder = builder.ca_tls_config(
+            iroh::tls::CaTlsConfig::default().with_extra_roots(cfg.relay_cas.clone()),
+        );
+    }
+    builder
 }
 
 #[cfg(test)]

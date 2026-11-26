@@ -679,6 +679,108 @@ mod tests {
         seed.shutdown().await.unwrap();
     }
 
+    /// A store's blobs protocol that records the id of every endpoint that dials it.
+    #[derive(Debug, Clone)]
+    struct Recording {
+        blobs: iroh_blobs::BlobsProtocol,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<iroh::EndpointId>>>,
+    }
+
+    impl ProtocolHandler for Recording {
+        async fn accept(
+            &self,
+            connection: iroh::endpoint::Connection,
+        ) -> std::result::Result<(), AcceptError> {
+            self.seen.lock().unwrap().push(connection.remote_id());
+            self.blobs.accept(connection).await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_node_that_fetches_apart_dials_from_an_id_its_tickets_never_carry() {
+        let (seed, mut seeded, manifest, list) = seeder("apart-seed").await;
+        // The seeder's blobs, behind an endpoint that records who dials it.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let addr = on_loopback(&endpoint);
+        let recorder = Router::builder(endpoint)
+            .accept(
+                iroh_blobs::ALPN,
+                Recording {
+                    blobs: iroh_blobs::BlobsProtocol::new(seed.blobs(), None),
+                    seen: seen.clone(),
+                },
+            )
+            .spawn();
+        let at = |t: &BlobTicket| BlobTicket::new(addr.clone(), t.hash(), t.format());
+        seeded.meta = at(&seeded.meta);
+        for t in seeded.renditions.values_mut() {
+            *t = at(t);
+        }
+        let root = manifest.root_hex();
+        for apart in [false, true] {
+            let node = Node::spawn(NodeConfig {
+                no_portmapper: true,
+                fetch_apart: apart,
+                ..NodeConfig::default()
+            })
+            .await
+            .unwrap();
+            let dest = FsStore::open(tmp(&format!("apart-dest-{apart}"))).unwrap();
+            let got = fetch_all(&node, &seeded, &manifest, &dest, Limits::default())
+                .await
+                .unwrap();
+            assert_eq!(got, list);
+            let dialled = std::mem::take(&mut *seen.lock().unwrap());
+            assert!(!dialled.is_empty(), "apart {apart}: never dialled");
+            assert!(
+                dialled.iter().all(|id| *id == node.fetch_id()),
+                "apart {apart}: dialled from {dialled:?}, not {}",
+                node.fetch_id()
+            );
+            // What it then seeds names the endpoint that serves, in every ticket.
+            let mine = node
+                .seed(&dest, &root, &manifest.addr, manifest.segs)
+                .await
+                .unwrap();
+            for t in std::iter::once(&mine.meta).chain(mine.renditions.values()) {
+                assert_eq!(t.addr().id, node.id(), "apart {apart}");
+            }
+            if apart {
+                assert_ne!(
+                    node.fetch_id(),
+                    node.id(),
+                    "fetched under the id it serves with"
+                );
+                // The endpoint it fetches from serves nothing.
+                let probe = Endpoint::builder(presets::Minimal)
+                    .relay_mode(RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .unwrap();
+                let tried = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    probe.connect(on_loopback(node.dialer()), iroh_blobs::ALPN),
+                )
+                .await;
+                assert!(
+                    !matches!(tried, Ok(Ok(_))),
+                    "the fetching endpoint took a blobs connection"
+                );
+                probe.close().await;
+            } else {
+                assert_eq!(node.fetch_id(), node.id(), "one endpoint, as before");
+            }
+            node.shutdown().await.unwrap();
+        }
+        recorder.shutdown().await.unwrap();
+        seed.shutdown().await.unwrap();
+    }
+
     /// A peer that takes the blobs connection and never answers.
     #[derive(Debug, Clone)]
     struct Silent;

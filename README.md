@@ -46,7 +46,7 @@ Frozen; the status of every document and its freeze milestone is in
 | `crates/nfx-media` | NFX-05 packaging (ladder planning, CMAF output, content addressing); ships the `nfx-package` binary |
 | `crates/nfx-wasm` | `nfx-proto` for browsers: verifies manifests, beacons, hash lists and files from JS |
 | `crates/nfxd` | The headless node: `key`, `publish`, `delete` and `run` |
-| `crates/desktop` | Tauri 2 desktop viewer on top of the `nfxd` daemon; its own Cargo workspace, sharing is opt-in |
+| `crates/desktop` | Tauri 2 desktop viewer on top of the `nfxd` daemon; its own Cargo workspace; keeps and seeds what it plays for a minute, on by default with a notice and an off switch (NFX-18) |
 | `crates/spikes` | Spike code and tools (`s1-iroh`, `s2-tauri`, `nfx-verify-store`), each its own workspace |
 | `crates/ci` | `check.sh`, the lock scripts and the CI job definition |
 | `crates/nfx-pay-wire`, `crates/nfx-pay` | The pay/1 wire and the open-mode payment contracts (NFX-07), with a mock engine and the adversary suite. **Locked**: see below |
