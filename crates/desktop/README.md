@@ -18,10 +18,9 @@ address (`38504:<creator>:<namespace>:<video-id>`). It then:
    off by default too;
 5. shows where the bytes came from in "Stats for nerds" (right-click the video, the button
    under it, or `n`; nfx #99): each iroh seeder by a short id with the bytes and blobs it
-   sent, what this node serves to browsers, and the player's own numbers (resolution,
-   buffer, dropped frames). Seeders' addresses and whether a path is direct or through a
-   relay appear only behind its "Show addresses" switch, which is off each time the panel
-   opens.
+   sent, and the player's own numbers (resolution, buffer, dropped frames). Seeders'
+   addresses and whether a path is direct or through a relay appear only behind its "Show
+   addresses" switch, which is off each time the panel opens.
 
 ```sh
 ./run.sh      # build (release) and start; needs web/player's npm ci for hls.js

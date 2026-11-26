@@ -41,4 +41,4 @@
 100644 362674c79fecbda2e60470aa5680ec9fbed1f5ceacee533cc0c6edc55f0a8b61 crates/nfx-pay/tests/woken_answers.rs
 100644 140c64decf6ef13919080088655779917987dc2aeaea22962d6e262d6b3020bb spec/test-vectors/pay1.json
 100644 91d4ff95f0c8cc746710730ceaed19c605bbeac1379c6e2ec160aa286ed91433 spec/test-vectors/pay1.py
-derived 7cfa77d671bdc3a32207e4e583c05778df29ff140b888e99f0d21c68061a20ef crates/Cargo.toml#profile,patch,replace,workspace.lints,resolver,members,package
+derived 5df7bf17a0006edcc199437f3c11ab5e152aaab03adbb3d7c83b5b9c4123cad7 crates/Cargo.toml#profile,patch,replace,workspace.lints,resolver,members,package

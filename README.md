@@ -1,6 +1,6 @@
 # NFX
 
-> **Source of truth:** [`nostr://npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nutflix`](https://gitworkshop.dev/npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nutflix) — issues and pull requests live there. This GitHub repository is a mirror; push to the Nostr remote, not here.
+> **Source of truth:** [`nostr://npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx`](https://gitworkshop.dev/npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx) — issues and pull requests live there. This GitHub repository is a mirror; push to the Nostr remote, not here.
 
 A Nostr-identified, peer-seeded video network: an open standard with a Rust reference
 implementation.
@@ -9,13 +9,14 @@ NFX lets a creator publish a signed video manifest on Nostr and lets peers seed 
 the video, checking every file against signed hashes. The normative specification is in
 `spec/`. The Rust reference implementation in `crates/` covers iroh (native), a WebRTC
 mesh (browsers) and an HTTP origin, which a public deployment puts behind TLS and a CDN.
-The optional Hypercore profile (NFX-12) and payments (Cashu ecash, per delivered chunk)
+The optional HyperDHT profile (NFX-12) and payments (Cashu ecash, per delivered chunk)
 are specified as drafts.
 
 **Names:** `nutflixd` was `nfxd` and `nutflix-package` was `nfx-package` until 2026-11-26, and
-this repository was `nfx`; the protocol is still NFX. Releases up to 0.1.4 carry the old binary
-names with the same commands and flags, so with one of those read `nfxd` for `nutflixd`. Records
-written before the change (reviews, decision records, release notes, spikes) keep the old names.
+this repository was `nfx` on GitHub (on Nostr its identifier still is); the protocol is still NFX.
+Releases up to 0.1.4 carry the old binary names with the same commands and flags, so with one of
+those read `nfxd` for `nutflixd`. Records written before the change (reviews, decision records,
+release notes, spikes) keep the old names.
 
 **Status (2026-11-26):** this tree is NFX 0.1.4 plus what has merged since. A release is a
 prebuilt node and packager for linux-x64 on the
@@ -35,7 +36,7 @@ hosts on a private network with plain HTTP and WebSocket endpoints; they did not
 NAT traversal, TLS, a CDN or paid delivery. What each run left out:
 [M1](docs/nfx/m1-exit.md#what-this-does-not-cover),
 [Phase A](docs/nfx/phase-a-exit.md#what-this-does-not-cover).
-The Hypercore profile (NFX-12) is not implemented. Payments are specified (NFX-07);
+The HyperDHT profile (NFX-12) is not implemented. Payments are specified (NFX-07);
 the open-mode contracts, the mock engine and the adversary suite sit in `crates/nfx-pay`
 and `crates/nfx-pay-wire`, behind the lock, and are not deployed. NFX-01 to NFX-06 are
 Frozen; the status of every document and its freeze milestone is in
@@ -46,29 +47,29 @@ Frozen; the status of every document and its freeze milestone is in
 
 | Path | What it is |
 |---|---|
-| `spec/` | NFX-01 to NFX-12, the JSON schemas (`schemas/`) and the regenerable test vectors (`test-vectors/`) |
+| `spec/` | NFX-01 to NFX-12, NFX-16 and NFX-17, the JSON schemas (`schemas/`) and the regenerable test vectors (`test-vectors/`) |
 | `crates/` | The Cargo workspace (edition 2024), with the members below |
 | `crates/nfx-proto` | Wire formats: manifests, beacons, hash lists, canonical JSON, vouchers, gossip envelopes. Pure (no I/O, clock or RNG); builds natively and for `wasm32` |
 | `crates/nfx-node` | The peer: content store, iroh seeding and fetching, gossip presence, Nostr manifests and beacons, pull-through origin, embeddable scoped relay, browser-mesh tracker and WebRTC bridge, and the Nostr-signaled full-ICE mesh endpoint |
 | `crates/nfx-media` | NFX-05 packaging (ladder planning, CMAF output, content addressing); ships the `nutflix-package` binary |
 | `crates/nfx-wasm` | `nfx-proto` for browsers: verifies manifests, beacons, hash lists and files from JS |
-| `crates/nutflixd` | The headless node: `key`, `publish`, `delete` and `run` |
+| `crates/nutflixd` | The headless node: `key`, `publish`, `delete`, `run` and `stun` |
 | `crates/desktop` | Tauri 2 desktop viewer on top of the `nutflixd` daemon; its own Cargo workspace, sharing is opt-in |
-| `crates/spikes` | Spike code and tools (`s1-iroh`, `s2-tauri`, `nfx-verify-store`), each its own workspace |
-| `crates/ci` | `check.sh`, the lock scripts and the CI job definition |
+| `crates/spikes` | Spike code and tools (`s1-iroh`, `s2-tauri`, `s5-hyperdht`, `s6-spilman`, `nfx-verify-store`), each its own workspace |
+| `crates/ci` | `check.sh`, the lock scripts and the dormant GitLab CI definition (the live one is `.github/workflows/ci.yml`) |
 | `crates/nfx-pay-wire`, `crates/nfx-pay` | The pay/1 wire and the open-mode payment contracts (NFX-07), with a mock engine and the adversary suite. **Locked**: see below |
 | `web/player` | The browser test player: hls.js behind a loader that verifies every file with `nfx-wasm`, plus the WebRTC mesh |
 | `web/spikes` | Browser spike code (`s3-mesh`, `s4-cmaf`) |
-| `docs/` | `decisions/` (ADRs) and `nfx/` (status, plans, exit runs, reviews, spike write-ups); index in [docs/README.md](docs/README.md) |
+| `docs/` | `decisions/` (ADRs) and `nfx/` (status, plans, exit runs, reviews, spike write-ups, release notes, the testnet page); index in [docs/README.md](docs/README.md) |
 
 ## Quick start
 
 Clone from Nostr (needs ngit's `git-remote-nostr`) or, instead, from the GitHub mirror:
 
 ```sh
-git clone nostr://npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nutflix
+git clone nostr://npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx nutflix   # the Nostr identifier is still nfx
 # or: git clone https://github.com/SovereignTechnology/nutflix
-cd nfx
+cd nutflix
 ```
 
 Prerequisites: a Rust toolchain at least as new as `rust-version` in `crates/Cargo.toml`;
@@ -173,10 +174,11 @@ nutflixd run --key node.key --store pkg/store --seed "$A" --relay wss://relay.ex
 ```
 
 Here `203.0.113.7:7845` stands for the public address and port forwarded to the host's UDP
-port 7845; `--mesh-bind` must then be a fixed port. The node offers that address as a host
-candidate and takes what arrives as sent to it, and offers no candidate address that is not
-public, so its address behind the DNAT never reaches a peer. `--mesh-stun` stays optional
-beside it.
+port 7845; `--mesh-bind` must then be a fixed port. A documentation address like this one
+is refused: `--mesh-public` takes only a public unicast address. The node offers that
+address as a host candidate and takes what arrives as sent to it, and offers no candidate
+address that is not public, so its address behind the DNAT never reaches a peer.
+`--mesh-stun` stays optional beside it.
 
 ## Run a STUN server for the network
 
@@ -190,7 +192,7 @@ client is logged.
 ```sh
 nutflixd key new stun.key                       # the operator key that signs the announcement
 nutflixd stun --bind 203.0.113.7:3478 \
-  --announce --key stun.key --relay wss://relay.nutflix.xyz --relay wss://nos.lol \
+  --announce --key stun.key --relay wss://relay.example --relay wss://nos.lol \
   --network nfx:mainnet:1
 ```
 
@@ -237,7 +239,7 @@ After=network-online.target
 
 [Service]
 User=nutflixd
-ExecStart=/usr/local/bin/nutflixd stun --bind 203.0.113.7:3478 --announce --key /var/lib/nutflixd/stun.key --relay wss://relay.nutflix.xyz --network nfx:mainnet:1
+ExecStart=/usr/local/bin/nutflixd stun --bind 203.0.113.7:3478 --announce --key /var/lib/nutflixd/stun.key --relay wss://relay.example --network nfx:mainnet:1
 Restart=on-failure
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -267,15 +269,21 @@ PYTHON=/path/to/venv/bin/python crates/ci/check.sh
 ```
 
 `check.sh` stops at the first failing step. The step list, what each one needs and the
-environment switches are in [CONTRIBUTING.md](CONTRIBUTING.md#checks). CI runs what
-`check.sh` runs. The browser end-to-end suites (`npm run e2e` and `npm run e2e:mesh` in
-`web/player`, `./e2e.sh` in `crates/desktop`) are separate.
+environment switches are in [CONTRIBUTING.md](CONTRIBUTING.md#checks). `ci.yml`'s `check`
+job runs what `check.sh` runs; pull requests also run `depth.yml` (coverage floor, next
+rustc) and `zizmor.yml` (workflow lint). The browser end-to-end suites (`npm run e2e`,
+`e2e:mesh`, `e2e:nostr`, `e2e:nostr-node` and `e2e:peer-first` in `web/player`, `./e2e.sh`
+in `crates/desktop`) are separate; `web/player/e2e-nat/run.sh` runs in CI on pull requests
+that touch the player (`nfx-nat-browsers.yml`).
 
 
 ## CI and the lock
 
-CI runs on GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) as two
-jobs: `lock`, and `check`, which runs `crates/ci/check.sh`.
+CI runs on GitHub Actions. [`.github/workflows/ci.yml`](.github/workflows/ci.yml) has two
+jobs: `lock`, and `check`, which runs `crates/ci/check.sh`. Beside it, `depth.yml`
+(coverage floor, next rustc) and `zizmor.yml` run on every pull request,
+`nfx-nat-browsers.yml` on pull requests that touch the player, `nightly.yml` daily and
+`release.yml` on a version tag.
 [`crates/ci/gitlab-ci.yml`](crates/ci/gitlab-ci.yml) holds the same two jobs for GitLab
 and is dormant.
 
@@ -298,8 +306,8 @@ NFX grew beside a TypeScript demo, a Pear-runtime desktop app under the name nut
 which is a different design ([ADR 0006](docs/decisions/0006-standardization-suite-nfx.md)).
 Until 2026-10-11 this repository mirrored the demo's tree. The mirror was removed
 ([ADR 0008](docs/decisions/0008-multi-network-master-plan.md), amendment of that date):
-the demo lives in its own repository, `nutflix-demo`, and the snapshot that was mirrored
-here stays reachable under the tag `demo-base`:
+the demo lives in its own repository, `nutflix-pear` (formerly `nutflix-demo`), and the
+snapshot that was mirrored here stays reachable under the tag `demo-base`:
 
 ```sh
 git show demo-base:README.md

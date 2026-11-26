@@ -1,15 +1,16 @@
 # Documentation map
 
-This directory holds the decision records, the project status log and the reference
-copies behind NFX, the Nostr-identified, peer-seeded video network specified in
+This directory holds the decision records and the project's status log, plans, records
+and release notes behind NFX, the Nostr-identified, peer-seeded video network specified in
 [`spec/`](../spec/README.md). Every area below carries one label, so you can tell what
-to rely on. Labels and statuses are as of 2026-11-05.
+to rely on. Labels and statuses are as of 2026-11-26.
 
 ## Where to start
 
 1. [`README.md`](../README.md): what NFX is, and how to build and run it.
-2. [`spec/README.md`](../spec/README.md): the NFX-01..12 reading order with each
-   document's status and freeze milestone, the status model and conformance levels.
+2. [`spec/README.md`](../spec/README.md): the reading order of NFX-01 to NFX-12, NFX-16
+   and NFX-17, with each document's status and freeze milestone, the status model and
+   conformance levels.
 3. [`nfx/status.md`](nfx/status.md): the resume point and status log. Work picks up
    there.
 4. [ADR 0008](decisions/0008-multi-network-master-plan.md): the master plan, with the
@@ -30,7 +31,7 @@ to rely on. Labels and statuses are as of 2026-11-05.
 | Area | Label | What it is |
 |---|---|---|
 | [`nfx/status.md`](nfx/status.md) | Living | Resume point and status log: where things stand, what was verified, what is next, known gaps |
-| [`nfx/testnet.md`](nfx/testnet.md) | Living | The public testnet `nfx:testnet:1`: the iroh relay and how to use it, who runs it, what the operator sees and keeps, its limits |
+| [`nfx/testnet.md`](nfx/testnet.md) | Living | The public testnet `nfx:testnet:1`: the iroh relay and the scoped Nostr relay, how to use them, who runs them, what the operator sees and keeps, their limits |
 | [`nfx/m2-plan.md`](nfx/m2-plan.md) | Living | M2 plan (paid delivery, open mode): stages M2.0 to M2.2, locked paths, decisions; updated as M2 proceeds |
 | [`nfx/phase-a-exit.md`](nfx/phase-a-exit.md) | Record | Phase A exit run, PASS 2026-09-24: two hosts, a real iroh relay, a real browser |
 | [`nfx/m1-exit.md`](nfx/m1-exit.md) | Record | M1 exit run, PASS 2026-09-24: publish, seed, desktop and browser playback, WebRTC fallback |
@@ -38,6 +39,7 @@ to rely on. Labels and statuses are as of 2026-11-05.
 | [`nfx/nfx-10-m1-plan.md`](nfx/nfx-10-m1-plan.md) | Superseded record | Plan for the free browser mesh, tracker and bridge at M1 |
 | [`nfx/reviews/`](nfx/reviews/) | Record | Reviews and security audits, one file per piece of work |
 | [`nfx/spikes/`](nfx/spikes/) | Record | Spikes S1 to S4: iroh, Tauri playback, web mesh, CMAF packaging; S5′: a Rust HyperDHT for NFX-12 (FAIL); S6: Cashu Spilman channels as a second pay rail (PASS) |
+| [`nfx/releases/`](nfx/releases/) | Record | Release notes, one file per release: 0.1.0 to 0.1.4 (0.1.3 and 0.1.4 are written up and not yet tagged) |
 | [ADR 0002](decisions/0002-stack-and-architecture.md) | Superseded record | Stack and architecture: Hypercore transport, Nostr catalog, Cashu payment, one React UI |
 | [ADR 0005](decisions/0005-open-questions.md) | Superseded record | Build-plan §9 open questions resolved for Stage 1/2 defaults |
 | [ADR 0006](decisions/0006-standardization-suite-nfx.md) | Record | Protocol standardization suite (NFX): the iroh/CMAF redesign is normative; the TypeScript implementation is v0/legacy |
@@ -48,6 +50,11 @@ to rely on. Labels and statuses are as of 2026-11-05.
 | [ADR 0102](decisions/0102-creator-share.md) | Record | A creator share on open videos: the creator's receipt before `ack`, a carve-out of the price |
 | [ADR 0103](decisions/0103-meet-over-iroh.md) | Record | nfx and nutflix-pear meet over iroh: the desktop app runs a thin iroh helper; nfx does not speak HyperDHT |
 | [ADR 0104](decisions/0104-channel-payments-and-seeder-ratings.md) | Record | Channel payments (Cashu Spilman) and seeder ratings, after nostr-vpn's paid exits; additive after NFX-07 freezes |
+| [ADR 0105](decisions/0105-seeder-lookup.md) | Record | Seeder lookup: viewers ask, seeders answer at once |
+| [ADR 0106](decisions/0106-relay-manifest-persistence.md) | Record | The embedded relay keeps manifests in plain files under the state directory |
+| [ADR 0107](decisions/0107-stun-from-nostr-creator-or-fallback.md) | Record | STUN servers from Nostr: the creator's, or the fallback |
+| [ADR 0108](decisions/0108-stun-at-your-own-relays.md) | Record | STUN at your own relays |
+| [ADR 0109](decisions/0109-browsers-take-segments-from-peers-first.md) | Record | Browsers take segments from peers first |
 | [NFX-01](../spec/nfx-01-networks.md) | Spec | Networks and versions |
 | [NFX-02](../spec/nfx-02-manifest.md) | Spec | Catalog manifest (kind 38504) |
 | [NFX-03](../spec/nfx-03-beacons.md) | Spec | Availability beacons (kind 20464) |
@@ -61,19 +68,21 @@ to rely on. Labels and statuses are as of 2026-11-05.
 | [NFX-11](../spec/nfx-11-registry.md) | Spec | Registry, schemas, test vectors, conformance; updated at every freeze |
 | [NFX-12](../spec/nfx-12-hyperdht.md) | Spec | HyperDHT transport profile (optional) |
 | [NFX-16](../spec/nfx-16-seeder-ratings.md) | Spec | Seeder ratings (kind 7368, optional): Draft, ADR 0104 |
+| [NFX-17](../spec/nfx-17-seeder-lookup.md) | Spec | Seeder lookup (kind 20465, optional): Draft, ADR 0105 |
 | [`spec/test-vectors/`](../spec/test-vectors/), [`spec/schemas/`](../spec/schemas/) | Living | Vectors regenerated by `generate.py` (the source of truth) and schemas checked against them; both are steps of `crates/ci/check.sh` |
 
 ADRs 0002, 0005 and 0007 came from the demo and stay here as records. The demo's ADRs 0001, 0003
 and 0004, its plans, spikes, reviews, vendored copies and code left with the mirror on
 2026-10-11 (ADR 0008's amendment of that date) and are in the demo's own repository, now
 [`nutflix-pear`](https://github.com/SovereignTechnology/nutflix-pear) (`docs/decisions/`).
-ADRs 0006, 0008 and 0100 to 0104 are nfx's own.
+ADRs 0006, 0008 and 0100 to 0109 are nfx's own.
 
 ### Statements overtaken since the records were written
 
 - **Names.** Records written before 2026-11-26 say `nfxd` for `nutflixd`, `nfx-package` for
   `nutflix-package`, `nfx-desktop` for `nutflix-desktop` (the viewer's package), and call this
-  repository `nfx`. The commands and flags they quote are unchanged; the protocol is still NFX.
+  repository `nfx` (still its identifier on Nostr). The commands and flags they quote are unchanged;
+  the protocol is still NFX.
 - **`nfx/nfx-10-m1-plan.md`**: its header says the work is built on branch
   `nfx10/mesh`, which no longer exists; the work is in `main`. Part C recommends
   deferring the bridge seeder to M2. The decision in the same file reversed that, and
@@ -82,7 +91,7 @@ ADRs 0006, 0008 and 0100 to 0104 are nfx's own.
 - **`nfx/freeze-m1-candidate.md`**: its "What freezing does", "mechanical step" and
   "Recommendation" text is written before the freeze, which happened on 2026-09-24
   (`spec/README.md`). It says `nutflixd` does not join swarms yet; `nutflixd run --gossip` now
-  does (`nfx/reviews/2026-09-24-hardening.md`). It counts 13 vector files; there are 14.
+  does (`nfx/reviews/2026-09-24-hardening.md`). It counts 13 vector files; there are 29 now.
 - **ADR 0002** is the history of the v0 stack; ADR 0006 supersedes it as forward-looking
   architecture. **ADR 0005**'s Q1 split rule was superseded in part by ADR 0007 (minimum
   PAY size, creator carry).

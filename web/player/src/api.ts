@@ -101,7 +101,8 @@ export interface RenditionAvailability {
  */
 export interface Endpoints {
   /**
-   * `https://host[:port][/prefix]` origin bases (NFX-05 §6), at most 8, most-named first.
+   * `https://host[:port][/prefix]` origin bases (NFX-05 §6), at most 32, in NFX-17 §4.2's
+   * tiers: those the creator's own beacon names first; how many keys name one never ranks it.
    * `originSources` is the same list with what beacons claim each origin serves; give
    * `open()` either (it asks each origin what it holds).
    */
@@ -478,10 +479,11 @@ export type PlayerEvent =
  * What `open()` plays, from where, and how.
  *
  * **Which levels a session offers** (NFX-10 §1, NFX-03 §5; nfx #85). The session takes
- * every file from one origin. `open()` tries `origins` in order, except that an origin
- * whose `OriginSource.renditions` hint names none of the allowed renditions is tried after
- * the others. On each, once its hash list has verified, it **asks the origin** which of
- * the allowed renditions (`renditions`, or every rendition of the hash list; at most 32,
+ * each file from any source it knows, one source's bytes per file (NFX-17 §4.3), and asks
+ * one origin at a time what it holds. `open()` tries `origins` in order, except that an
+ * origin whose `OriginSource.renditions` hint names none of the allowed renditions is tried
+ * after the others. On each, once its hash list has verified, it **asks the origin** which
+ * of the allowed renditions (`renditions`, or every rendition of the hash list; at most 32,
  * those the hint names first) it holds: for each, it fetches the rendition's media
  * playlist, verifies it, and sends a `GET` for the init it names (NFX-05 §3), reading at
  * most 64 KiB of the answer. These run in parallel, 6 at a time, and all of one origin's
@@ -496,8 +498,8 @@ export type PlayerEvent =
  * Beacon claims never remove an origin or a level: a beacon from any key can only change
  * the order above. And a level is never offered whose segments no source can deliver: the
  * mesh never adds a level, since a segment peers do not deliver in time comes over HTTP
- * from that origin (or, under `segmentSource` `peers-only`, is waited for), so a rendition
- * the origin does not hold would only fail. hls.js is told of no
+ * from the session's sources (or, under `segmentSource` `peers-only`, is waited for), so a
+ * rendition the answering origin does not hold could have no source. hls.js is told of no
  * other level: the master playlist it reads is cut to those renditions' variants, matched
  * by playlist content name (NFX-10 §2), and a level outside them stops the session with an
  * `error` event before any segment is fetched.
