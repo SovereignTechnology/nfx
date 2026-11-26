@@ -77,7 +77,7 @@ import {
   selectStun as selectStunServers,
   selectStunFallback as selectFallbackServers,
 } from './endpoints';
-import { MAX_RENDITIONS as LEVELS_MAX_RENDITIONS, checkRenditions, cutMaster, originOrder } from './levels';
+import { MAX_RENDITIONS as LEVELS_MAX_RENDITIONS, checkRenditions, cutMaster, originOrder, sessionRenditions } from './levels';
 import {
   MAX_RELAYS as MESH_MAX_RELAYS,
   MAX_TRACKERS as MESH_MAX_TRACKERS,
@@ -349,7 +349,11 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
   if (httpWindow !== undefined && !(Number.isSafeInteger(httpWindow) && httpWindow >= 0 && httpWindow <= 600)) {
     throw new TypeError('nfx: httpWindow must be 0 to 600 seconds');
   }
-  const { segmentSource, peerWaitMs } = checkSegmentSource(options, signaling !== null);
+  const given = checkSegmentSource(options, signaling !== null);
+  // With no origin there is nothing to rescue with: every mode is peers-only (decision 0112
+  // point 5), `https-first` included.
+  const segmentSource: SegmentSource = origins.length === 0 ? 'peers-only' : given.segmentSource;
+  const peerWaitMs = given.peerWaitMs;
   const keeping = checkKeep(options.keep);
   if (signal?.aborted) throw abortError(signal);
   await loadWasm();
@@ -437,7 +441,9 @@ async function openWith(
   const nostr = signaling?.kind === 'nostr' ? newSignaler(signaling, iceServers, log) : undefined;
   let files: FileChannelProvider | null = null;
   let videoRoom: RoomClient | null = null;
-  if (nostr !== undefined) {
+  // The file channel is a start-up tier when peers come first, or when there is no origin
+  // (decision 0112 point 8); under `https-first` with origins, start-up files stay on HTTPS.
+  if (nostr !== undefined && c.segmentSource !== 'https-first') {
     const f = new FileChannelProvider({ root, firstPeerWaitMs: peerWaitMs, findsPeers: manifestA !== undefined, morePeers: () => videoRoom?.offerMore(), log });
     files = f;
     nostr.onFileChannel = (peer, channel, room) => f.add(peer, channel, room);
@@ -540,7 +546,10 @@ async function openFrom(
   // A hash list from the keep store names no origin that delivered it.
   const fromHttp = sources.isProvider(delivered) ? null : delivered;
   if (delivered === files?.name) log('hash list verified, from a peer over the file channel');
-  files?.learnPlaylists(new Map(list.renditions.map((r) => [r.playlist, r.id])));
+  files?.learnHashList(
+    list.renditions.map((r) => r.id),
+    new Map(list.renditions.map((r) => [r.playlist, r.id])),
+  );
 
   // Peers first (NFX-10 §6.10 "Which levels"): the renditions their `have` names, each once
   // its playlist and init have verified. The origins' only when no peer confirms one in the
@@ -613,13 +622,15 @@ async function openFrom(
   if (signal?.aborted) throw abortError(signal);
   log(`hash list verified: ${anchor.size} files of ${anchor.video}${binding ? ' (bound to the manifest)' : ''}`);
   const levelRule = { renditions, preferStart: wanted !== null };
-  return start(el, anchor, { signaling, iceServers, autoplay, level, httpWindow, segmentSource, peerWaitMs, signal, ...levelRule, sources, keep, ...early }, emit, log, silence);
+  return start(el, anchor, { signaling, iceServers, autoplay, level, httpWindow, segmentSource, peerWaitMs, signal, ...levelRule, sources, keep, hasOrigin: origins.length > 0, ...early }, emit, log, silence);
 }
 
 /**
- * The renditions peers hold (NFX-10 §6.10, steps 3 and 4): those their `have` names (`whole`,
- * else `part`), each with its media playlist and init fetched through the session's tiers and
- * verified, 6 at a time and 8 s in all. Null when none is confirmed, unless `forever` (no
+ * The renditions peers hold (NFX-10 §6.10 "Which levels", steps 3 and 4): of the allowed ones,
+ * those their `have` names in `whole` and then those it names only in `part` are probed, each
+ * by its media playlist and init fetched through the session's tiers and verified, 6 at a time
+ * and 8 s in all; the verified `whole` ones are offered, or the verified `part` ones when none
+ * of those verified. Null when none is confirmed, unless `forever` (no
  * origin), when it waits for more peers and asks again until one is, or `signal` aborts.
  */
 async function peerLevels(
@@ -638,10 +649,11 @@ async function peerLevels(
   for (;;) {
     await files.haveFromAll(1_000, stop);
     if (signal?.aborted) throw abortError(signal);
-    const named = files.levels(ids);
-    if (named.length > 0) {
+    const named = files.levels(sessionRenditions(ids, wanted, null));
+    const either = [...named.whole, ...named.part];
+    if (either.length > 0) {
       const probe: Probe = async (id, probeSignal) => {
-        if (!named.includes(id)) throw new Error('no peer names it');
+        if (!either.includes(id)) throw new Error('no peer names it');
         const r = loaded.renditions.find((x) => x.id === id)!;
         const playlistUrl = `${base}${r.playlist}.m3u8`;
         const got = await sources.get(pathUnder(loaded, playlistUrl), verifies(loaded, playlistUrl), probeSignal, true);
@@ -655,15 +667,17 @@ async function peerLevels(
       };
       let picked: Selection;
       try {
-        picked = await selectRenditions(ids, wanted, named, probe, { signal });
+        picked = await selectRenditions(ids, wanted, either, probe, { signal });
       } catch (e) {
         if (signal?.aborted) throw abortError(signal);
         throw e;
       }
       const summary = describeProbes(picked.outcomes);
-      if (picked.renditions.length > 0) {
-        log(`peers hold ${picked.renditions.join(', ')} of the allowed renditions (${summary})`);
-        return picked.renditions;
+      const whole = picked.renditions.filter((id) => named.whole.includes(id));
+      const chosen = whole.length > 0 ? whole : picked.renditions.filter((id) => named.part.includes(id));
+      if (chosen.length > 0) {
+        log(`peers hold ${chosen.join(', ')} of the allowed renditions${whole.length > 0 ? '' : ', in part'} (${summary})`);
+        return chosen;
       }
       log(`no peer confirmed an allowed rendition (${summary})`);
     }
@@ -733,6 +747,8 @@ function initProbe(anchor: Anchor): Probe {
 interface StartOptions {
   /** The session's renditions, in order of preference (`OpenCommon` has the rule). */
   renditions: string[];
+  /** Whether `open()` had an origin: without one the session stays peers-only until one is added. */
+  hasOrigin: boolean;
   /** Start on the first of `renditions` (the caller named them), unless `level` pins one. */
   preferStart: boolean;
   signaling: Signaling | null;
@@ -825,6 +841,7 @@ function start(
     manifestLoadPolicy: noRetry,
   };
   let hls: Hls;
+  let hasOrigin = o.hasOrigin;
   let mesh: MeshStats | null = null;
   // Ends the WebRTC check with the session, so it leaves no connection behind.
   const probing = new AbortController();
@@ -1060,10 +1077,12 @@ function start(
       // An empty list is no change (every beacon may have expired); `open()` alone needs an origin.
       if (dead || list.length === 0) return;
       o.sources.add(checkOriginSources(list).map((x) => ({ url: x.url, tier: x.tier, renditions: x.renditions })));
+      hasOrigin = true;
     },
     setSegmentSource(source: SegmentSource): void {
       const next = checkSegmentSource({ segmentSource: source }, mesh !== null).segmentSource;
-      if (dead || mesh === null || applySource === null || next === mesh.source) return;
+      // With no origin there is nothing to rescue with: peers only until one is added.
+      if (dead || mesh === null || applySource === null || next === mesh.source || (!hasOrigin && next !== 'peers-only')) return;
       applySource(next);
     },
     async addresses(): Promise<PeerAddress[]> {

@@ -39,7 +39,7 @@
 //!   fewer video-room connections than a quarter of [`MeshConfig::max_peers`] (at least
 //!   [`MIN_VIDEO_ROOM_PEERS`]), sends its presence out of turn (at most every 5 s) when a new
 //!   peer appears and it has room for one, and closes a video-room connection
-//!   [`file_serve::VIDEO_ROOM_IDLE`] after the last request it answered.
+//!   [`file_serve::VIDEO_ROOM_IDLE`] after it finished sending its last answer.
 //! - **Discovery is by room alone** (§6): a page that plays a rendition joins its room and
 //!   meets every node present there. Beacons need no new endpoint for it, but a page and a
 //!   node meet only on a relay both use.
@@ -1802,9 +1802,10 @@ impl State {
             let late = !l.opened && now >= l.deadline;
             let idle = l.opened
                 && if l.conn.files_only {
-                    l.conn.files.as_ref().is_none_or(|f| {
-                        !f.busy() && now.duration_since(f.last_answer) > file_serve::VIDEO_ROOM_IDLE
-                    })
+                    l.conn
+                        .files
+                        .as_mut()
+                        .is_none_or(|f| f.idle_for(now) > file_serve::VIDEO_ROOM_IDLE)
                 } else {
                     now.duration_since(l.conn.active) > IDLE_TIMEOUT
                 };

@@ -5,7 +5,8 @@
 //! - [`Message`]: the ten messages, one per data-channel message, a type byte then the body;
 //!   [`Message::decode`] refuses every length and type the section does not allow, and
 //!   [`Message::encode`] writes exactly what `decode` takes.
-//! - [`Have`]: the `have` answer to `list`, `{"whole":[…],"part":[…]}`.
+//! - [`Have`]: the `have` answer to `list`, `{"whole":[…],"part":[…]}`, renditions named by
+//!   their index in the hash list.
 //! - [`beacons_answer`] / [`read_beacons_answer`]: a `beacons` answer, 1 to 4 signed kind-20464
 //!   events in their compact form (NFX-17 §1.2) as one JSON array.
 //! - [`data_messages`]: a file's bytes as `data` messages of at most [`MAX_MESSAGE`] bytes.
@@ -42,7 +43,7 @@ pub const MAX_ANSWERS_PER_FILE: u8 = 2;
 pub const MIN_HAVE_JSON: usize = 2;
 /// The bounds of a `have` body's JSON, in bytes.
 pub const MAX_HAVE_JSON: usize = 2_048;
-/// The most rendition ids a `have` names, `whole` and `part` together.
+/// A `have` names only the first this many renditions of a hash list: every index is below it.
 pub const MAX_HAVE_IDS: usize = 32;
 /// The most beacons in a `beacons` answer.
 pub const MAX_BEACONS: usize = 4;
@@ -244,31 +245,37 @@ impl<'a> Message<'a> {
 
 /// Which renditions of a hash list a server holds: `whole` with every file their media
 /// playlist names, `part` with that playlist and init and at least one segment but not all.
-/// Distinct ids, at most [`MAX_HAVE_IDS`] in all, none in both. Whether the ids are renditions
-/// of that hash list is for the reader to check against it.
+/// Renditions are named by their index in the hash list's `renditions` (0 for the first):
+/// distinct, each below [`MAX_HAVE_IDS`], none in both. Whether an index is below that hash
+/// list's length is for the reader to check against it (it ignores a `have` that is not).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Have {
-    pub whole: Vec<String>,
-    pub part: Vec<String>,
+    pub whole: Vec<u8>,
+    pub part: Vec<u8>,
 }
 
 impl Have {
     fn check(&self) -> Result<()> {
-        if self.whole.len() + self.part.len() > MAX_HAVE_IDS {
-            return Err(bad(format!(
-                "`have` names more than {MAX_HAVE_IDS} renditions"
-            )));
-        }
         let mut seen = BTreeSet::new();
-        for id in self.whole.iter().chain(&self.part) {
-            if id.is_empty() || id == "meta" {
-                return Err(bad("`have` names an empty rendition id or `meta`"));
+        for &i in self.whole.iter().chain(&self.part) {
+            if usize::from(i) >= MAX_HAVE_IDS {
+                return Err(bad(format!(
+                    "`have` names rendition {i}, past the first {MAX_HAVE_IDS}"
+                )));
             }
-            if !seen.insert(id.as_str()) {
-                return Err(bad(format!("`have` names `{id}` twice")));
+            if !seen.insert(i) {
+                return Err(bad(format!("`have` names rendition {i} twice")));
             }
         }
         Ok(())
+    }
+
+    /// Whether every index names a rendition of a hash list with `renditions` renditions.
+    pub fn fits(&self, renditions: usize) -> bool {
+        self.whole
+            .iter()
+            .chain(&self.part)
+            .all(|&i| usize::from(i) < renditions)
     }
 
     /// Read a `have` body. Members other than `whole` and `part` are ignored.
@@ -278,15 +285,23 @@ impl Have {
         let obj = v
             .as_object()
             .ok_or_else(|| bad("`have` is not an object"))?;
-        let list = |key: &str| -> Result<Vec<String>> {
+        let list = |key: &str| -> Result<Vec<u8>> {
             obj.get(key)
                 .and_then(serde_json::Value::as_array)
                 .ok_or_else(|| bad(format!("`have` has no `{key}` array")))?
                 .iter()
                 .map(|x| {
-                    x.as_str()
-                        .map(str::to_owned)
-                        .ok_or_else(|| bad(format!("`have` `{key}` holds a non-string")))
+                    // A number with an integer value 0 to 31, as JSON readers see it: `1.0`
+                    // is 1 (a JavaScript reader cannot tell them apart); `1.5`, `-1` and
+                    // strings are refused.
+                    x.as_f64()
+                        .filter(|v| v.fract() == 0.0 && (0.0..MAX_HAVE_IDS as f64).contains(v))
+                        .and_then(|v| u8::try_from(v as u64).ok())
+                        .ok_or_else(|| {
+                            bad(format!(
+                                "`have` `{key}` holds something other than an index below {MAX_HAVE_IDS}"
+                            ))
+                        })
                 })
                 .collect()
         };
@@ -527,8 +542,8 @@ mod tests {
     fn every_message_round_trips_and_has_its_one_length() {
         let sha = [7; 32];
         let have = Have {
-            whole: vec!["720p".into()],
-            part: vec!["360p".into()],
+            whole: vec![1],
+            part: vec![0],
         };
         let msgs = [
             Message::Get { req: 1, sha },
@@ -584,15 +599,24 @@ mod tests {
     }
 
     #[test]
-    fn have_takes_distinct_ids_only() {
+    fn have_takes_distinct_indices_only() {
         assert!(Have::parse(br#"{"whole":[],"part":[]}"#).is_ok());
         assert!(Have::parse(br#"{"whole":[],"part":[],"x":1}"#).is_ok());
+        let all = Have::parse(br#"{"whole":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],"part":[16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]}"#).unwrap();
+        assert_eq!(all.to_json().unwrap().len(), 107, "the largest `have`");
+        assert!(all.fits(32) && !all.fits(31));
+        assert_eq!(
+            Have::parse(br#"{"whole":[1.0],"part":[]}"#).unwrap().whole,
+            [1],
+            "1.0 is 1"
+        );
         for bad in [
-            &br#"{"whole":["a"],"part":["a"]}"#[..],
-            br#"{"whole":["a","a"],"part":[]}"#,
-            br#"{"whole":[""],"part":[]}"#,
-            br#"{"whole":["meta"],"part":[]}"#,
-            br#"{"whole":[1],"part":[]}"#,
+            &br#"{"whole":[1],"part":[1]}"#[..],
+            br#"{"whole":[2,2],"part":[]}"#,
+            br#"{"whole":[32],"part":[]}"#,
+            br#"{"whole":[-1],"part":[]}"#,
+            br#"{"whole":[1.5],"part":[]}"#,
+            br#"{"whole":["720p"],"part":[]}"#,
             br#"{"whole":[]}"#,
             br#"[]"#,
         ] {
@@ -602,11 +626,11 @@ mod tests {
                 String::from_utf8_lossy(bad)
             );
         }
-        let many = Have {
-            whole: (0..33).map(|i| format!("r{i}")).collect(),
+        let past = Have {
+            whole: vec![32],
             part: vec![],
         };
-        assert!(many.to_json().is_err());
+        assert!(past.to_json().is_err());
     }
 
     #[test]

@@ -34,7 +34,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 import type { FileChannelStats } from './api';
-import type { Have } from './file-channel';
+import { haveFits, type Have } from './file-channel';
 import { type Answer, FilePeer } from './file-peer';
 
 /** What this tier reads of `FileWant` (./session-sources.ts). */
@@ -91,6 +91,12 @@ const realSleep = (ms: number, signal: AbortSignal): Promise<void> =>
     signal.addEventListener('abort', done, { once: true });
   });
 
+/** A peer's `have` with its indices read as the hash list's rendition ids. */
+export interface Named {
+  readonly whole: readonly string[];
+  readonly part: readonly string[];
+}
+
 export class FileChannelProvider {
   readonly name = 'file-channel:';
   readonly deadlineMs = FILE_CHANNEL_DEADLINE_MS;
@@ -109,6 +115,8 @@ export class FileChannelProvider {
   readonly #delivered = new Set<string>();
   readonly #dropped = new Set<string>();
   readonly #haves = new Map<string, Have>();
+  /** The hash list's rendition ids in its order, once it verified: what a `have`'s indices name. */
+  #renditions: readonly string[] = [];
   /** Peers whose `have` is ignored for the session: it named a rendition, then `missing`. */
   readonly #haveIgnored = new Set<string>();
   readonly #busyUntil = new Map<string, number>();
@@ -209,14 +217,16 @@ export class FileChannelProvider {
   }
 
   /**
-   * The renditions to offer (§6.10 "Which levels"), of `ids`: those a connected peer's `have`
-   * names in `whole`, or, when none names any there, in `part`. The page offers each only once
-   * its playlist and init have verified.
+   * Which of `allowed` peers name (§6.10 "Which levels"): `whole`, those a ready peer's `have`
+   * names in `whole`; `part`, the rest that one names in `part`. The page probes `whole` first,
+   * then `part`, and offers the verified `whole` ones, or the verified `part` ones when none
+   * of those verified.
    */
-  levels(ids: readonly string[]): string[] {
+  levels(allowed: readonly string[]): { whole: string[]; part: string[] } {
     const haves = [...this.haves().values()];
-    const whole = ids.filter((id) => haves.some((h) => h.whole.includes(id)));
-    return whole.length > 0 ? whole : ids.filter((id) => haves.some((h) => h.part.includes(id)));
+    const whole = allowed.filter((id) => haves.some((h) => h.whole.includes(id)));
+    const part = allowed.filter((id) => !whole.includes(id) && haves.some((h) => h.part.includes(id)));
+    return { whole, part };
   }
 
   /**
@@ -248,16 +258,29 @@ export class FileChannelProvider {
     this.#cached += bytes.byteLength;
   }
 
-  /** What the verified hash list says: the rendition each media playlist (by sha256) is of. */
-  learnPlaylists(bySha: ReadonlyMap<string, string>): void {
-    this.#playlistRendition = new Map(bySha);
+  /**
+   * What the verified hash list says: its rendition ids in order (a `have` names them by index)
+   * and the rendition each media playlist (by sha256) is of.
+   */
+  learnHashList(renditions: readonly string[], playlistBySha: ReadonlyMap<string, string>): void {
+    this.#renditions = [...renditions];
+    this.#playlistRendition = new Map(playlistBySha);
   }
 
-  /** Every ready peer's `have`, not ignored ones: what "Which levels" reads. */
-  haves(): Map<string, Have> {
-    const out = new Map<string, Have>();
-    for (const [k, h] of this.#haves) if (!this.#haveIgnored.has(k) && this.#live(k)) out.set(k, h);
+  /** Every ready peer's `have` as rendition ids, not ignored ones: what "Which levels" reads. */
+  haves(): Map<string, Named> {
+    const out = new Map<string, Named>();
+    for (const [k, h] of this.#haves) if (!this.#haveIgnored.has(k) && this.#live(k)) out.set(k, this.#named(h));
     return out;
+  }
+
+  /**
+   * A `have`'s indices as rendition ids of the hash list. Nothing before the hash list is known,
+   * and nothing for a `have` naming an index past its length (§6.10: ignored).
+   */
+  #named(h: Have | undefined): Named {
+    if (h === undefined || this.#renditions.length === 0 || !haveFits(h, this.#renditions.length)) return { whole: [], part: [] };
+    return { whole: h.whole.map((i) => this.#renditions[i]!), part: h.part.map((i) => this.#renditions[i]!) };
   }
 
   /** Peers ready now. */
@@ -300,8 +323,8 @@ export class FileChannelProvider {
     const rendition = want.rendition ?? (want.role === 'playlist' ? (this.#playlistRendition.get(want.sha256) ?? null) : null);
     const names = (k: string): boolean => {
       if (rendition === null || this.#haveIgnored.has(k)) return false;
-      const h = this.#haves.get(k);
-      return h !== undefined && (h.whole.includes(rendition) || h.part.includes(rendition));
+      const h = this.#named(this.#haves.get(k));
+      return h.whole.includes(rendition) || h.part.includes(rendition);
     };
     const keys = [...this.#peers.keys()].filter((k) => this.#live(k) && !tried.has(k) && (this.#busyUntil.get(k) ?? 0) <= now);
     const rank = (k: string): number => (this.#delivered.has(k) ? 0 : names(k) ? 1 : 2);
@@ -451,8 +474,8 @@ export class FileChannelProvider {
         return a.bytes;
       case 'missing': {
         const rendition = want.role === 'playlist' ? (this.#playlistRendition.get(want.sha256) ?? null) : want.role === 'init' ? want.rendition : null;
-        const h = this.#haves.get(k);
-        if (rendition !== null && h !== undefined && (h.whole.includes(rendition) || h.part.includes(rendition))) this.#haveIgnored.add(k);
+        const h = this.#named(this.#haves.get(k));
+        if (rendition !== null && (h.whole.includes(rendition) || h.part.includes(rendition))) this.#haveIgnored.add(k);
         return null;
       }
       case 'busy':

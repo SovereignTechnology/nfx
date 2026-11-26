@@ -71,7 +71,9 @@ def filechan_vectors(keypair, schnorr_id_pubkey, nostr_event, *, namespace, a_ta
     init_sha = sha(init)
 
     # ---- every message, once ----
-    have = have_json(["720p"], [])
+    have = have_json([0], [])
+    have_all = have_json(list(range(16)), list(range(16, MAX_HAVE_IDS)))
+    assert len(have_all) == 107, "the largest `have`, written compactly"
     messages = [
         {"name": "get", "req": 7, "sha256": init_sha.hex(), "hex": msg("get", 7, init_sha).hex()},
         {"name": "get-hash-list", "req": 1, "sha256": root, "hex": msg("get", 1, root_b).hex()},
@@ -86,9 +88,13 @@ def filechan_vectors(keypair, schnorr_id_pubkey, nostr_event, *, namespace, a_ta
         {"name": "cancel", "req": 7, "hex": msg("cancel", 7).hex()},
         {"name": "busy", "req": 7, "hex": msg("busy", 7).hex()},
         {"name": "list", "req": 2, "root": root, "hex": msg("list", 2, root_b).hex()},
-        {"name": "have", "req": 2, "whole": ["720p"], "part": [], "hex": msg("have", 2, have).hex()},
-        {"name": "have-with-another-member", "req": 2, "whole": [], "part": ["720p"],
-         "read_only": True, "hex": msg("have", 2, b'{"part":["720p"],"whole":[],"v":2}').hex()},
+        {"name": "have", "req": 2, "whole": [0], "part": [], "hex": msg("have", 2, have).hex()},
+        {"name": "have-all-32", "req": 2, "whole": list(range(16)), "part": list(range(16, MAX_HAVE_IDS)),
+         "hex": msg("have", 2, have_all).hex()},
+        {"name": "have-with-another-member", "req": 2, "whole": [], "part": [0],
+         "read_only": True, "hex": msg("have", 2, b'{"part":[0],"whole":[],"v":2}').hex()},
+        {"name": "have-index-written-1.0", "req": 2, "whole": [1], "part": [],
+         "read_only": True, "hex": msg("have", 2, b'{"whole":[1.0],"part":[]}').hex()},
         {"name": "beacons", "req": 3, "hex": msg("beacons", 3).hex()},
         {"name": "end-req-max", "req": 0xFFFFFFFF, "hex": msg("end", 0xFFFFFFFF).hex()},
     ]
@@ -155,7 +161,8 @@ def filechan_vectors(keypair, schnorr_id_pubkey, nostr_event, *, namespace, a_ta
                        "data-channel message: a type byte (get 0, data 1, end 2, missing 3, hello 4, "
                        "cancel 5, busy 6, list 7, have 8, beacons 9), then its body; integers are u32 "
                        "little endian. 'messages' MUST be read as named, and a writer writes each byte "
-                       "for byte, except those marked 'read_only' ('have' members other than whole "
+                       "for byte, except those marked 'read_only' ('have' names renditions by their index in the "
+                       "hash list, 0 to 31; its members other than whole "
                        "and part are ignored; hello flag bits other than 0 and 1 are ignored, and sent "
                        "as 0). 'transfers' are a requester's get, then the "
                        "server's data messages (at most 16,384 bytes each, file bytes in order) and "
@@ -185,8 +192,8 @@ def filechan_vectors(keypair, schnorr_id_pubkey, nostr_event, *, namespace, a_ta
     # ---- what MUST close the channel ----
     over = msg("data", 1, b"\x00" * (MAX_DATA + 1))
     assert len(over) == MAX_MESSAGE + 1
-    many = have_json([f"r{i}" for i in range(MAX_HAVE_IDS + 1)], [])
-    long_have = have_json(["x" * (MAX_HAVE_JSON - 22)], [])
+    # Indices cannot make a `have` this long, but whitespace can.
+    long_have = b'{"whole":[' + b" " * (MAX_HAVE_JSON - 21) + b'],"part":[]}'
     assert len(long_have) > MAX_HAVE_JSON
     refused = [
         ("empty", b""),
@@ -211,12 +218,12 @@ def filechan_vectors(keypair, schnorr_id_pubkey, nostr_event, *, namespace, a_ta
         ("have-not-json", msg("have", 2, b"{whole}")),
         ("have-an-array", msg("have", 2, b"[[],[]]")),
         ("have-no-part", msg("have", 2, b'{"whole":[]}')),
-        ("have-id-in-both", msg("have", 2, have_json(["720p"], ["720p"]))),
-        ("have-id-twice", msg("have", 2, have_json(["720p", "720p"], []))),
-        ("have-empty-id", msg("have", 2, have_json([""], []))),
-        ("have-meta", msg("have", 2, have_json(["meta"], []))),
-        ("have-a-number", msg("have", 2, b'{"whole":[720],"part":[]}')),
-        ("have-33-ids", msg("have", 2, many)),
+        ("have-index-in-both", msg("have", 2, have_json([1], [1]))),
+        ("have-index-twice", msg("have", 2, have_json([2, 2], []))),
+        ("have-index-32", msg("have", 2, have_json([MAX_HAVE_IDS], []))),
+        ("have-negative-index", msg("have", 2, have_json([-1], []))),
+        ("have-fraction", msg("have", 2, b'{"whole":[1.5],"part":[]}')),
+        ("have-a-rendition-id", msg("have", 2, have_json(["720p"], []))),
         ("have-over-2048-bytes", msg("have", 2, long_have)),
     ]
 

@@ -33,9 +33,14 @@ export const HELLO_TIMEOUT_MS = 3_000;
 
 export const TYPES = ['get', 'data', 'end', 'missing', 'hello', 'cancel', 'busy', 'list', 'have', 'beacons'] as const;
 
+/**
+ * Which renditions of a hash list a server holds, each named by its index in the hash list's
+ * `renditions` (0 for the first): distinct, below `MAX_HAVE_IDS`, none in both. Whether an index
+ * is below that hash list's length is the reader's to check (`haveFits`).
+ */
 export interface Have {
-  readonly whole: readonly string[];
-  readonly part: readonly string[];
+  readonly whole: readonly number[];
+  readonly part: readonly number[];
 }
 
 export type Message =
@@ -79,14 +84,22 @@ function exactly(body: number, n: number, name: string): void {
 }
 
 function checkHave(have: Have): void {
-  if (have.whole.length + have.part.length > MAX_HAVE_IDS) fail(`\`have\` names more than ${MAX_HAVE_IDS} renditions`);
-  const seen = new Set<string>();
-  for (const id of [...have.whole, ...have.part]) {
-    if (typeof id !== 'string') fail('`have` holds a non-string');
-    if (id === '' || id === 'meta') fail('`have` names an empty rendition id or `meta`');
-    if (seen.has(id)) fail(`\`have\` names \`${id}\` twice`);
-    seen.add(id);
+  const seen = new Set<number>();
+  for (const i of [...have.whole, ...have.part]) {
+    if (!isIndex(i)) fail(`\`have\` holds something other than an index below ${MAX_HAVE_IDS}`);
+    if (seen.has(i)) fail(`\`have\` names rendition ${i} twice`);
+    seen.add(i);
   }
+}
+
+/** A number with an integer value 0 to 31 (`1.0` parses as 1, as it does for every JSON reader). */
+function isIndex(x: unknown): x is number {
+  return typeof x === 'number' && Number.isInteger(x) && x >= 0 && x < MAX_HAVE_IDS;
+}
+
+/** Whether every index of `have` names a rendition of a hash list with `renditions` renditions. */
+export function haveFits(have: Have, renditions: number): boolean {
+  return [...have.whole, ...have.part].every((i) => i < renditions);
 }
 
 /** Read a `have` body. Members other than `whole` and `part` are ignored. */
@@ -98,11 +111,11 @@ export function parseHave(json: Uint8Array): Have {
     return fail('`have` is not JSON');
   }
   if (typeof v !== 'object' || v === null || Array.isArray(v)) return fail('`have` is not an object');
-  const list = (key: string): string[] => {
+  const list = (key: string): number[] => {
     const a = (v as Record<string, unknown>)[key];
     if (!Array.isArray(a)) return fail(`\`have\` has no \`${key}\` array`);
-    for (const x of a) if (typeof x !== 'string') fail(`\`have\` \`${key}\` holds a non-string`);
-    return a as string[];
+    for (const x of a) if (!isIndex(x)) fail(`\`have\` \`${key}\` holds something other than an index below ${MAX_HAVE_IDS}`);
+    return (a as number[]).map((x) => (x === 0 ? 0 : x)); // -0 reads as 0
   };
   const have = { whole: list('whole'), part: list('part') };
   checkHave(have);

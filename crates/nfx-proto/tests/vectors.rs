@@ -1368,11 +1368,11 @@ fn file_channel_messages_read_and_write_as_the_vector() {
                 );
             }
             Message::Have { have, .. } => {
-                let ids = |k: &str| -> Vec<String> {
+                let ids = |k: &str| -> Vec<u8> {
                     m[k].as_array()
                         .unwrap()
                         .iter()
-                        .map(|x| x.as_str().unwrap().to_owned())
+                        .map(|x| u8::try_from(x.as_u64().unwrap()).unwrap())
                         .collect()
                 };
                 assert_eq!(have.whole, ids("whole"), "{name}");

@@ -594,9 +594,10 @@ fn check_start_up_files(v: &common::Vector, store: &dyn ContentStore, got: &Hash
     assert_eq!(
         got[&2],
         Got::Have(fc::Have {
-            whole: vec!["720p".into()],
+            whole: vec![0],
             part: vec![],
-        })
+        }),
+        "720p, the hash list's first rendition"
     );
     assert_eq!(got[&3], Got::File(store.get(&file(Role::Init)).unwrap()));
     assert_eq!(got[&4], Got::File(store.get(&file(Role::Thumb)).unwrap()));

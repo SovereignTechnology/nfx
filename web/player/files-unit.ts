@@ -147,7 +147,7 @@ class Server {
     [sha(small), small],
   ]);
   const [page, srv] = pair();
-  const server = new Server(srv, files, { have: { whole: ['720p'], part: ['1080p'] } });
+  const server = new Server(srv, files, { have: { whole: [1], part: [0] } });
   const p = new FilePeer('a'.repeat(64), page);
   eq('peer: our hello first, setting no bit', [...page.sent[0]!], [4, 1, 0]);
   eq('peer: ready with the server flags', await p.ready, fc.FLAG_FILES);
@@ -155,7 +155,7 @@ class Server {
   eq('peer: a file over three data messages', got.t === 'file' ? sha(got.bytes) : got.t, sha(big));
   eq('peer: missing', (await p.get('0'.repeat(64), 10)).t, 'missing');
   const have = await p.list('f'.repeat(64));
-  eq('peer: have', have.t === 'have' ? have.have : have.t, { whole: ['720p'], part: ['1080p'] });
+  eq('peer: have, by index', have.t === 'have' ? have.have : have.t, { whole: [1], part: [0] });
   // Nine at once: never more than eight open on the wire.
   server.maxOpen = 0;
   const nine = await Promise.all(Array.from({ length: 9 }, (_, i) => p.get(String(i).repeat(64), 10)));
@@ -273,13 +273,16 @@ const all = new Map([
 ]);
 {
   const prov = new FileChannelProvider({ root, ...fast });
-  const s1 = serverFor(prov, 'k1', all, { have: { whole: ['720p'], part: [] } });
+  const s1 = serverFor(prov, 'k1', all, { have: { whole: [1], part: [] } });
   await sleep(5);
   const got = await prov.get(want(root, 'hashlist', false, null), checks(root), new AbortController().signal);
   eq('provider: the hash list', got === null ? null : sha(got), root);
   eq('provider: its stats', [prov.stats.files, prov.stats.bytes, prov.ready], [1, list.length, 1]);
   await prov.haveFromAll(1000, new AbortController().signal);
-  eq('provider: levels from have (whole)', prov.levels(['1080p', '720p']), ['720p']);
+  eq('provider: no levels before the hash list names the indices', prov.levels(['1080p', '720p']), { whole: [], part: [] });
+  prov.learnHashList(['1080p', '720p'], new Map());
+  eq('provider: levels from have (whole)', prov.levels(['1080p', '720p']), { whole: ['720p'], part: [] });
+  eq('provider: only allowed renditions count', prov.levels(['1080p']), { whole: [], part: [] });
   // The cache answers a second ask with no request.
   const before = s1.gets;
   const again = await prov.get(want(root, 'hashlist', false, null), checks(root), new AbortController().signal);
@@ -335,14 +338,16 @@ const all = new Map([
 {
   // part only when no peer names a rendition whole; a have that lies is ignored after missing.
   const prov = new FileChannelProvider({ root, ...fast, random: () => 0 });
-  serverFor(prov, 'p', new Map(), { have: { whole: [], part: ['480p'] } });
-  serverFor(prov, 'q', all, { have: { whole: [], part: ['360p'] } });
+  serverFor(prov, 'p', new Map(), { have: { whole: [], part: [1] } });
+  serverFor(prov, 'q', all, { have: { whole: [], part: [0] } });
+  serverFor(prov, 'r', new Map(), { have: { whole: [2, 7], part: [] } });
   await sleep(5);
   await prov.haveFromAll(1000, new AbortController().signal);
-  eq('provider: levels from part', prov.levels(['360p', '480p', '720p']), ['360p', '480p']);
+  prov.learnHashList(['360p', '480p', '720p'], new Map());
+  eq('provider: levels from part (a have past the list is ignored)', prov.levels(['360p', '480p', '720p']), { whole: [], part: ['360p', '480p'] });
   const got = await prov.get(want(sha(init), 'init', false, '480p'), checks(sha(init)), new AbortController().signal);
   eq('provider: p named 480p but has nothing; q delivers', got === null ? null : sha(got), sha(init));
-  eq('provider: p has its have ignored', prov.levels(['360p', '480p', '720p']), ['360p']);
+  eq('provider: p has its have ignored', prov.levels(['360p', '480p', '720p']), { whole: [], part: ['360p'] });
   prov.destroy();
 }
 {

@@ -775,7 +775,9 @@ export interface Session {
    * peers first) and the engine reads it only then, so a session opened `https-first` keeps
    * the engine's own cap after a switch. Throws a `TypeError` for a
    * value `open()` would refuse. A session without a mesh has nothing to change: it throws
-   * for `peers-only` and ignores the others.
+   * for `peers-only` and ignores the others. A session opened with no origin is `peers-only`
+   * whatever it was given, and ignores a switch to another source until `addSources` adds an
+   * origin.
    */
   setSegmentSource(source: SegmentSource): void;
   stats(): Stats;

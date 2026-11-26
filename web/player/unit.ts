@@ -2056,7 +2056,7 @@ refuses('httpWindow beside peers only', () => checkSegmentSource({ segmentSource
 {
   const hex = (h: string): Uint8Array => Uint8Array.from(h.match(/../g) ?? [], (b) => parseInt(b, 16));
   const toHex = (b: Uint8Array): string => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
-  type Msg = { name: string; hex: string; req?: number; sha256?: string; root?: string; bytes_hex?: string; flags?: number; reads_as_flags?: number; whole?: string[]; part?: string[]; read_only?: boolean };
+  type Msg = { name: string; hex: string; req?: number; sha256?: string; root?: string; bytes_hex?: string; flags?: number; reads_as_flags?: number; whole?: number[]; part?: number[]; read_only?: boolean };
   const v = JSON.parse(readFileSync(join(here, '../../spec/test-vectors/file-channel.json'), 'utf8')) as {
     label: string;
     limits: Record<string, number>;
@@ -2084,7 +2084,7 @@ refuses('httpWindow beside peers only', () => checkSegmentSource({ segmentSource
     if (got.t === 'list') eq(`file channel: ${m.name} root`, got.root, m.root);
     if (got.t === 'data') eq(`file channel: ${m.name} bytes`, toHex(got.bytes), m.bytes_hex);
     if (got.t === 'hello') eq(`file channel: ${m.name} flags`, got.flags & (fc.FLAG_FILES | fc.FLAG_BEACONS), m.reads_as_flags ?? m.flags);
-    if (got.t === 'have') eq(`file channel: ${m.name} ids`, [got.have.whole, got.have.part], [m.whole, m.part]);
+    if (got.t === 'have') eq(`file channel: ${m.name} indices`, [got.have.whole, got.have.part], [m.whole, m.part]);
     if (!m.read_only) eq(`file channel: ${m.name} written as read`, toHex(fc.encode(got)), m.hex);
   }
   const received = (msgs: Uint8Array[]): { req: number; sha: string; file: Uint8Array } => {

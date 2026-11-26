@@ -61,10 +61,9 @@ impl VideoFiles {
             return None;
         }
         let mut have = fc::Have::default();
-        for r in &list.renditions {
-            if have.whole.len() + have.part.len() >= fc::MAX_HAVE_IDS {
-                break;
-            }
+        // Renditions are named by their index; only the first 32 can be (NFX-10 §6.10).
+        for (i, r) in list.renditions.iter().enumerate().take(fc::MAX_HAVE_IDS) {
+            let Ok(i) = u8::try_from(i) else { break };
             let Some(playlist) = list
                 .files
                 .iter()
@@ -85,9 +84,9 @@ impl VideoFiles {
             }
             let held = segments.iter().filter(|s| store.has(s)).count();
             if held == segments.len() {
-                have.whole.push(r.id.clone());
+                have.whole.push(i);
             } else if held > 0 {
-                have.part.push(r.id.clone());
+                have.part.push(i);
             }
         }
         Some(have)
@@ -140,7 +139,8 @@ pub(crate) struct FileChan {
     sending: Option<(u32, Bytes, usize)>,
     /// Messages ready to write, each with the request it answers (`None`: our `hello`).
     pub out: VecDeque<(Option<u32>, Bytes)>,
-    /// The last request answered, or the opening: what a video-room connection idles from.
+    /// When the channel last had work: a request read, or an answer still being sent (see
+    /// [`FileChan::idle_for`]), or the opening. What a video-room connection idles from.
     pub last_answer: Instant,
     /// Requests answered with a file.
     pub served: u64,
@@ -301,6 +301,16 @@ impl FileChan {
     pub(crate) fn busy(&self) -> bool {
         self.sending.is_some() || !self.todo.is_empty()
     }
+
+    /// How long the channel has had no work. A video-room connection closes after
+    /// [`VIDEO_ROOM_IDLE`] of it (NFX-10 §6.9): counted from when the last answer was fully
+    /// handed to the transport, never while a request is open or an answer's messages wait.
+    pub(crate) fn idle_for(&mut self, now: Instant) -> Duration {
+        if self.busy() || !self.out.is_empty() {
+            self.last_answer = now;
+        }
+        now.saturating_duration_since(self.last_answer)
+    }
 }
 
 #[cfg(test)]
@@ -457,8 +467,8 @@ mod tests {
     fn have_names_whole_and_part_renditions() {
         let x = fixture();
         let have = x.files.have(&x.root, &x.store).unwrap();
-        assert_eq!(have.whole, vec!["a".to_owned()]);
-        assert_eq!(have.part, vec!["b".to_owned()]);
+        assert_eq!(have.whole, vec![0], "rendition a, the first");
+        assert_eq!(have.part, vec![1], "rendition b");
         assert!(
             x.files.have(&x.other, &x.store).is_none(),
             "not a hash list of the video"
@@ -466,6 +476,46 @@ mod tests {
         x.store.remove(&x.init_a).unwrap();
         let have = x.files.have(&x.root, &x.store).unwrap();
         assert!(have.whole.is_empty(), "no init, no rendition");
+    }
+
+    #[test]
+    fn a_long_transfer_is_never_idle() {
+        let x = fixture();
+        let t0 = Instant::now();
+        let mut f = chan(t0);
+        let (mut yes, mut yes2) = (|| true, || true);
+        for m in [
+            Message::Hello {
+                version: fc::VERSION,
+                flags: 0,
+            },
+            Message::Get {
+                req: 1,
+                sha: sha(&x.big_sha),
+            },
+        ] {
+            let v = f.read(
+                &m.encode().unwrap(),
+                &x.files,
+                &x.store,
+                t0,
+                &mut yes,
+                &mut yes2,
+            );
+            assert_eq!(v, Verdict::Fine);
+        }
+        // The transport is full: the file is still being sent 25 s after it was asked for.
+        f.refill(fc::MAX_QUEUED, &mut |s| {
+            x.store.get(s).ok().map(Bytes::from)
+        });
+        let later = t0 + Duration::from_secs(25);
+        assert_eq!(f.idle_for(later), Duration::ZERO, "mid-transfer");
+        drain(&mut f, &x.store);
+        assert_eq!(
+            f.idle_for(later + Duration::from_secs(5)),
+            Duration::from_secs(5),
+            "idle from the end of the transfer, not from the request"
+        );
     }
 
     #[test]
@@ -534,7 +584,7 @@ mod tests {
         // `missing` and `have` go at once; the files follow, one at a time, in order.
         assert_eq!(decoded[0], Message::Missing { req: 3 }, "a segment");
         assert_eq!(decoded[1], Message::Missing { req: 4 }, "another video's");
-        assert!(matches!(&decoded[2], Message::Have { req: 5, have } if have.whole == ["a"]));
+        assert!(matches!(&decoded[2], Message::Have { req: 5, have } if have.whole == [0]));
         assert_eq!(decoded[3], Message::Missing { req: 6 }, "no beacons bit");
         let want_big = data_messages(1, &x.big).unwrap();
         assert_eq!(&got[4..8], &want_big[..], "three data messages, then end");
