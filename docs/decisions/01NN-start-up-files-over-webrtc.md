@@ -77,12 +77,12 @@ every namespace, room key and manifest.
      video-room connection it is the only channel.
    - **Messages** are binary: a type byte, then the body. Types 0-3 are NFX-12 §4's `get`, `data`,
      `end` and `missing`, byte for byte; 4 `hello` (version 1, flags: serves files, serves beacons),
-     5 `cancel`, 6 `busy`, 7 `list` (which renditions of a `root`), 8 `have` (a JSON array of
-     rendition ids held whole), 9 `beacons`. A `data` message carries at most 16,379 bytes of the file,
-     so a whole message is at most 16 KiB, which every WebRTC stack carries; a file spans as many as it
-     needs. Request ids are never reused on a channel, so a `cancel` needs no answer: anything that
-     still arrives for it is ignored. A malformed message closes the channel. A new message type
-     takes a new label (`nfx-files/2`), as NFX-12 §3 rules for Protomux.
+     5 `cancel`, 6 `busy`, 7 `list` (which renditions of a `root`), 8 `have` (the rendition ids held
+     whole and those held in part), 9 `beacons`. A `data` message carries at most 16,379 bytes of
+     the file, so a whole message is at most 16 KiB, which every WebRTC stack carries; a file spans
+     as many as it needs. Request ids are never reused on a channel, so a `cancel` needs no answer:
+     anything that still arrives for it is ignored. A malformed message closes the channel. A new
+     message type takes a new label (`nfx-files/2`), as NFX-12 §3 rules for Protomux.
    - **What is served**: the hash list (`get` of `root`) and the files of a hash list of the
      connection's video with any role but `segment`; never a segment, which stays on p2p-media-loader;
      never a file of another video, so a channel is no oracle for what else a peer holds.
@@ -107,10 +107,13 @@ every namespace, room key and manifest.
      3 at once), move on after `missing` or `busy`. Peers that delivered a verified file come first,
      then those whose `have` names the file's rendition, then the rest at random.
 3. **`have` replaces the origin probe.** A page offers a level only for a rendition that a connected
-   peer's `have` names and whose media playlist and init have verified, from any peer. A peer whose
-   `have` names a rendition and then answers `missing` for its playlist or init has its `have`
-   ignored for the session. `have` names only renditions held whole (the media playlist and every
-   file it names), so a node lists those it serves and a page usually none.
+   peer's `have` names as held whole and whose media playlist and init have verified, from any
+   peer. When no connected peer holds any rendition whole (a video whose seeders are gone, played
+   from its viewers), the renditions peers hold in part are offered instead, on the same condition;
+   p2p-media-loader's announcements then say which segments each holds, and a missing one is waited
+   for or rescued as the page may. A peer whose `have` names a rendition and then answers `missing`
+   for its playlist or init has its `have` ignored for the session. A node usually holds its
+   renditions whole; a page holds what it has watched, in part, unless it keeps the video whole.
 4. **Bootstrap with only the manifest**: join the video room and offer to the peers met; `get` the
    hash list from one, hedge to another after 2 s; verify it; `list` the peers; `get` the master
    playlist and, for each allowed rendition (at most 32, six at a time, 8 s in all as the origin probe
@@ -164,10 +167,11 @@ every namespace, room key and manifest.
      segment is never delayed by it.
 9. **nfxd** joins the video room of each video it serves while it has at least one of its stream
    rooms, counted in its room limit (`MAX_ROOMS`), never offers there, answers within the sub-limit,
-   closes a video-room connection 20 s after its last request, and serves the file channel from its
-   store, which re-verifies on read. As an offerer in a stream room it opens the file channel after the
-   first channel is open (str0m 0.24.1's `DirectApi::create_data_channel` opens a channel on the
-   running association without SDP). A flag turns the file channel off.
+   closes a video-room connection 20 s after its last request, serves the file channel from its
+   store, which re-verifies on read, and answers `beacons` with its own newest beacon. As an offerer
+   in a stream room it opens the file channel after the first channel is open (str0m 0.24.1's
+   `DirectApi::create_data_channel` opens a channel on the running association without SDP). A flag
+   turns the file channel off.
 10. **The reference web client** stops waiting for a beacon that names an origin before it plays,
     passes the origins it knows at Play only as the rescue (none in the strict mode the plan ends in),
     and drops its own HTTPS read of the hash list: the library decides levels from `have`.
@@ -220,12 +224,13 @@ every namespace, room key and manifest.
 - **Vectors**, from the spec text by a new generator beside `meshsig.py`: `mesh-signal.json` gains
   `video_rooms` (the manifest vector's address, a testnet address, and one whose video-id matches a
   stream vector's, showing the IDs differ); `file-channel.json` holds every message type in hex, a
-  40,000-byte transfer in three `data` messages, a `have`, a `beacons` answer carrying `beacon.json`'s
-  event, and beacon acceptance at a fixed time (the creator's: tier 1; another key's: pool);
-  `file-channel-invalid.json` holds every message that closes the channel (each wrong length, type 10,
-  `data` of 0 or 16,380 bytes, `hello` version 0 or 2, a second `hello`, a ninth open request, a `have`
-  that is not an array of distinct strings or is too long) and every beacon a reader refuses (expired,
-  dated 31 s ahead, another video's, not kind 20464, a `beacons` answer of 5 events or over 64 KiB).
+  40,000-byte transfer in three `data` messages, a `have`, a `beacons` answer carrying
+  `beacon.json`'s event, and beacon acceptance at a fixed time (the creator's: tier 1; another
+  key's: pool); `file-channel-invalid.json` holds every message that closes the channel (each wrong
+  length, type 10, `data` of 0 or 16,380 bytes, `hello` version 0 or 2, a second `hello`, a ninth
+  open request, a `have` that is not an object of two arrays of distinct strings, names an id in
+  both, or names more than 32) and every beacon a reader refuses (expired, dated 31 s ahead, another
+  video's, not kind 20464, a `beacons` answer of 5 events or over 64 KiB).
 - **Rust**: nfx-proto codec and derivation over the vectors; nfx-node's file server (shared budget,
   256 KiB window, twice per file, scope to the video, `segment` refused, `busy` over the global
   budget) and mesh (joins the video room per served video, never offers there, answers within its
@@ -248,10 +253,12 @@ every namespace, room key and manifest.
 - **Drill**: the site's playback proof run with the network's public seeder and its domain unreachable,
   from two vantages: the list, the first frame, 8 s of play, bytes over WebRTC, no origin request.
 
-## Open questions
+## Settled while drafting
 
-- The maintainer's call on amending frozen NFX-05 §§2 and 6 in place.
-- Whether viewers serve start-up files by default (`serveFiles`), and whether a node serves its own
-  beacon by default.
-- `have` means "held whole", so a video whose seeders are gone offers no level even when its viewers
-  together hold every segment.
+- NFX-05 §§2 and 6 are amended in place, not by a `specver` bump: the maintainer's direction of
+  2026-11-26 is that the spec is not locked while the network is `nfx:testnet:1`.
+- Viewers serve start-up files by default (`serveFiles: true`), and a node answers `beacons` with
+  its own newest beacon by default (a flag turns it off): the end state is a network that needs no
+  fixed host, and a newcomer needs some peer that can hand it both.
+- `have` reports renditions held in part as well as whole, so a video whose seeders are gone still
+  plays from its viewers (point 3).
