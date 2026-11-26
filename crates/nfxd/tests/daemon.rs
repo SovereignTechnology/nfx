@@ -17,15 +17,18 @@ use hyper::{Request, StatusCode};
 use hyper_util::rt::TokioIo;
 use iroh::RelayUrl;
 use nfx_node::nostr::{ManifestQuery, Relays, sign_manifest};
+use nfx_node::relay::ScopedRelay;
 use nfx_node::store::{ContentStore, FsStore};
 use nfx_node::unix_now;
 use nfx_proto::Verified;
 use nfx_proto::event::Event;
 use nfx_proto::hashlist::{HashList, Role};
 use nfx_proto::manifest::{License, Manifest};
+use nfx_proto::namespace::Namespace;
 use nfxd::daemon::{Config, Daemon, VideoState};
 use nfxd::key;
 use nfxd::package::Package;
+use nfxd::publish::{About, publish, sign_package};
 use nostr_sdk::prelude::Keys;
 use serde_json::Value;
 
@@ -407,6 +410,72 @@ async fn the_embedded_relay_names_its_stun_port_only_when_given_one() {
         }
         daemon.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn publishing_signs_the_package_and_a_lookup_by_its_creator_finds_it() {
+    let dir = tmp("publish");
+    let (_, vector, _) = vector_package(&dir);
+    let package = Package::open(&dir).unwrap();
+    let net = vector.addr.namespace().clone();
+    let keys = Keys::generate();
+    let tags = ["travel".to_owned()];
+    let about = About {
+        title: "Salt Flats",
+        description: "at dusk",
+        alt: Some("alt text"),
+        tags: &tags,
+    };
+
+    // Signing alone sends nothing and gives the same manifest `publish` will send.
+    let (event, signed) = sign_package(&keys, &package, about).await.unwrap();
+    assert_eq!(Manifest::from_event(&event).unwrap(), signed);
+    assert_eq!(signed.author, keys.public_key().to_hex());
+    assert_eq!(signed.root, vector.root);
+
+    let serve = |relay: ScopedRelay| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        (
+            url,
+            tokio::spawn(std::sync::Arc::new(relay).serve(listener)),
+        )
+    };
+
+    // A relay that takes this namespace: one acceptance, and the creator's lookup finds it.
+    let (url, server) = serve(ScopedRelay::new(std::slice::from_ref(&net))).await;
+    let relays = Relays::connect(std::slice::from_ref(&url), Duration::from_secs(10))
+        .await
+        .unwrap();
+    let published = publish(&relays, &keys, &package, about).await.unwrap();
+    assert_eq!(published.accepted, 1);
+    assert_eq!(published.a, published.manifest.a_tag());
+    assert_eq!(published.manifest.addr, vector.addr);
+    let found = relays
+        .manifests(
+            &ManifestQuery {
+                namespace: net,
+                authors: vec![keys.public_key().to_hex()],
+                videos: vec![],
+            },
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].a_tag(), published.a);
+    relays.shutdown().await;
+    server.abort();
+
+    // A relay for another network refuses it: publishing fails rather than reporting 0.
+    let testnet = Namespace::parse("nfx:testnet:1").unwrap();
+    let (url, server) = serve(ScopedRelay::new(std::slice::from_ref(&testnet))).await;
+    let relays = Relays::connect(std::slice::from_ref(&url), Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert!(publish(&relays, &keys, &package, about).await.is_err());
+    relays.shutdown().await;
+    server.abort();
 }
 
 #[tokio::test]
