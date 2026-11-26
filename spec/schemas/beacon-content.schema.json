@@ -79,7 +79,10 @@
             "if": {
               "properties": {
                 "t": {
-                  "const": "https"
+                  "enum": [
+                    "https",
+                    "hyperdht"
+                  ]
                 }
               },
               "required": [
@@ -94,7 +97,7 @@
                 }
               }
             },
-            "description": "https (NFX-03 §4): optional renditions, the ids whose files the origin serves; absent means every rendition, present it names 1 or more distinct ids"
+            "description": "https (NFX-03 §4) and hyperdht (NFX-12 §2): optional renditions, the ids whose files the endpoint serves; absent means every rendition, present it names 1 or more distinct ids"
           }
         ],
         "properties": {
