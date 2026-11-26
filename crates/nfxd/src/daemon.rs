@@ -517,8 +517,11 @@ impl Shared {
         // A refusal's pause runs from its answer, not from before a slow publish.
         let replied = tokio::time::Instant::now();
         for (url, answer) in &answers {
-            self.share
-                .answered(url, answer.as_ref().copied().map_err(String::as_str), replied);
+            self.share.answered(
+                url,
+                answer.as_ref().copied().map_err(String::as_str),
+                replied,
+            );
         }
         let accepted = answers.values().filter(|r| r.is_ok()).count();
         if accepted == 0 {
