@@ -1,5 +1,5 @@
 {
-  "description": "NFX-10 §6.10, the file channel ('nfx-files/1'). Each message is one data-channel message: a type byte (get 0, data 1, end 2, missing 3, hello 4, cancel 5, busy 6, list 7, have 8, beacons 9), then its body; integers are u32 little endian. 'messages' MUST be read as named, and a writer writes each byte for byte, except those marked 'read_only' ('have' members other than whole and part are ignored; hello flag bits other than 0 and 1 are ignored, and sent as 0). 'transfers' are a requester's get, then the server's data messages (at most 16,384 bytes each, file bytes in order) and end; 'three_data_messages' pins a 32,858-byte file by its rule, and each message by length, first 16 bytes and sha256. 'beacons_answer' is the bytes of a beacons answer (a JSON array of compact kind-20464 events, NFX-17 §1.2). 'reader' gives, at 'now' and for the video 'video', the tier a reader gives each beacon in 'take' (1: signed by the creator; 2: a key in 'trusted'; pool: any other), and in 'sequence' which of one peer's beacons it takes in order. The beacons it MUST refuse are in file-channel-invalid.json.",
+  "description": "NFX-10 §6.10, the file channel ('nfx-files/1'). Each message is one data-channel message: a type byte (get 0, data 1, end 2, missing 3, hello 4, cancel 5, busy 6, list 7, have 8, beacons 9), then its body; integers are u32 little endian. 'messages' MUST be read as named, and a writer writes each byte for byte, except those marked 'read_only' ('have' names renditions by their index in the hash list, 0 to 31; its members other than whole and part are ignored; hello flag bits other than 0 and 1 are ignored, and sent as 0). 'transfers' are a requester's get, then the server's data messages (at most 16,384 bytes each, file bytes in order) and end; 'three_data_messages' pins a 32,858-byte file by its rule, and each message by length, first 16 bytes and sha256. 'beacons_answer' is the bytes of a beacons answer (a JSON array of compact kind-20464 events, NFX-17 §1.2). 'reader' gives, at 'now' and for the video 'video', the tier a reader gives each beacon in 'take' (1: signed by the creator; 2: a key in 'trusted'; pool: any other), and in 'sequence' which of one peer's beacons it takes in order. The beacons it MUST refuse are in file-channel-invalid.json.",
   "label": "nfx-files/1",
   "version": 1,
   "flags": {
@@ -87,20 +87,70 @@
       "name": "have",
       "req": 2,
       "whole": [
-        "720p"
+        0
       ],
       "part": [],
-      "hex": "08020000007b2277686f6c65223a5b2237323070225d2c2270617274223a5b5d7d"
+      "hex": "08020000007b2277686f6c65223a5b305d2c2270617274223a5b5d7d"
+    },
+    {
+      "name": "have-all-32",
+      "req": 2,
+      "whole": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31
+      ],
+      "part": [],
+      "hex": "08020000007b2277686f6c65223a5b302c312c322c332c342c352c362c372c382c392c31302c31312c31322c31332c31342c31352c31362c31372c31382c31392c32302c32312c32322c32332c32342c32352c32362c32372c32382c32392c33302c33315d2c2270617274223a5b5d7d"
     },
     {
       "name": "have-with-another-member",
       "req": 2,
       "whole": [],
       "part": [
-        "720p"
+        0
       ],
       "read_only": true,
-      "hex": "08020000007b2270617274223a5b2237323070225d2c2277686f6c65223a5b5d2c2276223a327d"
+      "hex": "08020000007b2270617274223a5b305d2c2277686f6c65223a5b5d2c2276223a327d"
+    },
+    {
+      "name": "have-index-written-1.0",
+      "req": 2,
+      "whole": [
+        1
+      ],
+      "part": [],
+      "read_only": true,
+      "hex": "08020000007b2277686f6c65223a5b312e305d2c2270617274223a5b5d7d"
     },
     {
       "name": "beacons",

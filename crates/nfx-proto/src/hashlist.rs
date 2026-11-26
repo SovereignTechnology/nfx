@@ -108,7 +108,7 @@ impl HashList {
             return Err(bad("`renditions` is empty"));
         }
         if self.renditions.len() > MAX_RENDITIONS {
-            return Err(bad(format!(
+            return Err(bad(&format!(
                 "more than {MAX_RENDITIONS} renditions ({})",
                 self.renditions.len()
             )));
