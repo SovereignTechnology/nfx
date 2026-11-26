@@ -652,12 +652,21 @@ mod tests {
         assert!(p.bytes >= files, "{} < {files}", p.bytes);
         assert!(p.blobs > list.files.len() as u64, "{p:?}");
         assert!(p.last_ms > 0);
-        // Over loopback, straight to the seeder's socket.
+        // Straight to one of the seeder's own sockets, not through a relay. The endpoint binds an
+        // IPv4 and an IPv6 socket on every interface and is dialled on the IPv4 loopback one, but
+        // the connection may settle on any local path to it: 127.0.0.1, [::1] or the host's own
+        // interface address, each on that socket's port. So the port and family are pinned, not
+        // the address.
         let routes = node.transfers().routes(&root);
         assert_eq!(routes.len(), 1, "{routes:?}");
-        let want = on_loopback(seed.endpoint()).addrs.into_iter().next();
-        match (&routes[0].path, want) {
-            (PeerPath::Direct(got), Some(TransportAddr::Ip(want))) => assert_eq!(*got, want),
+        let sockets = seed.endpoint().bound_sockets();
+        match &routes[0].path {
+            PeerPath::Direct(got) => assert!(
+                sockets
+                    .iter()
+                    .any(|s| s.is_ipv4() == got.is_ipv4() && s.port() == got.port()),
+                "{got} is not one of the seeder's sockets {sockets:?}"
+            ),
             other => panic!("not direct to the seeder: {other:?}"),
         }
         // Fetched again, nothing moves: every file is held.
