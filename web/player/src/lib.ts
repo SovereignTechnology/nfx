@@ -52,6 +52,7 @@ import type {
   RemoteCandidates,
   ResolveOptions,
   ResolvedManifest,
+  SegmentSource,
   Session,
   Signaling,
   Stats,
@@ -73,8 +74,12 @@ import { MAX_RENDITIONS as LEVELS_MAX_RENDITIONS, checkRenditions, cutMaster, or
 import {
   MAX_RELAYS as MESH_MAX_RELAYS,
   MAX_TRACKERS as MESH_MAX_TRACKERS,
+  type MeshTuning,
   PeerBook,
+  checkSegmentSource,
   meshConfig,
+  probeWebRtc,
+  segmentWindows,
   relayUrl as meshRelayUrl,
   trackerUrl as meshTrackerUrl,
 } from './mesh';
@@ -264,6 +269,11 @@ function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** `HTMLMediaElement.HAVE_FUTURE_DATA`: below it the element cannot play on from where it is. */
+const HAVE_FUTURE_DATA = 3;
+/** Playback with nothing to play for this long, with peers first, is `waiting`. */
+const WAITING_AFTER_MS = 2000;
+
 function abortError(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException('aborted', 'AbortError');
 }
@@ -291,6 +301,7 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
   if (httpWindow !== undefined && !(Number.isSafeInteger(httpWindow) && httpWindow >= 0 && httpWindow <= 600)) {
     throw new TypeError('nfx: httpWindow must be 0 to 600 seconds');
   }
+  const { segmentSource, peerWaitMs } = checkSegmentSource(options, signaling !== null);
   if (signal?.aborted) throw abortError(signal);
   await loadWasm();
 
@@ -401,7 +412,7 @@ export async function open(el: HTMLVideoElement, options: OpenOptions): Promise<
   if (signal?.aborted) throw abortError(signal);
   log(`hash list verified: ${anchor.size} files of ${anchor.video}${binding ? ' (bound to the manifest)' : ''}`);
   const levelRule = { renditions, preferStart: wanted !== null };
-  return start(el, anchor, { signaling, iceServers, autoplay, level, httpWindow, signal, ...levelRule, sources }, emit, log, () => {
+  return start(el, anchor, { signaling, iceServers, autoplay, level, httpWindow, segmentSource, peerWaitMs, signal, ...levelRule, sources }, emit, log, () => {
     dead = true;
   });
 }
@@ -448,6 +459,8 @@ interface StartOptions {
   autoplay: boolean;
   level: number | undefined;
   httpWindow: number | undefined;
+  segmentSource: SegmentSource;
+  peerWaitMs: number;
   signal: AbortSignal | undefined;
   /** Where every file comes from (NFX-17 §§4.2-4.3). */
   sources: SessionSources;
@@ -522,6 +535,10 @@ function start(
   };
   let hls: Hls;
   let mesh: MeshStats | null = null;
+  // Ends the WebRTC check with the session, so it leaves no connection behind.
+  const probing = new AbortController();
+  /** Changes where the mesh takes segments from, while it plays; set once there is a mesh. */
+  let applySource: ((source: SegmentSource) => void) | null = null;
   const book = new PeerBook();
   let nostr: NostrSignaler | undefined;
   let engine: string;
@@ -540,9 +557,22 @@ function start(
       segments: { http: 0, p2p: 0 },
       peerList: [],
       signal: null,
+      source: o.segmentSource,
+      rescues: 0,
+      waiting: false,
+      webrtc: 'unknown',
+      startup: { peerMs: null, peerSegmentMs: null, segmentMs: null },
     };
     const HlsWithP2P = HlsJsP2PEngine.injectMixin(Hls);
-    const tuning = o.httpWindow === undefined ? {} : { httpWindow: o.httpWindow };
+    const tuning: MeshTuning = {
+      ...(o.httpWindow === undefined ? {} : { httpWindow: o.httpWindow }),
+      segmentSource: o.segmentSource,
+      peerWaitMs: o.peerWaitMs,
+      onRescue: (url) => {
+        emit({ type: 'rescue', url });
+        log(`mesh: rescue over HTTPS: ${url}`);
+      },
+    };
     if (signaling.kind === 'nostr') {
       const fallback = signaling.stunFallback ? new StunFallbackBook(signaling.stunFallback, o.iceServers.flatMap((i) => i.urls)) : null;
       // The relays' documents are read beside their sockets; nothing waits for them.
@@ -562,6 +592,33 @@ function start(
     const filtered = nostr?.remoteCandidates === 'global' ? ' (remote candidates: global unicast UDP only)' : '';
     const atRelays = nostr?.relayStun ? ' (STUN at its relays too)' : '';
     log(`mesh: ${signaling.kind} ${(signaling.kind === 'nostr' ? signaling.relays : signaling.urls).join(' ')}${filtered}${atRelays}`);
+    if (o.segmentSource !== 'https-first') log(`mesh: segments from ${o.segmentSource} (peers get ${o.peerWaitMs} ms)`);
+    // Can this browser's WebRTC reach anyone? If not, say so once, and stop waiting for peers.
+    const meshStats = mesh;
+    const p2pEngine = (hls as unknown as { p2pEngine?: { applyDynamicConfig?: (c: unknown) => void } }).p2pEngine;
+    // The engine's settings for `source`. With WebRTC found blocked no peer will come, so
+    // nothing waits for one.
+    const configure = (source: SegmentSource): void => {
+      const peerWaitMs = meshStats.webrtc === 'blocked' ? 0 : o.peerWaitMs;
+      try {
+        p2pEngine?.applyDynamicConfig?.({ core: segmentWindows(source, { httpWindow: o.httpWindow, peerWaitMs }) });
+      } catch (e) {
+        log(`mesh: could not change the engine's settings: ${message(e)}`);
+      }
+    };
+    applySource = (source) => {
+      configure(source);
+      meshStats.source = source;
+      log(`mesh: segments from ${source} from now on`);
+    };
+    void probeWebRtc(o.iceServers, undefined, undefined, probing.signal).then((probe) => {
+      if (dead) return;
+      meshStats.webrtc = probe.ok ? 'ok' : 'blocked';
+      log(`mesh: WebRTC check: ${probe.why}`);
+      if (probe.ok) return;
+      emit({ type: 'mesh', state: 'blocked', why: probe.why });
+      if (meshStats.source !== 'https-first') configure(meshStats.source);
+    });
   } else {
     hls = new Hls(base);
     engine = `hls.js ${Hls.version}`;
@@ -573,6 +630,30 @@ function start(
     emit({ type: 'playing' });
   };
   el.addEventListener('playing', onPlaying);
+  // Peers first: say when playback has nothing to play because no peer has delivered the
+  // next segment (`waiting`), and when it goes on (`resumed`). The element is the judge: it
+  // lacks data to play on, and the viewer has not paused it.
+  let waitTimer: ReturnType<typeof setInterval> | undefined;
+  if (mesh !== null) {
+    const meshStats = mesh;
+    let starvedSince: number | null = null;
+    waitTimer = setInterval(() => {
+      if (dead) return;
+      // With HTTPS first the origin delivers what peers do not: there is no wait to report.
+      const starved = meshStats.source !== 'https-first' && el.readyState < HAVE_FUTURE_DATA && !el.ended && (!el.paused || !playing);
+      starvedSince = starved ? (starvedSince ?? performance.now()) : null;
+      const waiting = starvedSince !== null && performance.now() - starvedSince >= WAITING_AFTER_MS;
+      if (waiting === meshStats.waiting) return;
+      meshStats.waiting = waiting;
+      if (!waiting) {
+        emit({ type: 'resumed' });
+        return;
+      }
+      const peers = book.connected();
+      emit({ type: 'waiting', reason: peers === 0 ? 'no-peer' : 'slow', peers });
+      log(`mesh: waiting for ${peers === 0 ? 'a peer' : `${peers} connected peer(s) to deliver`}`);
+    }, 500);
+  }
   hls.on(Hls.Events.MANIFEST_PARSED, (_, d) => {
     if (dead) return;
     const ids = d.levels.map((l) => anchor.renditionOf(l.url[0] ?? ''));
@@ -609,6 +690,8 @@ function start(
     silence();
     o.signal?.removeEventListener('abort', destroy);
     el.removeEventListener('playing', onPlaying);
+    if (waitTimer !== undefined) clearInterval(waitTimer);
+    probing.abort();
     // hls.js stops its loaders and its worker, detaches the media (revoking the
     // MediaSource URL), and fires DESTROYING, on which the p2p engine destroys its core:
     // stream loaders, peers and the tracker sockets (or the Nostr rooms, which send their
@@ -668,6 +751,11 @@ function start(
       // An empty list is no change (every beacon may have expired); `open()` alone needs an origin.
       if (dead || list.length === 0) return;
       o.sources.add(checkOriginSources(list).map((x) => ({ url: x.url, tier: x.tier, renditions: x.renditions })));
+    },
+    setSegmentSource(source: SegmentSource): void {
+      const next = checkSegmentSource({ segmentSource: source }, mesh !== null).segmentSource;
+      if (dead || mesh === null || applySource === null || next === mesh.source) return;
+      applySource(next);
     },
     async addresses(): Promise<PeerAddress[]> {
       if (dead || mesh === null) return [];

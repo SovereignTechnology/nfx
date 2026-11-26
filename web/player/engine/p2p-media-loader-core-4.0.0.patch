@@ -1,18 +1,20 @@
 --- a/src/core.ts
 +++ b/src/core.ts
-@@ -80,8 +80,11 @@
+@@ -80,8 +80,13 @@
      validateP2PSegment: undefined,
      validateHTTPSegment: undefined,
      httpRequestSetup: undefined,
 +    httpSegmentFetch: undefined,
 +    segmentFromOneSource: false,
++    segmentPolicy: "http-first",
++    peerWaitMs: 4000,
      swarmId: undefined,
      streamSwarmIdBuilder: undefined,
 +    signalingClientFactory: undefined,
      p2pMaxPeers: 50,
      p2pChurnMaxPeersMultiplier: 1.5,
      p2pChurnCleanupIntervalMs: 30000,
-@@ -718,8 +721,12 @@
+@@ -718,8 +723,12 @@
  
    private stripStaticOnlyProps<T extends object>(
      config: T,
@@ -27,7 +29,7 @@
        return config;
      }
  
-@@ -727,15 +734,17 @@
+@@ -727,15 +736,17 @@
      // plain-JS callers can still pass them — signal instead of silently
      // ignoring the update.
      this.logger(
@@ -130,6 +132,191 @@
    private handleResponseHeaders(response: Response) {
      if (!response.ok) {
        if (response.status === 406 || response.status === 416) {
+--- a/src/hybrid-loader.ts
++++ b/src/hybrid-loader.ts
+@@ -36,6 +36,13 @@
+   private initialHttpDelayTimeoutId?: number;
+   private isProcessQueueMicrotaskCreated = false;
+   private readonly createdAt = performance.now();
++  // NFX (`segmentPolicy`): until when peers may still be connecting, whether that wait
++  // yields to a segment playback is about to need, and since when the player has been
++  // asking for its segment.
++  private peerGraceUntil = 0;
++  private isPeerGraceSoft = false;
++  private peerGraceTimeoutId?: number;
++  private engineRequestedAt = 0;
+ 
+   constructor(
+     private lastRequestedSegment: Readonly<SegmentWithStream>,
+@@ -72,6 +79,7 @@
+     this.logger = debug(`p2pml-core:hybrid-loader-${activeStream.type}`);
+     this.logger.color = "coral";
+ 
++    this.peerGraceUntil = this.createdAt + this.config.peerWaitMs;
+     this.setIntervalLoading();
+   }
+ 
+@@ -95,6 +103,11 @@
+     if (stream !== this.lastRequestedSegment.stream) {
+       this.logger(`stream changed to ${LoggerUtils.getStreamString(stream)}`);
+       this.p2pLoaders.changeCurrentLoader(stream);
++      if (this.p2pLoaders.currentLoader.connectedPeerCount === 0) {
++        // NFX: the stream's peers are still to be met.
++        this.peerGraceUntil = performance.now() + this.config.peerWaitMs;
++        this.isPeerGraceSoft = true;
++      }
+     }
+     this.lastRequestedSegment = segment;
+ 
+@@ -131,6 +144,7 @@
+ 
+       this.engineRequest?.abort();
+       this.engineRequest = engineRequest;
++      this.engineRequestedAt = performance.now();
+ 
+       // If the engine explicitly requests a segment that previously failed during
+       // background pre-fetching, clear its error history so it can be retried.
+@@ -240,6 +254,7 @@
+             this.requests.remove(request);
+           }
+           if (
++            this.config.segmentPolicy === "http-first" &&
+             request.failedAttempts.httpAttemptsCount >= httpErrorRetries &&
+             engineRequest
+           ) {
+@@ -272,6 +287,11 @@
+     const { queue, queueSegmentIds, queueDownloadRatio } = this.generateQueue();
+     this.processRequests(queueSegmentIds, queueDownloadRatio);
+ 
++    if (this.config.segmentPolicy !== "http-first") {
++      this.processQueuePeers(queue);
++      return;
++    }
++
+     const {
+       simultaneousHttpDownloads,
+       simultaneousP2PDownloads,
+@@ -390,6 +410,99 @@
+     }
+   }
+ 
++  /**
++   * NFX: the queue under `segmentPolicy` "peer-first" or "peer-only". Segments come from
++   * the peers that announced them. HTTP is only for the segment the player is asking for,
++   * only under "peer-first", and only as `decidePeerModeSource` allows (a rescue).
++   */
++  private processQueuePeers(queue: QueueUtils.QueueItem[]) {
++    const {
++      simultaneousHttpDownloads,
++      simultaneousP2PDownloads,
++      httpErrorRetries,
++      segmentPolicy,
++      peerWaitMs,
++    } = this.config;
++    if (segmentPolicy === "http-first") return;
++
++    const loader = this.p2pLoaders.currentLoader;
++    const now = performance.now();
++    const isGraceRunning = peerWaitMs > 0 && now < this.peerGraceUntil;
++    if (isGraceRunning) {
++      this.peerGraceTimeoutId ??= window.setTimeout(() => {
++        this.peerGraceTimeoutId = undefined;
++        this.requestProcessQueueMicrotask();
++      }, this.peerGraceUntil - now);
++    }
++    const asked =
++      this.engineRequest?.status === "pending"
++        ? this.engineRequest.segment
++        : undefined;
++    const waited = now - this.engineRequestedAt >= peerWaitMs;
++
++    const loadFromPeer = (segment: SegmentWithStream, isUrgent: boolean) => {
++      if (
++        this.requests.executingP2PCount >= simultaneousP2PDownloads &&
++        !(isUrgent && this.abortLastP2PLoadingInQueueAfterItem(queue, segment))
++      ) {
++        return;
++      }
++      this.loadThroughP2P(segment);
++      // Every peer that holds it may be busy with a later segment: free one, once.
++      if (
++        isUrgent &&
++        this.requests.get(segment)?.status !== "loading" &&
++        this.abortLastP2PLoadingInQueueAfterItem(queue, segment)
++      ) {
++        this.loadThroughP2P(segment);
++      }
++    };
++
++    const handle = (
++      segment: SegmentWithStream,
++      isUrgent: boolean,
++      isInPeerWindow: boolean,
++    ) => {
++      const request = this.requests.get(segment);
++      if (request?.status === "succeed") return;
++      const isAsked = segment === asked;
++      const late =
++        segment.startTime - this.playback.position <=
++        (peerWaitMs / 1000) * this.playback.rate;
++      const decision = StreamUtils.decidePeerModeSource({
++        policy: segmentPolicy,
++        loading:
++          request?.status === "loading" ? request.downloadSource : undefined,
++        hasHolder: loader.isSegmentLoadedBySomeone(segment),
++        inGrace: isGraceRunning && !(this.isPeerGraceSoft && late),
++        late,
++        waited,
++        httpBudget:
++          isAsked &&
++          (request?.failedAttempts.httpAttemptsCount ?? 0) < httpErrorRetries,
++      });
++
++      if (decision === "p2p") {
++        if (isAsked || isUrgent || isInPeerWindow) {
++          loadFromPeer(segment, isAsked || isUrgent);
++        }
++      } else if (decision === "http") {
++        const isHttpSlotFree =
++          this.requests.executingHttpCount < simultaneousHttpDownloads ||
++          this.abortLastHttpLoadingInQueueAfterItem(queue, segment);
++        if (!isHttpSlotFree) return;
++        if (request?.status === "loading") request.cancel();
++        this.loadThroughHttp(segment);
++      }
++    };
++
++    if (asked) handle(asked, true, true);
++    for (const { segment, statuses } of queue) {
++      if (segment === asked) continue;
++      handle(segment, statuses.isHighDemand, statuses.isP2PDownloadable);
++    }
++  }
++
+   // api method for engines
+   abortSegmentRequest(segmentRuntimeId: string) {
+     if (this.engineRequest?.segment.runtimeId !== segmentRuntimeId) return;
+@@ -418,6 +531,12 @@
+   }
+ 
+   private loadRandomThroughHttp() {
++    if (this.config.segmentPolicy !== "http-first") {
++      // NFX: nothing is fetched over HTTP in the background; the interval only keeps the
++      // queue turning, at most once a second.
++      this.requestProcessQueueMicrotask(false);
++      return;
++    }
+     const { httpDownloadInitialTimeoutMs } = this.config;
+     const isInitialHttpWait =
+       httpDownloadInitialTimeoutMs > 0 &&
+@@ -651,6 +770,7 @@
+   destroy() {
+     clearTimeout(this.randomHttpDownloadTimeout);
+     clearTimeout(this.initialHttpDelayTimeoutId);
++    clearTimeout(this.peerGraceTimeoutId);
+     this.engineRequest?.abort();
+     this.requests.destroy();
+     this.p2pLoaders.destroy();
 --- a/src/p2p/loader.ts
 +++ b/src/p2p/loader.ts
 @@ -68,8 +68,10 @@
@@ -190,19 +377,22 @@
        { downloadSource: "p2p", peerId: this.id },
 --- a/src/types.ts
 +++ b/src/types.ts
-@@ -122,6 +122,8 @@
+@@ -122,6 +122,10 @@
    | "validateP2PSegment"
    | "validateHTTPSegment"
    | "httpRequestSetup"
 +  | "httpSegmentFetch"
 +  | "segmentFromOneSource"
++  | "segmentPolicy"
++  | "peerWaitMs"
    | "isP2PDisabled"
    | "isP2PUploadDisabled"
    | "p2pMaxPeers"
-@@ -510,6 +512,27 @@
+@@ -509,6 +513,27 @@
+     context: StreamSwarmIdBuilderContext,
    ) => string | undefined;
  
-   /**
++  /**
 +   * An optional factory for a stream's signaling client, used instead of the
 +   * WebTorrent tracker clients: when it is set, `announceTrackers` is not used.
 +   *
@@ -223,14 +413,14 @@
 +   */
 +  signalingClientFactory?: SignalingClientFactory;
 +
-+  /**
+   /**
     * An optional function to validate a P2P segment before fully integrating it into the playback buffer.
     * @param url The URL of the segment to validate.
-    * @param byteRange The optional byte range of the segment.
-@@ -566,6 +589,34 @@
+@@ -565,6 +590,64 @@
+     requestByteRange: { start: number; end?: number } | undefined,
    ) => Promise<Request | undefined | null>;
  
-   /**
++  /**
 +   * NFX (NFX-17 §4.3): when set, every HTTP segment download goes through this function
 +   * instead of `fetch(segment.url)`. It chooses the source, gives up and hedges, checks the
 +   * bytes, and resolves with the whole segment, or rejects. `httpRequestSetup` and
@@ -259,14 +449,42 @@
 +  segmentFromOneSource: boolean;
 +
 +  /**
++   * NFX (NFX-10 §1): where segments come from. "http-first" is the engine as published.
++   * Under "peer-first" and "peer-only" a segment comes from a peer that announced it, and
++   * nothing is fetched over HTTP in the background. "peer-first" still takes over HTTP the
++   * segment the player is asking for, as a rescue: when no peer holds it once `peerWaitMs`
++   * has passed since the start (or since a stream with no peer yet became current, unless
++   * playback is about to need the segment), or when a peer holds it but playback is about to
++   * need it and the player has asked for it for `peerWaitMs`. "peer-only" never uses HTTP
++   * for a segment: the player's request waits until a peer delivers it. Neither fails the
++   * player's request after HTTP errors; the attempts are forgotten after a minute.
++   *
++   * @default
++   * ```typescript
++   * segmentPolicy: "http-first"
++   * ```
++   */
++  segmentPolicy: "http-first" | "peer-first" | "peer-only";
++
++  /**
++   * NFX: how long peers get before HTTP steps in under `segmentPolicy` "peer-first", in
++   * milliseconds: the wait at the start, the time the player must have asked for a segment
++   * a peer holds, and (as seconds of playback) how close playback must be to it.
++   *
++   * @default
++   * ```typescript
++   * peerWaitMs: 4000
++   * ```
++   */
++  peerWaitMs: number;
++
+   /**
     * The maximum number of active peer-to-peer connections for the stream.
     * If this limit is reached, the client will stop accepting new incoming offers
-    * and cease requesting new peers from the tracker until the connection count drops.
-@@ -653,6 +704,88 @@
-    */
+@@ -654,6 +737,88 @@
    webRtcConnectionTimeoutMs: number;
  };
-+
+ 
 +/** What a `signalingClientFactory` is given for one stream swarm. */
 +export type SignalingClientContext = {
 +  /** The swarm's infohash, as trackers would be told. */
@@ -348,10 +566,11 @@
 +export type SignalingClientFactory = (
 +  context: SignalingClientContext,
 +) => SignalingClient;
- 
++
  /** The stream identity data passed to a custom `streamSwarmIdBuilder`. */
  export type StreamSwarmIdBuilderContext = {
-@@ -745,6 +878,17 @@
+   /** The swarm ID of the stream: the configured `swarmId` or the manifest response URL. */
+@@ -745,6 +910,17 @@
    trackerUrl: string;
  };
  
@@ -369,7 +588,7 @@
  /** Represents the types of errors that can occur during a peer connection. */
  export type PeerErrorType =
    | "transport-error"
-@@ -943,7 +1087,7 @@
+@@ -943,7 +1119,7 @@
     *
     * @param params - Contains details about the peer that the event is about.
     */
@@ -378,6 +597,46 @@
  
    /**
     * Triggered when an error occurs while establishing a peer-to-peer connection.
+--- a/src/utils/stream.ts
++++ b/src/utils/stream.ts
+@@ -115,3 +115,37 @@
+   const rightMargin = position + timeWindowLength * rate;
+   return !(rightMargin < startTime || position > endTime);
+ }
++
++/** NFX: what the queue does with one segment under `segmentPolicy` "peer-first" or "peer-only". */
++export type PeerModeDecision = "keep" | "p2p" | "http" | "wait";
++
++/**
++ * NFX: under `segmentPolicy` "peer-first" or "peer-only", where one segment comes from now.
++ * "keep" leaves its download as it is, "p2p" asks a peer that holds it, "http" fetches it
++ * over HTTP in place of any peer download (a rescue), "wait" does nothing yet.
++ *
++ * HTTP is for "peer-first" only, outside the wait for peers (`inGrace`), and only while
++ * `httpBudget` holds, which is the caller's: the segment is the one the player is asking
++ * for and it has HTTP attempts left. Then a segment no peer holds is fetched at once, and
++ * one a peer holds only when playback is about to need it (`late`) and the player has been
++ * asking for it for the whole wait (`waited`).
++ */
++export function decidePeerModeSource(input: {
++  policy: "peer-first" | "peer-only";
++  loading: "http" | "p2p" | undefined;
++  hasHolder: boolean;
++  inGrace: boolean;
++  late: boolean;
++  waited: boolean;
++  httpBudget: boolean;
++}): PeerModeDecision {
++  const { policy, loading, hasHolder, inGrace, late, waited, httpBudget } =
++    input;
++  if (loading === "http") return "keep";
++  const mayRescue = policy === "peer-first" && !inGrace && httpBudget;
++  if (hasHolder || loading === "p2p") {
++    if (mayRescue && late && waited) return "http";
++    return loading === "p2p" ? "keep" : "p2p";
++  }
++  return mayRescue ? "http" : "wait";
++}
 --- a/src/webtorrent/webtorrent-manager/index.ts
 +++ b/src/webtorrent/webtorrent-manager/index.ts
 @@ -3,6 +3,8 @@

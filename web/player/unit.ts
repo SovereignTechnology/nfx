@@ -30,7 +30,7 @@ import initWasm, {
   verifyBeacon,
   verifyStunAnnouncement,
 } from './out/wasm/nfx_wasm.js';
-import type { OriginSource, RemoteCandidates, Signaling } from './src/api';
+import type { MeshStats, OriginSource, RemoteCandidates, Signaling } from './src/api';
 import {
   EndpointBook,
   MAX_ICE_SERVERS,
@@ -71,7 +71,23 @@ import {
   probeOrder,
   sessionRenditions,
 } from './src/levels';
-import { MAX_PEERS_LISTED, MAX_RELAYS, PeerBook, printable, relayUrl, selectedPair } from './src/mesh';
+import {
+  MAX_PEERS_LISTED,
+  MAX_PEER_WAIT_MS,
+  MAX_RELAYS,
+  PEER_AHEAD_SECONDS,
+  PEER_STORAGE_MIB,
+  PEER_WAIT_MS,
+  PeerBook,
+  type ProbeConnection,
+  checkSegmentSource,
+  meshConfig,
+  printable,
+  probeWebRtc,
+  relayUrl,
+  segmentWindows,
+  selectedPair,
+} from './src/mesh';
 import { addressText, formatBytes, nerdView, pathText, shortId, typingInto } from './src/nerd';
 import {
   PROBE_CONCURRENCY,
@@ -1679,8 +1695,12 @@ interface VerifiedStunAnnouncement {
         { id: '-NX0100-abcdefghijkl', via: 'wss://tracker.example/announce', down: 0, up: 500, segments: 0, connected: false, since: 1, last: 2 },
       ],
       signal: { open: 1, sent: 4, received: 9, offers: 1, answers: 1 },
+      source: 'peers-then-https', rescues: 1, waiting: false, webrtc: 'ok',
+      startup: { peerMs: 900, peerSegmentMs: 1400, segmentMs: 1400 },
     },
   }, sample, null);
+  eq('panel: where segments come from', meshed.rows.find(([k]) => k === 'Segment source')?.[1], 'peers, then HTTPS (1 rescued)');
+  eq('panel: WebRTC', meshed.rows.find(([k]) => k === 'WebRTC')?.[1], 'ok');
   eq('panel: share from peers', meshed.rows.find(([k]) => k === 'From peers')?.[1], '75% (2.93 KiB of 3.91 KiB of segments)');
   eq('panel: signaling', meshed.rows.find(([k]) => k === 'Signaling')?.[1], 'Nostr, 1 of 2 relays open');
   eq('panel: sources', meshed.sources.map((x) => [x.kind, x.id, x.label, x.via, x.down, x.up, x.connected]), [
@@ -1709,6 +1729,153 @@ interface VerifiedStunAnnouncement {
     typingInto({ tagName: 'TEXTAREA' }),
     typingInto({ tagName: 'DIV', isContentEditable: true }),
   ], [false, false, true, true, true, true]);
+}
+
+// ---- where segments come from: segmentSource, peerWaitMs, and the engine's configuration ----
+eq('segment source: the default is HTTPS first', checkSegmentSource({}, true), { segmentSource: 'https-first', peerWaitMs: PEER_WAIT_MS });
+eq('segment source: peers first, the wait given', checkSegmentSource({ segmentSource: 'peers-then-https', peerWaitMs: 0 }, true), {
+  segmentSource: 'peers-then-https',
+  peerWaitMs: 0,
+});
+eq('segment source: peers first without a mesh is allowed (it plays from the origin)', checkSegmentSource({ segmentSource: 'peers-then-https' }, false).segmentSource, 'peers-then-https');
+eq('segment source: httpWindow goes with HTTPS first', checkSegmentSource({ httpWindow: 2 }, true).segmentSource, 'https-first');
+refuses('segment source: peers only without a mesh', () => checkSegmentSource({ segmentSource: 'peers-only' }, false), TypeError, /needs signaling/);
+refuses('segment source: an unknown one', () => checkSegmentSource({ segmentSource: 'carrier-pigeon' }, true), TypeError, /must be one of/);
+refuses('segment source: null', () => checkSegmentSource({ segmentSource: null }, true), TypeError, /must be one of/);
+refuses('peerWaitMs: not whole', () => checkSegmentSource({ peerWaitMs: 1.5 }, true), TypeError, /peerWaitMs/);
+refuses('peerWaitMs: negative', () => checkSegmentSource({ peerWaitMs: -1 }, true), TypeError, /peerWaitMs/);
+refuses('peerWaitMs: too long', () => checkSegmentSource({ peerWaitMs: MAX_PEER_WAIT_MS + 1 }, true), TypeError, /peerWaitMs/);
+refuses('peerWaitMs: text', () => checkSegmentSource({ peerWaitMs: '4000' }, true), TypeError, /peerWaitMs/);
+refuses('httpWindow beside peers first', () => checkSegmentSource({ segmentSource: 'peers-then-https', httpWindow: 2 }, true), TypeError, /httpWindow/);
+refuses('httpWindow beside peers only', () => checkSegmentSource({ segmentSource: 'peers-only', httpWindow: 0 }, true), TypeError, /httpWindow/);
+{
+  const blank = (): MeshStats => ({
+    signaling: 'trackers', trackers: [], relays: [], swarms: [], bytes: { http: 0, p2p: 0 }, uploaded: 0, peers: 0, rejected: [],
+    connected: 0, segments: { http: 0, p2p: 0 }, peerList: [], signal: null,
+    source: 'https-first', rescues: 0, waiting: false, webrtc: 'unknown', startup: { peerMs: null, peerSegmentMs: null, segmentMs: null },
+  });
+  const trackers: Signaling = { kind: 'trackers', urls: ['wss://t.example'] };
+  const core = (tuning: Parameters<typeof meshConfig>[5], stats = blank()): Record<string, unknown> =>
+    meshConfig({} as never, trackers, [], stats, () => undefined, tuning).p2p.core as unknown as Record<string, unknown>;
+  const policyKeys = ['segmentPolicy', 'peerWaitMs', 'highDemandTimeWindow', 'httpDownloadTimeWindow', 'p2pDownloadTimeWindow', 'simultaneousHttpDownloads', 'segmentMemoryStorageLimit'];
+  const pick = (c: Record<string, unknown>): unknown[] => policyKeys.map((k) => c[k]);
+  eq('engine: HTTPS first leaves the engine as published', pick(core({})), [undefined, undefined, undefined, undefined, undefined, undefined, undefined]);
+  eq('engine: the httpWindow test knob, as before (the policy named, which is the default)', pick(core({ httpWindow: 2 })), ['http-first', undefined, 2, 2, 120, 1, undefined]);
+  eq('engine: peers, then HTTPS', pick(core({ segmentSource: 'peers-then-https', peerWaitMs: 2500 })), [
+    'peer-first', 2500, 15, PEER_AHEAD_SECONDS, PEER_AHEAD_SECONDS, 1, PEER_STORAGE_MIB,
+  ]);
+  eq('engine: peers only, the default wait', pick(core({ segmentSource: 'peers-only' })), [
+    'peer-only', PEER_WAIT_MS, 15, PEER_AHEAD_SECONDS, PEER_AHEAD_SECONDS, 1, PEER_STORAGE_MIB,
+  ]);
+  const stats = blank();
+  core({ segmentSource: 'peers-only' }, stats);
+  eq('engine: the stats say where segments come from', stats.source, 'peers-only');
+  // What `Session.setSegmentSource` hands the running engine: every key one it takes while it runs.
+  eq('switching: to peers only', segmentWindows('peers-only', { peerWaitMs: 0 }), {
+    segmentPolicy: 'peer-only', peerWaitMs: 0, highDemandTimeWindow: 15, httpDownloadTimeWindow: PEER_AHEAD_SECONDS, p2pDownloadTimeWindow: PEER_AHEAD_SECONDS, simultaneousHttpDownloads: 1,
+  });
+  eq('switching: to peers, then HTTPS', segmentWindows('peers-then-https').segmentPolicy, 'peer-first');
+  eq('switching: back to HTTPS first restores the engine\'s published settings', segmentWindows('https-first'), {
+    segmentPolicy: 'http-first', highDemandTimeWindow: 15, httpDownloadTimeWindow: 3000, p2pDownloadTimeWindow: 6000, simultaneousHttpDownloads: 2,
+  });
+  eq('switching: back to HTTPS first with the test knob', segmentWindows('https-first', { httpWindow: 4 }).httpDownloadTimeWindow, 4);
+  eq('switching: no setting the engine fixes when it is made', Object.keys(segmentWindows('peers-only')).includes('segmentMemoryStorageLimit'), false);
+
+  // The engine's events, as the session's counters read them.
+  const counted = blank();
+  const rescued: string[] = [];
+  const cfg = meshConfig({} as never, trackers, [], counted, () => undefined, { segmentSource: 'peers-then-https', onRescue: (u) => rescued.push(u) });
+  const handlers = new Map<string, (...a: never[]) => void>();
+  cfg.p2p.onHlsJsCreated({ p2pEngine: { addEventListener: (name, h) => void handlers.set(name, h) } });
+  const fire = (name: string, ...a: unknown[]): void => (handlers.get(name) as ((...x: unknown[]) => void) | undefined)?.(...a);
+  fire('onPeerConnect', { peerId: 'p1', infoHash: 'i', trackerUrl: 'wss://t.example' });
+  fire('onSegmentLoaded', { downloadSource: 'p2p', peerId: 'p1', segment: { url: 'https://o.example/r/a.m4s' } });
+  fire('onSegmentLoaded', { downloadSource: 'http', segment: { url: 'https://o.example/r/b.m4s' } });
+  fire('onSegmentLoaded', { downloadSource: 'http', segment: {} });
+  eq('rescues: each HTTP segment with peers first is one', [counted.rescues, rescued], [2, ['https://o.example/r/b.m4s', '']]);
+  eq('rescues: segments are still counted by source', counted.segments, { http: 2, p2p: 1 });
+  counted.source = 'https-first';
+  fire('onSegmentLoaded', { downloadSource: 'http', segment: { url: 'https://o.example/r/c.m4s' } });
+  eq('rescues: the count follows the source the session has now', [counted.rescues, counted.segments.http], [2, 3]);
+  eq('startup: the first peer and the first segments are timed', [counted.startup.peerMs, counted.startup.peerSegmentMs, counted.startup.segmentMs].map((x) => typeof x === 'number' && x >= 0), [true, true, true]);
+  const plain = blank();
+  const cfg2 = meshConfig({} as never, trackers, [], plain, () => undefined, {});
+  const h2 = new Map<string, (...a: never[]) => void>();
+  cfg2.p2p.onHlsJsCreated({ p2pEngine: { addEventListener: (name, h) => void h2.set(name, h) } });
+  (h2.get('onSegmentLoaded') as unknown as (d: unknown) => void)({ downloadSource: 'http', segment: { url: 'x' } });
+  eq('rescues: none with HTTPS first', plain.rescues, 0);
+}
+
+// ---- probeWebRtc: can this browser's WebRTC reach anyone? (stand-in connections) ------------
+{
+  type Ev = { candidate: { candidate?: string; protocol?: string | null } | null };
+  /** A connection that hands `events` to its listener once the offer is set, then (unless `hang`) ends gathering. */
+  const standIn = (events: Ev['candidate'][], opts: { hang?: boolean; failOffer?: boolean } = {}): { C: ProbeConnection; closed: () => number } => {
+    let closed = 0;
+    class C {
+      #cb: ((e: Ev) => void) | null = null;
+      createDataChannel(): unknown {
+        return {};
+      }
+      async createOffer(): Promise<{ type: string; sdp: string }> {
+        if (opts.failOffer) throw new Error('offer refused');
+        return { type: 'offer', sdp: 'v=0' };
+      }
+      async setLocalDescription(): Promise<void> {
+        queueMicrotask(() => {
+          for (const c of events) this.#cb?.({ candidate: c });
+          if (!opts.hang) this.#cb?.({ candidate: null });
+        });
+      }
+      addEventListener(_name: 'icecandidate', cb: (e: Ev) => void): void {
+        this.#cb = cb;
+      }
+      close(): void {
+        closed += 1;
+      }
+    }
+    return { C: C as unknown as ProbeConnection, closed: () => closed };
+  };
+  const host = { candidate: 'candidate:1 1 udp 2113937151 f1e2.local 54321 typ host', protocol: 'udp' };
+  const srflx = { candidate: 'candidate:2 1 UDP 1677729535 203.0.113.9 54321 typ srflx raddr 0.0.0.0 rport 0' };
+  const tcp = { candidate: 'candidate:3 1 tcp 1518280447 f1e2.local 9 typ host tcptype active', protocol: 'tcp' };
+
+  eq('probe: no RTCPeerConnection at all', await probeWebRtc([], 50, undefined as unknown as ProbeConnection), {
+    ok: false, udp: 0, why: 'this browser has no RTCPeerConnection',
+  });
+  const good = standIn([host, srflx]);
+  eq('probe: UDP candidates, by the property or by the line', await probeWebRtc([], 50, good.C), { ok: true, udp: 2, why: '2 UDP candidates' });
+  eq('probe: the connection is closed afterwards', good.closed(), 1);
+  eq('probe: one candidate', (await probeWebRtc([], 50, standIn([host]).C)).why, '1 UDP candidate');
+  const none = await probeWebRtc([], 50, standIn([]).C);
+  eq('probe: gathering ended with nothing', [none.ok, none.udp, /no network candidate/.test(none.why)], [false, 0, true]);
+  const onlyTcp = await probeWebRtc([], 50, standIn([tcp]).C);
+  eq('probe: TCP alone reaches no mesh peer', [onlyTcp.ok, /no UDP candidate \(1 other\)/.test(onlyTcp.why)], [false, true]);
+  const hung = standIn([], { hang: true });
+  const before = Date.now();
+  const late = await probeWebRtc([], 60, hung.C);
+  eq('probe: gathering that never ends stops at the time limit, with nothing found', [late.ok, Date.now() - before < 1000, hung.closed()], [false, true, 1]);
+  eq('probe: a candidate before the time limit counts', (await probeWebRtc([], 60, standIn([host], { hang: true }).C)).ok, true);
+  const refused = standIn([], { failOffer: true });
+  const failed = await probeWebRtc([], 50, refused.C);
+  eq('probe: a refused offer is not thrown', [failed.ok, /WebRTC failed to start: offer refused/.test(failed.why), refused.closed()], [false, true, 1]);
+  const thrower = class {
+    constructor() {
+      throw new Error('disabled by policy');
+    }
+  } as unknown as ProbeConnection;
+  eq('probe: a constructor that throws', (await probeWebRtc([], 50, thrower)).why, 'RTCPeerConnection refused: disabled by policy');
+  const stopped = standIn([host], { hang: true });
+  const ctl = new AbortController();
+  const pending = probeWebRtc([], 60_000, stopped.C, ctl.signal);
+  await sleep(20);
+  ctl.abort();
+  const cut = await pending;
+  eq('probe: an abort ends it at once, with what it had found, and closes the connection', [cut.ok, cut.udp, stopped.closed()], [true, 1, 1]);
+  const gone = new AbortController();
+  gone.abort();
+  eq('probe: already aborted', (await probeWebRtc([], 60_000, standIn([], { hang: true }).C, gone.signal)).ok, false);
+  eq('probe: an empty candidate ends gathering (older engines)', (await probeWebRtc([], 5000, standIn([host, { candidate: '' }], { hang: true }).C)).udp, 1);
 }
 
 console.log(`unit: ${ran - bad}/${ran} ok`);
