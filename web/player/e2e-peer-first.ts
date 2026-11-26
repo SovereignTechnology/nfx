@@ -22,6 +22,10 @@
  *   4. A browser whose WebRTC cannot use UDP: the page says so (`blocked`); with
  *      `peers-then-https` and a wait of 20 s it plays within a few seconds all the same (the
  *      wait ends when the check does); with `peers-only` it waits, and nothing fails.
+ *   5. No origin at all (NFX-10 §§6.9-6.10): the page holds only the video's address. It
+ *      reads the signed manifest from the node's relay, meets the node in the video room,
+ *      takes the hash list, playlists and init over the file channel and every segment from
+ *      the peer: it must play 12 s with not one request to the origin, of any kind.
  *
  * Usage: STRFRY=<strfry binary> STRFRY_CONF=<its strfry.conf> npm run e2e:peer-first
  * (after npm run build). Every process it starts runs in its own process group, and only
@@ -139,14 +143,16 @@ async function pageServer(): Promise<string> {
 }
 
 /** The origin behind a switch that counts: every segment request, and (once `block` is on) refuses them. */
-async function gate(upstream: string): Promise<{ url: string; block: () => void; open: () => void; delay: (ms: number) => void; asked: () => number; refused: () => number; reset: () => void }> {
+async function gate(upstream: string): Promise<{ url: string; block: () => void; open: () => void; delay: (ms: number) => void; asked: () => number; refused: () => number; all: () => number; reset: () => void }> {
   let blocked = false;
   // Held this long before a segment is answered (0: at once), so a request can be in flight across a switch.
   let delayMs = 0;
   let asked = 0;
   let refused = 0;
+  let all = 0;
   const port = await listen(
     createServer((req, res) => {
+      all += 1;
       if ((req.url ?? '').endsWith('.m4s')) {
         asked += 1;
         if (blocked) {
@@ -173,9 +179,11 @@ async function gate(upstream: string): Promise<{ url: string; block: () => void;
     delay: (ms: number) => (delayMs = ms),
     asked: () => asked,
     refused: () => refused,
+    all: () => all,
     reset: () => {
       asked = 0;
       refused = 0;
+      all = 0;
     },
   };
 }
@@ -481,6 +489,32 @@ async function main(): Promise<void> {
     ], results.blockedPeersOnly);
   } finally {
     await noUdp.close();
+  }
+
+  // ---- 5. no origin at all: the address, the video room and the file channel ----
+  const fromPeers = await chromium.launch({ headless: true });
+  try {
+    g.open();
+    g.reset();
+    const relays = `relay=${encodeURIComponent(nodeRelay)}&relay=${encodeURIComponent(relay)}`;
+    const six = await view(fromPeers, 'no origin', `a=${encodeURIComponent(a)}&${relays}&noorigin=1&segmentSource=peers-only`, played(12), 120_000);
+    results.noOrigin = { firstFrameMs: six.firstFrameMs, t: six.v.t, files: six.v.mesh?.files, segments: six.v.mesh?.segments, startup: six.v.mesh?.startup, originRequests: g.all() };
+    fail('no origin', [
+      six.v.errors.length !== 0 ? `errors ${JSON.stringify(six.v.errors)}` : '',
+      !(six.v.t > 12) ? 'did not play 12 s from peers alone' : '',
+      six.v.mesh?.files?.videoRoom !== true ? 'not in the video room' : '',
+      // The hash list, the master playlist, the rendition's media playlist and its init.
+      !(six.v.mesh?.files?.files >= 4) ? `${six.v.mesh?.files?.files} start-up files over the file channel` : '',
+      six.v.mesh?.segments?.http !== 0 ? `${six.v.mesh?.segments?.http} segments over HTTP` : '',
+      !(six.v.mesh?.segments?.p2p > 0) ? 'no segment from a peer' : '',
+      g.all() !== 0 ? `the origin was asked ${g.all()} times` : '',
+      (six.v.mesh?.rejected ?? []).length !== 0 ? `rejected ${JSON.stringify(six.v.mesh.rejected)}` : '',
+      ...six.sockets
+        .filter((u) => ![nodeRelay, relay].includes(u.replace(/\/$/, '')))
+        .map((u) => `the page opened a socket to ${u}`),
+    ], results.noOrigin);
+  } finally {
+    await fromPeers.close();
   }
   console.log(JSON.stringify(results, null, 2));
 }

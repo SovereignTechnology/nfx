@@ -20,6 +20,7 @@
     "e2e:peer-first": "tsx e2e-peer-first.ts",
     "unit:policy": "npm run --silent engine && tsx policy-unit.ts",
     "unit:keep": "tsx keep-unit.ts",
+    "unit:files": "tsx files-unit.ts",
     "e2e:keep": "esbuild e2e-keep-fixture.ts --bundle --format=esm --target=es2022 --outfile=out-e2e/e2e-keep-fixture.js && tsx e2e-keep.ts"
   },
   "devDependencies": {

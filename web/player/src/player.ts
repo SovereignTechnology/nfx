@@ -259,6 +259,11 @@ const trackerSignaling = (urls: string[], stunFallback?: StunFallback): Signalin
     : urls.length > 0
       ? { kind: 'trackers', urls }
       : undefined;
+/**
+ * `&noorigin=1` (with `a` and `&signal=nostr`): play from peers alone, from the manifest
+ * (NFX-10 §§6.9-6.10): `open()` gets no origin, so nothing is asked of any.
+ */
+const noOrigin = params.get('noorigin') === '1';
 /** `&renditions=`: passed to the library as given, so it refuses a bad list itself. */
 const urlRenditions = params.has('renditions') ? (params.get('renditions') ?? '').split(',') : undefined;
 const whole = (v: string | null, max: number): number | undefined => {
@@ -311,6 +316,11 @@ async function startByAddress(a: string, relays: string[], hint: string | null):
   const m = await resolveManifest(a, relays);
   st.resolved = { a: m.a, title: m.title, root: m.root, video: m.video, segs: m.segs, created_at: m.created_at };
   log(`manifest "${m.title}" (${m.video}), revision ${m.created_at}, root ${m.root.slice(0, 12)}…`);
+  if (noOrigin) {
+    // Nothing but the manifest: the video room finds the peers, and every file is theirs.
+    await play({ ...common, manifestJson: m.event, origins: [], renditions: urlRenditions, signaling: trackerSignaling([]) });
+    return;
+  }
   let heard: Endpoints = {
     origins: [],
     originSources: [],

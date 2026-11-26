@@ -799,9 +799,10 @@ export interface CheckedOrigin {
  * The origins a session may try (bare bases, or `OriginSource`s), normalised: URLs reduced,
  * repeated ids dropped, an origin given twice taken as first given. Throws a `TypeError` on
  * any it may not: a URL `pageOrigin` refuses, or `renditions` that is not a list of at most
- * `MAX_RENDITIONS` non-empty strings.
+ * `MAX_RENDITIONS` non-empty strings; and on an empty list unless `allowNone` (a session that
+ * finds peers from its manifest, NFX-10 §6.10).
  */
-export function checkOriginSources(list: readonly (string | OriginSource)[]): CheckedOrigin[] {
+export function checkOriginSources(list: readonly (string | OriginSource)[], allowNone = false): CheckedOrigin[] {
   if (!Array.isArray(list)) throw new TypeError('nfx: origins must be a list');
   const out: CheckedOrigin[] = [];
   for (const raw of list as unknown[]) {
@@ -822,7 +823,7 @@ export function checkOriginSources(list: readonly (string | OriginSource)[]): Ch
     if (!out.some((o) => o.url === url)) out.push({ url, renditions, tier });
     if (out.length > MAX_ORIGINS + 8) throw new TypeError(`nfx: at most ${MAX_ORIGINS + 8} origins`);
   }
-  if (out.length === 0) throw new TypeError('nfx: no origin to try');
+  if (out.length === 0 && !allowNone) throw new TypeError('nfx: no origin to try');
   return out;
 }
 
