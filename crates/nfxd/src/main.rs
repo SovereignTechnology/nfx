@@ -278,7 +278,7 @@ async fn main() -> ExitCode {
 }
 
 /// `--mesh-stun` values: `ip:port`, or `host:port` with a DNS name, resolved once here, at
-/// start (decision record 0110). A name that does not resolve within 5 s, or has no address of
+/// start (decision record 0111). A name that does not resolve within 5 s, or has no address of
 /// `--mesh-bind`'s family, is skipped with a note: a STUN server's DNS never stops the node.
 /// `check_mesh` then checks the addresses as it checks literal ones.
 async fn mesh_stun(values: &[String], mesh: bool, v4: bool) -> Result<Vec<std::net::SocketAddr>> {

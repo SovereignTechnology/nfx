@@ -1648,7 +1648,7 @@ interface VerifiedStunAnnouncement {
 }
 
 {
-  // keepSubscribed (decision record 0110): an ended subscription is opened again, backing off.
+  // keepSubscribed (decision record 0111): an ended subscription is opened again, backing off.
   type Opened = { onEvent: (j: string) => void; onEose: () => void; onEnd: (w: string) => void; closed: boolean };
   const opened: Opened[] = [];
   const open = ((_u: string, _f: unknown, onEvent: (j: string) => void, onEose: () => void, onEnd: (w: string) => void) => {
@@ -1694,7 +1694,7 @@ interface VerifiedStunAnnouncement {
 }
 
 {
-  // ICE gathering ends shortly after the first server-reflexive candidate (decision record 0110).
+  // ICE gathering ends shortly after the first server-reflexive candidate (decision record 0111).
   const line = (typ: string): string => `candidate:1 1 udp 1686052607 203.0.113.9 50000 typ ${typ} raddr 0.0.0.0 rport 0`;
   eq('srflx: by type, or by the typ field when the browser gives no type', [
     isServerReflexive({ type: 'srflx', candidate: line('srflx') }),

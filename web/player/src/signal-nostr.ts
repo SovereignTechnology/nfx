@@ -55,7 +55,7 @@ export const PROTOCOL = 'nfx-mesh/1';
 const FRESH_SECONDS = 60;
 const DEFAULT_ICE_GATHERING_TIMEOUT_MS = 5_000;
 /**
- * Gathering ends this long after the first server-reflexive candidate (decision record 0110): the
+ * Gathering ends this long after the first server-reflexive candidate (decision record 0111): the
  * NAT mapping is known then, and one STUN server that never answers (its host down) no longer
  * holds every connection for the whole gathering timeout. Long enough for the other servers'
  * answers to the same probe, which arrive within a round trip of the first.

@@ -1,4 +1,4 @@
-//! A seeder's share of each relay it announces on (NFX-03 §7, decision record 0110).
+//! A seeder's share of each relay it announces on (NFX-03 §7, decision record 0111).
 //!
 //! On a general relay, per seeder key: at most [`MAX_EVENTS`] events a minute, beacons and
 //! NFX-17 tells together; beacons at most [`MAX_BEACONS`] a minute; tells keep the

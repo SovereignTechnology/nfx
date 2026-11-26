@@ -134,7 +134,7 @@ export function watchEndpoints(
     }
     if (changed) report();
   };
-  // Reopened whenever a relay drops it (decision record 0110): beacons are live only, so a
+  // Reopened whenever a relay drops it (decision record 0111): beacons are live only, so a
   // subscription that ended would never hear a seeder again, even once the relay is back.
   const subs = relays.map((r) =>
     keepSubscribed(

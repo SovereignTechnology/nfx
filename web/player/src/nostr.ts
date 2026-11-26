@@ -114,7 +114,7 @@ const runtimeTimers: ResubscribeTimers = {
  * `subscribe`, opened again whenever it ends (the relay unreachable, the socket dropped, a
  * CLOSED), after `RESUBSCRIBE_MIN_MS` doubling to `RESUBSCRIBE_MAX_MS`, and back to the first
  * wait once the relay has answered (an event or EOSE). For live-only events such as beacons,
- * which a relay never stores (decision record 0110): an ended subscription hears nothing more,
+ * which a relay never stores (decision record 0111): an ended subscription hears nothing more,
  * even after the relay is back. `close` ends it for good. `open` and `timers` are for tests.
  */
 export function keepSubscribed(
