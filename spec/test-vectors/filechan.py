@@ -72,7 +72,7 @@ def filechan_vectors(keypair, schnorr_id_pubkey, nostr_event, *, namespace, a_ta
 
     # ---- every message, once ----
     have = have_json([0], [])
-    have_all = have_json(list(range(16)), list(range(16, MAX_HAVE_IDS)))
+    have_all = have_json(list(range(MAX_HAVE_IDS)), [])  # one list: a comma more than two
     assert len(have_all) == 107, "the largest `have`, written compactly"
     messages = [
         {"name": "get", "req": 7, "sha256": init_sha.hex(), "hex": msg("get", 7, init_sha).hex()},
@@ -89,7 +89,7 @@ def filechan_vectors(keypair, schnorr_id_pubkey, nostr_event, *, namespace, a_ta
         {"name": "busy", "req": 7, "hex": msg("busy", 7).hex()},
         {"name": "list", "req": 2, "root": root, "hex": msg("list", 2, root_b).hex()},
         {"name": "have", "req": 2, "whole": [0], "part": [], "hex": msg("have", 2, have).hex()},
-        {"name": "have-all-32", "req": 2, "whole": list(range(16)), "part": list(range(16, MAX_HAVE_IDS)),
+        {"name": "have-all-32", "req": 2, "whole": list(range(MAX_HAVE_IDS)), "part": [],
          "hex": msg("have", 2, have_all).hex()},
         {"name": "have-with-another-member", "req": 2, "whole": [], "part": [0],
          "read_only": True, "hex": msg("have", 2, b'{"part":[0],"whole":[],"v":2}').hex()},

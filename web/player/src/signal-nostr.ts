@@ -40,7 +40,7 @@ import { PeerConnectError } from 'p2p-media-loader-core';
 
 import { MeshRoom, MeshSession } from '../out/wasm/nfx_wasm.js';
 
-import { LABEL as FILE_CHANNEL_LABEL } from './file-channel';
+import { LABEL as FILE_CHANNEL_LABEL, MIN_PEER_MESSAGE } from './file-channel';
 
 import type { RemoteCandidates } from './api';
 import type { RelayStunBook } from './relay-stun';
@@ -718,7 +718,7 @@ export class RoomClient {
     if (extra.length > 0) this.#s.pool.log(`mesh: no STUN mapping: also asking ${extra.length} seeder STUN server(s) for one peer`);
     // The peer's file channel, whenever it opens it: by its label alone, for the connection's life.
     pc.addEventListener('datachannel', (e: RTCDataChannelEvent) => {
-      if (e.channel.label === FILE_CHANNEL_LABEL) this.#fileChannel(peer, e.channel);
+      if (e.channel.label === FILE_CHANNEL_LABEL) this.#fileChannel(peer, e.channel, pc);
     });
     const n: Negotiation = { role, pc, fallback: extra.length > 0, offerId, answer: null, superseded: false, abort: new AbortController() };
     this.#negotiating.set(peer, n);
@@ -766,14 +766,14 @@ export class RoomClient {
           if (this.#videoConns.get(peer) === pc) this.#videoConns.delete(peer);
           pc.close();
         });
-        this.#fileChannel(peer, open);
+        this.#fileChannel(peer, open, pc);
         return;
       }
       this.#emit('peerConnected', { peerId: peer, connection: pc, channel: open });
       // The offerer opens the file channel once the first is open (NFX-10 §6.10).
       if (this.#s.onFileChannel !== null) {
         try {
-          this.#fileChannel(peer, pc.createDataChannel(FILE_CHANNEL_LABEL));
+          this.#fileChannel(peer, pc.createDataChannel(FILE_CHANNEL_LABEL), pc);
         } catch {
           // a closed connection: nothing to open
         }
@@ -942,11 +942,19 @@ export class RoomClient {
   }
 
   /** A file channel of a connection with `peer`: the session's, or closed when it takes none. */
-  #fileChannel(peer: string, channel: RTCDataChannel): void {
+  #fileChannel(peer: string, channel: RTCDataChannel, pc: RTCPeerConnection): void {
     const take = this.#s.onFileChannel;
-    if (take === null || this.#destroyed) {
+    // A peer whose `max-message-size` is below the longest `have` with its header gets no
+    // file channel (NFX-10 §6.10); the size is known once the SCTP transport is up.
+    const tooSmall = (): boolean => (pc.sctp?.maxMessageSize ?? Infinity) < MIN_PEER_MESSAGE;
+    if (take === null || this.#destroyed || tooSmall()) {
       channel.close();
       return;
+    }
+    if (channel.readyState !== 'open') {
+      channel.addEventListener('open', () => {
+        if (tooSmall()) channel.close();
+      }, { once: true });
     }
     try {
       take(peer, channel, this.kind);

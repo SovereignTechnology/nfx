@@ -23,6 +23,8 @@ export const MAX_ANSWERS_PER_FILE = 2;
 export const MIN_HAVE_JSON = 2;
 export const MAX_HAVE_JSON = 2_048;
 export const MAX_HAVE_IDS = 32;
+/** The smallest peer `max-message-size` (RFC 8841 §6) the channel runs over: the longest `have` with its header. */
+export const MIN_PEER_MESSAGE = 5 + MAX_HAVE_JSON;
 export const MAX_BEACONS = 4;
 export const MAX_BEACON_BYTES = 16_384;
 export const MAX_BEACONS_ANSWER = 65_536;
