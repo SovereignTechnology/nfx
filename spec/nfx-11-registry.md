@@ -14,6 +14,7 @@ Single table of every shared constant, so no constant lives twice across NFX doc
 | 7368 | regular | `nostr-identity` fact op (`nostr-social-memory` `rating`), profiled by NFX-16 | seeder rating: scope `nfx.seeder`, adds `n` and `expiration` |
 | 25050 | ephemeral | the NIP-DC draft's signaling kind, profiled by NFX-10 §6 | mesh signaling: `connect`, `disconnect`, `offer`, `answer` with `i` = `nfx-mesh/1`, `y` = `nfx`; readers ignore every other `i` |
 | 33478 | addressable | NFX-10 §1 | STUN service announcement: `d` = the server's global unicast `ip:port`, `n` per network served (1 to 8), `expiration` at most 24 h after `created_at`; signed by the server's operator |
+| 20465 | ephemeral | NFX-17 | seeder lookup: `t` = `ask` (signed by a viewer's throwaway key) or `tell` (a seeder's answer, `p` = the ask's signer, embedding its signed kind-20464 beacon) |
 
 Provisional until submitted to `nostr-protocol/registry-of-kinds`. Both 38504/20464
 chosen unclaimed as of 2026-09-16. 7368 is not ours: it is `nostr-identity`'s, also used by
@@ -23,7 +24,9 @@ another shape; NFX-10 §6 adds only the protocol identifier `nfx-mesh/1`. 33478 
 chosen unclaimed on 2026-11-19 (neither the NIPs kind table nor `registry-of-kinds` lists it):
 addressable, so a relay keeps one announcement per operator key and server and a newer one
 replaces the older, and NIP-40's `expiration` bounds how long one lives; its digits echo
-3478, STUN's default port (RFC 8489).
+3478, STUN's default port (RFC 8489). 20465 is ours, chosen unclaimed on 2026-11-22 (neither the
+NIPs kind table nor `registry-of-kinds` listed it): ephemeral, like the beacon a tell carries,
+and the kind after it.
 
 ## 2. Namespaces (NFX-01 §2)
 
@@ -142,6 +145,8 @@ New codes are non-breaking (NFX-01 §4); clients MUST tolerate unknown ones.
 | STUN service announcements, valid and invalid (NFX-10 §1) | `test-vectors/stun-announcement.json` |
 | STUN server selection, and the addresses a client may take from Nostr (NFX-10 §1) | `test-vectors/stun-select.json` |
 | STUN at a relay's own host, from its NIP-11 `nfx.stun_port`, and its place in the selection (NFX-10 §1) | `test-vectors/relay-stun.json` |
+| Seeder lookup asks and tells, valid at `now`, with events on each limit (NFX-17 §§1–2, §7) | `test-vectors/lookup.json` |
+| Seeder lookup events that MUST be rejected or ignored (NFX-17 §2, §7) | `test-vectors/lookup-invalid.json` |
 | `https` endpoints naming their renditions, valid and invalid (NFX-03 §4) | `test-vectors/beacon-renditions.json` |
 | `nfx/files/1` messages, valid and invalid (NFX-12 §4) | `test-vectors/files1.json` |
 | Seeder ratings, valid (NFX-16 §1) | `test-vectors/ratings.json` |
@@ -306,3 +311,7 @@ UTF-16 code units. `test-vectors/canon.json` pins the edge cases.
   (NFX-04 §3 as amended in place 2026-11-24): the UDP port on which the relay's own host
   answers STUN. A client that uses its relays' STUN servers (NFX-10 §1) also passes the new
   `relay-stun.json` (source `test-vectors/stunad.py`). `stun-select.json` is unchanged.
+- 2026-11-26 (NFX-17, decision record 0105) — kind 20465, seeder lookup (an ask and a tell,
+  ephemeral), with its vectors `lookup.json` and `lookup-invalid.json` (source
+  `test-vectors/lookup.py`); a scoped relay that carries it lists the NIP-11 role `lookup`
+  (NFX-04 §3 as amended in place 2026-11-26).

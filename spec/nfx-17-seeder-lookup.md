@@ -282,10 +282,9 @@ share. **Which general relays:** the ones the client reads its catalog and beaco
 A seeder listens for asks there, and a viewer sends its ask to at most 3 of them (§4). Nothing in
 this document names a relay.
 
-A **scoped relay** (NFX-04) refuses kind 20465 unless it lists 20465 in its NIP-11 `nfx.kinds`.
-Frozen NFX-04 §1 does not yet allow one to: that takes an in-place amendment, recorded as an
-exception like #96 and #104, and no scoped relay may list the kind before it lands. One that lists
-it:
+A **scoped relay** (NFX-04) refuses kind 20465 unless it lists 20465 in its NIP-11 `nfx.kinds`
+and `lookup` in its `roles`, which NFX-04 §§1–3 allow since their in-place amendment of 2026-11-26
+(an exception to the freeze rule, like #96 and #104). One that lists it:
 
 - handles it as an ephemeral: forward to live subscribers, never persist, never return it to a
   later `REQ`;
@@ -373,8 +372,6 @@ checks both.
 
 - Registering kind 20465 in `nostr-protocol/registry-of-kinds`. It was unclaimed in the NIPs table
   and that registry on 2026-11-22.
-- The NFX-04 amendment that lets a scoped relay carry the kind. (General relays carry it within
-  NFX-03 §7's share, decision record 0111, §5.)
 - Vectors for embedded events with the wrong JSON types, for readers in languages that parse loosely.
 - Whether a node holding a live beacon may forward it for a seeder that does not answer. Version 1
   allows only the beacon's own signer.
@@ -397,4 +394,6 @@ checks both.
   seeder's NFX-03 §7 share of each general relay and back off on `rate-limited:` or `blocked:`, and
   a tell embeds only a beacon whose addresses suit the relay's address class; §4.1, the creator's own
   beacon is never a pool entry; §5, lookups use the relays the client reads its catalog from, which
-  closes that §8 item; §8 adds on-demand beacons for kept videos.
+  closes that §8 item; §8 adds on-demand beacons for kept videos. §5: NFX-04 §§1–3 now let a
+  scoped relay carry the kind (listing 20465 and the role `lookup`), which closes the last
+  general-relay and scoped-relay items of §8.
