@@ -416,9 +416,17 @@ impl Shared {
             }
         }
         // The mesh joins the rooms of the renditions held, as the bridge their swarms, and
-        // counts the STUN servers the video's beacons name (NFX-10 §1).
+        // counts the STUN servers the video's beacons name (NFX-10 §1). Beside a stream room
+        // of the video, it serves the start-up files in its video room and on its file
+        // channels (§§6.9-6.10), so a page can start with no origin.
         if let Some(mesh) = &self.mesh {
-            let _ = mesh.serve(&list, &*self.store, only).await;
+            if let Ok(joined) = mesh.serve(&list, &*self.store, only).await
+                && !joined.is_empty()
+            {
+                let _ = mesh
+                    .serve_files(&manifest.a_tag(), &manifest.root_hex(), &list)
+                    .await;
+            }
             let _ = mesh.stun_from_beacons_of(&manifest.a_tag()).await;
         }
     }
@@ -432,6 +440,7 @@ impl Shared {
             return;
         };
         if let Some(mesh) = &self.mesh {
+            let _ = mesh.forget_files(&manifest.a_tag()).await;
             let _ = mesh.forget(&list).await;
         }
         if let Some(tracker) = &self.tracker {

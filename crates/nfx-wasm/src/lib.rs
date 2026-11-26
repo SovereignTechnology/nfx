@@ -344,12 +344,39 @@ impl MeshRoom {
         }
     }
 
+    /// `MeshRoom.forVideo(manifestAddress)`: the video room (NFX-10 §6.9) of
+    /// `38504:<creator>:<namespace>:<video-id>`, or a thrown error for anything else.
+    #[wasm_bindgen(js_name = forVideo)]
+    pub fn js_for_video(manifest_address: &str) -> Result<MeshRoom, JsError> {
+        Self::for_video(manifest_address).map_err(|e| JsError::new(&e))
+    }
+
+    /// The video room ID of a manifest address (`videoRoomId` in JS).
+    #[wasm_bindgen(js_name = videoRoomId)]
+    pub fn js_video_room_id(manifest_address: &str) -> Result<String, JsError> {
+        video_room_id(manifest_address).map_err(|e| JsError::new(&e))
+    }
+
     /// The room key (the `P` tag), 64 lowercase hex.
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn pubkey(&self) -> String {
         self.room.pubkey().to_owned()
     }
+}
+
+impl MeshRoom {
+    /// The video room (NFX-10 §6.9) of a manifest address.
+    pub fn for_video(manifest_address: &str) -> Result<Self, String> {
+        Ok(Self {
+            room: Room::video(manifest_address).map_err(|e| e.to_string())?,
+        })
+    }
+}
+
+/// The video room ID (NFX-10 §6.9) of a manifest address.
+pub fn video_room_id(manifest_address: &str) -> Result<String, String> {
+    signal::video_room_id(manifest_address).map_err(|e| e.to_string())
 }
 
 /// A mesh session (NFX-10 §6.4): a random key and id, made by the page and held here.
@@ -787,6 +814,27 @@ mod tests {
             String::new(),
         ] {
             assert_eq!(v.stream_swarm_id(&unmapped), None, "{unmapped}");
+        }
+    }
+
+    #[test]
+    fn video_rooms_match_the_vector() {
+        let v: Value =
+            serde_json::from_str(include_str!("../../../spec/test-vectors/mesh-signal.json"))
+                .unwrap();
+        for r in v["video_rooms"].as_array().unwrap() {
+            let addr = r["address"].as_str().unwrap();
+            assert_eq!(
+                video_room_id(addr).unwrap(),
+                r["video_room_id"].as_str().unwrap()
+            );
+            assert_eq!(
+                MeshRoom::for_video(addr).unwrap().pubkey(),
+                r["pubkey"].as_str().unwrap()
+            );
+        }
+        for bad in v["video_room_refused"].as_array().unwrap() {
+            assert!(MeshRoom::for_video(bad["address"].as_str().unwrap()).is_err());
         }
     }
 

@@ -10,6 +10,7 @@
 pub mod bridge;
 mod error;
 pub mod fetch;
+mod file_serve;
 pub mod gossip;
 pub mod limit;
 pub mod lookup;
