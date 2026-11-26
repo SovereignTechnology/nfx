@@ -229,7 +229,7 @@ class Server {
   await p.ready;
   srv.send(fc.encode({ t: 'get', req: 7, sha: '5'.repeat(64) }));
   await sleep(5);
-  eq('peer: hello on open, then missing for what it is asked', answers, [[4, 1, 0], [3, 0, 0, 0, 7]]);
+  eq('peer: hello on open, then missing for what it is asked', answers, [[4, 1, 0], [3, 7, 0, 0, 0]]);
   p.close();
 }
 

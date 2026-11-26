@@ -316,7 +316,13 @@ impl Have {
     /// The body a server sends: `{"whole":[…],"part":[…]}`, compact.
     pub fn to_json(&self) -> Result<String> {
         self.check()?;
-        let s = serde_json::json!({ "whole": self.whole, "part": self.part }).to_string();
+        // `whole` then `part`, as the section writes it (`json!` would sort the members).
+        let list = |v: &[u8]| v.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
+        let s = format!(
+            r#"{{"whole":[{}],"part":[{}]}}"#,
+            list(&self.whole),
+            list(&self.part)
+        );
         if s.len() > MAX_HAVE_JSON {
             return Err(bad(format!("`have` of {} bytes", s.len())));
         }

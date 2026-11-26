@@ -27,7 +27,7 @@ export interface DataChannelLike {
   readonly label: string;
   readonly readyState: string;
   binaryType: string;
-  send(data: Uint8Array): void;
+  send(data: Uint8Array<ArrayBuffer>): void;
   close(): void;
   addEventListener(type: 'message', f: (e: { data: unknown }) => void): void;
   addEventListener(type: 'open' | 'close' | 'error', f: () => void, options?: { once?: boolean }): void;
@@ -219,7 +219,7 @@ export class FilePeer {
   #send(m: fc.Message): void {
     if (this.#closed) return;
     try {
-      this.#ch.send(fc.encode(m));
+      this.#ch.send(fc.encode(m) as Uint8Array<ArrayBuffer>);
     } catch {
       this.#end(null);
     }

@@ -457,9 +457,28 @@ async function openWith(
       log(`files: in the video room of ${manifestA}${origins.length === 0 ? '; no origin: every start-up file comes from peers' : ''}`);
     }
   }
+  // With no origin, a browser whose WebRTC is blocked can never start: `open()` rejects as soon
+  // as the WebRTC check says so (decision 0112 point 6) instead of waiting for peers forever.
+  const opening = new AbortController();
+  const onAbort = (): void => opening.abort(c.signal?.reason);
+  if (c.signal?.aborted) onAbort();
+  c.signal?.addEventListener('abort', onAbort, { once: true });
+  let settled = false;
+  if (files !== null && origins.length === 0) {
+    void probeWebRtc(iceServers, undefined, undefined, opening.signal).then((probe) => {
+      if (settled || probe.ok) return;
+      log(`files: WebRTC check: ${probe.why}; with no origin nothing can be played`);
+      opening.abort(new Error(`nfx: no origin, and this browser's WebRTC is blocked (${probe.why})`));
+    });
+  }
   try {
-    return await openFrom(el, c, keep, emit, log, silence, { nostr, files, videoRoom });
+    // The session keeps `opening.signal` as its own: the caller's abort still reaches it.
+    const session = await openFrom(el, { ...c, signal: opening.signal }, keep, emit, log, silence, { nostr, files, videoRoom });
+    settled = true;
+    return session;
   } catch (e) {
+    settled = true;
+    c.signal?.removeEventListener('abort', onAbort);
     // open() failed: nothing of the mesh is left running.
     files?.destroy();
     nostr?.destroy();
@@ -495,7 +514,8 @@ async function openFrom(
   early: Early,
 ): Promise<Session> {
   const { root, binding, origins, wanted, signaling, iceServers, autoplay, level, httpWindow, segmentSource, peerWaitMs, signal } = c;
-  const { files } = early;
+  // The file-channel tier (`files` below is the hash list's files).
+  const { files: tier } = early;
   let anchor: Anchor | null = null;
   let renditions: string[] = [];
   const failures: string[] = [];
@@ -508,7 +528,7 @@ async function openFrom(
   const sources = new SessionSources(
     root,
     origins.map((o) => ({ url: o.url, tier: o.tier, renditions: o.renditions })),
-    { providers: [...(keep === null ? [] : [keep]), ...(files === null ? [] : [files])] },
+    { providers: [...(keep === null ? [] : [keep]), ...(tier === null ? [] : [tier])] },
   );
   sources.bind({ log, reject: (source, path) => skip(source, `${path} did not verify`) });
   const built: { list: Anchor | null } = { list: null };
@@ -545,8 +565,8 @@ async function openFrom(
   });
   // A hash list from the keep store names no origin that delivered it.
   const fromHttp = sources.isProvider(delivered) ? null : delivered;
-  if (delivered === files?.name) log('hash list verified, from a peer over the file channel');
-  files?.learnHashList(
+  if (delivered === tier?.name) log('hash list verified, from a peer over the file channel');
+  tier?.learnHashList(
     list.renditions.map((r) => r.id),
     new Map(list.renditions.map((r) => [r.playlist, r.id])),
   );
@@ -554,10 +574,10 @@ async function openFrom(
   // Peers first (NFX-10 §6.10 "Which levels"): the renditions their `have` names, each once
   // its playlist and init have verified. The origins' only when no peer confirms one in the
   // 8 s, or (with no origin) when peers come: until then the page waits for them.
-  if (files !== null && (origins.length === 0 || (await files.firstPeer(signal ?? new AbortController().signal)))) {
+  if (tier !== null && (origins.length === 0 || (await tier.firstPeer(signal ?? new AbortController().signal)))) {
     if (signal?.aborted) throw abortError(signal);
     const loaded = list.at(origins[0]?.url ?? PEER_ORIGIN);
-    const picked = await peerLevels(loaded, files, sources, keep, wanted, origins.length === 0, log, signal);
+    const picked = await peerLevels(loaded, tier, sources, keep, wanted, origins.length === 0, log, signal);
     if (picked !== null) {
       anchor = loaded;
       renditions = picked;
@@ -1047,7 +1067,7 @@ function start(
     stats(): Stats {
       return {
         engine,
-        origin: anchor.origin,
+        origin: anchor.origin === PEER_ORIGIN ? null : anchor.origin,
         root: anchor.root,
         video: anchor.video,
         verified,

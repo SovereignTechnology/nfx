@@ -721,11 +721,12 @@ export interface Stats {
   engine: string;
   /**
    * The base the session's URLs are built on: the origin whose answers chose its levels; when
-   * peers chose them (NFX-10 §6.10), the first origin given, or `https://peers.invalid` when
-   * none was (a name that never resolves: nothing is fetched from it). Which source delivered
-   * each file is `originBytes`, `mesh.bytes` and `mesh.files`.
+   * peers chose them (NFX-10 §6.10), the first origin given. `null` when `open()` was given
+   * none: every file comes from peers (the session's URLs then sit under a name that never
+   * resolves, and nothing is fetched from it). Which source delivered each file is
+   * `originBytes`, `mesh.bytes` and `mesh.files`.
    */
-  origin: string;
+  origin: string | null;
   root: string;
   /** The video the hash list names. */
   video: string;

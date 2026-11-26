@@ -1762,9 +1762,7 @@ interface VerifiedStunAnnouncement {
     '1280x720', '720p (2500 kb/s)', '12.34 Mb/s', '12.3 s', '3 of 900',
   ]);
   const key = 'cd'.repeat(32);
-  const meshed = nerdView({
-    ...base,
-    mesh: {
+  const meshStats: MeshStats = {
       signaling: 'nostr', trackers: [], relays: ['wss://relay.example', 'wss://r2.example'], swarms: [],
       bytes: { http: 1000, p2p: 3000 }, uploaded: 500, peers: 3, rejected: [], connected: 2,
       segments: { http: 1, p2p: 3 },
@@ -1775,8 +1773,8 @@ interface VerifiedStunAnnouncement {
       signal: { open: 1, sent: 4, received: 9, offers: 1, answers: 1 },
       source: 'peers-then-https', rescues: 1, waiting: false, webrtc: 'ok',
       startup: { peerMs: 900, peerSegmentMs: 1400, segmentMs: 1400 },
-    },
-  }, sample, null);
+  };
+  const meshed = nerdView({ ...base, mesh: meshStats }, sample, null);
   eq('panel: where segments come from', meshed.rows.find(([k]) => k === 'Segment source')?.[1], 'peers, then HTTPS (1 rescued)');
   eq('panel: WebRTC', meshed.rows.find(([k]) => k === 'WebRTC')?.[1], 'ok');
   eq('panel: share from peers', meshed.rows.find(([k]) => k === 'From peers')?.[1], '75% (2.93 KiB of 3.91 KiB of segments)');
@@ -1786,6 +1784,9 @@ interface VerifiedStunAnnouncement {
     ['webrtc', 'cdcdcdcd', 'peer', 'nostr', 3000, 0, true],
     ['webrtc', '-NX0100-abcdefghijkl', 'nfxd bridge?', 'tracker.example', 0, 500, false],
   ]);
+  const peersOnly = nerdView({ ...base, origin: null, mesh: { ...meshStats, files: { peers: 2, files: 4, bytes: 2048, videoRoom: true } } }, sample, null);
+  eq('panel: no origin, no origin row', peersOnly.sources.map((x) => x.kind), ['webrtc', 'webrtc']);
+  eq('panel: start-up files from peers', peersOnly.rows.find(([k]) => k === 'Start-up files from peers')?.[1], '4 (2.00 KiB), 2 with a file channel, in the video room');
   eq('shortId: a session key', shortId(key), 'cdcdcdcd');
   eq('shortId: anything else', shortId('x'.repeat(40)).length, 20);
   eq('formatBytes', [0, 1023, 1024, 10 * 1024 * 1024, -1].map(formatBytes), ['0 B', '1023 B', '1.00 KiB', '10.0 MiB', '–']);
