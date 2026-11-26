@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # web/player/e2e-nat/run.sh: nfx #71 phase 3, browsers behind NATs, with signaling ONLY through
-# a stock Nostr relay (strfry) and STUN ONLY from a public nfxd (`nfxd --stun`). No tracker and
+# a stock Nostr relay (strfry) and STUN ONLY from a public nutflixd (`nutflixd --stun`). No tracker and
 # no TURN anywhere. CI only, as root (.github/workflows/nfx-nat-browsers.yml runs it with sudo):
 # it makes network namespaces and nftables routers, and never runs on a developer's machine.
 #
@@ -10,14 +10,14 @@
 #
 #   nfxpub  203.0.113.1/24 on a bridge: the "internet". strfry (its own default strfry.conf,
 #           only its database, bind address and open-files limit changed) on :7777, plain
-#           ws, which nfxd's mesh endpoint signals through (it trusts only web PKI roots, so
+#           ws, which nutflixd's mesh endpoint signals through (it trusts only web PKI roots, so
 #           never a test CA); browsers reach the same strfry over TLS on :7443 (the driver's
 #           front, as a relay is deployed: the web library takes ws: only on loopback). And
-#           one nfxd: the origin (:8080) and STUN (udp :3478) for a small generated video
+#           one nutflixd: the origin (:8080) and STUN (udp :3478) for a small generated video
 #   nfxra   router A: 203.0.113.11 up, 192.168.10.1 down
 #   nfxrb   router B: 203.0.113.12 up, 192.168.20.1 down
-#   nfxha   192.168.10.2 behind A: browser A (headless Chromium), the seeder; in the nfxd cell
-#           an nfxd with the mesh endpoint (--mesh-relay, --mesh-stun) instead
+#   nfxha   192.168.10.2 behind A: browser A (headless Chromium), the seeder; in the nutflixd cell
+#           a nutflixd with the mesh endpoint (--mesh-relay, --mesh-stun) instead
 #   nfxhb   192.168.20.2 behind B: browser B, the viewer
 #
 # A "consistent" router masquerades keeping the source port (endpoint-independent mapping);
@@ -27,21 +27,21 @@
 # Each router counts what it forwards between its LAN and the internet (table nfxmeter,
 # after its own filter, so only what it delivers): peer_* is UDP to or from the other
 # router's public address (the direct path), relay_* the wss relay, relayws_* the same relay
-# over plain ws, stun_* nfxd's STUN, origin_* nfxd's origin, other_* anything else. peer_refused counts UDP from the other
+# over plain ws, stun_* nutflixd's STUN, origin_* nutflixd's origin, other_* anything else. peer_refused counts UDP from the other
 # router that it dropped as unsolicited: punch attempts that died at the NAT.
 #
-# The cells (e2e-nat/driver.ts judges each, one fresh network, relay and nfxd per cell):
+# The cells (e2e-nat/driver.ts judges each, one fresh network, relay and nutflixd per cell):
 #   consistent-consistent  punch     B plays from A with the origin cut at router B; direct
 #                                    bytes, srflx ↔ srflx, only signaling and STUN from the
 #                                    public side
 #   symmetric-symmetric    no-punch  every peer connection ends unconnected within
 #                                    FAIL_BOUND_MS; B plays on from the origin
 #   consistent-symmetric   record    whatever happens; B plays on
-#   nfxd-browser           nfxd      an nfxd behind router A (consistent) serves browser B
+#   nutflixd-browser           nutflixd      a nutflixd behind router A (consistent) serves browser B
 #                                    (behind router B, consistent) over its mesh endpoint;
-#                                    B plays on from it with the origin cut. nfxd to browser
+#                                    B plays on from it with the origin cut. nutflixd to browser
 #                                    only: the endpoint never takes bytes from a peer. SKIP
-#                                    (a placeholder) when the nfxd under test has no
+#                                    (a placeholder) when the nutflixd under test has no
 #                                    --mesh-relay (#71 phase 2)
 #
 # The fail bound (FAIL_BOUND_MS, 30 s): the library gives a punch that cannot work at most its
@@ -52,7 +52,7 @@
 # and a loaded CI runner.
 #
 # Usage (root): STRFRY=<strfry> STRFRY_CONF=<its strfry.conf> bash e2e-nat/run.sh, after
-# `npm run build` and `cargo build -p nfxd -p nfx-media --bins` (NFXD, NFX_PACKAGE override
+# `npm run build` and `cargo build -p nutflixd -p nfx-media --bins` (NUTFLIXD, NUTFLIX_PACKAGE override
 # the debug binaries). Results: $OUT (default e2e-nat/results): nat-browsers.jsonl, one line per
 # cell; results.md, the table; per cell <cell>.json, <cell>-diag.json and the processes' logs.
 # Exit 1 if a judged cell failed.
@@ -192,15 +192,15 @@ esac
 
 # --- the run --------------------------------------------------------------------------------
 [ "$(id -u)" = 0 ] || { echo "run.sh: root only (network namespaces, nftables)" >&2; exit 2; }
-NFXD=${NFXD:-$repo/crates/target/debug/nfxd}
-NFX_PACKAGE=${NFX_PACKAGE:-$repo/crates/target/debug/nfx-package}
+NUTFLIXD=${NUTFLIXD:-$repo/crates/target/debug/nutflixd}
+NUTFLIX_PACKAGE=${NUTFLIX_PACKAGE:-$repo/crates/target/debug/nutflix-package}
 STRFRY=${STRFRY:?the strfry binary (e2e-strfry.sh prints it)}
 STRFRY_CONF=${STRFRY_CONF:?strfry.conf from the same strfry checkout (its defaults)}
 TSX=${TSX:-$player/node_modules/.bin/tsx}
 FFMPEG=${FFMPEG:-ffmpeg}
 out=${OUT:-$here/results}
 work=${WORK:-$(mktemp -d)}
-for b in "$NFXD" "$NFX_PACKAGE" "$STRFRY" "$TSX"; do [ -x "$b" ] || { echo "run.sh: $b is not executable" >&2; exit 2; }; done
+for b in "$NUTFLIXD" "$NUTFLIX_PACKAGE" "$STRFRY" "$TSX"; do [ -x "$b" ] || { echo "run.sh: $b is not executable" >&2; exit 2; }; done
 for c in ip nft openssl python3 node "$FFMPEG"; do command -v "$c" > /dev/null || { echo "run.sh: no $c" >&2; exit 2; }; done
 [ -f "$player/out/player.js" ] && [ -f "$player/out/wasm/nfx_wasm_bg.wasm" ] || { echo "run.sh: run npm run build first" >&2; exit 2; }
 mkdir -p "$out" "$work"
@@ -287,7 +287,7 @@ strfry_conf() { # dir
     { echo "strfry.conf: db, bind or nofiles not found once, or not on port $STRFRY_PORT" >&2; return 1; }
 }
 
-# The public side of a cell: a fresh strfry and a fresh nfxd seeding the video (origin and
+# The public side of a cell: a fresh strfry and a fresh nutflixd seeding the video (origin and
 # STUN on the public address; an embedded relay on loopback, only to publish the manifest it
 # seeds, never given to a page). Sets A_ADDR.
 public_up() { # dir name
@@ -296,18 +296,18 @@ public_up() { # dir name
   strfry_conf "$d" || return 1
   start "$name-strfry" nfxpub "$STRFRY" --config="$d/strfry.conf" relay
   wait_port nfxpub "$PUB_IP" "$STRFRY_PORT" 30 || { echo "strfry is not listening" >&2; return 1; }
-  pubkey=$("$NFXD" key new "$d/node.key" | head -1)
+  pubkey=$("$NUTFLIXD" key new "$d/node.key" | head -1)
   A_ADDR="38504:$pubkey:$VIDEO"
   cp -r "$work/pkg/store" "$d/store"
-  start "$name-nfxd" nfxpub "$NFXD" run --key "$d/node.key" --store "$d/store" --state "$d/state" \
+  start "$name-nutflixd" nfxpub "$NUTFLIXD" run --key "$d/node.key" --store "$d/store" --state "$d/state" \
     --seed "$A_ADDR" --embed-relay 127.0.0.1:0 --origin "$PUB_IP:$ORIGIN_PORT" --stun "$PUB_IP:$STUN_PORT"
-  wait_for "$out/$name-nfxd.err" 'embedded relay: ws://' 30 || { echo "nfxd: no embedded relay" >&2; return 1; }
-  wait_for "$out/$name-nfxd.err" "stun: udp $PUB_IP:$STUN_PORT" 30 || { echo "nfxd: no STUN on $PUB_IP:$STUN_PORT" >&2; return 1; }
-  if grep -q 'embedded tracker' "$out/$name-nfxd.err"; then echo "nfxd started a tracker" >&2; return 1; fi
-  nodeRelay=$(grep -oE 'embedded relay: ws://[^ ]+' "$out/$name-nfxd.err" | head -1 | cut -d' ' -f3)
-  ip netns exec nfxpub "$NFXD" publish --key "$d/node.key" --relay "$nodeRelay" --package "$work/pkg" \
-    --title "NAT browsers" > /dev/null 2>> "$out/$name-publish.err" || { echo "nfxd publish failed" >&2; return 1; }
-  wait_for "$out/$name-nfxd.err" "$A_ADDR: Seeding" 60 || { echo "nfxd never seeding" >&2; return 1; }
+  wait_for "$out/$name-nutflixd.err" 'embedded relay: ws://' 30 || { echo "nutflixd: no embedded relay" >&2; return 1; }
+  wait_for "$out/$name-nutflixd.err" "stun: udp $PUB_IP:$STUN_PORT" 30 || { echo "nutflixd: no STUN on $PUB_IP:$STUN_PORT" >&2; return 1; }
+  if grep -q 'embedded tracker' "$out/$name-nutflixd.err"; then echo "nutflixd started a tracker" >&2; return 1; fi
+  nodeRelay=$(grep -oE 'embedded relay: ws://[^ ]+' "$out/$name-nutflixd.err" | head -1 | cut -d' ' -f3)
+  ip netns exec nfxpub "$NUTFLIXD" publish --key "$d/node.key" --relay "$nodeRelay" --package "$work/pkg" \
+    --title "NAT browsers" > /dev/null 2>> "$out/$name-publish.err" || { echo "nutflixd publish failed" >&2; return 1; }
+  wait_for "$out/$name-nutflixd.err" "$A_ADDR: Seeding" 60 || { echo "nutflixd never seeding" >&2; return 1; }
   wait_port nfxpub "$PUB_IP" "$ORIGIN_PORT" 10 || { echo "no origin on $PUB_IP:$ORIGIN_PORT" >&2; return 1; }
 }
 
@@ -327,7 +327,7 @@ cell() { # NAME MODE-A MODE-B EXPECT
   echo "== $name: router A $2, router B $3, expect $4"
   topology "$2" "$3"
   for i in a b; do ip netns exec "nfxr$i" nft list ruleset > "$out/$name-router-$i.nft"; done
-  if ! { public_up "$d" "$name" && { [ "$4" != nfxd ] || nat_nfxd_up "$d" "$name"; }; } 2> "$out/$name-harness.err"; then
+  if ! { public_up "$d" "$name" && { [ "$4" != nutflixd ] || nat_nutflixd_up "$d" "$name"; }; } 2> "$out/$name-harness.err"; then
     record "$(json 'import json,sys; print(json.dumps({"cell":sys.argv[1],"judged":True,"passed":False,"problems":["harness: "+open(sys.argv[2]).read().strip()[-400:]]}))' "$name" "$out/$name-harness.err")"
   else
     rm -f "$out/$name.json"
@@ -337,7 +337,7 @@ cell() { # NAME MODE-A MODE-B EXPECT
       NAT_ORIGIN_PORT="$ORIGIN_PORT" NAT_STUN_PORT="$STUN_PORT" NAT_RELAY_TLS_PORT="$RELAY_TLS_PORT" \
       NAT_STRFRY_PORT="$STRFRY_PORT" NAT_ROOT="$ROOT" NAT_CTL="$here/run.sh" NAT_OUT="$out" \
       NAT_FAIL_BOUND_MS="$FAIL_BOUND_MS" NAT_TLS_KEY="$work/tls/relay.key" NAT_TLS_CERT="$work/tls/relay.crt" \
-      NAT_TLS_SPKI="$SPKI" NAT_NFXD_LOG="$out/$name-nfxd-a.err" "$TSX" "$here/driver.ts" > "$out/$name-driver.out" 2> "$out/$name-driver.err" || rc=$?
+      NAT_TLS_SPKI="$SPKI" NAT_NUTFLIXD_LOG="$out/$name-nutflixd-a.err" "$TSX" "$here/driver.ts" > "$out/$name-driver.out" 2> "$out/$name-driver.err" || rc=$?
     if [ -s "$out/$name.json" ]; then
       record "$(json 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$out/$name.json")"
     else
@@ -348,41 +348,41 @@ cell() { # NAME MODE-A MODE-B EXPECT
   pids=("${pids[@]}")
 }
 
-# The nfxd cell's seeder: an nfxd in LAN A (behind router A) with the mesh endpoint (#71 phase
+# The nutflixd cell's seeder: a nutflixd in LAN A (behind router A) with the mesh endpoint (#71 phase
 # 2), in place of browser A. Its own key and a copy of the package store; it publishes the
 # manifest to its own embedded relay, so it resolves it there, and signals only through strfry
-# over plain ws (--mesh-relay), with STUN from the public nfxd (--mesh-stun). Rooms are the
+# over plain ws (--mesh-relay), with STUN from the public nutflixd (--mesh-stun). Rooms are the
 # renditions' stream swarms (NFX-10 §2), so it meets browser B whatever key signed the
 # manifest B plays. Ready once it seeds and its mesh line names a srflx candidate on router
 # A's address, gathering done.
-nat_nfxd_up() { # dir name
+nat_nutflixd_up() { # dir name
   local d=$1 name=$2 pubkey a nodeRelay
-  pubkey=$("$NFXD" key new "$d/nat-node.key" | head -1)
+  pubkey=$("$NUTFLIXD" key new "$d/nat-node.key" | head -1)
   a="38504:$pubkey:$VIDEO"
   cp -r "$work/pkg/store" "$d/nat-store"
-  start "$name-nfxd-a" nfxha "$NFXD" run --key "$d/nat-node.key" --store "$d/nat-store" --state "$d/nat-state" \
+  start "$name-nutflixd-a" nfxha "$NUTFLIXD" run --key "$d/nat-node.key" --store "$d/nat-store" --state "$d/nat-state" \
     --seed "$a" --embed-relay 127.0.0.1:0 --mesh-relay "ws://$PUB_IP:$STRFRY_PORT" --mesh-stun "$PUB_IP:$STUN_PORT"
-  wait_for "$out/$name-nfxd-a.err" 'embedded relay: ws://' 30 || { echo "nfxd A: no embedded relay" >&2; return 1; }
-  nodeRelay=$(grep -oE 'embedded relay: ws://[^ ]+' "$out/$name-nfxd-a.err" | head -1 | cut -d' ' -f3)
-  ip netns exec nfxha "$NFXD" publish --key "$d/nat-node.key" --relay "$nodeRelay" --package "$work/pkg" \
-    --title "NAT browsers" > /dev/null 2>> "$out/$name-publish-a.err" || { echo "nfxd A: publish failed" >&2; return 1; }
-  wait_for "$out/$name-nfxd-a.err" "$a: Seeding" 60 || { echo "nfxd A: never seeding" >&2; return 1; }
-  wait_for "$out/$name-nfxd-a.err" '^mesh: udp .*, session ' 30 || { echo "nfxd A: no mesh endpoint" >&2; return 1; }
-  wait_for "$out/$name-nfxd-a.err" "^mesh: [1-9][0-9]* room\\(s\\), candidates \\[[^]]*srflx ${RA_IP//./\\.}:[0-9]+[^]]*\\], " 30 ||
-    { echo "nfxd A: no room joined with a srflx candidate on $RA_IP" >&2; tail -5 "$out/$name-nfxd-a.err" >&2; return 1; }
+  wait_for "$out/$name-nutflixd-a.err" 'embedded relay: ws://' 30 || { echo "nutflixd A: no embedded relay" >&2; return 1; }
+  nodeRelay=$(grep -oE 'embedded relay: ws://[^ ]+' "$out/$name-nutflixd-a.err" | head -1 | cut -d' ' -f3)
+  ip netns exec nfxha "$NUTFLIXD" publish --key "$d/nat-node.key" --relay "$nodeRelay" --package "$work/pkg" \
+    --title "NAT browsers" > /dev/null 2>> "$out/$name-publish-a.err" || { echo "nutflixd A: publish failed" >&2; return 1; }
+  wait_for "$out/$name-nutflixd-a.err" "$a: Seeding" 60 || { echo "nutflixd A: never seeding" >&2; return 1; }
+  wait_for "$out/$name-nutflixd-a.err" '^mesh: udp .*, session ' 30 || { echo "nutflixd A: no mesh endpoint" >&2; return 1; }
+  wait_for "$out/$name-nutflixd-a.err" "^mesh: [1-9][0-9]* room\\(s\\), candidates \\[[^]]*srflx ${RA_IP//./\\.}:[0-9]+[^]]*\\], " 30 ||
+    { echo "nutflixd A: no room joined with a srflx candidate on $RA_IP" >&2; tail -5 "$out/$name-nutflixd-a.err" >&2; return 1; }
 }
 
-# The nfxd cell needs the mesh endpoint (#71 phase 2). Whether the nfxd under test has it is
-# read from its usage text (nfxd alone prints it and exits 2), never guessed; without it the
+# The nutflixd cell needs the mesh endpoint (#71 phase 2). Whether the nutflixd under test has it is
+# read from its usage text (nutflixd alone prints it and exits 2), never guessed; without it the
 # cell is recorded as skipped, never as a pass.
-cell_nfxd() {
-  local usage why="PLACEHOLDER: the nfxd under test has no --mesh-relay: the mesh endpoint (#71 phase 2, a full ICE agent with Nostr signaling) is not in it"
-  usage=$("$NFXD" 2>&1 || true)
+cell_nutflixd() {
+  local usage why="PLACEHOLDER: the nutflixd under test has no --mesh-relay: the mesh endpoint (#71 phase 2, a full ICE agent with Nostr signaling) is not in it"
+  usage=$("$NUTFLIXD" 2>&1 || true)
   if [[ $usage == *--mesh-relay* && $usage == *--mesh-stun* ]]; then
-    cell nfxd-browser consistent consistent nfxd
+    cell nutflixd-browser consistent consistent nutflixd
   else
-    record "$(json 'import json,sys; print(json.dumps({"cell":"nfxd-browser","nat_a":"consistent","nat_b":"consistent","expect":"nfxd","skipped":True,"judged":False,"reason":sys.argv[1]}))' "$why")"
-    echo "::notice title=NAT browsers: nfxd-browser skipped::$why"
+    record "$(json 'import json,sys; print(json.dumps({"cell":"nutflixd-browser","nat_a":"consistent","nat_b":"consistent","expect":"nutflixd","skipped":True,"judged":False,"reason":sys.argv[1]}))' "$why")"
+    echo "::notice title=NAT browsers: nutflixd-browser skipped::$why"
   fi
 }
 
@@ -391,7 +391,7 @@ VIDEO="nfx:testnet:1:nat-browsers"
 "$FFMPEG" -hide_banner -loglevel error -f lavfi -i testsrc2=size=1280x720:rate=30 \
   -f lavfi -i sine=frequency=440:sample_rate=48000 -t 60 -c:v libx264 -preset ultrafast \
   -pix_fmt yuv420p -c:a aac "$work/clip.mp4"
-"$NFX_PACKAGE" "$work/clip.mp4" --video "$VIDEO" --out "$work/pkg" --max-height 720 --preset veryfast > "$out/package.json"
+"$NUTFLIX_PACKAGE" "$work/clip.mp4" --video "$VIDEO" --out "$work/pkg" --max-height 720 --preset veryfast > "$out/package.json"
 ROOT=$(json 'import json,sys; print(json.load(open(sys.argv[1]))["root"])' "$work/pkg/nfx.json")
 
 # --- the relay's TLS: a CI-only CA and a certificate for the public address; browsers pin
@@ -414,7 +414,7 @@ echo "content: root $ROOT; relay key sha256/$SPKI"
 cell consistent-consistent consistent consistent punch
 cell symmetric-symmetric symmetric symmetric no-punch
 cell consistent-symmetric consistent symmetric record
-cell_nfxd
+cell_nutflixd
 
 # --- the table --------------------------------------------------------------------------------
 json 'import json,sys

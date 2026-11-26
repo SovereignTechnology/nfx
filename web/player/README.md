@@ -110,7 +110,7 @@ relays, creator)` picks a session's servers by the rules every NFX client uses: 
 own first, then those the relays it signals through name for themselves (below), then the
 creator's that are global unicast and on a port of 1024 or above; each once, at most 4 in
 all. A beacon signed by any other key adds none, however many keys name a server: keys
-are free, so a count proves nothing. STUN service announcements (kind 33478, which `nfxd
+are free, so a count proves nothing. STUN service announcements (kind 33478, which `nutflixd
 stun --announce` signs) are a directory for people and operators; the player never reads
 them. So routine selection never makes a viewer ask more than 4 STUN servers, or one that
 neither the creator nor one of its relays named. The fallback below, only when the page asks
@@ -129,7 +129,7 @@ test). Never a server only an announcement names or on a port below 1024, and at
 STUN servers in the session. `selectStunFallback` is the same rule as a pure function.
 
 A relay can offer STUN on its own host (NFX-10 §1, NFX-04 §3): its NIP-11 document lists
-25050 in `nfx.kinds` and gives `nfx.stun_port` (1024 to 65535; `nfxd
+25050 in `nfx.kinds` and gives `nfx.stun_port` (1024 to 65535; `nutflixd
 --embed-relay-stun-port`). The relay already sees the viewer's address on its WebSocket, so
 its STUN server learns only the UDP port. With
 `signaling: { kind: 'nostr', relays, relayStun: { own } }` (`own`: the page's own STUN URLs,
@@ -202,16 +202,16 @@ npm run e2e            # the test page end to end (cargo, ffmpeg, openssl, Chrom
 npm run e2e:mesh       # the mesh, the bridge, the library's lifecycle, trackers from a beacon
 eval "$(bash e2e-strfry.sh /var/tmp/strfry)"   # the stock relay, strfry at a pinned commit
 npm run e2e:nostr      # two browsers over Nostr only (strfry, no tracker), the origin cut
-npm run e2e:nostr-node # a browser and nfxd's mesh endpoint (full ICE) over strfry, the origin cut
-npm run e2e:peer-first # peers first: segments from nfxd's mesh endpoint from the first one, rescues, a browser with WebRTC blocked
+npm run e2e:nostr-node # a browser and nutflixd's mesh endpoint (full ICE) over strfry, the origin cut
+npm run e2e:peer-first # peers first: segments from nutflixd's mesh endpoint from the first one, rescues, a browser with WebRTC blocked
 ```
 
-The suites build `nfxd` and `nfx-package` and run headless Chromium in fresh contexts, on
+The suites build `nutflixd` and `nutflix-package` and run headless Chromium in fresh contexts, on
 loopback only.
 
 `e2e-nat/run.sh` is the same mesh through NATs (nfx #71): one browser behind each of two
 nftables routers in network namespaces, signaling only through strfry and taking STUN only
-from a public nfxd (`--stun`), with router byte counters for the path the bytes took. It
+from a public nutflixd (`--stun`), with router byte counters for the path the bytes took. It
 needs root, so it runs in CI only (`.github/workflows/nfx-nat-browsers.yml`), never on a
 developer's machine; its header lists the cells.
 

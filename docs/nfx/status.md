@@ -63,13 +63,13 @@ from ADR 0104, and two yanked dependencies replaced.
     invalid ones; NFX-16 is stricter on purpose.
 - **NFX-16's first implementation, read-only** (#16): `nfx-proto`'s `rating` module reads and
   scores every vector exactly as `ratings.py` does, natively and on `wasm32`. With
-  `--rating-root` and `--general-relay`, `nfxd` orders the seeders it pulls from by the trusted
+  `--rating-root` and `--general-relay`, `nutflixd` orders the seeders it pulls from by the trusted
   score of the user's circle, refreshed hourly: after cooldown and relay-before-gossip, so a
   score never rescues a failing seeder. Off by default; publishing ratings is not built.
   The desktop viewer has the same settings (#17): the user's npub (never bare hex, which a
-  pasted secret key would pass for), general relays and more trusted npubs. `nfxd` and the
+  pasted secret key would pass for), general relays and more trusted npubs. `nutflixd` and the
   app refuse an nsec given as a rating key without repeating it.
-- **`nfxd --iroh-relay-ca <pem>`:** a network whose iroh relays use a private CA, such as
+- **`nutflixd --iroh-relay-ca <pem>`:** a network whose iroh relays use a private CA, such as
   the nutflix-pear exit run's test network (ADR 0103 §3), can be reached through them. The
   file's CA certificates (at most 4 in all, 8 KiB each, 64 KiB a file, any other PEM block
   refused) are trusted for the relays' TLS beside the compiled-in Mozilla roots
@@ -77,7 +77,7 @@ from ADR 0104, and two yanked dependencies replaced.
   certificates are trusted, never how peers authenticate each other. Proved by a relay-only
   fetch through a TLS relay with a self-signed CA: it fails without the CA, and succeeds with
   it, every file under its sha256.
-- **A seeder behind a NAT or a DNAT** (`nfxd --iroh-bind`, `--iroh-external`): #30's case of a
+- **A seeder behind a NAT or a DNAT** (`nutflixd --iroh-bind`, `--iroh-external`): #30's case of a
   seeder with a public UDP port, which needs no iroh relay.
   - `--iroh-bind ip:port` binds the iroh endpoint's UDP socket to a fixed port that a router
     or a DNAT can forward (`NodeConfig::bind_addr`), in place of a random one.
@@ -95,7 +95,7 @@ from ADR 0104, and two yanked dependencies replaced.
   client to Nostr relay to client). Beacons are now made from the node's current address, so
   their tickets name a relay that connects after seeding started; before, tickets were fixed
   at seeding and a relay missed in the first 10 s was missing from them until a restart.
-  With `--iroh-external`, `nfxd` seeds at once. Without it, it waits at most 60 s
+  With `--iroh-external`, `nutflixd` seeds at once. Without it, it waits at most 60 s
   (`RELAY_WAIT`) for an `--iroh-relay` so that its first beacons name it (each video is
   `AwaitingRelay` meanwhile, naming the relay), then seeds without it and warns. Proved by a
   seeder with an external address and a dead relay (seeds at once), one whose relay never
@@ -103,7 +103,7 @@ from ADR 0104, and two yanked dependencies replaced.
   during the wait (a relay-only fetcher fetches through its tickets), and a node whose relay
   connects after seeding (its next beacon's tickets name it).
 - **A long video fetches over a slow relay, and a failed fetch resumes.** One collection
-  transfer had a fixed 120 s, so `nfxd --fetch` of a 963-file, 652 MiB video through an iroh
+  transfer had a fixed 120 s, so `nutflixd --fetch` of a 963-file, 652 MiB video through an iroh
   relay (4 MiB/s a client, at least 163 s) timed out, threw its progress away and started
   over, forever. Now the deadline grows with the work: 120 s to connect and fetch the hash
   list, then 1 s per file plus its size at 1 MiB/s (`FETCH_PER_FILE`, `FETCH_FLOOR_RATE`), at
@@ -119,8 +119,8 @@ from ADR 0104, and two yanked dependencies replaced.
   - #10 (`cf9788a`): crypto-bigint 0.7.6 → 0.7.9. RUSTSEC-2026-0387's fix is kept.
   - #13 (`0f86e9a`): nostr-sdk 0.45.4 → 0.45.6. 0.45.0 to 0.45.5 were yanked over a
     verification-cache bypass; 0.45.6 binds each cache entry to the event's signature.
-    nfx-node and nfxd read beacons through this client.
-- **A bridge behind a DNAT, and its connection cap** (`nfxd --bridge-public`,
+    nfx-node and nutflixd read beacons through this client.
+- **A bridge behind a DNAT, and its connection cap** (`nutflixd --bridge-public`,
   `--bridge-max-peers`).
   - The bridge's address is its one ICE candidate, and str0m answers a browser's checks only
     at a local candidate, so a bridge behind a DNAT told browsers its private address.
@@ -177,7 +177,7 @@ desktop app and the dependency tree.
 
 **Phases A0, A1 and A2 are complete** (ADR 0008 §5). Every A2 piece, the Rust M1 data
 plane, is built and tested: `nfx-media`, `nfx-node` (iroh, Nostr,
-the pull-through origin, the scoped relay), `nfxd` and the test player. **The Phase A exit
+the pull-through origin, the scoped relay), `nutflixd` and the test player. **The Phase A exit
 run passed on 2026-09-24** between host-b and laptop, over a real iroh relay and over a
 direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 **Phase A is complete.**
@@ -187,7 +187,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
     L8's own unit expectations ported alongside (20 cases);
   - an ISO-BMFF reader that takes CODECS from `avcC`/`esds` (5 cases, including every
     truncation of a valid init);
-  - a packager and the `nfx-package` CLI: CMAF tail, content addressing, and a
+  - a packager and the `nutflix-package` CLI: CMAF tail, content addressing, and a
     self-check with `nfx-proto` before returning. The input is pinned to ffmpeg's
     `file:` protocol, and segment names from ffmpeg's playlist are validated.
   - Its output verifies with `nfx-verify-store` and plays, seeks and switches in
@@ -259,12 +259,12 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
       and 16 KiB size caps.
     - Beacons are forwarded, never stored; stored events are capped at 20,000.
   - The test checks each refusal's reason prefix, not just that it failed.
-- **`nfxd`, the headless node (A2, 2026-09-23):**
-  - `nfxd key new|show` writes a 0600 key file (never overwrites; refuses a key readable
+- **`nutflixd`, the headless node (A2, 2026-09-23):**
+  - `nutflixd key new|show` writes a 0600 key file (never overwrites; refuses a key readable
     by group or others) and prints only public keys.
-  - `nfxd publish` turns an `nfx-package` output into an open, free manifest: duration
+  - `nutflixd publish` turns a `nutflix-package` output into an open, free manifest: duration
     summed from the playlist, and the thumb with its MIME.
-  - `nfxd run`:
+  - `nutflixd run`:
     - `--seed`, `--fetch` and `--pull` take manifest `a` tags;
     - `--origin` serves the pull-through origin, with `--https-url` announcing it as an
       `https` endpoint;
@@ -286,8 +286,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
     no WebCrypto and works from an insecure context. With `&video=<d>&segs=<n>` the hash
     list is also bound to the manifest.
   - `npm run e2e`, run in `web/player/` (PASS on every run, loopback only):
-    - an ffmpeg clip goes through `nfx-package`, then `nfxd key new`, `nfxd run` (seed,
-      embedded relay, origin) and `nfxd publish`;
+    - an ffmpeg clip goes through `nutflix-package`, then `nutflixd key new`, `nutflixd run` (seed,
+      embedded relay, origin) and `nutflixd publish`;
     - headless Chromium in a fresh context plays it: 360p and 720p levels, 7 files
       verified, 0 rejected, 2 s played;
     - from an insecure context (`http://player.test`, mapped to loopback; no
@@ -314,7 +314,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
   so it was cancelled. CI now builds without debug info and with 2 jobs (sovtech's
   choice), about 94 MB per binary, and still runs every test.
 - **The desktop viewer, `crates/desktop` (M1, 2026-09-24):**
-  - A Tauri 2 window around `nfxd`'s `Daemon`, which gained an internal origin with no
+  - A Tauri 2 window around `nutflixd`'s `Daemon`, which gained an internal origin with no
     listener and a runtime `watch`.
   - `watch` works like a viewer: it resolves the manifest, learns seeders from verified
     beacons and holds the video on the origin.
@@ -326,7 +326,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
     `cargo deny` passes with a desktop policy (MPL-2.0 per crate for Servo's CSS
     parsers, `unic-*` unmaintained notices ignored by ID).
   - `crates/desktop/e2e.sh` (PASS) runs in a private headless GNOME Shell:
-    - it packages a clip and starts an `nfxd` seeder with an embedded relay;
+    - it packages a clip and starts a `nutflixd` seeder with an embedded relay;
     - the app watches before the manifest exists;
     - once the manifest is published, the app plays 360p and 720p past 3 s and ends up
       seeding the video.
@@ -343,12 +343,12 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
       is only served to the window and never announced, and the portmapper is off
       (`Config::seed_watched`, `Config::no_portmapper`). The desktop e2e runs both
       ways.
-  - **Gossip in `nfxd` (NFX-06 §4), opt-in.** With `--gossip`, every seeded or watched
+  - **Gossip in `nutflixd` (NFX-06 §4), opt-in.** With `--gossip`, every seeded or watched
     video joins its swarm.
     Seeders announce a signed `here` every 60 s and a `bye` on deletion, and every node
     learns seeders from verified `here`s.
     - Bootstrap uses full endpoint addresses, from relay-heard beacon tickets and
-      `--gossip-peer ID@ADDR` (printed by `nfxd run --gossip`), filtered like
+      `--gossip-peer ID@ADDR` (printed by `nutflixd run --gossip`), filtered like
       `Node::dial`.
     - **A relay-only node never gossips.** iroh-gossip feeds members' advertised
       addresses to the endpoint unfiltered, and iroh dials any relay URL, so a member
@@ -383,7 +383,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
   - The player e2e adds three runs, all PASS:
     - by address with an origin hint;
     - by address alone, with the origin found through a verified beacon's `https`
-      endpoint (a self-signed TLS proxy in front of nfxd, `--https-url`);
+      endpoint (a self-signed TLS proxy in front of nutflixd, `--https-url`);
     - an address nobody published, which fails with "no valid manifest".
   - `npm run unit` (in `web/player/`) checks the origin sanitiser (8 cases).
 - **`nfx-wasm`, `nfx-proto` for browsers (2026-09-23):**
@@ -487,8 +487,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
    - `nfx-node`: ~~store trait, iroh seed/fetch, gossip, Nostr manifests and
      beacons, the pull-through origin~~ done; the per-member window gate comes with
      M2;
-   - ~~`nfxd`~~ done, with gossip since 2026-09-24;
-   - ~~a scoped relay~~ done (`nfx-node::relay`, for `nfxd` to embed or run alone);
+   - ~~`nutflixd`~~ done, with gossip since 2026-09-24;
+   - ~~a scoped relay~~ done (`nfx-node::relay`, for `nutflixd` to embed or run alone);
    - ~~a test player page~~ done (`web/player/`);
    - ~~the desktop viewer~~ done (`crates/desktop/`, Tauri 2, `crates/desktop/e2e.sh`);
    - ~~**the Phase A exit run: multi-host**~~ PASS 2026-09-24, host-b ↔ laptop
@@ -506,7 +506,7 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
 4. Carried risk: the iroh-blobs 0.103 README still says "not production quality". The
    containment plan is in the S1 page.
 5. ~~Add the schema check (`jsonschema`) to `check.sh`~~ done (`spec/schemas/check.py`).
-6. ~~M1 hardening carry-forwards~~ done 2026-09-24: gossip in `nfxd`, the creator
+6. ~~M1 hardening carry-forwards~~ done 2026-09-24: gossip in `nutflixd`, the creator
    allow-list and `Verified<T>`. NIP-42 is blocked upstream (see above).
 7. ~~The WebRTC browser mesh (NFX-10)~~ **built 2026-09-24**
    ([`nfx-10-m1-plan.md`](nfx-10-m1-plan.md)).
@@ -518,8 +518,8 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
      `X-Forwarded-For`.
    - The player joins with `&tracker=`, and every segment from a peer or HTTP is
      verified by WASM.
-   - `nfxd --embed-tracker` admits only the swarms of videos it holds.
-   - `nfxd --bridge` is a Rust WebRTC peer (str0m) that serves browsers from the
+   - `nutflixd --embed-tracker` admits only the swarms of videos it holds.
+   - `nutflixd --bridge` is a Rust WebRTC peer (str0m) that serves browsers from the
      verified store.
    - `e2e-mesh.ts` passes 3/3. NFX-10 stays Draft (freeze at M4).
 

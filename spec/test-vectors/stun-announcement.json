@@ -7,7 +7,7 @@
   "valid": [
     {
       "name": "ipv4-one-network",
-      "reason": "what nfxd stun --announce sends: 24 h, one network",
+      "reason": "what nutflixd stun --announce sends: 24 h, one network",
       "event": {
         "id": "abd1644556a9c567cc7114a1b5e9929931228c423e68d2fbc0d4b3b7aaaeb06e",
         "pubkey": "84cf5ba7fd3bee0d4920d00d427168c0b16556df167cf468cae43c949312c490",

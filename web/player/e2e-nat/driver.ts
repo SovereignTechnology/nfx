@@ -1,10 +1,10 @@
 /**
  * NFX-10 §6 through NATs (nfx #71, phase 3): two real browsers, each behind its own NAT,
  * signaling ONLY through a stock Nostr relay (strfry) and taking server-reflexive
- * candidates ONLY from a public nfxd's STUN responder (`nfxd --stun`). No tracker, no TURN.
+ * candidates ONLY from a public nutflixd's STUN responder (`nutflixd --stun`). No tracker, no TURN.
  *
  * e2e-nat/run.sh builds the network (network namespaces and nftables routers, as root),
- * starts strfry and nfxd in its "public" namespace, and runs this driver there once per
+ * starts strfry and nutflixd in its "public" namespace, and runs this driver there once per
  * cell. The driver:
  *   - fronts strfry with TLS (wss://<public>:7443 → strfry's plain ws on <public>:7777, the
  *     way a relay is deployed: the library takes `ws:` only on loopback);
@@ -28,12 +28,12 @@
  *             connected, within NAT_FAIL_BOUND_MS of its creation; B must take no mesh bytes
  *             and keep playing from the origin.
  *   record    The same, judged only on playback continuing; the outcome is recorded.
- *   nfxd      No browser A: run.sh started an nfxd with the mesh endpoint behind router A
+ *   nutflixd      No browser A: run.sh started a nutflixd with the mesh endpoint behind router A
  *             (#71 phase 2). B plays, and once it has a peer router B cuts the origin; B must
  *             play 15 s past the cut on mesh bytes alone, router B must have taken at least
- *             those as UDP from router A, the selected pair must be srflx ↔ srflx, and nfxd's
- *             last `mesh:` line (NAT_NFXD_LOG) must count a connection opened and a segment
- *             served. nfxd to browser only: the endpoint never takes bytes from a peer.
+ *             those as UDP from router A, the selected pair must be srflx ↔ srflx, and nutflixd's
+ *             last `mesh:` line (NAT_NUTFLIXD_LOG) must count a connection opened and a segment
+ *             served. nutflixd to browser only: the endpoint never takes bytes from a peer.
  * Every cell: strfry carried only kind-25050 `nfx-mesh/1` events, offers and answers as
  * NIP-44 v2 ciphertext naming no SDP, candidate or address in clear; no page opened a socket
  * to anything but the relay.
@@ -61,7 +61,7 @@ function need(name: string): string {
   return v;
 }
 const CELL = need('NAT_CELL');
-const EXPECT = need('NAT_EXPECT') as 'punch' | 'no-punch' | 'record' | 'nfxd';
+const EXPECT = need('NAT_EXPECT') as 'punch' | 'no-punch' | 'record' | 'nutflixd';
 const NAT_A = need('NAT_A');
 const NAT_B = need('NAT_B');
 const PUB = need('NAT_PUB_IP');
@@ -82,9 +82,9 @@ const TLS_KEY = readFileSync(need('NAT_TLS_KEY'));
 const TLS_CERT = readFileSync(need('NAT_TLS_CERT'));
 const TLS_SPKI = need('NAT_TLS_SPKI');
 const WRAPPER = join(here, 'chromium-netns.sh');
-if (!['punch', 'no-punch', 'record', 'nfxd'].includes(EXPECT)) throw new Error(`NAT_EXPECT ${EXPECT}`);
-/** The NAT'd nfxd's stderr, in the nfxd cell. */
-const NFXD_LOG = need('NAT_NFXD_LOG');
+if (!['punch', 'no-punch', 'record', 'nutflixd'].includes(EXPECT)) throw new Error(`NAT_EXPECT ${EXPECT}`);
+/** The NAT'd nutflixd's stderr, in the nutflixd cell. */
+const NUTFLIXD_LOG = need('NAT_NUTFLIXD_LOG');
 if (!/^[0-9a-f]{64}$/.test(ROOT)) throw new Error('NAT_ROOT is not 64 hex');
 if (!/^[A-Za-z0-9+/]{43}=$/.test(TLS_SPKI)) throw new Error('NAT_TLS_SPKI is not a base64 sha256');
 
@@ -364,7 +364,7 @@ const rtc = async (p: Page): Promise<RtcRec[]> =>
 
 /**
  * How the page's NAT mapped its socket, from the candidates it gathered: `kept` when the
- * srflx candidate (the mapping nfxd's STUN saw) has the host candidate's port, as a
+ * srflx candidate (the mapping nutflixd's STUN saw) has the host candidate's port, as a
  * consistent router keeps it; `changed` when it differs, as a fully-random one does; null
  * with no srflx candidate. One per negotiation; null entries dropped.
  */
@@ -458,8 +458,8 @@ function outcome(r: RtcRec, now: number): { kind: 'connected' | 'ended' | 'open'
   return { kind: 'open', ms: now - r.created, reason: 'open' };
 }
 
-/** The NAT'd nfxd's last `mesh:` status line, parsed (nfxd prints one whenever it changes). */
-interface NfxdMesh {
+/** The NAT'd nutflixd's last `mesh:` status line, parsed (nutflixd prints one whenever it changes). */
+interface NutflixdMesh {
   line: string;
   rooms: number;
   candidates: string[];
@@ -467,10 +467,10 @@ interface NfxdMesh {
   failed: number;
   served: number;
 }
-function nfxdMesh(): NfxdMesh | null {
+function nutflixdMesh(): NutflixdMesh | null {
   let text: string;
   try {
-    text = readFileSync(NFXD_LOG, 'utf8');
+    text = readFileSync(NUTFLIXD_LOG, 'utf8');
   } catch {
     return null;
   }
@@ -487,8 +487,8 @@ function nfxdMesh(): NfxdMesh | null {
   };
 }
 
-/** As `mappings`, from nfxd's own candidates (`host <ip>:<port>`, `srflx <ip>:<port>`). */
-function nfxdMapping(m: NfxdMesh | null): ('kept' | 'changed')[] {
+/** As `mappings`, from nutflixd's own candidates (`host <ip>:<port>`, `srflx <ip>:<port>`). */
+function nutflixdMapping(m: NutflixdMesh | null): ('kept' | 'changed')[] {
   const port = (type: string): string | undefined => m?.candidates.find((c) => c.startsWith(`${type} `))?.split(':').at(-1);
   const host = port('host');
   const srflx = port('srflx');
@@ -506,9 +506,9 @@ async function main(): Promise<number> {
   const viewers: Viewer[] = [];
   const diag: Record<string, unknown> = {};
   try {
-    // ---- A: plays from the origin first, and fetches far ahead over HTTP. In the nfxd
-    // cell A is run.sh's nfxd, seeding already. ----
-    const a = EXPECT === 'nfxd' ? null : await viewer('A', NS_A, 120);
+    // ---- A: plays from the origin first, and fetches far ahead over HTTP. In the nutflixd
+    // cell A is run.sh's nutflixd, seeding already. ----
+    const a = EXPECT === 'nutflixd' ? null : await viewer('A', NS_A, 120);
     if (a !== null) {
       viewers.push(a);
       if (!(await until(a.page, (s) => s.playing || s.errors.length > 0, 90_000)) || !(await state(a.page)).playing) {
@@ -528,7 +528,7 @@ async function main(): Promise<number> {
     let pairsB: SelectedPair[] = [];
     let pairsA: SelectedPair[] = [];
 
-    if (EXPECT === 'punch' || EXPECT === 'nfxd') {
+    if (EXPECT === 'punch' || EXPECT === 'nutflixd') {
       const meshed = await until(b.page, (s) => s.errors.length > 0 || (s.playing && s.t > 3 && (s.mesh?.peers ?? 0) > 0), 120_000);
       if (!meshed) problems.push('B never played with a peer (120 s)');
       // The cut: router B refuses B's path to the origin (resets B's connections to it, drops
@@ -568,10 +568,10 @@ async function main(): Promise<number> {
     const aEnd = a === null ? null : await state(a.page);
     const recsB = await rtc(b.page);
     const recsA = a === null ? [] : await rtc(a.page);
-    const cutCell = EXPECT === 'punch' || EXPECT === 'nfxd';
+    const cutCell = EXPECT === 'punch' || EXPECT === 'nutflixd';
     if (cutCell && pairsB.length === 0) pairsB = await selectedPairs(b.page);
     if (EXPECT === 'punch' && a !== null && pairsA.length === 0) pairsA = await selectedPairs(a.page);
-    const nfxd = EXPECT === 'nfxd' ? nfxdMesh() : null;
+    const nutflixd = EXPECT === 'nutflixd' ? nutflixdMesh() : null;
     const session = { a: delta(m0.a, m2.a), b: delta(m0.b, m2.b) };
     const afterCut = m1 === null ? null : { a: delta(m1.a, m2.a), b: delta(m1.b, m2.b) };
     const outB = recsB.map((r) => outcome(r, now));
@@ -601,11 +601,11 @@ async function main(): Promise<number> {
     result.pairs_a = pairsA;
     result.local_types_b = [...new Set(recsB.flatMap((r) => r.local.map((c) => c.type)))];
     result.remote_types_b = [...new Set(recsB.flatMap((r) => r.remote))];
-    const mapA = a === null ? nfxdMapping(nfxd) : mappings(recsA);
+    const mapA = a === null ? nutflixdMapping(nutflixd) : mappings(recsA);
     const mapB = mappings(recsB);
     result.mapping = { a: mapA, b: mapB };
     result.viewer = { t: bEnd.t, errors: bEnd.errors, mesh: bEnd.mesh, at_cut: atCut, played_ms: now - bStart };
-    result.seeder = aEnd === null ? { nfxd } : { t: aEnd.t, errors: aEnd.errors, mesh: aEnd.mesh };
+    result.seeder = aEnd === null ? { nutflixd } : { t: aEnd.t, errors: aEnd.errors, mesh: aEnd.mesh };
     result.fail_bound_ms = FAIL_BOUND_MS;
     diag.rtc = { A: recsA, B: recsB };
 
@@ -626,19 +626,19 @@ async function main(): Promise<number> {
     for (const [r, m] of Object.entries(session)) {
       if ((m.other_in ?? 0) !== 0 || (m.other_out ?? 0) !== 0) problems.push(`router ${r} carried other traffic: ${m.other_in} in, ${m.other_out} out`);
     }
-    // The routers behave as named: a consistent one kept the browser's (or the NAT'd nfxd's)
-    // port in the mapping the public nfxd's STUN saw, a symmetric one changed it.
+    // The routers behave as named: a consistent one kept the browser's (or the NAT'd nutflixd's)
+    // port in the mapping the public nutflixd's STUN saw, a symmetric one changed it.
     for (const [n, nat, m] of [
       ['A', NAT_A, mapA],
       ['B', NAT_B, mapB],
     ] as const) {
       const want = nat === 'consistent' ? 'kept' : 'changed';
-      if (m.length === 0) problems.push(`${n} gathered no srflx candidate: STUN from nfxd did not answer`);
+      if (m.length === 0) problems.push(`${n} gathered no srflx candidate: STUN from nutflixd did not answer`);
       else if (m.some((x) => x !== want)) problems.push(`${n}'s ${nat} NAT: srflx port ${JSON.stringify(m)}, not ${want}`);
     }
 
     // ---- per cell ----
-    if (EXPECT === 'punch' || EXPECT === 'nfxd') {
+    if (EXPECT === 'punch' || EXPECT === 'nutflixd') {
       const ms = bEnd.mesh;
       if (atCut !== null && !(bEnd.t > atCut.t + 15)) problems.push(`B played only to ${bEnd.t} s (cut at ${atCut.t} s)`);
       if (!((ms?.peers ?? 0) > 0)) problems.push('B has no peer');
@@ -653,12 +653,12 @@ async function main(): Promise<number> {
           problems.push(`router A sent ${session.a.peer_out} B of UDP to router B, fewer than A's ${aEnd.mesh?.uploaded} uploaded`);
         }
       } else {
-        // The NAT'd nfxd: its last status line counts a connection opened and a segment
+        // The NAT'd nutflixd: its last status line counts a connection opened and a segment
         // served, and both routers delivered UDP from the other (the punch, both ways).
-        if (nfxd === null) problems.push(`nfxd printed no mesh status line (${NFXD_LOG})`);
-        else if (!(nfxd.opened >= 1 && nfxd.served >= 1)) problems.push(`nfxd: ${nfxd.line}`);
+        if (nutflixd === null) problems.push(`nutflixd printed no mesh status line (${NUTFLIXD_LOG})`);
+        else if (!(nutflixd.opened >= 1 && nutflixd.served >= 1)) problems.push(`nutflixd: ${nutflixd.line}`);
         if (!((session.a.peer_in ?? 0) > 0 && (session.b.peer_in ?? 0) > 0)) {
-          problems.push(`UDP delivered: ${session.b.peer_in} B nfxd → B, ${session.a.peer_in} B B → nfxd`);
+          problems.push(`UDP delivered: ${session.b.peer_in} B nutflixd → B, ${session.a.peer_in} B B → nutflixd`);
         }
       }
       // After the cut, nothing from the origin reached B (only the relay and STUN from the

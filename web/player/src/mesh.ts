@@ -95,7 +95,7 @@ export const PEER_WAIT_MS = 4000;
 export const MAX_PEER_WAIT_MS = 30_000;
 /**
  * With peers first, how far ahead of the playhead segments are fetched from them, in
- * seconds. nfxd serves a connection 60 requests at once and 20 a second after that
+ * seconds. nutflixd serves a connection 60 requests at once and 20 a second after that
  * (`rtc_serve.rs`): at NFX-05's 2 s segments this is 15 requests, then one every 2 s.
  */
 export const PEER_AHEAD_SECONDS = 30;

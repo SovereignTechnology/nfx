@@ -19,11 +19,11 @@ so direct hole-punching is limited and many connections will be relayed.
 
 ## Using the scoped relay
 
-`wss://relay.nutflix.xyz` is the NFX-04 reference relay (`nfxd`'s embedded scoped relay) and
+`wss://relay.nutflix.xyz` is the NFX-04 reference relay (`nutflixd`'s embedded scoped relay) and
 nothing else: it takes manifests (kind 38504), availability beacons (kind 20464, never stored)
 and valid deletions (kind 5) for `nfx:testnet:1`, and answers `blocked: out of scope` to every
 other event. In the nutflix-pear desktop app, add it under Settings > NFX network > scoped
-relays; with `nfxd`, pass `--relay wss://relay.nutflix.xyz`.
+relays; with `nutflixd`, pass `--relay wss://relay.nutflix.xyz`.
 
 - Stored manifests live in the relay's memory (at most 20,000 events). A restart forgets them,
   so publishers must republish, and should also mirror manifests to general public relays
@@ -42,8 +42,8 @@ is a filter and a convenience.
 Using it is opt-in; nothing points at it by default.
 
 ```sh
-nfxd run --iroh-relay https://iroh.nutflix.xyz/ …              # use it, and still go direct when possible
-nfxd run --iroh-relay https://iroh.nutflix.xyz/ --relay-only … # send every byte through it
+nutflixd run --iroh-relay https://iroh.nutflix.xyz/ …              # use it, and still go direct when possible
+nutflixd run --iroh-relay https://iroh.nutflix.xyz/ --relay-only … # send every byte through it
 ```
 
 `--relay-only` needs at least one `--iroh-relay` and cannot be combined with `--gossip`. In the
@@ -59,7 +59,7 @@ a direct message.
 ## What the operator can see and keeps
 
 An iroh relay forwards encrypted packets addressed by endpoint id. Each endpoint
-authenticates itself with its id inside QUIC TLS, iroh verifies blobs by BLAKE3, and `nfxd`
+authenticates itself with its id inside QUIC TLS, iroh verifies blobs by BLAKE3, and `nutflixd`
 checks every file against the signed sha256 hash list (NFX-05). So the relay:
 
 - **cannot** read or alter the video, and cannot impersonate a peer;

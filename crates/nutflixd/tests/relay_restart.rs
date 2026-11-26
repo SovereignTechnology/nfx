@@ -1,4 +1,4 @@
-//! The real `nfxd` binary: a manifest published to its embedded relay is served after the
+//! The real `nutflixd` binary: a manifest published to its embedded relay is served after the
 //! process is killed and started again on the same `--state`, with nothing re-sent (issue
 //! #114). Without `--state` a restart forgets it, as it always has.
 
@@ -21,7 +21,10 @@ use serde_json::Value;
 const WAIT: Duration = Duration::from_secs(30);
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("nfxd-relay-restart-{}-{name}", std::process::id()));
+    let d = std::env::temp_dir().join(format!(
+        "nutflixd-relay-restart-{}-{name}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -46,13 +49,13 @@ fn video() -> Manifest {
     }
 }
 
-/// A running `nfxd`, killed if the test ends early.
-struct Nfxd(Child);
+/// A running `nutflixd`, killed if the test ends early.
+struct Nutflixd(Child);
 
-impl Nfxd {
+impl Nutflixd {
     fn start(root: &Path, state: Option<&Path>, port: u16, log: &str) -> Self {
         let namespace = video().addr.namespace().to_string();
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_nfxd"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_nutflixd"));
         cmd.arg("run")
             .arg("--store")
             .arg(root.join("store"))
@@ -63,7 +66,7 @@ impl Nfxd {
         }
         let log = File::create(root.join(log)).unwrap();
         // Guarded from here on: a failed assertion below must not leave it running.
-        let mut nfxd = Self(
+        let mut nutflixd = Self(
             cmd.stdout(Stdio::null())
                 .stderr(Stdio::from(log))
                 .spawn()
@@ -72,13 +75,13 @@ impl Nfxd {
         let deadline = Instant::now() + WAIT;
         while TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err() {
             assert!(
-                nfxd.0.try_wait().unwrap().is_none(),
-                "nfxd exited before listening"
+                nutflixd.0.try_wait().unwrap().is_none(),
+                "nutflixd exited before listening"
             );
-            assert!(Instant::now() < deadline, "nfxd did not listen in time");
+            assert!(Instant::now() < deadline, "nutflixd did not listen in time");
             std::thread::sleep(Duration::from_millis(50));
         }
-        nfxd
+        nutflixd
     }
 
     /// SIGKILL: no shutdown path gets to run.
@@ -88,7 +91,7 @@ impl Nfxd {
     }
 }
 
-impl Drop for Nfxd {
+impl Drop for Nutflixd {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
@@ -108,7 +111,7 @@ async fn read_back(url: &str, author: &str) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_manifest_outlives_a_killed_nfxd_on_the_same_state() {
+async fn a_manifest_outlives_a_killed_nutflixd_on_the_same_state() {
     let root = tmp("state");
     let state = root.join("state");
     let port = free_port();
@@ -119,26 +122,26 @@ async fn a_manifest_outlives_a_killed_nfxd_on_the_same_state() {
         .await
         .unwrap();
 
-    let nfxd = Nfxd::start(&root, Some(&state), port, "first.log");
+    let nutflixd = Nutflixd::start(&root, Some(&state), port, "first.log");
     let publisher = Relays::connect(std::slice::from_ref(&url), WAIT)
         .await
         .unwrap();
     assert_eq!(publisher.publish(&event).await.unwrap(), 1);
     // Killed the moment the relay said OK, before anything else can give it time to finish a
     // write: an OK means it is on disk.
-    nfxd.kill();
+    nutflixd.kill();
     publisher.shutdown().await;
 
     let dir = state.join("relay-manifests");
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
 
-    let nfxd = Nfxd::start(&root, Some(&state), port, "second.log");
+    let nutflixd = Nutflixd::start(&root, Some(&state), port, "second.log");
     assert_eq!(
         read_back(&url, &author).await,
         [video().addr.to_string()],
         "served after the restart with nothing re-sent"
     );
-    nfxd.kill();
+    nutflixd.kill();
     let log = std::fs::read_to_string(root.join("second.log")).unwrap();
     assert!(log.contains("1 manifests reloaded"), "{log}");
 
@@ -151,7 +154,7 @@ async fn a_manifest_outlives_a_killed_nfxd_on_the_same_state() {
         .path();
     let bytes = std::fs::read(&file).unwrap();
     std::fs::write(&file, &bytes[..bytes.len() / 2]).unwrap();
-    let nfxd = Nfxd::start(&root, Some(&state), port, "third.log");
+    let nutflixd = Nutflixd::start(&root, Some(&state), port, "third.log");
     assert!(read_back(&url, &author).await.is_empty());
     let publisher = Relays::connect(std::slice::from_ref(&url), WAIT)
         .await
@@ -159,7 +162,7 @@ async fn a_manifest_outlives_a_killed_nfxd_on_the_same_state() {
     assert_eq!(publisher.publish(&event).await.unwrap(), 1);
     publisher.shutdown().await;
     assert_eq!(read_back(&url, &author).await.len(), 1);
-    nfxd.kill();
+    nutflixd.kill();
     let log = std::fs::read_to_string(root.join("third.log")).unwrap();
     assert!(log.contains("not a valid event; removed"), "{log}");
 }
@@ -175,20 +178,20 @@ async fn without_state_a_restart_forgets_and_nothing_is_written() {
         .await
         .unwrap();
 
-    let nfxd = Nfxd::start(&root, None, port, "first.log");
+    let nutflixd = Nutflixd::start(&root, None, port, "first.log");
     let publisher = Relays::connect(std::slice::from_ref(&url), WAIT)
         .await
         .unwrap();
     assert_eq!(publisher.publish(&event).await.unwrap(), 1);
     publisher.shutdown().await;
     assert_eq!(read_back(&url, &author).await.len(), 1);
-    nfxd.kill();
+    nutflixd.kill();
     assert!(
-        !root.join("store/.nfxd/relay-manifests").exists(),
+        !root.join("store/.nutflixd/relay-manifests").exists(),
         "the default state directory keeps no manifests"
     );
 
-    let nfxd = Nfxd::start(&root, None, port, "second.log");
+    let nutflixd = Nutflixd::start(&root, None, port, "second.log");
     assert!(read_back(&url, &author).await.is_empty());
-    nfxd.kill();
+    nutflixd.kill();
 }

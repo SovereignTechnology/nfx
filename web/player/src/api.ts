@@ -330,7 +330,7 @@ export type SegmentSource = 'peers-then-https' | 'peers-only' | 'https-first';
 export interface MeshPeer {
   /**
    * The engine's id for it: for the Nostr kind, the peer's session key (64 hex, fresh each
-   * session, never a user's key); for trackers, its WebTorrent peer id (nfxd's bridge uses
+   * session, never a user's key); for trackers, its WebTorrent peer id (nutflixd's bridge uses
    * the prefix `-NX0100-`, which anyone can copy). Non-printable characters become `?`; at
    * most 64 characters.
    */

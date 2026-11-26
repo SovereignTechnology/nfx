@@ -144,7 +144,7 @@ export function nerdView(s: Stats, e: ElementSample, title: string | null): Nerd
       kind: 'webrtc',
       id: shortId(p.id),
       key: p.id,
-      label: p.id.startsWith('-NX0100-') ? 'nfxd bridge?' : 'peer',
+      label: p.id.startsWith('-NX0100-') ? 'nutflixd bridge?' : 'peer',
       via: p.via.startsWith('nostr:') ? 'nostr' : host(p.via),
       down: p.down,
       up: p.up,

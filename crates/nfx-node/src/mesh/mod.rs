@@ -187,7 +187,7 @@ pub struct MeshConfig {
     /// it: offered as the first host candidate, and every datagram the socket receives is
     /// taken as sent to it. With it, no other candidate whose address is not public
     /// ([`crate::node::is_public`]) is offered. An address peers can dial, of `bind`'s family;
-    /// whether it is public is the caller's to check (`nfxd` refuses one that is not).
+    /// whether it is public is the caller's to check (`nutflixd` refuses one that is not).
     /// `None`: none.
     pub public: Option<SocketAddr>,
     /// Learn STUN servers from Nostr (NFX-10 §1): beacons' `stun` endpoints for the videos

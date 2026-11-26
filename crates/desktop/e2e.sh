@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The desktop viewer end to end, in a private headless GNOME Shell (nothing appears on
 # the user's screen):
-#   ffmpeg clip → nfx-package → nfxd seeder with an embedded scoped relay; the app in test
+#   ffmpeg clip → nutflix-package → nutflixd seeder with an embedded scoped relay; the app in test
 #   mode watches the address before the manifest exists, the manifest is published, the app
 #   learns the seeder from a verified beacon, plays over nfx:// with bytes fetched over iroh
 #   and verified, and ends up seeding the video itself. The first run also has seeder
@@ -18,10 +18,10 @@ case ${NFX_E2E_DISPLAY:=gnome-shell} in
 esac
 here=$(cd "$(dirname "$0")" && pwd)
 crates=$(cd "$here/.." && pwd)
-work=$(mktemp -d "${TMPDIR:-/tmp}/nfx-desktop-e2e-XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/nutflix-desktop-e2e-XXXXXX")
 # A display name of this run's own: a fixed one would find the socket a killed compositor
 # left behind, and the app would dial a dead display.
-display="nfx-desktop-e2e-${work##*-}"
+display="nutflix-desktop-e2e-${work##*-}"
 runtime=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 chmod 700 "$work"
 pids=()
@@ -37,7 +37,7 @@ wait_for() { # file pattern seconds
   echo "timed out waiting for /$2/ in $1:" >&2; cat "$1" >&2 || true; return 1
 }
 
-cargo build --release --locked --manifest-path "$crates/Cargo.toml" -p nfxd -p nfx-media --bins -j 4
+cargo build --release --locked --manifest-path "$crates/Cargo.toml" -p nutflixd -p nfx-media --bins -j 4
 bin=$crates/target/release
 cp "$crates/../web/player/node_modules/hls.js/dist/hls.min.js" "$here/ui/hls.min.js"
 # The page runs this script with IPC access: only the pinned hls.js 1.7.4 build is used.
@@ -49,15 +49,15 @@ echo "$hls_sha256  $here/ui/hls.min.js" | sha256sum -c --quiet - \
 ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=size=1280x720:rate=30 \
   -f lavfi -i sine=frequency=440:sample_rate=48000 -t 12 -c:v libx264 -preset ultrafast \
   -pix_fmt yuv420p -c:a aac "$work/clip.mp4"
-"$bin/nfx-package" "$work/clip.mp4" --video nfx:testnet:1:desktop-e2e-clip --out "$work/pkg" \
+"$bin/nutflix-package" "$work/clip.mp4" --video nfx:testnet:1:desktop-e2e-clip --out "$work/pkg" \
   --max-height 720 --preset veryfast > /dev/null
-creator=$("$bin/nfxd" key new "$work/creator.key")
+creator=$("$bin/nutflixd" key new "$work/creator.key")
 pub=$(sed -n 1p <<< "$creator")
 npub=$(sed -n 2p <<< "$creator")
 a="38504:$pub:nfx:testnet:1:desktop-e2e-clip"
 
 # The seeder, with the scoped relay the app will use.
-setsid "$bin/nfxd" run --key "$work/creator.key" --store "$work/pkg/store" --seed "$a" \
+setsid "$bin/nutflixd" run --key "$work/creator.key" --store "$work/pkg/store" --seed "$a" \
   --embed-relay 127.0.0.1:0 2> "$work/seeder.log" &
 pids+=($!)
 wait_for "$work/seeder.log" 'embedded relay: ws://' 30
@@ -82,9 +82,9 @@ start_app() { # share tag [more JSON fields]
       [ -S "$XDG_RUNTIME_DIR/$4" ] || { echo "the headless compositor never started"; exit 1; }
       export WAYLAND_DISPLAY="$4" GDK_BACKEND=wayland
     fi
-    NFX_DESKTOP_TEST="$1" NFX_DESKTOP_DATA="$2" "$3"
+    NUTFLIX_DESKTOP_TEST="$1" NUTFLIX_DESKTOP_DATA="$2" "$3"
     echo "EXIT $?"
-  ' _ "$json" "$work/app-$2" "$here/target/release/nfx-desktop" "$display-$2" \
+  ' _ "$json" "$work/app-$2" "$here/target/release/nutflix-desktop" "$display-$2" \
     "$NFX_E2E_DISPLAY" "$work/xdisplay-$2" > "$work/app-$2.log" 2>&1 &
   pids+=($!)
 }
@@ -98,7 +98,7 @@ check_app() { # tag step
 start_app false private ",\"rating_root\":\"$npub\",\"general_relays\":[\"$relay\"]"
 # Publish once the app is watching, so it sees the seeder's first beacon.
 wait_for "$work/app-private.log" '"step":"watching"' 90
-"$bin/nfxd" publish --key "$work/creator.key" --relay "$relay" --package "$work/pkg" \
+"$bin/nutflixd" publish --key "$work/creator.key" --relay "$relay" --package "$work/pkg" \
   --title "Desktop e2e" > /dev/null 2>&1
 check_app private played-not-shared || { echo "desktop e2e: FAIL (sharing off)"; exit 1; }
 # With sharing on, the next beacon (within 60 s) names the seeder.

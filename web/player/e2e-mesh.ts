@@ -1,18 +1,18 @@
 /**
  * NFX-10 browser mesh, end to end, on this machine only (loopback, ephemeral ports):
  *
- *   ffmpeg 60 s clip → nfx-package → nfxd (embedded scoped relay + origin + embedded
+ *   ffmpeg 60 s clip → nutflix-package → nutflixd (embedded scoped relay + origin + embedded
  *   tracker + seeding) → two fresh headless Chromium contexts (never a real profile):
  *   - E, a peer that shares whatever its origin gave it (e2e-peer.ts), fed by a lying
  *     origin that flips one byte of one segment of the lowest rendition;
  *   - B, the real player on the honest origin, with a 2 s HTTP window so most segments
  *     come from peers.
  *   B must receive segment bytes over WebRTC, reject exactly the tampered segment (from
- *   the peer), and play past it. nfxd's tracker must refuse a swarm it does not hold.
+ *   the peer), and play past it. nutflixd's tracker must refuse a swarm it does not hold.
  *
- *   Then the bridge: a second nfxd with `--bridge` (a native WebRTC peer, str0m). A viewer
+ *   Then the bridge: a second nutflixd with `--bridge` (a native WebRTC peer, str0m). A viewer
  *   plays through a gate that, once playback has started, refuses every segment: the rest
- *   of the video can only come from the bridge, over WebRTC, from nfxd's verified store.
+ *   of the video can only come from the bridge, over WebRTC, from nutflixd's verified store.
  *
  *   The library's lifecycle, on the shipped bundle (out-lib/player.js, e2e-lib.ts): three
  *   rounds of open, play over the mesh, destroy, each ending with no socket, peer
@@ -270,11 +270,11 @@ async function quiet(page: import('playwright').Page, ms: number): Promise<strin
 
 async function main(): Promise<void> {
   if (!existsSync(join(here, 'out-lib/player.js'))) throw new Error('no out-lib/player.js: run npm run build:lib first');
-  run('cargo', ['build', '--locked', '--manifest-path', join(crates, 'Cargo.toml'), '-p', 'nfxd', '-p', 'nfx-media', '--bins']);
+  run('cargo', ['build', '--locked', '--manifest-path', join(crates, 'Cargo.toml'), '-p', 'nutflixd', '-p', 'nfx-media', '--bins']);
   const clip = join(work, 'clip.mp4');
   run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '60', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', clip]);
   const pkg = join(work, 'pkg');
-  run(bin('nfx-package'), [clip, '--video', 'nfx:testnet:1:mesh-e2e', '--out', pkg, '--max-height', '720', '--preset', 'veryfast']);
+  run(bin('nutflix-package'), [clip, '--video', 'nfx:testnet:1:mesh-e2e', '--out', pkg, '--max-height', '720', '--preset', 'veryfast']);
   const meta = JSON.parse(readFileSync(join(pkg, 'nfx.json'), 'utf8')) as { root: string; video: string };
   const store = join(pkg, 'store');
   const list = JSON.parse(readFileSync(join(store, meta.root), 'utf8')) as {
@@ -290,17 +290,17 @@ async function main(): Promise<void> {
   const victim = uris[5]!.split('.')[0]!;
 
   const key = join(work, 'node.key');
-  const pubkey = run(bin('nfxd'), ['key', 'new', key]).split('\n')[0]!;
+  const pubkey = run(bin('nutflixd'), ['key', 'new', key]).split('\n')[0]!;
   const a = `38504:${pubkey}:${meta.video}`;
   const node = await start(
-    bin('nfxd'),
+    bin('nutflixd'),
     ['run', '--key', key, '--store', store, '--seed', a, '--embed-relay', '127.0.0.1:0', '--origin', '127.0.0.1:0', '--embed-tracker', '127.0.0.1:0'],
     [/embedded relay: (ws:\/\/\S+)/, /origin: (http:\/\/\S+?)\/?\s/, /embedded tracker: (ws:\/\/\S+)/],
   );
   const relay = node.matches[0]![1]!;
   const origin = node.matches[1]![1]!.replace(/\/$/, '');
   const tracker = node.matches[2]![1]!;
-  run(bin('nfxd'), ['publish', '--key', key, '--relay', relay, '--package', pkg, '--title', 'Mesh e2e']);
+  run(bin('nutflixd'), ['publish', '--key', key, '--relay', relay, '--package', pkg, '--title', 'Mesh e2e']);
   const deadline = Date.now() + 60_000;
   while (!node.text().includes(`${a}: Seeding`)) {
     if (Date.now() > deadline) throw new Error(`never seeding:\n${node.text()}`);
@@ -362,7 +362,7 @@ async function main(): Promise<void> {
     const originFront = await tlsFront();
     const trackerFront = await tlsFront();
     const bridged = await start(
-      bin('nfxd'),
+      bin('nutflixd'),
       [
         'run', '--key', key, '--store', store, '--state', join(work, 'state-bridge'), '--seed', a,
         '--embed-relay', '127.0.0.1:0', '--origin', '127.0.0.1:0', '--embed-tracker', '127.0.0.1:0', '--bridge', '127.0.0.1:0',
@@ -373,7 +373,7 @@ async function main(): Promise<void> {
     const relay2 = bridged.matches[0]![1]!;
     const origin2 = bridged.matches[1]![1]!.replace(/\/$/, '');
     const tracker2 = bridged.matches[2]![1]!;
-    run(bin('nfxd'), ['publish', '--key', key, '--relay', relay2, '--package', pkg, '--title', 'Mesh e2e']);
+    run(bin('nutflixd'), ['publish', '--key', key, '--relay', relay2, '--package', pkg, '--title', 'Mesh e2e']);
     const until = Date.now() + 60_000;
     while (!bridged.text().includes(`${a}: Seeding`)) {
       if (Date.now() > until) throw new Error(`bridge never seeding:\n${bridged.text()}`);
@@ -406,7 +406,7 @@ async function main(): Promise<void> {
     ].filter(Boolean);
     if (bridgeProblems.length > 0) throw new Error(`bridge: ${bridgeProblems.join('; ')}: ${JSON.stringify(results.bridge)}`);
     // Stats for nerds (nfx #99) over a tracker peer: the bridge, by its peer id prefix.
-    const nerd = await nerdProblems(v, 'nfxd bridge?');
+    const nerd = await nerdProblems(v, 'nutflixd bridge?');
     if (nerd.length > 0) throw new Error(`bridge stats: ${nerd.join('; ')}`);
 
     // The library's lifecycle, on the bundle the tar ships: open, play over the mesh, end

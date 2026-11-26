@@ -75,7 +75,7 @@ pub trait ContentStore: Send + Sync {
     }
 }
 
-/// The store layout `nfx-package` writes: `<dir>/<sha256>`.
+/// The store layout `nutflix-package` writes: `<dir>/<sha256>`.
 #[derive(Debug, Clone)]
 pub struct FsStore {
     dir: PathBuf,

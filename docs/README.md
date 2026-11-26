@@ -71,14 +71,17 @@ ADRs 0006, 0008 and 0100 to 0104 are nfx's own.
 
 ### Statements overtaken since the records were written
 
+- **Names.** Records written before 2026-11-26 say `nfxd` for `nutflixd`, `nfx-package` for
+  `nutflix-package`, `nfx-desktop` for `nutflix-desktop` (the viewer's package), and call this
+  repository `nfx`. The commands and flags they quote are unchanged; the protocol is still NFX.
 - **`nfx/nfx-10-m1-plan.md`**: its header says the work is built on branch
   `nfx10/mesh`, which no longer exists; the work is in `main`. Part C recommends
   deferring the bridge seeder to M2. The decision in the same file reversed that, and
-  the bridge shipped in M1 (`nfxd run --bridge`;
+  the bridge shipped in M1 (`nutflixd run --bridge`;
   see `nfx/reviews/2026-09-24-nfx10-m1.md`).
 - **`nfx/freeze-m1-candidate.md`**: its "What freezing does", "mechanical step" and
   "Recommendation" text is written before the freeze, which happened on 2026-09-24
-  (`spec/README.md`). It says `nfxd` does not join swarms yet; `nfxd run --gossip` now
+  (`spec/README.md`). It says `nutflixd` does not join swarms yet; `nutflixd run --gossip` now
   does (`nfx/reviews/2026-09-24-hardening.md`). It counts 13 vector files; there are 14.
 - **ADR 0002** is the history of the v0 stack; ADR 0006 supersedes it as forward-looking
   architecture. **ADR 0005**'s Q1 split rule was superseded in part by ADR 0007 (minimum

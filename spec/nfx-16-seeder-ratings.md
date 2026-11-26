@@ -170,7 +170,7 @@ rank by:
 
 A score never rescues a seeder that is failing now.
 
-`nfxd run --rating-root` (2026-11-05) ranks by 1 and 4 and keeps its own tie-breaks: a seeder on
+`nutflixd run --rating-root` (2026-11-05) ranks by 1 and 4 and keeps its own tie-breaks: a seeder on
 cooldown after a failure last, a seeder heard only over gossip after one from a relay's beacon,
 then the trusted score, then the order learned. Ranks 2, 3 and 5 wait for publishing and paid
 seeding.
@@ -251,6 +251,6 @@ the reference does, every verdict and score included, natively and on `wasm32`
   random 1–24 h delay and at most one rating per seeder a day. Scores come only from the user,
   its follows and trusted authors, minus mutes.
 - Draft 2026-11-05 — a second implementation, no normative change: `nfx-proto`'s Rust reader
-  and scorer match every vector, and `nfxd` orders the seeders it pulls from by trusted score
+  and scorer match every vector, and `nutflixd` orders the seeders it pulls from by trusted score
   (§4, ranks 1 and 4). §5 names what reading still reveals: the reader's address, to the
   relays it reads its own lists from.

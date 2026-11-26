@@ -1,11 +1,11 @@
 /**
  * NFX-10 §6 with a native node in the mesh (#71, phase 2), end to end on this machine only
- * (loopback, ephemeral ports), with NO tracker anywhere: a browser and nfxd's mesh endpoint
+ * (loopback, ephemeral ports), with NO tracker anywhere: a browser and nutflixd's mesh endpoint
  * (`--mesh-relay`, a full ICE agent) find each other in a rendition's room and negotiate
  * through a STOCK Nostr relay, strfry at the pinned commit e2e-strfry.sh builds, with its own
  * default strfry.conf (only its database, port and open-files limit changed).
  *
- *   ffmpeg 60 s clip → nfx-package → nfxd seeding it: the origin (behind a gate), an embedded
+ *   ffmpeg 60 s clip → nutflix-package → nutflixd seeding it: the origin (behind a gate), an embedded
  *   relay only to publish the manifest (never given to the page), and the mesh endpoint
  *   signaling through strfry → one fresh headless Chromium context (never a real profile) on
  *   the test page with `&signal=nostr&relay=` strfry and a 2 s HTTP window.
@@ -244,7 +244,7 @@ async function main(): Promise<void> {
   const strfryBin = need('STRFRY');
   const strfryConf = need('STRFRY_CONF');
   if (!existsSync(join(here, 'out/player.js'))) throw new Error('no out/player.js: run npm run build first');
-  run('cargo', ['build', '--locked', '--manifest-path', join(crates, 'Cargo.toml'), '-p', 'nfxd', '-p', 'nfx-media', '--bins']);
+  run('cargo', ['build', '--locked', '--manifest-path', join(crates, 'Cargo.toml'), '-p', 'nutflixd', '-p', 'nfx-media', '--bins']);
 
   // ---- the stock relay: strfry's own config, only db, port and open-files limit changed ----
   const relayPort = await freePort();
@@ -264,25 +264,25 @@ async function main(): Promise<void> {
   const clip = join(work, 'clip.mp4');
   run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '60', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', clip]);
   const pkg = join(work, 'pkg');
-  run(bin('nfx-package'), [clip, '--video', 'nfx:testnet:1:nostr-node-e2e', '--out', pkg, '--max-height', '720', '--preset', 'veryfast']);
+  run(bin('nutflix-package'), [clip, '--video', 'nfx:testnet:1:nostr-node-e2e', '--out', pkg, '--max-height', '720', '--preset', 'veryfast']);
   const meta = JSON.parse(readFileSync(join(pkg, 'nfx.json'), 'utf8')) as { root: string; video: string };
   const key = join(work, 'node.key');
-  const pubkey = run(bin('nfxd'), ['key', 'new', key]).split('\n')[0]!;
+  const pubkey = run(bin('nutflixd'), ['key', 'new', key]).split('\n')[0]!;
   const a = `38504:${pubkey}:${meta.video}`;
   const node = await start(
-    bin('nfxd'),
+    bin('nutflixd'),
     [
       'run', '--key', key, '--store', join(pkg, 'store'), '--seed', a, '--embed-relay', '127.0.0.1:0', '--origin', '127.0.0.1:0',
       '--mesh-relay', relay, '--mesh-bind', '127.0.0.1:0',
     ],
     [/embedded relay: (ws:\/\/\S+)/, /origin: (http:\/\/\S+?)\/?\s/, /mesh: udp \S+, session ([0-9a-f]{64})/],
   );
-  if (/embedded tracker/.test(node.text())) throw new Error(`nfxd started a tracker:\n${node.text()}`);
+  if (/embedded tracker/.test(node.text())) throw new Error(`nutflixd started a tracker:\n${node.text()}`);
   const nodeRelay = node.matches[0]![1]!;
   const origin = node.matches[1]![1]!.replace(/\/$/, '');
   const session = node.matches[2]![1]!;
   if (session === pubkey) throw new Error('the mesh session key is the node key');
-  run(bin('nfxd'), ['publish', '--key', key, '--relay', nodeRelay, '--package', pkg, '--title', 'Nostr node e2e']);
+  run(bin('nutflixd'), ['publish', '--key', key, '--relay', nodeRelay, '--package', pkg, '--title', 'Nostr node e2e']);
   const seedBy = Date.now() + 60_000;
   while (!node.text().includes(`${a}: Seeding`) || !/^mesh: 1 room/m.test(node.text())) {
     if (Date.now() > seedBy) throw new Error(`never seeding in a room:\n${node.text().slice(-4000)}`);
@@ -373,7 +373,7 @@ async function main(): Promise<void> {
   const { problems, counts } = relayProblems(watch.events);
   results.relayCarried = counts;
   results.nodeExit = code;
-  if (code === 'timeout') problems.push('nfxd did not exit within 30 s of SIGTERM');
+  if (code === 'timeout') problems.push('nutflixd did not exit within 30 s of SIGTERM');
   if (!watch.events.some((e) => e.pubkey === session && tag(e, 't') === 'disconnect')) problems.push("strfry carried no disconnect of the node's session");
   if (problems.length > 0) throw new Error(`relay: ${problems.slice(0, 20).join('; ')}: ${JSON.stringify(results)}`);
   console.log(JSON.stringify(results, null, 2));

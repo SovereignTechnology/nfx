@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["nfx-media", "nfx-node", "nfx-pay", "nfx-pay-wire", "nfx-proto", "nfx-wasm", "nfxd"]
+members = ["nfx-media", "nfx-node", "nfx-pay", "nfx-pay-wire", "nfx-proto", "nfx-wasm", "nutflixd"]
 
 [workspace.package]
 edition = "2024"
 rust-version = "1.98"
 license = "AGPL-3.0-or-later"
-repository = "https://gitworkshop.dev/npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx"
+repository = "https://gitworkshop.dev/npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nutflix"
 
 [workspace.dependencies]
 base64 = "0.23.1"

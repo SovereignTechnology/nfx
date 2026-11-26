@@ -1707,7 +1707,7 @@ interface VerifiedStunAnnouncement {
   eq('panel: sources', meshed.sources.map((x) => [x.kind, x.id, x.label, x.via, x.down, x.up, x.connected]), [
     ['origin', 'origin.example', 'HTTPS origin', '', 5096, 0, true],
     ['webrtc', 'cdcdcdcd', 'peer', 'nostr', 3000, 0, true],
-    ['webrtc', '-NX0100-abcdefghijkl', 'nfxd bridge?', 'tracker.example', 0, 500, false],
+    ['webrtc', '-NX0100-abcdefghijkl', 'nutflixd bridge?', 'tracker.example', 0, 500, false],
   ]);
   eq('shortId: a session key', shortId(key), 'cdcdcdcd');
   eq('shortId: anything else', shortId('x'.repeat(40)).length, 20);

@@ -42,7 +42,7 @@ impl Node {
     /// that [`Node::dial`] filtered. So a member can make the node contact a host of its
     /// choosing: a blind SSRF, and on a relay-only node the IP address that mode hides.
     /// iroh-gossip also keeps the peer data members send, unpruned. Callers should
-    /// gossip only when asked to; `nfxd` makes it opt-in. Refused on a relay-only node.
+    /// gossip only when asked to; `nutflixd` makes it opt-in. Refused on a relay-only node.
     pub async fn join_swarm(&self, video: &VideoAddr, peers: Vec<EndpointAddr>) -> Result<Swarm> {
         if self.relay_only() {
             return Err(NodeError::Transport(

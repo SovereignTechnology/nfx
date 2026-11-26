@@ -1,4 +1,4 @@
-//! A minimal STUN Binding responder (RFC 8489), so that a network's own nfxd can be the STUN
+//! A minimal STUN Binding responder (RFC 8489), so that a network's own nutflixd can be the STUN
 //! server its web pages name in `iceServers` (NFX-10 §1): browsers learn their public UDP
 //! mapping (a server-reflexive candidate) from it instead of from a third party.
 //!

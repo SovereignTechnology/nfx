@@ -1,4 +1,4 @@
-//! `nfxd` end to end, in one process: a fetcher with an origin and an embedded scoped
+//! `nutflixd` end to end, in one process: a fetcher with an origin and an embedded scoped
 //! relay, and a seeder that finds that relay. The fetcher learns the seeder from a
 //! verified beacon, fetches over iroh, serves the video over HTTP, and becomes a seeder.
 
@@ -23,22 +23,22 @@ use nfx_proto::Verified;
 use nfx_proto::event::Event;
 use nfx_proto::hashlist::{HashList, Role};
 use nfx_proto::manifest::{License, Manifest};
-use nfxd::daemon::{Config, Daemon, VideoState};
-use nfxd::key;
-use nfxd::package::Package;
 use nostr_sdk::prelude::Keys;
+use nutflixd::daemon::{Config, Daemon, VideoState, default_state};
+use nutflixd::key;
+use nutflixd::package::Package;
 use serde_json::Value;
 
 const WAIT: Duration = Duration::from_secs(60);
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("nfxd-it-{}-{name}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("nutflixd-it-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
 }
 
-/// The test-vector video as an `nfx-package` output directory.
+/// The test-vector video as a `nutflix-package` output directory.
 fn vector_package(dir: &Path) -> (Event, Verified<Manifest>, HashList) {
     let m: Value =
         serde_json::from_str(include_str!("../../../spec/test-vectors/manifest.json")).unwrap();
@@ -144,7 +144,7 @@ fn a_closed_stdout_or_stderr_is_not_a_panic() {
 
     let (reader, writer) = std::io::pipe().unwrap();
     drop(reader);
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nfxd"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nutflixd"))
         .args(["key", "show"])
         .arg(&path)
         .stdout(writer)
@@ -159,11 +159,29 @@ fn a_closed_stdout_or_stderr_is_not_a_panic() {
 
     let (reader, writer) = std::io::pipe().unwrap();
     drop(reader);
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nfxd"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nutflixd"))
         .stderr(writer)
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "the usage exit, not a panic");
+}
+
+/// The default state directory is `.nutflixd`. A store written before 0.1.5 has `.nfxd`
+/// and keeps it; once a store has both, the new one wins.
+#[test]
+fn the_default_state_directory_keeps_a_store_written_under_the_old_name() {
+    let store = tmp("default-state");
+    assert_eq!(default_state(&store), store.join(".nutflixd"));
+
+    std::fs::write(store.join(".nfxd"), b"a file is not a state directory").unwrap();
+    assert_eq!(default_state(&store), store.join(".nutflixd"));
+    std::fs::remove_file(store.join(".nfxd")).unwrap();
+
+    std::fs::create_dir_all(store.join(".nfxd/iroh-blobs")).unwrap();
+    assert_eq!(default_state(&store), store.join(".nfxd"));
+
+    std::fs::create_dir_all(store.join(".nutflixd")).unwrap();
+    assert_eq!(default_state(&store), store.join(".nutflixd"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1240,12 +1258,12 @@ async fn a_seeder_whose_iroh_relay_never_comes_up_seeds_without_it_after_the_wai
         &seeder,
         &a,
         &VideoState::Seeding,
-        nfxd::daemon::RELAY_WAIT + Duration::from_secs(30),
+        nutflixd::daemon::RELAY_WAIT + Duration::from_secs(30),
     )
     .await;
     assert!(
         started.elapsed() + Duration::from_secs(5)
-            >= nfxd::daemon::RELAY_WAIT - Duration::from_secs(10),
+            >= nutflixd::daemon::RELAY_WAIT - Duration::from_secs(10),
         "it waited for the relay first: {:?}",
         started.elapsed()
     );
@@ -1588,7 +1606,7 @@ async fn a_seeder_answers_stun_and_announces_it_in_its_beacons() {
         .expect("an answer")
         .unwrap();
     assert_eq!(
-        nfxd::stun::mapped_address(&buf[..n], &txid),
+        nutflixd::stun::mapped_address(&buf[..n], &txid),
         Some(client.local_addr().unwrap())
     );
 
@@ -1635,7 +1653,7 @@ async fn a_seeder_answers_stun_and_announces_it_in_its_beacons() {
 }
 
 /// A two-rendition video (720p and 360p, three 2 s segments each, fabricated bytes) as an
-/// `nfx-package` output directory, and its open manifest signed by `creator`.
+/// `nutflix-package` output directory, and its open manifest signed by `creator`.
 async fn two_rendition_package(
     dir: &Path,
     creator: &Keys,

@@ -590,7 +590,7 @@ fn candidate_lines(sdp: &str) -> Vec<&str> {
 async fn with_a_public_address_it_is_offered_first_and_no_address_that_is_not_public() {
     let sa = |s: &str| -> SocketAddr { s.parse().unwrap() };
     // Bound behind a DNAT on a private address. The public address is offered as given
-    // (nfxd refuses one that is not public; a documentation address stands in for it here).
+    // (nutflixd refuses one that is not public; a documentation address stands in for it here).
     let mut s = state(16).await;
     s.base = sa("10.0.0.28:7845");
     assert_eq!(kinds(&s), ["host 10.0.0.28:7845"], "without one, as before");

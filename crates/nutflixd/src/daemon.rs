@@ -1,4 +1,4 @@
-//! `nfxd run`: seed, fetch, serve and relay, in one process.
+//! `nutflixd run`: seed, fetch, serve and relay, in one process.
 //!
 //! Every video is named by its manifest's `a` tag. The manifest is found on the
 //! configured relays and verified there (NFX-02), and everything after that is anchored
@@ -30,7 +30,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -79,14 +79,29 @@ const DELETION_CHECK_EVERY: Duration = Duration::from_secs(60);
 /// wait at all.
 pub const RELAY_WAIT: Duration = Duration::from_secs(60);
 
+/// Where a node keeps its own state when `--state` names no directory: `<store>/.nutflixd`.
+/// A store written before 0.1.5, when `nutflixd` was `nfxd`, has `<store>/.nfxd` instead:
+/// with one of those and no `.nutflixd`, the old directory stays in use, so an upgraded node
+/// finds the index it wrote and nothing is moved under a running one.
+pub fn default_state(store: &Path) -> PathBuf {
+    let state = store.join(".nutflixd");
+    let before = store.join(".nfxd");
+    if !state.exists() && before.is_dir() {
+        before
+    } else {
+        state
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     /// Signs beacons. Required to seed or fetch (a fetched video is seeded).
     pub keys: Option<Keys>,
     pub store: PathBuf,
-    /// The node's own state (iroh-blobs' index). Default: `<store>/.nfxd`. Kept on disk so
-    /// seeded files are imported by reference, not copied into memory. When given, an
-    /// embedded relay also keeps the manifests it accepts in `relay-manifests` under it.
+    /// The node's own state (iroh-blobs' index). Default: [`default_state`] of the store,
+    /// `<store>/.nutflixd`. Kept on disk so seeded files are imported by reference, not
+    /// copied into memory. When given, an embedded relay also keeps the manifests it accepts
+    /// in `relay-manifests` under it.
     pub state: Option<PathBuf>,
     /// Nostr relays (scoped relays, NFX-04).
     pub relays: Vec<String>,
@@ -1031,9 +1046,9 @@ impl Daemon {
                             ScopedRelay::admitting_persisted(&namespaces, creators, may, &dir)
                                 .await
                                 .map_err(allow_err)?;
-                        crate::status!("nfxd: embedded relay: {reload}");
+                        crate::status!("nutflixd: embedded relay: {reload}");
                         for note in &reload.notes {
-                            crate::status!("nfxd: embedded relay: {note}");
+                            crate::status!("nutflixd: embedded relay: {note}");
                         }
                         relay
                     }
@@ -1056,7 +1071,10 @@ impl Daemon {
             }
         };
 
-        let state = cfg.state.clone().unwrap_or_else(|| cfg.store.join(".nfxd"));
+        let state = cfg
+            .state
+            .clone()
+            .unwrap_or_else(|| default_state(&cfg.store));
         std::fs::create_dir_all(state.join("iroh-blobs"))?;
         let node = Arc::new(
             Node::spawn(NodeConfig {
@@ -1595,12 +1613,12 @@ async fn come_online(node: Arc<Node>, status: watch::Sender<Option<String>>, rel
     status.send_replace(None);
     if !reached {
         crate::status!(
-            "nfxd: warning: iroh relay {relays} not reached in {} s; seeding without it \
+            "nutflixd: warning: iroh relay {relays} not reached in {} s; seeding without it \
              (beacons name it once it connects)",
             RELAY_WAIT.as_secs()
         );
         node.endpoint().online().await;
-        crate::status!("nfxd: iroh relay reached; the next beacons name it");
+        crate::status!("nutflixd: iroh relay reached; the next beacons name it");
     }
 }
 

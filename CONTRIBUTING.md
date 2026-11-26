@@ -110,7 +110,7 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 
 Types used in this repository: `feat`, `fix`, `docs`, `spec` (changes under `spec/`),
 `spike` (spike code and results), `test`, `refactor`, `build`, `ci`, `chore` and
-`merge` (merge commits). The scope is a crate or area, for example `nfxd`, `nfx-proto`,
+`merge` (merge commits). The scope is a crate or area, for example `nutflixd`, `nfx-proto`,
 `crates` or `web`, and may be omitted. A real subject from the history:
 `spec: freeze NFX-02..06 at M1 (2026-09-24)`.
 

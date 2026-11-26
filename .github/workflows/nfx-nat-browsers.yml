@@ -1,6 +1,6 @@
 # nfx #71 phase 3: browsers behind NATs. Two headless Chromium, each behind its own nftables
 # router in a network namespace, share segments with signaling only through a stock Nostr
-# relay (strfry, its pinned commit) and STUN only from a public nfxd (`--stun`): no tracker,
+# relay (strfry, its pinned commit) and STUN only from a public nutflixd (`--stun`): no tracker,
 # no TURN. web/player/e2e-nat/run.sh builds the network and runs the cells (its header lists
 # them and the bounds); web/player/e2e-nat/driver.ts drives the browsers and judges.
 #
@@ -78,7 +78,7 @@ jobs:
           install -m 0755 "$RUNNER_TEMP/dl/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl/wasm-bindgen" "$bin/"
           { echo "$RUNNER_TEMP/node/bin"; echo "$bin"; } >> "$GITHUB_PATH"
           echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/ms-playwright" >> "$GITHUB_ENV"
-      - name: system packages (ffmpeg for nfx-package, nftables for the routers, strfry's build libraries)
+      - name: system packages (ffmpeg for nutflix-package, nftables for the routers, strfry's build libraries)
         run: |
           set -euo pipefail
           sudo apt-get -o Acquire::Retries=8 update -qq
@@ -99,11 +99,11 @@ jobs:
             [ "$i" -lt 5 ] || exit 1
             sleep $((i * 15))
           done
-      - name: build (the WASM, the patched engine and the test page; nfxd and nfx-package)
+      - name: build (the WASM, the patched engine and the test page; nutflixd and nutflix-package)
         run: |
           set -euo pipefail
           (cd web/player && npm run build && npm run typecheck)
-          cargo build --locked --manifest-path crates/Cargo.toml -p nfxd -p nfx-media --bins
+          cargo build --locked --manifest-path crates/Cargo.toml -p nutflixd -p nfx-media --bins
       - name: the NAT cells (root, network namespaces)
         run: |
           set -euo pipefail
