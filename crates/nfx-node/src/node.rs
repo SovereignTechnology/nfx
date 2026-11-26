@@ -586,7 +586,7 @@ mod tests {
 
     #[test]
     fn with_an_external_address_only_public_ones_are_advertised() {
-        let id = SecretKey::from([9u8; 32]).public();
+        let id = runtime_id();
         let relay: RelayUrl = "https://relay.example/".parse().unwrap();
         let ip = |s: &str| TransportAddr::Ip(sa(s));
         let seen = EndpointAddr::from_parts(
@@ -623,9 +623,16 @@ mod tests {
         );
     }
 
+    /// An endpoint id from a key made at run time: no key material in the source.
+    fn runtime_id() -> EndpointId {
+        let mut seed = [0u8; 32];
+        getrandom::fill(&mut seed).unwrap();
+        SecretKey::from(seed).public()
+    }
+
     #[test]
     fn only_public_keeps_relays_and_public_addresses() {
-        let id = SecretKey::from([9u8; 32]).public();
+        let id = runtime_id();
         let relay: RelayUrl = "https://relay.example/".parse().unwrap();
         let ip = |s: &str| TransportAddr::Ip(sa(s));
         let seen = EndpointAddr::from_parts(
