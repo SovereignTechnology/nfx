@@ -197,11 +197,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use nfx_node::nostr::{Relays, sign_manifest};
+use nfx_node::nostr::Relays;
 use nfx_node::unix_now;
 use nfx_proto::namespace::Namespace;
 use nfxd::daemon::{Config, Daemon};
 use nfxd::package::Package;
+use nfxd::publish::{About, sign_package};
 use nfxd::stun_server::{Announce, StunConfig, StunServer};
 use nfxd::{Error, Result, key, status};
 use nostr_sdk::prelude::ToBech32 as _;
@@ -426,15 +427,17 @@ async fn publish(args: &[String]) -> Result<()> {
         return Err(Error::Config("--relay is required".into()));
     }
     let package = Package::open(Path::new(&required(&f, "package")?))?;
-    let now = unix_now();
-    let manifest = package.manifest(
-        &required(&f, "title")?,
-        &one(&f, "description")?.unwrap_or_default(),
-        one(&f, "alt")?.as_deref(),
-        &all(&f, "tag"),
-        now,
-    )?;
-    let (event, manifest) = sign_manifest(&keys, &manifest, now).await?;
+    let title = required(&f, "title")?;
+    let description = one(&f, "description")?.unwrap_or_default();
+    let alt = one(&f, "alt")?;
+    let tags = all(&f, "tag");
+    let about = About {
+        title: &title,
+        description: &description,
+        alt: alt.as_deref(),
+        tags: &tags,
+    };
+    let (event, manifest) = sign_package(&keys, &package, about).await?;
     let relays = Relays::connect(&relays, Duration::from_secs(10)).await?;
     let accepted = relays.publish(&event).await;
     relays.shutdown().await;
