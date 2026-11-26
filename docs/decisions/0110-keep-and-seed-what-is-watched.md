@@ -13,9 +13,10 @@ first; the other renumbers.
 ## Context
 
 - A video reaches its viewers through its creator's seeders and a few operators' `nfxd`. Its
-  audience fetches it and then throws it away: the desktop viewer deletes a
-  watched video at close unless its user turned on "Share videos I watch", the Pear app spools a
-  play to a temp folder and deletes it, and a browser holds it in memory until the tab closes.
+  audience fetches it and serves none of it afterwards: the desktop viewer leaves a watched
+  video's files in a cache it never serves again, and seeds one only while it runs if its user
+  turned on "Share videos I watch"; the Pear app spools a play to a temp folder and deletes it;
+  and a browser holds it in memory until the tab closes.
 - The 2026-09-24 independent audit's L4 (desktop privacy) chose **seeding is opt-in**: a viewer
   that seeds announces its address and what it watched, so it should do so only when asked.
   Its protections were that a viewer announces nothing by default, and that a viewer that shares
