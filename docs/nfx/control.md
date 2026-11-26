@@ -25,6 +25,7 @@ Status: **design**. Nothing here is built yet; the types will live in
   owner and mode, and that the peer's uid is the socket file's owner.
 - The path must fit `sun_path` (107 bytes on Linux).
 - At most 2 connections at once. A third is closed without a reply.
+- Root is not let in unless the node runs as root or `--control-allow-uid 0` says so.
 
 A node on another machine is reached by forwarding the socket, for example
 `ssh -N -o StreamLocalBindUnlink=yes -L /run/user/1000/nfx-remote/booth.sock:/run/user/1001/nfxd/control.sock host`.
@@ -38,8 +39,8 @@ directory's.
   UTF-8.
 - The length is 1 to 262144 (256 KiB). Both ends enforce it before they read the body. A
   frame outside it ends the connection; the node first answers `too_large` with id 0.
-- One request is in flight on a connection. A client sends a request and reads its reply
-  before it sends the next. A second request before the reply ends the connection.
+- Requests on a connection are answered one at a time, in the order they arrive. A client
+  sends a request and reads its reply before it sends the next.
 - A connection with no request for 30 s is closed. A frame that takes more than 10 s to
   arrive whole ends the connection.
 - More than 20 requests in one second on a connection: `rate_limited`.
