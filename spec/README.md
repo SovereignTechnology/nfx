@@ -39,6 +39,7 @@ desktop shell.
 | NFX-12 | HyperDHT transport profile (optional) | Draft | later |
 | NFX-16 | Seeder ratings (kind 7368; optional) | Draft | — |
 | NFX-17 | Seeder lookup (kind 20465; optional) | Draft | — |
+| NFX-18 | Keeping and seeding what is watched (optional) | Draft | — |
 
 NFX-13 to NFX-15 are reserved for documents not yet written: creator-managed mode
 (ADR 0100), the creator share (ADR 0102) and channel payments (ADR 0104).
@@ -121,3 +122,9 @@ the repository license. Rationale and full context: `docs/decisions/0006-*` (f).
   Decided by the maintainer (sovtech) over a `specver` bump. Record: decision record 0108 and
   NFX-04's changelog. NFX-10 §1 (Draft) gains STUN at the relays a client signals through;
   NFX-11 registers the field.
+- 2026-11-26 — NFX-18 (keeping and seeding what is watched) added as Draft, optional, after
+  decision record 0110: a watcher keeps what its user watches for a minute or downloads, and
+  seeds the renditions it holds, with no private address announced, keys of its own, and a
+  notice and a switch for its user. NFX-12 (Draft) gains an optional `renditions` on the
+  `hyperdht` endpoint. No frozen document changes: NFX-03 §4 already defines a seeder of some
+  renditions.

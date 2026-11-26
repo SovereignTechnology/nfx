@@ -47,7 +47,7 @@ Frozen; the status of every document and its freeze milestone is in
 
 | Path | What it is |
 |---|---|
-| `spec/` | NFX-01 to NFX-12, NFX-16 and NFX-17, the JSON schemas (`schemas/`) and the regenerable test vectors (`test-vectors/`) |
+| `spec/` | NFX-01 to NFX-12 and NFX-16 to NFX-18, the JSON schemas (`schemas/`) and the regenerable test vectors (`test-vectors/`) |
 | `crates/` | The Cargo workspace (edition 2024), with the members below |
 | `crates/nfx-proto` | Wire formats: manifests, beacons, hash lists, canonical JSON, vouchers, gossip envelopes. Pure (no I/O, clock or RNG); builds natively and for `wasm32` |
 | `crates/nfx-node` | The peer: content store, iroh seeding and fetching, gossip presence, Nostr manifests and beacons, pull-through origin, embeddable scoped relay, browser-mesh tracker and WebRTC bridge, and the Nostr-signaled full-ICE mesh endpoint |

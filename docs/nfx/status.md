@@ -16,7 +16,7 @@ rust-forward), `zizmor.yml`, `nightly.yml` (advisories, miri), `release.yml` and
 dormant twin: it runs nothing. What the sections below say of the private
 GitLab project, of GitLab CI and of its shared runner is as it stood before that.
 
-Updated 2026-11-26 · `main` = `3d96bcc` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
+Updated 2026-11-26 · `main` = `2119bea` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
 
 ## Since 2026-11-09
 
@@ -72,6 +72,12 @@ Merged after the 0.1.4 release commit (`226fd79`), so in no release's notes:
   beacon subscription that ended and stops waiting on a STUN server that never answers;
   `nutflixd` takes a host name in `--mesh-stun` and sends each video's beacon to every
   `--relay` within a share of that relay, backing off when the relay says it is rate-limited.
+- **2026-11-26, NFX-18, keeping and seeding what is watched, Draft** (#129, `2119bea`;
+  [NFX-18](../../spec/nfx-18-keeping.md), decision record
+  [0110](../decisions/0110-keep-and-seed-what-is-watched.md)): a watcher may keep what its user
+  watches or downloads and seed the renditions it holds, behind a notice and one switch;
+  NFX-12 gains an optional `renditions` on the `hyperdht` endpoint. Spec and vectors only: no
+  node or viewer does it yet.
 
 ## Since 2026-10-25
 
@@ -405,6 +411,12 @@ direct path, played in a real browser ([`phase-a-exit.md`](phase-a-exit.md)).
       is only served to the window and never announced, and the portmapper is off
       (`Config::seed_watched`, `Config::no_portmapper`). The desktop e2e runs both
       ways.
+      **Amended 2026-11-26 by sovtech (decision record 0110, NFX-18):** an app that keeps and
+      seeds what its user watches or downloads may do so by default, behind a notice (its IP
+      address and the list of what it seeds are public) and one switch that stops all
+      announcing. L4's protections stay as rules: no private address announced
+      (`NodeConfig::public_addrs_only`), no port mapping because of keeping, beacons never
+      under the user's identity key. The desktop viewer's default changes in its own PR.
   - **Gossip in `nutflixd` (NFX-06 §4), opt-in.** With `--gossip`, every seeded or watched
     video joins its swarm.
     Seeders announce a signed `here` every 60 s and a `bye` on deletion, and every node
