@@ -80,10 +80,11 @@ every namespace, room key and manifest.
      5 `cancel`, 6 `busy`, 7 `list` (which renditions of a `root`), 8 `have` (which of the hash
      list's renditions are held whole and which in part, by their index in it), 9 `beacons`. A
      `data` message carries at most 16,379 bytes of the file, so a whole message is at most 16 KiB,
-     which every WebRTC stack carries; a file spans as many as it needs. Request ids are never
-     reused on a channel, so a `cancel` needs no answer: anything that still arrives for it is
-     ignored. A malformed message closes the channel. A new message type takes a new label
-     (`nfx-files/2`), as NFX-12 §3 rules for Protomux.
+     and less to a peer whose `max-message-size` (RFC 8841 §6.1) is lower: no message is larger than
+     the peer takes. A file spans as many as it needs. Request ids are never reused on a channel, so
+     a `cancel` needs no answer: anything that still arrives for it is ignored. A malformed message
+     closes the channel. A new message type takes a new label (`nfx-files/2`), as NFX-12 §3 rules
+     for Protomux.
    - **What is served**: the hash list (`get` of `root`) and the files of a hash list of the
      connection's video with any role but `segment`; never a segment, which stays on p2p-media-loader;
      never a file of another video, so a channel is no oracle for what else a peer holds.
@@ -108,22 +109,23 @@ every namespace, room key and manifest.
      3 at once), move on after `missing` or `busy`. Peers that delivered a verified file come first,
      then those whose `have` names the file's rendition, then the rest at random.
 3. **`have` replaces the origin probe.** A page looks only at the renditions it may offer (its
-   allowed levels, among the hash list's first 32). It offers a level for an allowed rendition that
-   a connected peer's `have` names as held whole, once its media playlist and init have verified,
-   from any peer. Allowed renditions named only in part are probed too, after the whole ones, in the
-   same 8 s; the page offers them instead when no allowed rendition held whole verified (none is
-   held whole, as for a video whose seeders are gone, played from its viewers; or the peers that
-   hold it whole answered `busy` or failed throughout). p2p-media-loader's announcements then say
-   which segments each peer holds, and a missing one is waited for or rescued as the page may. A
-   peer whose `have` names a rendition and then answers `missing` for its playlist or init has its
-   `have` ignored for the session. A node usually holds its renditions whole; a page holds what it
-   has watched, in part, unless it keeps the video whole.
+   allowed levels). It offers a level for an allowed rendition that a connected peer's `have` names
+   as held whole, once its media playlist and init have verified, from any peer. Allowed renditions
+   named only in part are probed too, beside the whole ones in the same 8 s (two queues, three
+   probes at a time each, or six for one when the other is empty, so whole ones whose probes stall
+   never keep the part ones from being probed); the page offers them instead when no allowed
+   rendition held whole verified (none is held whole, as for a video whose seeders are gone, played
+   from its viewers; or the peers that hold it whole answered `busy` or failed throughout).
+   p2p-media-loader's announcements then say which segments each peer holds, and a missing one is
+   waited for or rescued as the page may. A peer whose `have` names a rendition and then answers
+   `missing` for its playlist or init has its `have` ignored for the session. A node usually holds
+   its renditions whole; a page holds what it has watched, in part, unless it keeps the video whole.
 4. **Bootstrap with only the manifest**: join the video room and offer to the peers met; `get` the
    hash list from one, hedge to another after 2 s; verify it; `list` the peers; `get` the master
-   playlist and, for each allowed rendition (at most 32, six at a time, 8 s in all as the origin probe
-   has today), its media playlist and init; offer the confirmed levels; start the player and join
-   their stream rooms. The verified start-up files are kept for the session, answer the page's own
-   loads, and are served to others.
+   playlist and, for each allowed rendition (at most 32, six at a time shared as point 3 says, 8 s
+   in all as the origin probe has today), its media playlist and init; offer the confirmed levels;
+   start the player and join their stream rooms. The verified start-up files are kept for the
+   session, answer the page's own loads, and are served to others.
 5. **Origins become an optional rescue, by `segmentSource`.** Under `https-first` (still the
    library's default), start-up files come over HTTPS as before; the page still serves the file
    channel. Under `peers-then-https`, peers first: a start-up file goes over HTTPS only when peers
@@ -202,7 +204,7 @@ every namespace, room key and manifest.
 | A `seeder` list in the manifest, to trust beacons by | a change to frozen NFX-02, and the creator would re-sign the manifest whenever a seeder comes or goes |
 | Beacons in presence content | readers drop a presence with content (NFX-10 §6.5, NIP-DC §5) |
 | Segments on the file channel too | a second path for what p2p-media-loader already carries, outside its availability map |
-| NFX-12's 65,536-byte `data` frames unchanged | larger than the 16 KiB every WebRTC stack carries in one message |
+| NFX-12's 65,536-byte `data` frames unchanged | past more peers' `max-message-size` (RFC 8841 §6), and each holds the channel four times as long |
 
 ## Consequences
 

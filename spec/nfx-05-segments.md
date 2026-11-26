@@ -61,6 +61,8 @@ Rules:
 - Segment entries SHOULD carry `dur_ms`; playlist entries are generated content
   (§3), not fetched names — their *bytes* still ride the same hash-addressed plane.
 - `segs` in the manifest MUST equal `len(files)`.
+- `renditions` has 1 to 32 entries, so a peer can name each in a file channel's `have`
+  (NFX-10 §6.10).
 - `renditions[].id` values are unique, and `meta` is reserved (NFX-03 §4).
   `renditions[].playlist` MUST equal the `name` of a `files` entry whose role is
   `playlist`. No two renditions name the same playlist, and their playlists' sha256
@@ -221,14 +223,17 @@ server generalizes to an origin when its admin pins NFX-05 content.
   and wrote the paths from the host's root, while NFX-03 §4 already had a beacon's
   `https` endpoint serve `GET <base>/<sha256>` under a base path, and the M1 player
   already fetched under one.
-- 2026-11-26 (**an exception to the freeze rule**, proposed in ADR 0112; for the maintainer,
-  sovtech, to decide over a `specver` bump, which would change every namespace, room key and
-  manifest): a browser needs no origin to start. §6 no longer says every network needs an
-  origin for "browser genesis": a browser can take its start-up files from peers over
-  NFX-10's file channel (§6.10), so a network SHOULD have an origin, for manifest mirroring
-  and as a backstop, and is conformant without one (was: "Every network needs ≥1 (manifest
-  mirroring, browser genesis, censored-shutdown backstop)"). §2 names a peer beside an
-  origin or a seeder as where a hash list may come from, trusted only because it hashes to
-  `root` (was: "from any origin/seeder and MUST NOT be trusted from any other source"). No
-  artifact, wire format or check changes: a hash list is still fetched by `root` and
-  verified against it, wherever it comes from.
+- 2026-11-26 (**an exception to the freeze rule**, proposed in ADR 0112; for the
+  maintainer, sovtech, to decide over a `specver` bump, which would change every
+  namespace, room key and manifest): a browser needs no origin to start. §6 no longer says
+  every network needs an origin for "browser genesis": a browser can take its start-up
+  files from peers over NFX-10's file channel (§6.10), so a network SHOULD have an origin,
+  for manifest mirroring and as a backstop, and is conformant without one (was: "Every
+  network needs ≥1 (manifest mirroring, browser genesis, censored-shutdown backstop)"). §2
+  names a peer beside an origin or a seeder as where a hash list may come from, trusted
+  only because it hashes to `root` (was: "from any origin/seeder and MUST NOT be trusted
+  from any other source"). §2 caps `renditions` at 32, so a file channel's `have` can name
+  each by its index (was: no limit; no hash list made so far has more), and
+  `hashlist-invalid.json` gains a 33-rendition case with the reference implementation; the
+  schema says `maxItems` 32. No other artifact, wire format or check changes: a hash list
+  is still fetched by `root` and verified against it, wherever it comes from.

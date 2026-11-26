@@ -821,9 +821,13 @@ name the roles in one exchange.
 | 8 | `have` | server | `req` ‖ UTF-8 JSON, 2 to 2,048 bytes |
 | 9 | `beacons` | requester | `req`: exactly 4 bytes |
 
-- A `data` message is at most 16,384 bytes in all, the most every WebRTC implementation
-  carries in one message (NFX-12 §4's 65,536-byte frames are not); a file spans as many as
-  it needs.
+- A `data` message is at most 16,384 bytes in all (NFX-12 §4's 65,536-byte frames are not
+  used here). A sender never sends a message larger than its peer's `max-message-size`
+  (RFC 8841 §6.1), read from the peer's SDP: 65,536 bytes when it names none, any size when
+  it names 0. To a peer with a lower limit a `data` message carries less of the file, at
+  most that limit less its 5-byte header. A side does not use the file channel, and closes
+  it when it opens, on a connection whose peer's limit is below 2,053 bytes (the longest
+  `have` with its header). A file spans as many messages as it needs.
 - A message of another length or of a type not in the table, a `hello` of another version or
   a second `hello`, or a ninth open request (below) is a protocol error: the receiver
   closes the channel, and a video-room connection with it. A new type is never added under
@@ -850,14 +854,14 @@ name the roles in one exchange.
   arrays of distinct integers, each the index of a rendition in that hash list's
   `renditions` (0 for the first), below 32 and below the list's length, no index in both. A
   rendition is named by its place, not its id, so every `have` fits the bound whatever the
-  ids are (the largest, written compactly, is 107 bytes). A rendition after the 32nd cannot
-  be named, and a page offers none from peers (it looks at the first 32 only, below).
-  `whole` names the renditions whose media playlist the server holds with every file that
-  playlist names (its init and every segment); `part` names those whose media playlist and
-  init it holds with at least one segment but not all. Both arrays are empty when it holds
-  neither. A server answers `missing` for a hash list it does not hold, and for one of
-  another video even when it holds it, as for `get` (below). A requester ignores a `have`
-  that names an index at or past the list's length.
+  ids are (the largest, written compactly, is 107 bytes). A hash list has at most 32
+  renditions (NFX-05 §2), so a `have` can name every one. `whole` names the renditions whose
+  media playlist the server holds with every file that playlist names (its init and every
+  segment); `part` names those whose media playlist and init it holds with at least one
+  segment but not all. Both arrays are empty when it holds neither. A server answers
+  `missing` for a hash list it does not hold, and for one of another video even when it
+  holds it, as for `get` (below). A requester ignores a `have` that names an index at or
+  past the list's length.
 - `beacons` asks for the server's beacons of the channel's video (below). The answer is
   `data` messages then `end`, whose bytes are a JSON array of 1 to 4 signed kind-20464
   events, each in the compact form of NFX-17 §1.2 and at most 16,384 bytes, the whole at
@@ -912,18 +916,19 @@ or 10 s, whichever comes first, before it tries again.
 
 **Which levels.** `have` does for peers what an `https` endpoint's `renditions` and an
 origin's answers do for origins (§1, NFX-03 §5). A page looks only at the renditions it may
-offer: its allowed levels, among the first 32 of the hash list. It offers a level for an
-allowed rendition that a connected peer's `have` names in `whole`, and only once that
-rendition's media playlist and init have verified, from any peer. It probes the allowed
-renditions named only in `part` too, after those named in `whole`, within the same 8 s (step
-3 below), and offers them, on the same condition, when no allowed rendition named in `whole`
-has verified: none is named so (a video whose seeders are gone, played from its viewers), or
-the peers that name one answered `busy` or failed throughout. Which segments each peer holds
-then comes from p2p-media-loader's announcements in the stream room, and a segment no peer
-holds is waited for, or rescued where the page may (below). A peer whose `have` names a
-rendition and then answers `missing` for its playlist or init has its `have` ignored for the
-rest of the session. A `have` orders peers and selects levels; it never makes a page trust a
-byte.
+offer: its allowed levels. It offers a level for an allowed rendition that a connected
+peer's `have` names in `whole`, and only once that rendition's media playlist and init have
+verified, from any peer. It probes the allowed renditions named only in `part` too, beside
+those named in `whole`, within the same 8 s (step 3 below): as two queues, three probes at a
+time each (six for one when the other is empty), so renditions named in `whole` whose probes
+stall never keep the others from being probed. It offers them, on the same condition, when
+no allowed rendition named in `whole` has verified: none is named so (a video whose seeders
+are gone, played from its viewers), or the peers that name one answered `busy` or failed
+throughout. Which segments each peer holds then comes from p2p-media-loader's announcements
+in the stream room, and a segment no peer holds is waited for, or rescued where the page may
+(below). A peer whose `have` names a rendition and then answers `missing` for its playlist
+or init has its `have` ignored for the rest of the session. A `have` orders peers and
+selects levels; it never makes a page trust a byte.
 
 **Starting from a manifest.** A page that holds a video's signed manifest, verified (NFX-02
 §4), and signals over Nostr:
@@ -932,7 +937,8 @@ byte.
 2. asks one of them for the hash list, joining another to the request after 2 s without a
    byte, and verifies it;
 3. asks its peers `list`, and fetches the master playlist and, for each rendition it may
-   offer (at most 32, six at a time, 8 s in all), its media playlist and init, each verified;
+   offer (at most 32, six at a time as above, 8 s in all), its media playlist and init, each
+   verified;
 4. offers the levels above, starts the player, and joins those renditions' stream rooms
    (§6.1), whose connections carry the file channel too;
 5. keeps the start-up files it verified, which answer its own player's loads, and serves them
@@ -1145,14 +1151,15 @@ that MUST close the channel and every beacon a reader MUST refuse.
   second data channel beside p2p-media-loader's (opened after it, which earlier peers
   ignore): NFX-12 §4's `get`, `data`, `end` and `missing` behind a type byte, with `hello`,
   `cancel`, `busy`, `list`/`have` (renditions held whole or in part) and `beacons`; data in
-  messages of at most 16 KiB; start-up files only, never segments, each capped and verified
-  as over HTTPS; at most 8 open requests and 256 KiB queued per channel; a node's file
-  requests share its segment budget. `have` replaces the origin probe for the levels a page
-  offers. A server may also serve its signed beacons, which readers trust as they trust a
-  tell's. §1: a file comes from an origin or from peers, at the player's choice, and an
-  origin is optional; start-up files are verified the same way over either and never travel
-  over p2p-media-loader. §§2, 6, 6.1, 6.6, 6.7 and 6.8 follow. (Was: the hash list,
-  playlists and init segments came from an origin only, and rooms needed the hash list.) New
-  vectors `file-channel.json` and `file-channel-invalid.json`, and `mesh-signal.json` gains
-  `video_rooms`, all pending until the reference implementation adds them. NFX-05 §§2 and 6
-  are amended in place to match (an exception to the freeze rule).
+  messages of at most 16 KiB and never past the peer's `max-message-size`; start-up files
+  only, never segments, each capped and verified as over HTTPS; at most 8 open requests and
+  256 KiB queued per channel; a node's file requests share its segment budget. `have`
+  replaces the origin probe for the levels a page offers. A server may also serve its signed
+  beacons, which readers trust as they trust a tell's. §1: a file comes from an origin or
+  from peers, at the player's choice, and an origin is optional; start-up files are verified
+  the same way over either and never travel over p2p-media-loader. §§2, 6, 6.1, 6.6, 6.7 and
+  6.8 follow. (Was: the hash list, playlists and init segments came from an origin only, and
+  rooms needed the hash list.) New vectors `file-channel.json` and
+  `file-channel-invalid.json`, and `mesh-signal.json` gains `video_rooms`, all pending until
+  the reference implementation adds them. NFX-05 §§2 and 6 are amended in place to match (an
+  exception to the freeze rule).
