@@ -734,8 +734,11 @@ NFX-18's.
 
 ### 7.3 Where a file comes from
 
-A page that keeps, or that speaks the file channel (§6.10), asks for each file in tiers, in
-this order: its keep store; the file channel, which declines segments; HTTP origins.
+A page that keeps, or that speaks the file channel (§6.10), asks for each file in tiers. Its
+keep store comes first, whatever the session's `segmentSource`. The tiers after it follow
+`segmentSource` (decision record 0112): with `peers-then-https`, the file channel (which
+declines segments), then HTTP origins; with `peers-only`, the file channel alone; with
+`https-first`, HTTP origins, and the file channel only for a session that has no origin.
 
 - A tier is asked by the file's HTTP path (`<root>`, or `<root>/<content name>`) and told
   the sha256, role and size the hash list gives the file. It answers with bytes it has
