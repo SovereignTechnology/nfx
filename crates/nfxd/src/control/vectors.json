@@ -882,6 +882,15 @@
       ]
     },
     {
+      "name": "a list of the fields",
+      "code": "bad_request",
+      "field": null,
+      "json": [
+        1,
+        "status"
+      ]
+    },
+    {
       "name": "params that are a list",
       "code": "bad_request",
       "field": null,
@@ -996,6 +1005,23 @@
         "id": 1,
         "method": "settings.set",
         "params": {}
+      }
+    },
+    {
+      "name": "settings that are a list",
+      "code": "bad_request",
+      "field": null,
+      "json": {
+        "id": 1,
+        "method": "settings.set",
+        "params": {
+          "settings": [
+            null,
+            null,
+            null,
+            true
+          ]
+        }
       }
     },
     {
