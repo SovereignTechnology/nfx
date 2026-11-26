@@ -258,6 +258,42 @@ impl Relays {
         Ok(out.success.len())
     }
 
+    /// These relays' URLs, as [`Relays::publish_to`] takes them.
+    pub async fn urls(&self) -> Vec<String> {
+        self.client
+            .relays()
+            .await
+            .keys()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// Send a signed event to `urls` only, each one of [`Relays::urls`]. Each relay's answer,
+    /// by URL: `Ok` when it accepted the event, else why not (its `OK` message, say
+    /// `rate-limited: …`, or why it was not reached).
+    pub async fn publish_to(
+        &self,
+        event: &Event,
+        urls: &[String],
+    ) -> Result<BTreeMap<String, core::result::Result<(), String>>> {
+        if urls.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let out = self
+            .client
+            .send_event(&to_nostr(event)?)
+            .to(urls.iter().map(String::as_str))
+            .await
+            .map_err(NodeError::relay)?;
+        let mut answers: BTreeMap<String, core::result::Result<(), String>> = out
+            .failed
+            .into_iter()
+            .map(|(url, why)| (url.to_string(), Err(why)))
+            .collect();
+        answers.extend(out.success.into_keys().map(|url| (url.to_string(), Ok(()))));
+        Ok(answers)
+    }
+
     /// Sign and publish a beacon for `manifest` now, with [`BEACON_TTL`].
     pub async fn announce<S>(
         &self,
