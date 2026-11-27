@@ -107,6 +107,8 @@ import {
   LIMITS,
   OfferBackoff,
   PresenceBook,
+  PRESENCE_MIN_GAP_MS,
+  PresenceClock,
   SeenIds,
   SenderLimiter,
   eventHead,
@@ -917,6 +919,21 @@ throws('nine relays', () => checkRelays(Array.from({ length: 9 }, (_, i) => `wss
   const hi = '0'.repeat(63) + 'b';
   eq('the lower key offers', [offersTo(lo, hi), offersTo(hi, lo)], [true, false]);
   eq('not to itself', offersTo(lo, lo), false);
+}
+{
+  // NFX-10 §6.6: no two connects of a room closer than 10 s (NFX-04 §2), one due sooner waits;
+  // newcomers answered out of turn at most once per 30 s.
+  const c = new PresenceClock(10_000, 30_000);
+  eq('the first connect goes at once', c.wait(1_000), 0);
+  c.sent(1_000);
+  eq('one wanted 4 s later waits the other 6 s', c.wait(5_000), 6_000);
+  eq('at the gap it may go', c.wait(11_000), 0);
+  eq('the first newcomer is answered', c.answer(5_000), true);
+  eq('another 29 s later is not', c.answer(34_000), false);
+  eq('one 30 s later is', c.answer(35_000), true);
+  c.sent(40_000);
+  eq('a round 2 s after an out-of-turn connect waits 8 s', c.wait(42_000), 8_000);
+  eq('NFX-04 §2: the gap is at least 10 s', PRESENCE_MIN_GAP_MS >= 10_000, true);
 }
 {
   // Presence: newest by created_at wins; a disconnect wins a same-second tie; expiry; bound.

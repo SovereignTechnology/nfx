@@ -146,9 +146,11 @@ const MAX_LOCAL_CANDIDATES: usize = 7;
 /// How often a room whose rendition is not all in the store is checked again, so peers hear
 /// of segments that arrived (a pulled or fetched video fills in), as the bridge does.
 const REFRESH_EVERY: Duration = Duration::from_secs(10);
-/// A room's presence is sent again, out of turn, at most this often: when a new peer whose
-/// key is lower (so it is the one to offer) appears, so it need not wait for the next round.
-const REANNOUNCE_EVERY: Duration = Duration::from_secs(5);
+/// No two of a room's `connect`s go out closer than this (NFX-10 §6.6): NFX-04 §2 admits one
+/// presence per 10 s per key, room and type. One due sooner waits for the gap and is never
+/// dropped, so a node answers newcomers at most once per gap, and one answer deferred serves
+/// every newcomer seen meanwhile.
+pub const PRESENCE_MIN_GAP: Duration = Duration::from_secs(signal::PRESENCE_MIN_GAP);
 /// STUN from Nostr: the sources of names held at most (a beacon per signer and video). Keys
 /// are free: past it, a new source is ignored until one expires. A creator's beacon of its
 /// own video is always kept: there is at most one per video watched.
@@ -806,6 +808,24 @@ impl Link {
     }
 }
 
+impl RoomState {
+    /// Whether this room's `connect` may go to every relay at `now` (counted as sent if so):
+    /// inside [`PRESENCE_MIN_GAP`] of the last one it is deferred until the gap has passed.
+    fn presence_now(&mut self, now: Instant) -> bool {
+        match self.last_connect {
+            Some(t) if now < t + PRESENCE_MIN_GAP => {
+                self.presence_due.get_or_insert(t + PRESENCE_MIN_GAP);
+                false
+            }
+            _ => {
+                self.last_connect = Some(now);
+                self.presence_due = None;
+                true
+            }
+        }
+    }
+}
+
 /// A joined room.
 struct RoomState {
     room: Room,
@@ -814,8 +834,10 @@ struct RoomState {
     seen: SeenIds,
     limiter: SenderLimiter,
     backoff: OfferBackoff,
-    /// When this room's presence may next go out of turn ([`REANNOUNCE_EVERY`]).
-    reannounce_at: Instant,
+    /// When this room's `connect` last went to every relay, and the one deferred until
+    /// [`PRESENCE_MIN_GAP`] has passed.
+    last_connect: Option<Instant>,
+    presence_due: Option<Instant>,
     /// The video's address without its creator (`<namespace>:<video-id>`), as a beacon's `a`
     /// ends: the fallback counts a beacon only for the peers of its own video.
     video: String,
@@ -929,6 +951,11 @@ impl State {
             .min(self.next_sub_check)
             .min(self.stun.next_round)
             .min(self.next_presence);
+        for r in self.rooms.values() {
+            if let Some(d) = r.presence_due {
+                wake = wake.min(d);
+            }
+        }
         for (_, _, at) in self.stun.pending.values() {
             wake = wake.min(*at);
         }
@@ -1137,7 +1164,8 @@ impl State {
                 seen: SeenIds::default(),
                 limiter: SenderLimiter::default(),
                 backoff: OfferBackoff::default(),
-                reannounce_at: Instant::now(),
+                last_connect: None,
+                presence_due: None,
                 video: spec.video.clone(),
             });
             r.swarm = Swarm {
@@ -1164,8 +1192,10 @@ impl State {
         self.resubscribe().await;
         self.resubscribe_stun().await;
         let now = unix_now();
+        let at = Instant::now();
         for key in joined {
-            if let Some(r) = self.rooms.get(&key)
+            if let Some(r) = self.rooms.get_mut(&key)
+                && r.presence_now(at)
                 && let Ok(ev) = self.session.connect(&r.room, now)
             {
                 self.publish(&ev);
@@ -1606,17 +1636,26 @@ impl State {
                 l.conn.dead = true;
             }
         }
-        if self.gathered && now >= self.next_presence {
+        let round = self.gathered && now >= self.next_presence;
+        if round {
             self.next_presence = now + Duration::from_secs(signal::PRESENCE_INTERVAL);
+        }
+        if self.gathered {
+            // The round's presence, and any deferred inside PRESENCE_MIN_GAP that is now due.
             let at = unix_now();
+            let mut events: Vec<Event> = Vec::new();
             for r in self.rooms.values_mut() {
-                r.presence.prune(at);
+                if round {
+                    r.presence.prune(at);
+                }
+                let wanted = round || r.presence_due.is_some_and(|d| d <= now);
+                if wanted
+                    && r.presence_now(now)
+                    && let Ok(ev) = self.session.connect(&r.room, at)
+                {
+                    events.push(ev);
+                }
             }
-            let events: Vec<Event> = self
-                .rooms
-                .values()
-                .filter_map(|r| self.session.connect(&r.room, at).ok())
-                .collect();
             for ev in &events {
                 self.publish(ev);
             }
@@ -1758,11 +1797,18 @@ impl State {
                 }
                 if signal::offers_to(&me, &r.sender) {
                     self.maybe_offer(&key, &r.sender);
-                } else if new && Instant::now() >= room.reannounce_at {
+                } else if new
+                    && self.has_room(&key)
+                    && self.negotiating(&key) < NEGOTIATIONS_PER_ROOM
+                {
                     // A newcomer that is to offer heard nothing of this node yet (relays keep
-                    // no ephemeral event): tell it now rather than at the next round.
-                    room.reannounce_at = Instant::now() + REANNOUNCE_EVERY;
-                    if let Ok(ev) = self.session.connect(&room.room, now) {
+                    // no ephemeral event): tell it now rather than at the next round, or when
+                    // PRESENCE_MIN_GAP has passed (NFX-10 §6.6).
+                    let at = Instant::now();
+                    if let Some(room) = self.rooms.get_mut(&key)
+                        && room.presence_now(at)
+                        && let Ok(ev) = self.session.connect(&room.room, now)
+                    {
                         self.publish(&ev);
                     }
                 }

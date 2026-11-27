@@ -33,9 +33,12 @@ import type { RelayStunBook } from './relay-stun';
 import { filterRemoteSdpCounted } from './remote-sdp';
 import type { StunFallbackBook } from './stun-fallback';
 import {
+  ANSWER_NEWCOMERS_EVERY_MS,
   LIMITS,
   OfferBackoff,
   PresenceBook,
+  PresenceClock,
+  PRESENCE_MIN_GAP_MS,
   SeenIds,
   SenderLimiter,
   eventHead,
@@ -46,7 +49,7 @@ import {
   overBytes,
 } from './signal-book';
 
-export { LIMITS, PresenceBook, SeenIds, SenderLimiter, eventId, nowSeconds, offersTo };
+export { ANSWER_NEWCOMERS_EVERY_MS, LIMITS, PRESENCE_MIN_GAP_MS, PresenceBook, PresenceClock, SeenIds, SenderLimiter, eventId, nowSeconds, offersTo };
 
 /** NFX-10 §6 constants the library uses (nfx-proto holds the same). */
 export const PRESENCE_INTERVAL_MS = 30_000;
@@ -465,6 +468,9 @@ export class RoomClient {
   #me = '';
   #unsubscribe: (() => void) | null = null;
   #timer: ReturnType<typeof setInterval> | null = null;
+  /** When our `connect` may next go out (NFX-10 §6.6), and the one deferred until then. */
+  readonly #clock = new PresenceClock(PRESENCE_MIN_GAP_MS, ANSWER_NEWCOMERS_EVERY_MS);
+  #due: ReturnType<typeof setTimeout> | null = null;
   #started = false;
   #destroyed = false;
 
@@ -507,10 +513,10 @@ export class RoomClient {
       (json) => this.#onEvent(json),
       (send) => this.#announce(send),
     );
-    this.#announce();
+    this.#announceAll();
     this.#timer = setInterval(() => {
       this.#presence.prune(nowSeconds());
-      this.#announce();
+      this.#announceAll();
     }, PRESENCE_INTERVAL_MS);
     this.#s.log(`mesh: nostr room ${room.slice(0, 12)}… for ${this.#ctx.streamSwarmId}`);
   }
@@ -524,6 +530,39 @@ export class RoomClient {
     const ev = this.#s.session.connect(this.#room, nowSeconds());
     if (send) send(ev);
     else this.#publish(ev);
+  }
+
+  /**
+   * Our presence to every relay, now, or once `PRESENCE_MIN_GAP_MS` has passed since the last
+   * one: a presence due sooner is deferred, never dropped, and one deferred serves every
+   * reason for it met meanwhile.
+   */
+  #announceAll(): void {
+    if (this.#destroyed || this.#room === null) return;
+    const wait = this.#clock.wait(Date.now());
+    if (wait > 0) {
+      this.#due ??= setTimeout(() => {
+        this.#due = null;
+        this.#announceAll();
+      }, wait);
+      return;
+    }
+    if (this.#due !== null) clearTimeout(this.#due);
+    this.#due = null;
+    this.#clock.sent(Date.now());
+    this.#announce();
+  }
+
+  /**
+   * A newcomer is to offer (its key is lower) and heard nothing of this session yet: relays
+   * keep no ephemeral event, so without this it waits for our next round, up to 30 s. Our
+   * presence goes out of turn, at most once per `ANSWER_NEWCOMERS_EVERY_MS`, and only with
+   * room for another peer (NFX-10 §6.6).
+   */
+  #answerNewcomer(peer: string): void {
+    if (offersTo(this.#me, peer) || this.#negotiating.has(peer)) return;
+    if (this.#negotiating.size >= LIMITS.negotiationsPerRoom || !this.#ctx.shouldGenerateOffers()) return;
+    if (this.#clock.answer(Date.now())) this.#announceAll();
   }
 
   #publish(eventJson: string): void {
@@ -548,9 +587,14 @@ export class RoomClient {
     this.#s.stats.received += 1;
     const now = nowSeconds();
     switch (r.type) {
-      case 'connect':
-        if (this.#presence.add(r.sender, r.created_at, r.expiration ?? 0, now)) this.#maybeOffer(r.sender);
+      case 'connect': {
+        const newcomer = !this.#presence.present(r.sender, now);
+        if (this.#presence.add(r.sender, r.created_at, r.expiration ?? 0, now)) {
+          this.#maybeOffer(r.sender);
+          if (newcomer) this.#answerNewcomer(r.sender);
+        }
         break;
+      }
       case 'disconnect':
         this.#presence.add(r.sender, r.created_at, null, now);
         this.#s.stunFallback?.forget(r.sender);
@@ -857,6 +901,8 @@ export class RoomClient {
     this.#destroyed = true;
     if (this.#timer !== null) clearInterval(this.#timer);
     this.#timer = null;
+    if (this.#due !== null) clearTimeout(this.#due);
+    this.#due = null;
     this.#unsubscribe?.();
     this.#unsubscribe = null;
     for (const n of this.#negotiating.values()) {

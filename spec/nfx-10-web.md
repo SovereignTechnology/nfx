@@ -560,9 +560,13 @@ Every event is kind **25050** (ephemeral). `t` tells the four types apart:
 - `i` is the protocol identifier, exactly `nfx-mesh/1`; `y` is the application, `nfx`.
 - Offer and answer content is **NIP-44 v2**, from the sender's session key to the
   receiver's (the `p`), of the complete SDP text (`RTCSessionDescription.sdp`, first line
-  `v=0`). Peers wait for ICE gathering to finish (at most 5 s) and send one SDP that
-  carries every candidate. NIP-DC's `route` (trickle candidates) is not sent in
-  `nfx-mesh/1`, and readers ignore it. The content is at most **32768 bytes**.
+  `v=0`). Peers send one SDP that carries the candidates they gathered. They wait for ICE
+  gathering to finish, at most 5 s, and MAY stop 300 ms after the first server-reflexive
+  candidate: the mapping is known then, other servers' answers to the same probe arrive
+  within a round trip of it, and one STUN server that never answers no longer holds every
+  connection for the whole 5 s. A native client MAY gather once and put the same candidates
+  in every SDP. NIP-DC's `route` (trickle candidates) is not sent in `nfx-mesh/1`, and
+  readers ignore it. The content is at most **32768 bytes**.
 - Tags are written in the order shown; readers do not depend on order, and ignore tags
   they do not know.
 
@@ -644,6 +648,17 @@ over 70 KiB (UTF-8) dropped unparsed.
 
 - **Presence.** A session sends `connect` when it joins a room and every 30 s after, with
   `expiration` = `created_at` + 90, and `disconnect` when it leaves (best effort).
+- **Telling a newcomer.** Relays keep no ephemeral event, so a session that joins hears of
+  a member only at the member's next presence, up to 30 s away, and the session with the
+  lower key is the one to offer (below). So on a valid `connect` from a peer it held no
+  presence for, whose key is lower, and with room for another peer, a session sends its
+  own `connect` again, out of turn: a node each time, a page at most once per 30 s per
+  room, since most members of a busy room are pages.
+- **Spacing.** A session never sends two `connect`s in one room less than 10 s apart, out
+  of turn or not, as NFX-04 §2 admits one presence per 10 s per key, room and type. One due
+  sooner is sent when the 10 s have passed, not dropped, and one such serves every
+  newcomer seen meanwhile. A `connect` sent only to a relay that has just been connected,
+  which has none of the session's, is not counted.
 - **Who offers (glare).** On a valid `connect` from a peer it is neither connected nor
   connecting to, and with room for another peer, the session whose key is lower
   (comparing the 64-character lowercase hex strings) sends an offer; the other waits for
@@ -844,3 +859,11 @@ ICE, and a NAT test.
   HTTPS" now hold only for a player that still asks origins for segments. A player that asks
   peers only SHOULD say when it waits for a peer and when the browser's WebRTC gathers no
   UDP candidate. Playlists, init segments and the hash list still come from an origin.
+- Draft 2026-11-27 (spec review of main 93f52f4): §6.6 says how a member tells a newcomer
+  it is there (was: nothing, so a newcomer whose key is lower waited for the member's next
+  presence, up to 30 s): on a newcomer's `connect`, a member whose key is higher sends its
+  own out of turn, a page at most once per 30 s per room. No two `connect`s of a session in
+  one room go less than 10 s apart, as NFX-04 §2 admits (nfxd's 5 s was under it); one due
+  sooner waits. §6.2 lets a client stop gathering 300 ms after its first server-reflexive
+  candidate, so a STUN server that never answers no longer costs 5 s per side, and lets a
+  native client reuse one gathering. Nothing on the wire changes.

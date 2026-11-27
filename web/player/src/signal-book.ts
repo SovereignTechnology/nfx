@@ -90,6 +90,45 @@ export class PresenceBook {
 }
 
 /**
+ * No two of a session's `connect`s in one room go out closer than this: NFX-04 §2 admits one
+ * presence per 10 s per key, room and type (NFX-10 §6.6). One due sooner waits for the gap.
+ */
+export const PRESENCE_MIN_GAP_MS = 10_000;
+/** How often a page sends its presence out of turn for newcomers, at most, per room (NFX-10 §6.6). */
+export const ANSWER_NEWCOMERS_EVERY_MS = 30_000;
+/**
+ * When a session's `connect` may next go out in one room (NFX-10 §6.6). No two go closer than
+ * `gapMs` (NFX-04 §2 admits one presence per 10 s per key, room and type): one due sooner
+ * waits, and is not dropped. Newcomers are answered out of turn at most once per
+ * `answerEveryMs`. Times are milliseconds.
+ */
+export class PresenceClock {
+  #last = Number.NEGATIVE_INFINITY;
+  #lastAnswer = Number.NEGATIVE_INFINITY;
+  constructor(
+    readonly gapMs: number,
+    readonly answerEveryMs: number,
+  ) {}
+
+  /** How long a `connect` wanted at `now` must wait: 0 when it may go now. */
+  wait(now: number): number {
+    return Math.max(0, this.#last + this.gapMs - now);
+  }
+
+  /** A `connect` went to every relay at `now`. */
+  sent(now: number): void {
+    this.#last = now;
+  }
+
+  /** Whether a newcomer seen at `now` gets our presence out of turn; true counts as that answer. */
+  answer(now: number): boolean {
+    if (now - this.#lastAnswer < this.answerEveryMs) return false;
+    this.#lastAnswer = now;
+    return true;
+  }
+}
+
+/**
  * The ids of the last `max` events taken, so each is taken once whichever relays deliver it.
  * Only ids of events that verified are added: a relay that sends a forged event under a real
  * event's id must not make the real one look like a duplicate.
