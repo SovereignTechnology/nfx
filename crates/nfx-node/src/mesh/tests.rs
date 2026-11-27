@@ -19,7 +19,7 @@ use tokio::net::UdpSocket;
 use super::book::{OfferBackoff, PENDING_OFFERS_PER_ROOM, PresenceBook, SeenIds, SenderLimiter};
 use super::{
     Control, FAILURES_KEPT, FailStage, LinkFailure, MAX_NAMED, MAX_PEERS_PER_ROOM, MeshStatus,
-    NAMED_PER_KEY, NostrStun, RoomState, State, Stun, StunFallback,
+    NAMED_PER_KEY, NostrStun, PRESENCE_MIN_GAP, RoomState, State, Stun, StunFallback,
 };
 use crate::nostr::to_nostr;
 use crate::rtc_serve::{Swarm, Uploader};
@@ -79,7 +79,8 @@ async fn state(max_peers: usize) -> State {
             seen: SeenIds::default(),
             limiter: SenderLimiter::default(),
             backoff: OfferBackoff::default(),
-            reannounce_at: now,
+            last_connect: None,
+            presence_due: None,
             video: "nfx:mainnet:1:salt-flats-dusk".into(),
         },
     );
@@ -135,6 +136,32 @@ fn offer_from(peer: &Session, at: u64, nonce: u8) -> Event {
 }
 
 #[tokio::test]
+async fn presence_keeps_10_s_apart_and_one_due_sooner_waits() {
+    let mut s = state(16).await;
+    let r = s.rooms.get_mut(room().pubkey()).unwrap();
+    let t0 = Instant::now();
+    assert!(r.presence_now(t0), "the first goes at once");
+    assert!(
+        !r.presence_now(t0 + Duration::from_secs(4)),
+        "4 s later it waits"
+    );
+    assert_eq!(r.presence_due, Some(t0 + PRESENCE_MIN_GAP));
+    assert!(
+        !r.presence_now(t0 + Duration::from_secs(7)),
+        "one deferred serves the next"
+    );
+    assert_eq!(
+        r.presence_due,
+        Some(t0 + PRESENCE_MIN_GAP),
+        "and is not pushed back"
+    );
+    assert!(r.presence_now(t0 + PRESENCE_MIN_GAP), "at the gap it goes");
+    assert_eq!(r.presence_due, None);
+    assert_eq!(r.last_connect, Some(t0 + PRESENCE_MIN_GAP));
+    assert!(PRESENCE_MIN_GAP >= Duration::from_secs(10), "NFX-04 §2");
+}
+
+#[tokio::test]
 async fn the_lower_key_offers_and_its_offer_stands() {
     let mut s = state(16).await;
     let (hi, lo) = peers();
@@ -158,7 +185,16 @@ async fn the_lower_key_offers_and_its_offer_stands() {
     assert_eq!(s.sent.len(), sent + 1);
     assert_eq!(tag(s.sent.last().unwrap(), "t"), Some("connect"));
     feed(&mut s, &lo[1].connect(&room(), now).unwrap());
-    assert_eq!(s.sent.len(), sent + 1, "at most once per 5 s");
+    assert_eq!(
+        s.sent.len(),
+        sent + 1,
+        "never two presences within 10 s (NFX-04 §2)"
+    );
+    let r = s.rooms.get(room().pubkey()).unwrap();
+    let (Some(last), Some(due)) = (r.last_connect, r.presence_due) else {
+        panic!("the second newcomer's presence is deferred, not dropped")
+    };
+    assert_eq!(due, last + PRESENCE_MIN_GAP);
 
     // Glare: the higher key offers while ours is pending. Ours (the lower key's) stands.
     feed(&mut s, &offer_from(&hi[0], now, 1));

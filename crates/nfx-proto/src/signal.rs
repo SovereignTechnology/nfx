@@ -30,6 +30,9 @@ pub const ROOM_LABEL: &str = "nfx/1/web/room";
 pub const PRESENCE_TTL: u64 = 90;
 /// How often a session repeats its presence, in seconds.
 pub const PRESENCE_INTERVAL: u64 = 30;
+/// The least time between two of a session's `connect`s in one room, in seconds (NFX-10
+/// §6.6): NFX-04 §2 admits one presence per 10 s per key, room and type.
+pub const PRESENCE_MIN_GAP: u64 = 10;
 /// Oldest `created_at` accepted, in seconds before `now`.
 pub const MAX_AGE: u64 = 60;
 /// Newest `created_at` accepted, in seconds after `now`.
