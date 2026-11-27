@@ -2,6 +2,8 @@
 
 Date: 2026-11-22
 
+Reopened by decision record 0115 (proposed, 2026-11-27).
+
 ## Status
 
 Accepted 2026-11-22 by the maintainer (sovtech). Issue #113. The wire format is draft NFX-17.
