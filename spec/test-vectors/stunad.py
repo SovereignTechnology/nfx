@@ -476,7 +476,7 @@ def stunad_vectors(keypair, nostr_event) -> dict:
 
     eight = [f"nfx:net-{i}:1" for i in range(1, 9)]
     valid = [
-        ("ipv4-one-network", "what nfxd stun --announce sends: 24 h, one network", event(tags())),
+        ("ipv4-one-network", "what nutflixd stun --announce sends: 24 h, one network", event(tags())),
         ("ipv6-two-networks", "a bracketed IPv6 server for two networks, 12 h",
          event(tags(d="[2606:4700::1111]:3478", networks=("nfx:mainnet:1", "nfx:testnet:1"),
                     ttl=MAX_TTL // 2))),

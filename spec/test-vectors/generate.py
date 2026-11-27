@@ -696,7 +696,7 @@ def main() -> int:
     ]
 
     # How many renditions' iroh tickets fit in a gossip envelope beside a hyperdht endpoint
-    # (NFX-06 §4: 4 KiB on the wire; nfxd sends nothing above 4096 - 64). Every rendition's
+    # (NFX-06 §4: 4 KiB on the wire; nutflixd sends nothing above 4096 - 64). Every rendition's
     # ticket has the 720p ticket's length, which is what a ticket for the same endpoint has.
     rendition_ids = ["2160p", "1440p", "1080p", "720p", "540p", "480p", "360p", "240p", "144p",
                      "audio-hi", "audio-lo", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9"]

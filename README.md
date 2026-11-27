@@ -1,6 +1,6 @@
 # NFX
 
-> **Source of truth:** [`nostr://npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx`](https://gitworkshop.dev/npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx) — issues and pull requests live there. This GitHub repository is a mirror; push to the Nostr remote, not here.
+> **Canonical copy:** [`nostr://npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx`](https://gitworkshop.dev/npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx), on Nostr (NIP-34). Issues are taken there and on GitHub; pull requests are on GitHub, where CI runs. Both carry the same `main`.
 
 A Nostr-identified, peer-seeded video network: an open standard with a Rust reference
 implementation.
@@ -9,14 +9,24 @@ NFX lets a creator publish a signed video manifest on Nostr and lets peers seed 
 the video, checking every file against signed hashes. The normative specification is in
 `spec/`. The Rust reference implementation in `crates/` covers iroh (native), a WebRTC
 mesh (browsers) and an HTTP origin, which a public deployment puts behind TLS and a CDN.
-The optional Hypercore profile (NFX-12) and payments (Cashu ecash, per delivered chunk)
+The optional HyperDHT profile (NFX-12) and payments (Cashu ecash, per delivered chunk)
 are specified as drafts.
 
-**Status (2026-11-25):** NFX 0.1.4 is the latest release: `nfxd` and `nfx-package` for
-linux-x64 on the [Releases page](https://github.com/SovereignTechnology/nfx/releases), free video
-only ([release notes](docs/nfx/releases/v0.1.4.md); earlier: [0.1.3](docs/nfx/releases/v0.1.3.md),
+**Names:** `nutflixd` was `nfxd` and `nutflix-package` was `nfx-package` until 2026-11-26, and
+this repository was `nfx` on GitHub (on Nostr its identifier still is); the protocol is still NFX.
+Releases up to 0.1.4 carry the old binary names with the same commands and flags, so with one of
+those read `nfxd` for `nutflixd`. A release's tarball is `nutflixd-<version>-linux-x64.tar.gz` and its
+signed release notice carries `d` = `nutflixd` from 0.1.5; up to 0.1.4 they are
+`nfx-<version>-linux-x64.tar.gz` and `d` = `nfx`. Records written before the change (reviews,
+decision records, release notes, spikes) keep the old names.
+
+**Status (2026-11-26):** this tree is NFX 0.1.4 plus what has merged since. A release is a
+prebuilt node and packager for linux-x64 on the
+[Releases page](https://github.com/SovereignTechnology/nutflix/releases), free video only. 0.1.2
+is the latest one published; 0.1.3 and 0.1.4 are written up and wait for their signed tags
+(release notes: [0.1.4](docs/nfx/releases/v0.1.4.md), [0.1.3](docs/nfx/releases/v0.1.3.md),
 [0.1.2](docs/nfx/releases/v0.1.2.md), [0.1.1](docs/nfx/releases/v0.1.1.md),
-[0.1.0](docs/nfx/releases/v0.1.0.md)). `nfxd` serves
+[0.1.0](docs/nfx/releases/v0.1.0.md)). `nutflixd` serves
 browsers directly, through NATs, signaling only over Nostr relays (its mesh endpoint, NFX-10 §6),
 and since 0.1.3 its embedded scoped relay can carry that signaling too (`--embed-relay-mesh`);
 since 0.1.4 that relay keeps its manifests across a restart (`--state`) and a client can find a
@@ -28,7 +38,7 @@ hosts on a private network with plain HTTP and WebSocket endpoints; they did not
 NAT traversal, TLS, a CDN or paid delivery. What each run left out:
 [M1](docs/nfx/m1-exit.md#what-this-does-not-cover),
 [Phase A](docs/nfx/phase-a-exit.md#what-this-does-not-cover).
-The Hypercore profile (NFX-12) is not implemented. Payments are specified (NFX-07);
+The HyperDHT profile (NFX-12) is not implemented. Payments are specified (NFX-07);
 the open-mode contracts, the mock engine and the adversary suite sit in `crates/nfx-pay`
 and `crates/nfx-pay-wire`, behind the lock, and are not deployed. NFX-01 to NFX-06 are
 Frozen; the status of every document and its freeze milestone is in
@@ -39,29 +49,29 @@ Frozen; the status of every document and its freeze milestone is in
 
 | Path | What it is |
 |---|---|
-| `spec/` | NFX-01 to NFX-12, the JSON schemas (`schemas/`) and the regenerable test vectors (`test-vectors/`) |
+| `spec/` | NFX-01 to NFX-12 and NFX-16 to NFX-18, the JSON schemas (`schemas/`) and the regenerable test vectors (`test-vectors/`) |
 | `crates/` | The Cargo workspace (edition 2024), with the members below |
 | `crates/nfx-proto` | Wire formats: manifests, beacons, hash lists, canonical JSON, vouchers, gossip envelopes. Pure (no I/O, clock or RNG); builds natively and for `wasm32` |
 | `crates/nfx-node` | The peer: content store, iroh seeding and fetching, gossip presence, Nostr manifests and beacons, pull-through origin, embeddable scoped relay, browser-mesh tracker and WebRTC bridge, and the Nostr-signaled full-ICE mesh endpoint |
-| `crates/nfx-media` | NFX-05 packaging (ladder planning, CMAF output, content addressing); ships the `nfx-package` binary |
+| `crates/nfx-media` | NFX-05 packaging (ladder planning, CMAF output, content addressing); ships the `nutflix-package` binary |
 | `crates/nfx-wasm` | `nfx-proto` for browsers: verifies manifests, beacons, hash lists and files from JS |
-| `crates/nfxd` | The headless node: `key`, `publish`, `delete` and `run` |
-| `crates/desktop` | Tauri 2 desktop viewer on top of the `nfxd` daemon; its own Cargo workspace, sharing is opt-in |
-| `crates/spikes` | Spike code and tools (`s1-iroh`, `s2-tauri`, `nfx-verify-store`), each its own workspace |
-| `crates/ci` | `check.sh`, the lock scripts and the CI job definition |
+| `crates/nutflixd` | The headless node: `key`, `publish`, `delete`, `run` and `stun` |
+| `crates/desktop` | Tauri 2 desktop viewer on top of the `nutflixd` daemon; its own Cargo workspace, sharing is opt-in |
+| `crates/spikes` | Spike code and tools (`s1-iroh`, `s2-tauri`, `s5-hyperdht`, `s6-spilman`, `nfx-verify-store`), each its own workspace |
+| `crates/ci` | `check.sh`, the lock scripts and the dormant GitLab CI definition (the live one is `.github/workflows/ci.yml`) |
 | `crates/nfx-pay-wire`, `crates/nfx-pay` | The pay/1 wire and the open-mode payment contracts (NFX-07), with a mock engine and the adversary suite. **Locked**: see below |
 | `web/player` | The browser test player: hls.js behind a loader that verifies every file with `nfx-wasm`, plus the WebRTC mesh |
 | `web/spikes` | Browser spike code (`s3-mesh`, `s4-cmaf`) |
-| `docs/` | `decisions/` (ADRs) and `nfx/` (status, plans, exit runs, reviews, spike write-ups); index in [docs/README.md](docs/README.md) |
+| `docs/` | `decisions/` (ADRs) and `nfx/` (status, plans, exit runs, reviews, spike write-ups, release notes, the testnet page); index in [docs/README.md](docs/README.md) |
 
 ## Quick start
 
 Clone from Nostr (needs ngit's `git-remote-nostr`) or, instead, from the GitHub mirror:
 
 ```sh
-git clone nostr://npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx
-# or: git clone https://github.com/SovereignTechnology/nfx
-cd nfx
+git clone nostr://npub1s0vtechh66tx7vrwdud8zfyheu9zca7swwfrzd4qu2a4f93mxs6qvn9adx/nfx nutflix   # the Nostr identifier is still nfx
+# or: git clone https://github.com/SovereignTechnology/nutflix
+cd nutflix
 ```
 
 Prerequisites: a Rust toolchain at least as new as `rust-version` in `crates/Cargo.toml`;
@@ -71,7 +81,7 @@ are pinned in `.github/workflows/ci.yml`.
 
 ```sh
 repo=$PWD                                  # the root of the clone
-cargo build --release --locked --manifest-path crates/Cargo.toml -p nfxd -p nfx-media
+cargo build --release --locked --manifest-path crates/Cargo.toml -p nutflixd -p nfx-media
 export PATH="$repo/crates/target/release:$PATH"
 work=$(mktemp -d); echo "$work"            # a scratch directory for the demo files
 cd "$work"
@@ -82,14 +92,14 @@ Package the clip, create a key, and run a node that seeds it. `--embed-relay` an
 `--origin` take `ip:port`; a bare `:port` is refused.
 
 ```sh
-nfx-package clip.mp4 --video nfx:testnet:1:my-video --out pkg   # pkg/store, pkg/nfx.json
-pub=$(nfxd key new node.key | head -n 1)   # prints the public key as hex, then as npub
+nutflix-package clip.mp4 --video nfx:testnet:1:my-video --out pkg   # pkg/store, pkg/nfx.json
+pub=$(nutflixd key new node.key | head -n 1)   # prints the public key as hex, then as npub
 A=38504:$pub:nfx:testnet:1:my-video        # the manifest address
-nfxd run --key node.key --store pkg/store --seed "$A" \
+nutflixd run --key node.key --store pkg/store --seed "$A" \
   --embed-relay 127.0.0.1:7447 --origin 127.0.0.1:3473
 ```
 
-`nfx-package` makes one rendition by default: 720p, or the clip's own size when it is
+`nutflix-package` makes one rendition by default: 720p, or the clip's own size when it is
 smaller. A size is the picture's short side, so 720p is 1280x720, or 720x1280 for a
 portrait clip. While the network is small, each extra rendition is another set of segments
 to store and another browser swarm to split viewers across
@@ -105,7 +115,7 @@ address, and the node then logs `<address>: Seeding`. Then serve the browser tes
 which listens on `0.0.0.0:3471`:
 
 ```sh
-nfxd publish --key node.key --relay ws://127.0.0.1:7447 --package pkg --title "My video"
+nutflixd publish --key node.key --relay ws://127.0.0.1:7447 --package pkg --title "My video"
 cd "$repo/web/player" && npm ci --ignore-scripts && npm run serve
 # open http://127.0.0.1:3471/?a=<address>&relay=ws://127.0.0.1:7447&origin=http://127.0.0.1:3473
 ```
@@ -115,7 +125,7 @@ relay (`--iroh-relay`) or by hole-punching. A host that can forward one UDP port
 home router's port forward or a DNAT in front of a VM, can be dialled directly instead:
 
 ```sh
-nfxd run --key node.key --store pkg/store --seed "$A" --embed-relay 127.0.0.1:7447 \
+nutflixd run --key node.key --store pkg/store --seed "$A" --embed-relay 127.0.0.1:7447 \
   --iroh-bind 0.0.0.0:7843 --iroh-external 203.0.113.7:7843
 ```
 
@@ -138,14 +148,14 @@ a DNAT, bind `--bridge` to the host's own address and pass the public one as
 
 A node behind a NAT, a home node say, serves browsers with no tracker and no forwarded port
 through the mesh endpoint (NFX-10 §6): `--mesh-relay <url>` (1 to 8 Nostr relays: general
-ones, or a scoped relay that admits the signaling kind, NFX-04 §1, such as nfxd's own with
+ones, or a scoped relay that admits the signaling kind, NFX-04 §1, such as nutflixd's own with
 `--embed-relay-mesh`) turns it on, and `--mesh-stun <ip:port>` names a
 public node's `--stun` so it learns its public mapping. Browsers that play a rendition it
 holds meet it in that rendition's room, and both ends punch through their NATs with full
 ICE:
 
 ```sh
-nfxd run --key node.key --store pkg/store --seed "$A" --relay wss://relay.example \
+nutflixd run --key node.key --store pkg/store --seed "$A" --relay wss://relay.example \
   --mesh-relay wss://general-relay.example --mesh-stun 203.0.113.7:3478
 ```
 
@@ -169,34 +179,35 @@ is its own (that would take a UDP hairpin), and no gateway maps a port. Name the
 `--mesh-public`, as `--bridge-public` does for the bridge:
 
 ```sh
-nfxd run --key node.key --store pkg/store --seed "$A" --relay wss://relay.example \
+nutflixd run --key node.key --store pkg/store --seed "$A" --relay wss://relay.example \
   --mesh-relay wss://general-relay.example --mesh-bind 0.0.0.0:7845 --mesh-public 203.0.113.7:7845
 ```
 
 Here `203.0.113.7:7845` stands for the public address and port forwarded to the host's UDP
-port 7845; `--mesh-bind` must then be a fixed port. The node offers that address as a host
-candidate and takes what arrives as sent to it, and offers no candidate address that is not
-public, so its address behind the DNAT never reaches a peer. `--mesh-stun` stays optional
-beside it.
+port 7845; `--mesh-bind` must then be a fixed port. A documentation address like this one
+is refused: `--mesh-public` takes only a public unicast address. The node offers that
+address as a host candidate and takes what arrives as sent to it, and offers no candidate
+address that is not public, so its address behind the DNAT never reaches a peer.
+`--mesh-stun` stays optional beside it.
 
 ## Run a STUN server for the network
 
 Browsers and mesh endpoints behind NATs learn their public UDP mapping from STUN servers, and
-the more independent ones a network has, the less it depends on any one. `nfxd stun` runs
+the more independent ones a network has, the less it depends on any one. `nutflixd stun` runs
 one and nothing else: no store, no videos, no iroh, only RFC 8489 Binding requests answered,
-with the same rate limits as `nfxd run --stun` (16 answers a second per source address or
+with the same rate limits as `nutflixd run --stun` (16 answers a second per source address or
 IPv6 /64, 256 per /24 or /48, 4096 in all). No TURN, no authentication, and nothing about a
 client is logged.
 
 ```sh
-nfxd key new stun.key                       # the operator key that signs the announcement
-nfxd stun --bind 203.0.113.7:3478 \
-  --announce --key stun.key --relay wss://relay.nutflix.xyz --relay wss://nos.lol \
+nutflixd key new stun.key                       # the operator key that signs the announcement
+nutflixd stun --bind 203.0.113.7:3478 \
+  --announce --key stun.key --relay wss://relay.example --relay wss://nos.lol \
   --network nfx:mainnet:1
 ```
 
 Here `203.0.113.7` stands for the host's public address: a documentation address like it
-routes nowhere, and `nfxd stun` refuses to announce one. `--bind` is the UDP address it
+routes nowhere, and `nutflixd stun` refuses to announce one. `--bind` is the UDP address it
 answers on. On a host with several addresses, bind the one clients reach (not `0.0.0.0`): an answer leaves from the address the route picks, and a
 client's NAT drops one from another. Behind a DNAT, bind the host's own address and name the
 public one with `--public 203.0.113.7:3478`. With `--announce`, it signs a STUN service
@@ -207,43 +218,43 @@ the server over Nostr and choose whether to use it. No client asks it just becau
 announced. A page names it among its own STUN servers, a node with `--mesh-stun`, and a
 creator in the `stun` endpoint of its own beacons, which every viewer of its videos then
 uses. A scoped relay carries the announcement only if it admits kind 33478 (NFX-04 §1, as
-`nfxd run --embed-relay-stun-ads` makes nfxd's own); general relays carry it as is. Without
+`nutflixd run --embed-relay-stun-ads` makes nutflixd's own); general relays carry it as is. Without
 `--announce` it is a STUN server that people must be told about some other way.
 
 A relay operator can offer it to the clients that signal through the relay. When the STUN
-server answers on the relay's own host name, `nfxd run --embed-relay-stun-port 3478` puts
+server answers on the relay's own host name, `nutflixd run --embed-relay-stun-port 3478` puts
 `"stun_port": 3478` in the embedded relay's NIP-11 `nfx` object (NFX-04 §3), and a page
 that signals through the relay (with `--embed-relay-mesh`) asks
 `stun:<host of the relay URL>:3478` after its own servers and before the creator's (NFX-10
 §1, decision record 0108). The relay sees the client's address anyway, so its STUN server
-learns only the client's UDP port. nfxd does not check that anything answers there: the
+learns only the client's UDP port. nutflixd does not check that anything answers there: the
 host is whatever the relay's name resolves to, so behind a TLS proxy or a CDN it is the
 proxy's, and a port that does not answer costs clients a slot and a gathering timeout. Only
-the web player asks relays' STUN servers so far; nfxd's own mesh endpoint does not.
+the web player asks relays' STUN servers so far; nutflixd's own mesh endpoint does not.
 
 Open UDP 3478 to it, for example with ufw:
 
 ```sh
-sudo ufw allow 3478/udp comment 'nfxd stun'
+sudo ufw allow 3478/udp comment 'nutflixd stun'
 ```
 
 A systemd unit (put the key where only the service user reads it):
 
 ```ini
-# /etc/systemd/system/nfxd-stun.service
+# /etc/systemd/system/nutflixd-stun.service
 [Unit]
-Description=nfxd stun: a STUN server for NFX networks
+Description=nutflixd stun: a STUN server for NFX networks
 Wants=network-online.target
 After=network-online.target
 
 [Service]
-User=nfxd
-ExecStart=/usr/local/bin/nfxd stun --bind 203.0.113.7:3478 --announce --key /var/lib/nfxd/stun.key --relay wss://relay.nutflix.xyz --network nfx:mainnet:1
+User=nutflixd
+ExecStart=/usr/local/bin/nutflixd stun --bind 203.0.113.7:3478 --announce --key /var/lib/nutflixd/stun.key --relay wss://relay.example --network nfx:mainnet:1
 Restart=on-failure
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadOnlyPaths=/var/lib/nfxd
+ReadOnlyPaths=/var/lib/nutflixd
 PrivateTmp=yes
 
 [Install]
@@ -268,15 +279,21 @@ PYTHON=/path/to/venv/bin/python crates/ci/check.sh
 ```
 
 `check.sh` stops at the first failing step. The step list, what each one needs and the
-environment switches are in [CONTRIBUTING.md](CONTRIBUTING.md#checks). CI runs what
-`check.sh` runs. The browser end-to-end suites (`npm run e2e` and `npm run e2e:mesh` in
-`web/player`, `./e2e.sh` in `crates/desktop`) are separate.
+environment switches are in [CONTRIBUTING.md](CONTRIBUTING.md#checks). `ci.yml`'s `check`
+job runs what `check.sh` runs; pull requests also run `depth.yml` (coverage floor, next
+rustc) and `zizmor.yml` (workflow lint). The browser end-to-end suites (`npm run e2e`,
+`e2e:mesh`, `e2e:nostr`, `e2e:nostr-node` and `e2e:peer-first` in `web/player`, `./e2e.sh`
+in `crates/desktop`) are separate; `web/player/e2e-nat/run.sh` runs in CI on pull requests
+that touch the player (`nfx-nat-browsers.yml`).
 
 
 ## CI and the lock
 
-CI runs on GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) as two
-jobs: `lock`, and `check`, which runs `crates/ci/check.sh`.
+CI runs on GitHub Actions. [`.github/workflows/ci.yml`](.github/workflows/ci.yml) has two
+jobs: `lock`, and `check`, which runs `crates/ci/check.sh`. Beside it, `depth.yml`
+(coverage floor, next rustc) and `zizmor.yml` run on every pull request,
+`nfx-nat-browsers.yml` on pull requests that touch the player, `nightly.yml` daily and
+`release.yml` on a version tag.
 [`crates/ci/gitlab-ci.yml`](crates/ci/gitlab-ci.yml) holds the same two jobs for GitLab
 and is dormant.
 
@@ -299,8 +316,8 @@ NFX grew beside a TypeScript demo, a Pear-runtime desktop app under the name nut
 which is a different design ([ADR 0006](docs/decisions/0006-standardization-suite-nfx.md)).
 Until 2026-10-11 this repository mirrored the demo's tree. The mirror was removed
 ([ADR 0008](docs/decisions/0008-multi-network-master-plan.md), amendment of that date):
-the demo lives in its own repository, `nutflix-demo`, and the snapshot that was mirrored
-here stays reachable under the tag `demo-base`:
+the demo lives in its own repository, `nutflix-pear` (formerly `nutflix-demo`), and the
+snapshot that was mirrored here stays reachable under the tag `demo-base`:
 
 ```sh
 git show demo-base:README.md

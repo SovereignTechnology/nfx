@@ -244,7 +244,7 @@ export function resolveManifest(a: string, relays: string[], options: ResolveOpt
  * Report the origins, trackers and STUN servers seeders' live beacons for `a` name, and
  * which renditions they hold, each time that changes (the newest unexpired beacon per
  * seeder counts, at most 64 seeders, the creator's own beacon always; `https://` origins
- * only, at most 8, with the renditions beacons claim each serves, a hint for `open()`;
+ * only, at most 32, with the renditions beacons claim each serves, a hint for `open()`;
  * `wss://` trackers only, at most 4; `availability`). STUN servers come from beacons' `stun`
  * endpoints, global unicast addresses only: the creator's own beacon's (`stunCreator`, and
  * `stunServers`, what `selectStun` picks for a page with none of its own), and every seeder's

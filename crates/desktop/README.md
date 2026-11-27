@@ -1,6 +1,6 @@
 # NFX desktop viewer
 
-A Tauri 2 window around `nfxd`'s node. Give it one or more scoped relays and a video
+A Tauri 2 window around `nutflixd`'s node. Give it one or more scoped relays and a video
 address (`38504:<creator>:<namespace>:<video-id>`). It then:
 1. resolves the signed manifest (NFX-02) and learns seeders from verified beacons
    (NFX-03);
@@ -18,10 +18,9 @@ address (`38504:<creator>:<namespace>:<video-id>`). It then:
    off by default too;
 5. shows where the bytes came from in "Stats for nerds" (right-click the video, the button
    under it, or `n`; nfx #99): each iroh seeder by a short id with the bytes and blobs it
-   sent, what this node serves to browsers, and the player's own numbers (resolution,
-   buffer, dropped frames). Seeders' addresses and whether a path is direct or through a
-   relay appear only behind its "Show addresses" switch, which is off each time the panel
-   opens.
+   sent, and the player's own numbers (resolution, buffer, dropped frames). Seeders'
+   addresses and whether a path is direct or through a relay appear only behind its "Show
+   addresses" switch, which is off each time the panel opens.
 
 ```sh
 ./run.sh      # build (release) and start; needs web/player's npm ci for hls.js
@@ -47,13 +46,13 @@ Needs WebKitGTK plus these GStreamer plugins (spike S2):
 
 ## Data
 
-The data directory is the app's data dir, or `NFX_DESKTOP_DATA`:
+The data directory is the app's data dir, or `NUTFLIX_VIEWER_DATA`:
 
 | Path | What |
 |---|---|
 | `node.key` | This node's Nostr key, mode 0600, created on first run. Never printed; only the public key is shown. |
 | `settings.json` | `relays` (Nostr scoped relays), `iroh_relays` (the network's own iroh relays; none disables relaying, so direct connections only), `share` (`false` unless turned on), and for seeder ratings `rating_root` (the user's key, hex; unset = off), `rating_trusted` (more keys, hex) and `general_relays`. |
-| `store/` | Content by sha256. `store/.nfxd/` holds iroh-blobs' index. |
+| `store/` | Content by sha256. `store/.nutflixd/` holds iroh-blobs' index (`store/.nfxd/` in a data directory made before the rename; it is kept and used). |
 
 ## Security
 

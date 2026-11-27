@@ -20,7 +20,7 @@ const stop = watchEndpoints(a, m.namespace, relays, (e) => {
   // e.stunSeeders: each seeder's, for the fallback; e.originSources: the origins with the
   // renditions beacons claim each serves (hints); e.availability: how many seeders hold each
   // rendition
-  // selectStun(own, e.stunCreator): the STUN servers to use (NFX-10 §1's rules)
+  // selectStun(own, [], e.stunCreator): the STUN servers to use (NFX-10 §1's rules)
 });
 const session = await open(videoElement, {
   manifestJson: m.event,                        // verified again in WASM
@@ -40,6 +40,14 @@ session.destroy();                              // hls.js, its worker, the p2p l
 
 The types are in `src/api.ts`. `open()` also takes a bare `root` (with `video` and `segs` to
 bind the hash list) instead of `manifestJson`.
+
+`watchEndpoints`'s `stop` has two more calls (NFX-17). `stop.delivered(url)` tells the watch
+an origin delivered a file. With `watchEndpoints(a, ns, relays, onChange, { ask: true })`,
+`stop.ask()` asks the video's seeders to answer at once: call it when the viewer presses
+Play, and offer a way to turn it off, since it publishes one event, from a throwaway key,
+that says which video is starting. `session.addSources(e.originSources)` hands a playing
+session the sources heard of since it opened; each `OriginSource` carries its `tier`
+(NFX-17 §4.2).
 
 **Where segments come from** (`segmentSource`, decision record 0109). With a mesh, the
 default is the origin first (`https-first`). `peers-then-https` takes each segment from a
@@ -83,16 +91,20 @@ a "Show addresses" switch that is off each time the panel opens.
 
 A seeder may hold only some renditions of a video (NFX-03 §4), so a session offers only
 levels some source it uses can deliver (NFX-10 §1, `src/levels.ts`, `src/probe.ts`). It
-takes every file from one origin, and **asks the origin** what it holds (nfx #85): once the
-hash list verifies, `open()` fetches each allowed rendition's media playlist (verified) and
-sends a `GET` for the init it names, reading at most 64 KiB; in parallel (6 at a time, at
-most 32 renditions) and within 8 s per origin in all. A rendition is held when its init
-answers `200` (or `206`). The first origin that holds an allowed rendition is used, and its
-levels are the allowed renditions (`renditions`, or all) it holds; an origin that holds
-none is skipped, with an `origin` event giving each rendition's answer. The mesh adds no
-level, since a segment peers do not deliver comes from that origin. hls.js reads a master
-playlist cut to those variants, matched by playlist content name, so it never learns of
-another level, and ABR picks freely among the rest, starting on the first of `renditions`.
+**asks an origin** what it holds (nfx #85), starting with the one that delivered the hash
+list: once the hash list verifies, `open()` fetches each allowed rendition's media playlist
+(verified) and sends a `GET` for the init it names, reading at most 64 KiB; in parallel (6
+at a time, at most 32 renditions) and within 8 s per origin in all. A rendition is held
+when its init answers `200` (or `206`). The first origin that holds an allowed rendition
+sets the levels, which are the allowed renditions (`renditions`, or all) it holds; an origin
+that holds none is skipped, with an `origin` event giving each rendition's answer. Every
+file, the hash list included, comes from any source the session knows, one source's bytes
+per file, and a source that stalls, runs slow or sends bytes that do not verify is left for
+another (NFX-17 §4.3, `src/sources.ts`, `src/fetcher.ts`); `session.addSources()` adds
+sources while it plays. The mesh adds no level, since a segment peers do not deliver comes
+over HTTPS from the session's sources. hls.js reads a master playlist cut to those
+variants, matched by playlist content name, so it never learns of another level, and ABR
+picks freely among the rest, starting on the first of `renditions`.
 
 What beacons say an origin serves (an `OriginSource`'s `renditions`, from its beacon's
 `https` endpoint) is **a hint, not a constraint**: beacons come from any key, so a stranger
@@ -110,7 +122,7 @@ relays, creator)` picks a session's servers by the rules every NFX client uses: 
 own first, then those the relays it signals through name for themselves (below), then the
 creator's that are global unicast and on a port of 1024 or above; each once, at most 4 in
 all. A beacon signed by any other key adds none, however many keys name a server: keys
-are free, so a count proves nothing. STUN service announcements (kind 33478, which `nfxd
+are free, so a count proves nothing. STUN service announcements (kind 33478, which `nutflixd
 stun --announce` signs) are a directory for people and operators; the player never reads
 them. So routine selection never makes a viewer ask more than 4 STUN servers, or one that
 neither the creator nor one of its relays named. The fallback below, only when the page asks
@@ -129,7 +141,7 @@ test). Never a server only an announcement names or on a port below 1024, and at
 STUN servers in the session. `selectStunFallback` is the same rule as a pure function.
 
 A relay can offer STUN on its own host (NFX-10 §1, NFX-04 §3): its NIP-11 document lists
-25050 in `nfx.kinds` and gives `nfx.stun_port` (1024 to 65535; `nfxd
+25050 in `nfx.kinds` and gives `nfx.stun_port` (1024 to 65535; `nutflixd
 --embed-relay-stun-port`). The relay already sees the viewer's address on its WebSocket, so
 its STUN server learns only the UDP port. With
 `signaling: { kind: 'nostr', relays, relayStun: { own } }` (`own`: the page's own STUN URLs,
@@ -144,8 +156,8 @@ off unless given: a viewer behind a proxy, a VPN or Tor must not use it (the STU
 goes around the proxy and tells the relay the address it hides), and a page cannot detect
 that. `fetchRelayInfo(relay)`, `parseRelayInfo(doc)` and `relayStunUrl(relay, info)` are the
 same steps for a page that reads relays' documents itself (`src/relay-info.ts` is reusable
-for `nfx.kinds` too); their vectors are in `test-vectors/relay-stun.json`. The test page
-turns it on with `&signal=nostr`, and `&relayStun=0` turns it off.
+for `nfx.kinds` too); their vectors are in `../../spec/test-vectors/relay-stun.json`. The
+test page turns it on with `&signal=nostr`, and `&relayStun=0` turns it off.
 
 `signaling` is how mesh peers find each other and exchange offers, answers and ICE
 candidates, wired into the engine in one place (`src/mesh.ts` `engineSignaling`). Two kinds:
@@ -185,9 +197,11 @@ candidates, wired into the engine in one place (`src/mesh.ts` `engineSignaling`)
 - `{ kind: 'trackers', urls }` (1 to 4, `wss://`): WebTorrent trackers, as before.
 
 Trackers and origins named by beacons are hints:
-`watchEndpoints` keeps only `wss://` trackers and `https://` origins, ranked by how many
-seeders name them. With any tracker, the viewer uploads verified segments to other viewers,
-and the trackers and those peers see the viewer's IP address.
+`watchEndpoints` keeps only `wss://` trackers, ranked by how many seeders name them, and
+`https://` origins, in NFX-17 §4.2's tiers: those the creator's own beacon names first, then
+the rest in an order drawn for each watch (how many seeders name an origin never ranks it).
+With any tracker, the viewer uploads verified segments to other viewers, and the trackers
+and those peers see the viewer's IP address.
 
 ## Build and test
 
@@ -198,20 +212,27 @@ npm run build:lib      # the library: out-lib/player.js (minified) and its decla
 npm run typecheck
 npm run unit           # sanitisers, the beacon endpoint book and availability, open()'s option checks, levels and probes, the remote candidate filter, relays' NIP-11 and STUN, where segments come from, the WebRTC check
 npm run unit:policy    # the engine's choice of source with peers first, over every input
+npx tsx book-unit.ts     # the beacon book's NFX-17 §4.2 tiers and per-relay caps
+npx tsx sources-unit.ts  # which source each file comes from: tiers, strikes, rests
+npx tsx fetcher-unit.ts  # one file from several sources: give-ups, hedges, the retry
 npm run e2e            # the test page end to end (cargo, ffmpeg, openssl, Chromium), held renditions and a hostile beacon included
 npm run e2e:mesh       # the mesh, the bridge, the library's lifecycle, trackers from a beacon
 eval "$(bash e2e-strfry.sh /var/tmp/strfry)"   # the stock relay, strfry at a pinned commit
 npm run e2e:nostr      # two browsers over Nostr only (strfry, no tracker), the origin cut
-npm run e2e:nostr-node # a browser and nfxd's mesh endpoint (full ICE) over strfry, the origin cut
-npm run e2e:peer-first # peers first: segments from nfxd's mesh endpoint from the first one, rescues, a browser with WebRTC blocked
+npm run e2e:nostr-node # a browser and nutflixd's mesh endpoint (full ICE) over strfry, the origin cut
+npm run e2e:peer-first # peers first: segments from nutflixd's mesh endpoint from the first one, rescues, a browser with WebRTC blocked
 ```
 
-The suites build `nfxd` and `nfx-package` and run headless Chromium in fresh contexts, on
-loopback only.
+The suites build `nutflixd` and `nutflix-package` and run headless Chromium in fresh contexts, on
+loopback only. `book-unit.ts`, `sources-unit.ts` and `fetcher-unit.ts` have no npm script,
+are not in `tsconfig.json` (so `npm run typecheck` does not read them) and are not run in
+CI; run them by hand as above. Of the builds and suites above, CI runs `npm run build` and
+`npm run typecheck`, on pull requests that touch the player (`nfx-nat-browsers.yml`), and
+no unit or loopback e2e suite.
 
 `e2e-nat/run.sh` is the same mesh through NATs (nfx #71): one browser behind each of two
 nftables routers in network namespaces, signaling only through strfry and taking STUN only
-from a public nfxd (`--stun`), with router byte counters for the path the bytes took. It
+from a public nutflixd (`--stun`), with router byte counters for the path the bytes took. It
 needs root, so it runs in CI only (`.github/workflows/nfx-nat-browsers.yml`), never on a
 developer's machine; its header lists the cells.
 

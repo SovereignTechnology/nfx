@@ -1,4 +1,4 @@
-//! `nfxd stun`: a STUN server and nothing else (NFX-10 §1). A Binding round trip in process
+//! `nutflixd stun`: a STUN server and nothing else (NFX-10 §1). A Binding round trip in process
 //! and through the binary; an announcement signed, tagged and expiring as NFX-10 §1 says,
 //! sent to a relay; and the settings it refuses.
 
@@ -13,9 +13,9 @@ use nfx_node::unix_now;
 use nfx_proto::event::Event;
 use nfx_proto::namespace::Namespace;
 use nfx_proto::stun::{KIND_STUN_ANNOUNCEMENT, MAX_TTL, StunAnnouncement};
-use nfxd::stun::{Limits, mapped_address};
-use nfxd::stun_server::{Announce, StunConfig, StunServer};
 use nostr_sdk::prelude as ns;
+use nutflixd::stun::{Limits, mapped_address};
+use nutflixd::stun_server::{Announce, StunConfig, StunServer};
 use tokio::net::UdpSocket;
 
 const TX: [u8; 12] = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8];
@@ -210,11 +210,11 @@ async fn what_cannot_work_is_refused_before_anything_is_sent() {
     }
 }
 
-/// The binary: `nfxd stun --bind` prints its address and answers there; flags that need
+/// The binary: `nutflixd stun --bind` prints its address and answers there; flags that need
 /// `--announce`, or a missing `--bind`, are refused.
 #[test]
 fn the_binary_answers_on_its_bound_address() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nfxd"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nutflixd"))
         .args(["stun", "--bind", "127.0.0.1:0"])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -247,7 +247,7 @@ fn the_binary_answers_on_its_bound_address() {
         ),
         (vec!["stun", "--bind", "127.0.0.1"], "not an ip:port"),
     ] {
-        let out = Command::new(env!("CARGO_BIN_EXE_nfxd"))
+        let out = Command::new(env!("CARGO_BIN_EXE_nutflixd"))
             .args(&args)
             .output()
             .unwrap();

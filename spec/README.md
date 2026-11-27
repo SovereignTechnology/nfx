@@ -28,7 +28,7 @@ desktop shell.
 | NFX-01 | Networks & versions | **Frozen** (re-frozen 2026-09-23) | M0 |
 | NFX-02 | Catalog manifest (kind 38504) | **Frozen** (2026-09-24) | M1 |
 | NFX-03 | Availability beacons (kind 20464) | **Frozen** (2026-09-24) | M1 |
-| NFX-04 | Scoped relay profile | **Frozen** (2026-09-24; amended in place 2026-11-18, #96, and 2026-11-19, #104) | M1 |
+| NFX-04 | Scoped relay profile | **Frozen** (2026-09-24; amended in place 2026-11-18, #96, 2026-11-19, #104, and 2026-11-24, ADR 0108) | M1 |
 | NFX-05 | Segments & content integrity | **Frozen** (2026-09-24) | M1 |
 | NFX-06 | iroh transport profile | **Frozen** (2026-09-24) | M1 |
 | NFX-07 | Payments — open mode | Draft | M2 |
@@ -115,6 +115,13 @@ the repository license. Rationale and full context: `docs/decisions/0006-*` (f).
   who seeds a video and seeders answer at once with their signed beacon (kind 20465). No frozen
   document changes in this entry; a scoped relay can carry the kind only after a separate in-place
   amendment to NFX-04. New vectors `lookup*.json`. Issue #113.
+- 2026-11-24 — **a third exception to the freeze rule**: frozen NFX-04 §3 is amended in place
+  so a scoped relay's NIP-11 `nfx` object MAY carry `stun_port`, the UDP port on which the
+  relay's own host answers STUN Binding requests. Additive and optional, like the first two: a
+  relay without the field is as conformant as before, and so is a reader that ignores it.
+  Decided by the maintainer (sovtech) over a `specver` bump. Record: decision record 0108 and
+  NFX-04's changelog. NFX-10 §1 (Draft) gains STUN at the relays a client signals through;
+  NFX-11 registers the field.
 - 2026-11-26 — NFX-18 (keeping and seeding what is watched) added as Draft, optional, after
   decision record 0110: a watcher keeps what its user watches for a minute or downloads, and
   seeds the renditions it holds, with no private address announced, keys of its own, and a

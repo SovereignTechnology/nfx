@@ -1,4 +1,4 @@
-//! A packaged video (`nfx-package` output: `<dir>/nfx.json` and `<dir>/store`) and the
+//! A packaged video (`nutflix-package` output: `<dir>/nfx.json` and `<dir>/store`) and the
 //! open-mode manifest that announces it (NFX-02).
 
 use std::path::Path;

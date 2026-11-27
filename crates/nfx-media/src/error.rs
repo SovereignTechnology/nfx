@@ -13,7 +13,7 @@ pub enum MediaError {
     Tool(String),
     #[error("package: {0}")]
     Package(String),
-    /// The renditions asked for cannot be made (`nfx-package --renditions`).
+    /// The renditions asked for cannot be made (`nutflix-package --renditions`).
     #[error("renditions: {0}")]
     Renditions(String),
     #[error("NFX self-check failed: {0}")]

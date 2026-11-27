@@ -2,7 +2,7 @@
 //! videos it is told to watch, serves an NFX-05 §6 origin with swarm pull-through, and
 //! can embed an NFX-04 scoped relay (§7). Everything here is wiring; the protocol lives
 //! in `nfx-node` and `nfx-proto`, but for [`stun`], a minimal STUN Binding responder, which
-//! [`stun_server`] also runs on its own (`nfxd stun`), announced over Nostr if asked.
+//! [`stun_server`] also runs on its own (`nutflixd stun`), announced over Nostr if asked.
 
 /// A status line on stderr. Unlike `eprintln!` it never panics: a journal or pipe that has
 /// gone away must not end a seeding node.

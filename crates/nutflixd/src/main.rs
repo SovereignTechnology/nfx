@@ -1,12 +1,12 @@
-//! `nfxd` — the headless NFX node.
+//! `nutflixd` — the headless NFX node.
 //!
 //! ```text
-//! nfxd key new <file>                      create a key (mode 0600); prints the public key
-//! nfxd key show <file>                     print a key file's public key
-//! nfxd publish --key <file> --relay <url>… --package <dir> --title <text>
+//! nutflixd key new <file>                      create a key (mode 0600); prints the public key
+//! nutflixd key show <file>                     print a key file's public key
+//! nutflixd publish --key <file> --relay <url>… --package <dir> --title <text>
 //!              [--description <md>] [--alt <text>] [--tag <t>]…
-//! nfxd delete --key <file> --relay <url>… --a <a>…   withdraw your own videos (NFX-02 §6)
-//! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--iroh-relay-ca <pem>]… [--relay-only]
+//! nutflixd delete --key <file> --relay <url>… --a <a>…   withdraw your own videos (NFX-02 §6)
+//! nutflixd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--iroh-relay-ca <pem>]… [--relay-only]
 //!          [--iroh-bind <ip:port> [--iroh-external <ip:port>]…] [--public-addrs-only]
 //!          [--seed <a>[#<id>,…]]… [--fetch <a>[#<id>,…]]… [--pull <a>[#<id>,…]]… [--origin <addr:port>]
 //!          [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>] [--embed-relay-lookup]]
@@ -16,7 +16,7 @@
 //!           [--mesh-stun-from-nostr=false]]
 //!          [--allow-creator <hex>]… [--gossip [--gossip-peer <id>@<ip:port|relay-url>]…]
 //!          [--rating-root <npub|hex> --general-relay <url>… [--rating-trusted <npub|hex>]…]
-//! nfxd stun --bind <ip:port> [--public <ip:port>]
+//! nutflixd stun --bind <ip:port> [--public <ip:port>]
 //!           [--announce --key <file> --relay <url>… --network <ns>…]   a STUN server, nothing else
 //! ```
 //!
@@ -24,7 +24,7 @@
 //! `publish` prints it. Secrets never reach the terminal: only public keys are printed.
 //!
 //! `key new` and `key show` print two lines, the hex public key and then the npub. A reader
-//! may stop after the first (`nfxd key show f | head -n 1`): a closed stdout or stderr is
+//! may stop after the first (`nutflixd key show f | head -n 1`): a closed stdout or stderr is
 //! never a panic, and `run` keeps seeding when its status output goes away.
 //!
 //! An item may name the only renditions this node holds of it: `--seed <a>#720p`,
@@ -41,7 +41,7 @@
 //! `run` sends each video's beacon to every `--relay` every 30 s, within a share of each
 //! relay (NFX-03 §7): at most 20 beacons a minute per relay, so past 10 videos the videos take
 //! turns there, and a relay that answers `rate-limited:` or `blocked:` gets nothing for 1
-//! minute, doubling to 30, until it accepts again. nfxd cannot tell a scoped relay from a
+//! minute, doubling to 30, until it accepts again. nutflixd cannot tell a scoped relay from a
 //! general one yet, so the share applies to every `--relay`.
 //!
 //! `--iroh-relay-ca` names a PEM file of CA certificates (at most 4 in all, 8 KiB each, 64 KiB
@@ -127,8 +127,8 @@
 //! ask it for their public mapping (NFX-10 §1): the relay sees their address on the WebSocket
 //! anyway, so the STUN server learns only the port. They ask only a relay that lists kind
 //! 25050, so it goes with `--embed-relay-mesh`, and they ask the host name of the relay's URL,
-//! so it must answer where that name resolves (behind a TLS proxy, the proxy's host). nfxd does
-//! not check that anything answers there: that is the operator's word. Run `--stun` (or `nfxd
+//! so it must answer where that name resolves (behind a TLS proxy, the proxy's host). nutflixd does
+//! not check that anything answers there: that is the operator's word. Run `--stun` (or `nutflixd
 //! stun`) on that port. Off by default.
 //!
 //! With `--state`, the embedded relay keeps the manifests it accepts in
@@ -165,7 +165,7 @@
 //! this node in the rooms of the renditions it holds and fetch verified segments from it over
 //! WebRTC, signaling only through those Nostr relays (general ones, `wss://`, or `ws://`, which
 //! shows room keys and timing to the path; a scoped relay refuses kind 25050 unless it admits it,
-//! NFX-04 §1, as `--embed-relay-mesh` makes nfxd's own), with no tracker
+//! NFX-04 §1, as `--embed-relay-mesh` makes nutflixd's own), with no tracker
 //! and no TURN. Its ICE agent is a full one, so it works behind a NAT: `--mesh-stun <ip:port>`
 //! (repeatable, at most 4; a public node's `--stun`, say) names STUN servers that tell it its
 //! public mapping. A `host:port` is resolved once at start, to an address of `--mesh-bind`'s
@@ -199,7 +199,7 @@
 //! `--mesh-bind`'s family. `--mesh-stun` stays optional beside it: a mapping that equals it is
 //! offered once, one that is not public not at all.
 //!
-//! `nfxd stun` runs a STUN server and nothing else, for anyone who wants to give a network one:
+//! `nutflixd stun` runs a STUN server and nothing else, for anyone who wants to give a network one:
 //! no store, no videos, no iroh, the same Binding responder and rate limits as `--stun`, and
 //! nothing about a client logged. `--bind` is the UDP address it answers on; on a host with
 //! several addresses bind the one clients reach, and behind a DNAT name the public address as
@@ -218,19 +218,19 @@ use std::time::Duration;
 use nfx_node::nostr::{Relays, sign_manifest};
 use nfx_node::unix_now;
 use nfx_proto::namespace::Namespace;
-use nfxd::daemon::{Config, Daemon};
-use nfxd::package::Package;
-use nfxd::stun_server::{Announce, StunConfig, StunServer};
-use nfxd::{Error, Result, key, status};
 use nostr_sdk::prelude::ToBech32 as _;
+use nutflixd::daemon::{Config, Daemon};
+use nutflixd::package::Package;
+use nutflixd::stun_server::{Announce, StunConfig, StunServer};
+use nutflixd::{Error, Result, key, status};
 
 const USAGE: &str = "usage:
-  nfxd key new <file>
-  nfxd key show <file>
-  nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
-  nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--public-addrs-only] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>] [--embed-relay-lookup]] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port|host:port>]... [--mesh-max-peers <n>] [--mesh-stun-from-nostr=false]]
-  nfxd stun --bind <ip:port> [--public <ip:port>] [--announce --key <file> --relay <url>... --network <ns>...]
+  nutflixd key new <file>
+  nutflixd key show <file>
+  nutflixd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
+  nutflixd delete --key <file> --relay <url>... --a <a>...
+  nutflixd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--public-addrs-only] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>] [--embed-relay-lookup]] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port|host:port>]... [--mesh-max-peers <n>] [--mesh-stun-from-nostr=false]]
+  nutflixd stun --bind <ip:port> [--public <ip:port>] [--announce --key <file> --relay <url>... --network <ns>...]
 
   --mesh-relay runs the mesh endpoint (NFX-10 §6): browsers meet this node in the rooms of
   the renditions it holds, signaling only through those Nostr relays, and fetch verified
@@ -260,7 +260,7 @@ const USAGE: &str = "usage:
   --embed-relay-stun-port <port> (1024 to 65535) says in the relay's NIP-11 document
   (nfx.stun_port) that the host of its URL answers STUN on that UDP port, so pages that
   signal through it (with --embed-relay-mesh) ask it: the relay already sees their address.
-  nfxd does not check that anything answers there: run --stun on that port. Off by default.
+  nutflixd does not check that anything answers there: run --stun on that port. Off by default.
   With --state, the embedded relay keeps the manifests it accepts in <state>/relay-manifests
   and serves them after a restart, re-verified and re-admitted under this run's flags. Only
   manifests are kept. Without --state they live in memory only.
@@ -292,7 +292,7 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(Error::Config(msg)) if msg == "usage" => usage(),
         Err(e) => {
-            status!("nfxd: {e}");
+            status!("nutflixd: {e}");
             ExitCode::FAILURE
         }
     }
@@ -331,10 +331,12 @@ async fn mesh_stun(values: &[String], mesh: bool, v4: bool) -> Result<Vec<std::n
             Ok(Ok(mut addrs)) => match addrs.find(|a| a.is_ipv4() == v4) {
                 Some(a) => out.push(a),
                 None => {
-                    status!("nfxd: --mesh-stun {v}: no address of --mesh-bind's family; skipped")
+                    status!(
+                        "nutflixd: --mesh-stun {v}: no address of --mesh-bind's family; skipped"
+                    )
                 }
             },
-            _ => status!("nfxd: --mesh-stun {v}: does not resolve now; skipped"),
+            _ => status!("nutflixd: --mesh-stun {v}: does not resolve now; skipped"),
         }
     }
     Ok(out)
@@ -362,7 +364,7 @@ fn bad_usage() -> Error {
     Error::Config("usage".into())
 }
 
-/// Writes `lines` to `out`. A reader that has gone away (`nfxd key show f | head -n 1`) is a
+/// Writes `lines` to `out`. A reader that has gone away (`nutflixd key show f | head -n 1`) is a
 /// normal end, not a failure: it already took what it wanted. Any other write error, such as
 /// a full disk, is returned.
 fn write_lines(out: &mut impl std::io::Write, lines: &[&str]) -> std::io::Result<()> {
@@ -721,7 +723,7 @@ async fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `nfxd stun`: a STUN server, announced over Nostr with `--announce`.
+/// `nutflixd stun`: a STUN server, announced over Nostr with `--announce`.
 async fn stun(args: &[String]) -> Result<()> {
     let announce = args.iter().any(|a| a == "--announce");
     let args: Vec<String> = args
@@ -754,7 +756,7 @@ async fn stun(args: &[String]) -> Result<()> {
         bind,
         public,
         announce,
-        limits: nfxd::stun::Limits::default(),
+        limits: nutflixd::stun::Limits::default(),
     })
     .await?;
     let addr = server.local_addr();
@@ -999,7 +1001,7 @@ fn pubkey_hex(flag: &str, v: &str) -> Result<String> {
 }
 
 /// `--gossip-peer ID@ADDR`, where `ADDR` is `ip:port` or an iroh relay URL; repeat the flag
-/// for more addresses of the same peer. `nfxd run` prints its own in this form.
+/// for more addresses of the same peer. `nutflixd run` prints its own in this form.
 fn gossip_peers(values: &[String]) -> Result<Vec<iroh::EndpointAddr>> {
     let mut peers: Vec<iroh::EndpointAddr> = Vec::new();
     for v in values {
@@ -1136,7 +1138,7 @@ mod tests {
     }
 
     fn file(name: &str, text: &str) -> String {
-        let dir = std::env::temp_dir().join(format!("nfxd-relay-ca-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nutflixd-relay-ca-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, text).unwrap();
@@ -1196,8 +1198,8 @@ mod tests {
             assert!(err.contains("secret key"), "{err}");
             assert!(!err.contains(&nsec[5..]), "the nsec is repeated: {err}");
         }
-        assert_eq!(nfxd::key::npub(&hex).as_deref(), Some(npub.as_str()));
-        assert_eq!(nfxd::key::npub("nope"), None);
+        assert_eq!(nutflixd::key::npub(&hex).as_deref(), Some(npub.as_str()));
+        assert_eq!(nutflixd::key::npub("nope"), None);
     }
 
     #[test]

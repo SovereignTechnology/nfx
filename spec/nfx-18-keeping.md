@@ -42,7 +42,7 @@ No conformance level requires it. A client that implements it claims it beside a
 - **Finishing.** A client MAY then fetch the rest of the rendition it played, so that it becomes
   held. It MUST do so only from sources it does not pay (`free: true` beacons, an origin that
   asks no payment) and only from peers: it MUST NOT fetch over HTTPS in the background for
-  keeping (decision record 0109), and an origin that is also a peer (an `nfxd` bridge) counts as
+  keeping (decision record 0109), and an origin that is also a peer (a `nutflixd` bridge) counts as
   a peer. It MUST NOT pay for finishing: money is spent only on what its user plays or asks to
   download. It fetches nothing for a rendition its user did not play.
 - **A video its user paid for** (NFX-07, NFX-08) is kept, after a play of at least the minimum,

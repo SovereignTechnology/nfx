@@ -4,8 +4,9 @@
 #                              (not public: sovtech reviews it and publishes it by hand)
 #   a PR that touches this     the same build and sums, no release (a dry run)
 #
-# What ships: `nfxd` and `nfx-package` for linux-x64 (glibc, built in ci.yml's pinned
-# rust:1.98.0-bookworm image), LICENSE and README, in one tarball, and SHA256SUMS. The Tauri
+# What ships: `nutflixd` and `nutflix-package` for linux-x64 (glibc, built in ci.yml's pinned
+# rust:1.98.0-bookworm image), LICENSE and README, in one tarball, nutflixd-<version>-linux-x64.tar.gz
+# (nfx-<version>-linux-x64.tar.gz up to 0.1.4), and SHA256SUMS. The Tauri
 # desktop viewer and the browser player are built from source for now.
 #
 # No job holds a key or signs anything. Only `draft-release` can write (contents: write), only
@@ -40,15 +41,15 @@ jobs:
         with:
           persist-credentials: false
       # A tag must name exactly the version being built: the tarball's name carries it, and
-      # `nfxd` and `nfx-media` must agree.
+      # `nutflixd` and `nfx-media` must agree.
       - name: the version
         id: version
         shell: bash
         run: |
           set -euo pipefail
-          v=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/nfxd/Cargo.toml | head -n 1)
+          v=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/nutflixd/Cargo.toml | head -n 1)
           m=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/nfx-media/Cargo.toml | head -n 1)
-          [ -n "$v" ] && [ "$v" = "$m" ] || { echo "::error::nfxd $v and nfx-media $m differ"; exit 1; }
+          [ -n "$v" ] && [ "$v" = "$m" ] || { echo "::error::nutflixd $v and nfx-media $m differ"; exit 1; }
           if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF_NAME" != "v$v" ]; then
             echo "::error::tag $GITHUB_REF_NAME does not name version $v"
             exit 1
@@ -62,7 +63,7 @@ jobs:
           git config --system --add safe.directory "$(pwd -P)"
           export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
           export RUSTFLAGS="--remap-path-prefix=$(pwd -P)=/build --remap-path-prefix=${CARGO_HOME:-/usr/local/cargo}=/cargo"
-          cargo build --release --locked --manifest-path crates/Cargo.toml -p nfxd -p nfx-media --bins
+          cargo build --release --locked --manifest-path crates/Cargo.toml -p nutflixd -p nfx-media --bins
       - name: tarball and SHA256SUMS
         shell: bash
         env:
@@ -70,15 +71,15 @@ jobs:
         run: |
           set -euo pipefail
           export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
-          name="nfx-${V}-linux-x64"
+          name="nutflixd-${V}-linux-x64"
           mkdir -p "dist/$name"
-          install -m 0755 crates/target/release/nfxd crates/target/release/nfx-package "dist/$name/"
+          install -m 0755 crates/target/release/nutflixd crates/target/release/nutflix-package "dist/$name/"
           install -m 0644 LICENSE README.md "dist/$name/"
           tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" \
             -C dist -cf - "$name" | gzip -9n > "dist/$name.tar.gz"
           rm -r "dist/$name"
           (cd dist && sha256sum "$name.tar.gz" > SHA256SUMS && cat SHA256SUMS)
-          "crates/target/release/nfxd" 2>&1 | head -n 3 || true
+          "crates/target/release/nutflixd" 2>&1 | head -n 3 || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nfx-release
@@ -106,5 +107,5 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
             --title "NFX ${GITHUB_REF_NAME#v}" \
-            --notes "Prebuilt nfxd and nfx-package for linux-x64, and SHA256SUMS. Release notes: docs/nfx/releases/${GITHUB_REF_NAME}.md in the tagged tree." \
+            --notes "Prebuilt nutflixd and nutflix-package for linux-x64, and SHA256SUMS. Release notes: docs/nfx/releases/${GITHUB_REF_NAME}.md in the tagged tree." \
             dist/*.tar.gz dist/SHA256SUMS

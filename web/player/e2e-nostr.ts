@@ -4,7 +4,7 @@
  * at a pinned commit (e2e-strfry.sh builds it) with its own default strfry.conf, only its
  * database, port and open-files limit changed.
  *
- *   ffmpeg 60 s clip → nfx-package → nfxd (origin; an embedded relay only to publish the
+ *   ffmpeg 60 s clip → nutflix-package → nutflixd (origin; an embedded relay only to publish the
  *   manifest it seeds, never given to a page; no tracker) behind a gate → two fresh headless
  *   Chromium contexts (never a real profile) on the test page with `&signal=nostr&relay=`
  *   strfry:
@@ -296,7 +296,7 @@ async function main(): Promise<void> {
   const strfryBin = need('STRFRY');
   const strfryConf = need('STRFRY_CONF');
   if (!existsSync(join(here, 'out-lib/player.js'))) throw new Error('no out-lib/player.js: run npm run build:lib first');
-  run('cargo', ['build', '--locked', '--manifest-path', join(crates, 'Cargo.toml'), '-p', 'nfxd', '-p', 'nfx-media', '--bins']);
+  run('cargo', ['build', '--locked', '--manifest-path', join(crates, 'Cargo.toml'), '-p', 'nutflixd', '-p', 'nfx-media', '--bins']);
 
   // ---- the stock relay: strfry's own config, only db, port and open-files limit changed ----
   const relayPort = await freePort();
@@ -316,20 +316,20 @@ async function main(): Promise<void> {
   const clip = join(work, 'clip.mp4');
   run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '60', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', clip]);
   const pkg = join(work, 'pkg');
-  run(bin('nfx-package'), [clip, '--video', 'nfx:testnet:1:nostr-e2e', '--out', pkg, '--max-height', '720', '--preset', 'veryfast']);
+  run(bin('nutflix-package'), [clip, '--video', 'nfx:testnet:1:nostr-e2e', '--out', pkg, '--max-height', '720', '--preset', 'veryfast']);
   const meta = JSON.parse(readFileSync(join(pkg, 'nfx.json'), 'utf8')) as { root: string; video: string };
   const key = join(work, 'node.key');
-  const pubkey = run(bin('nfxd'), ['key', 'new', key]).split('\n')[0]!;
+  const pubkey = run(bin('nutflixd'), ['key', 'new', key]).split('\n')[0]!;
   const a = `38504:${pubkey}:${meta.video}`;
   const node = await start(
-    bin('nfxd'),
+    bin('nutflixd'),
     ['run', '--key', key, '--store', join(pkg, 'store'), '--seed', a, '--embed-relay', '127.0.0.1:0', '--origin', '127.0.0.1:0'],
     [/embedded relay: (ws:\/\/\S+)/, /origin: (http:\/\/\S+?)\/?\s/],
   );
-  if (/embedded tracker/.test(node.text())) throw new Error(`nfxd started a tracker:\n${node.text()}`);
+  if (/embedded tracker/.test(node.text())) throw new Error(`nutflixd started a tracker:\n${node.text()}`);
   const nodeRelay = node.matches[0]![1]!;
   const origin = node.matches[1]![1]!.replace(/\/$/, '');
-  run(bin('nfxd'), ['publish', '--key', key, '--relay', nodeRelay, '--package', pkg, '--title', 'Nostr e2e']);
+  run(bin('nutflixd'), ['publish', '--key', key, '--relay', nodeRelay, '--package', pkg, '--title', 'Nostr e2e']);
   // The origin serves the video once the node seeds it.
   const seedBy = Date.now() + 60_000;
   while (!node.text().includes(`${a}: Seeding`)) {

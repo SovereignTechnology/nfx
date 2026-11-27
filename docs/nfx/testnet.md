@@ -19,31 +19,36 @@ so direct hole-punching is limited and many connections will be relayed.
 
 ## Using the scoped relay
 
-`wss://relay.nutflix.xyz` is the NFX-04 reference relay (`nfxd`'s embedded scoped relay) and
+`wss://relay.nutflix.xyz` is the NFX-04 reference relay (`nutflixd`'s embedded scoped relay) and
 nothing else: it takes manifests (kind 38504), availability beacons (kind 20464, never stored)
-and valid deletions (kind 5) for `nfx:testnet:1`, and answers `blocked: out of scope` to every
+and valid deletions (kind 5) for `nfx:testnet:1`. It also carries the testnet's mesh signaling
+(kind 25050, NFX-10 section 6; `--embed-relay-mesh`, since 0.1.3), forwarded live and never
+stored, so pages and mesh endpoints can name it as a signaling relay. A signaling event names
+no network, so the relay cannot scope it to `nfx:testnet:1`: it checks the event's room proof
+and rate-limits each sender (NFX-04 section 1). It answers `blocked: out of scope` to every
 other event. In the nutflix-pear desktop app, add it under Settings > NFX network > scoped
-relays; with `nfxd`, pass `--relay wss://relay.nutflix.xyz`.
+relays; with `nutflixd`, pass `--relay wss://relay.nutflix.xyz`.
 
 - Stored manifests live in the relay's memory (at most 20,000 events). A restart forgets them,
   so publishers must republish, and should also mirror manifests to general public relays
-  (NFX-04 section 4).
+  (NFX-04 section 4). The relay runs 0.1.3 (as of 2026-11-26): 0.1.4's `--state`, which keeps
+  manifests across a restart, is not deployed on it.
 - It does not implement NIP-42 authentication (a SHOULD in NFX-04), and its NIP-11 document
   carries no operator fields; this page is where the operator is named.
 
 Nothing on the network depends on this relay. A goal of NFX and nutflix is to work with
 ordinary Nostr relays: manifests and beacons are standard events that general public relays
-carry unchanged, and connection signaling for peers behind NAT (issue #30) is being designed
-the same way, with no relay plugins or custom relay software in the required path. This relay
-is a filter and a convenience.
+carry unchanged, and connection signaling for peers behind NAT (issue #30) already works the
+same way for browsers (the mesh endpoint, NFX-10 section 6, since 0.1.2), with no relay plugins
+or custom relay software in the required path. This relay is a filter and a convenience.
 
 ## Using the iroh relay
 
 Using it is opt-in; nothing points at it by default.
 
 ```sh
-nfxd run --iroh-relay https://iroh.nutflix.xyz/ …              # use it, and still go direct when possible
-nfxd run --iroh-relay https://iroh.nutflix.xyz/ --relay-only … # send every byte through it
+nutflixd run --iroh-relay https://iroh.nutflix.xyz/ …              # use it, and still go direct when possible
+nutflixd run --iroh-relay https://iroh.nutflix.xyz/ --relay-only … # send every byte through it
 ```
 
 `--relay-only` needs at least one `--iroh-relay` and cannot be combined with `--gossip`. In the
@@ -59,7 +64,7 @@ a direct message.
 ## What the operator can see and keeps
 
 An iroh relay forwards encrypted packets addressed by endpoint id. Each endpoint
-authenticates itself with its id inside QUIC TLS, iroh verifies blobs by BLAKE3, and `nfxd`
+authenticates itself with its id inside QUIC TLS, iroh verifies blobs by BLAKE3, and `nutflixd`
 checks every file against the signed sha256 hash list (NFX-05). So the relay:
 
 - **cannot** read or alter the video, and cannot impersonate a peer;
@@ -68,7 +73,9 @@ checks every file against the signed sha256 hash list (NFX-05). So the relay:
 
 The scoped Nostr relay carries events that are public by design (manifests and beacons name
 videos and the endpoints that seed them), and its operator also sees which videos a client
-subscribes to and the client's network address at connection time.
+subscribes to and the client's network address at connection time. Of mesh signaling it sees
+room keys and session keys, and who signals whom and when; offers and answers are encrypted
+between the two peers (NIP-44), so it does not see their SDP.
 
 What is kept, for both relays:
 

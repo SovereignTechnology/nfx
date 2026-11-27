@@ -3918,23 +3918,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
-name = "nfx-desktop"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "http-body-util",
- "hyper",
- "iroh",
- "nfx-proto",
- "nfxd",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tokio",
-]
-
-[[package]]
 name = "nfx-node"
 version = "0.1.4"
 dependencies = [
@@ -3989,20 +3972,6 @@ dependencies = [
  "sha1 0.11.0",
  "sha2 0.11.0",
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "nfxd"
-version = "0.1.4"
-dependencies = [
- "hex",
- "iroh",
- "nfx-node",
- "nfx-proto",
- "nostr-sdk",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -4232,6 +4201,37 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "nutflix-viewer"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "iroh",
+ "nfx-proto",
+ "nutflixd",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tokio",
+]
+
+[[package]]
+name = "nutflixd"
+version = "0.1.4"
+dependencies = [
+ "hex",
+ "iroh",
+ "nfx-node",
+ "nfx-proto",
+ "nostr-sdk",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]

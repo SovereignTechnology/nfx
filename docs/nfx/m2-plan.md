@@ -19,6 +19,10 @@ security stage**. In the demo (the execution plan (not published) §0 rule 3 and
 
 ## Progress
 
+As of 2026-11-26, `m2/audit-loop` is merged to `main` (`0b69f8a`), so this section is
+`main`'s state, through the thirty-first audit. The branches `m2/r32` to `m2/r35` build on
+`m2/audit-loop` and are not merged to `main`.
+
 **M2.0 built (2026-09-24, branch `m2/contracts`), then reworked after each of thirty-one
 independent audits (the later reworks on `m2/audit-loop`)** ([first](reviews/2026-09-24-m2.0-independent-audit.md),
 [second](reviews/2026-09-24-m2.0-second-audit.md),

@@ -9,7 +9,7 @@
 //!   Nothing is ever upscaled.
 //! - **What packaging makes** ([`Renditions`]): by default **one** rendition, 720p, or
 //!   `<S>p` for a source smaller than 720; or exactly the offered sizes a creator names
-//!   (`nfx-package --renditions 2160p`, `1080p,360p`, `1000p` for a source 1000 lines on its
+//!   (`nutflix-package --renditions 2160p`, `1080p,360p`, `1000p` for a source 1000 lines on its
 //!   short side, or
 //!   `1080p,720p,360p`, the old ladder). While the network is small every rendition is its
 //!   own set of segments and its own browser swarm (NFX-10 §2), so more of them cost storage
@@ -211,7 +211,7 @@ pub fn storyboard_geometry(duration_sec: f64) -> Option<StoryboardGeometry> {
     })
 }
 
-/// Which renditions packaging makes (`nfx-package --renditions`).
+/// Which renditions packaging makes (`nutflix-package --renditions`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Renditions {
     /// One rendition: 720p, or `<S>p` for a source smaller than 720 lines on its short side.

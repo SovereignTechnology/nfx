@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["nfx-media", "nfx-node", "nfx-pay", "nfx-pay-wire", "nfx-proto", "nfx-wasm", "nfxd"]
+members = ["nfx-media", "nfx-node", "nfx-pay", "nfx-pay-wire", "nfx-proto", "nfx-wasm", "nutflixd"]
 
 [workspace.package]
 edition = "2024"

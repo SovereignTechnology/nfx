@@ -116,7 +116,7 @@ A seed list MAY ship with clients purely for bootstrapping step 2's discovery.
 ## 7. Embedded scoped relay
 
 A seeder node MAY embed a scoped relay in the same process (the reference headless
-node `nfxd` does; ADR 0008), so that a network can bootstrap with no outside relay at
+node `nutflixd` does; ADR 0008), so that a network can bootstrap with no outside relay at
 all:
 
 - An embedded relay is a scoped relay in every respect. It MUST satisfy §§1–3
@@ -186,3 +186,7 @@ redundancy comes from many operators).
   conformant as before, and so is a reader that ignores it; no reader of NFX-02, -03 or -05
   changes behaviour. A bump would have re-derived every room key and republished every
   manifest, for no reader's benefit. The reasons are in decision record 0108.
+- **Clarified in place 2026-11-26, with no change of behaviour.** §7 names the reference
+  headless node `nutflixd`; it was `nfxd` until the repository and its binaries were renamed
+  that day. No rule, wire format or artifact changes: a name in an example of who embeds a
+  relay, fixed in place as the status model allows for clarifications.

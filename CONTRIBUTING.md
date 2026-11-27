@@ -30,10 +30,13 @@ New work goes in `spec/`, `crates/`, `web/` and `docs/nfx/`, plus decision recor
 4. Run `crates/ci/check.sh` before you push (see below).
 5. Open a pull request against `main`. Explain *why*, not just *what*; the diff already
    shows what changed.
-6. CI must pass. Review must approve. Then it merges. CI is two jobs: the lock job
-   and the check job, which runs `crates/ci/check.sh`. You can run that script yourself
-   before you push: it runs `crates/ci/check-locked.sh`'s checks too, though the
-   verdict on the money code is the lock job's.
+6. CI must pass. Review must approve. Then it merges. `ci.yml` is two jobs: the lock job
+   and the check job, which runs `crates/ci/check.sh`. A pull request also runs
+   `depth.yml` (line coverage against `crates/coverage-floor.txt`, and `cargo check` on
+   the next rustc), `zizmor.yml` (the workflow lint) and, when it touches `web/player/`,
+   `nfx-nat-browsers.yml`. You can run `check.sh` yourself before you push: it runs
+   `crates/ci/check-locked.sh`'s checks too, though the verdict on the money code is the
+   lock job's.
 
 The money code is locked: a change under `crates/nfx-pay`, `crates/nfx-pay-wire` or any
 other path that `crates/ci/check-locked.sh` lists fails CI until it has been reviewed
@@ -51,30 +54,35 @@ and re-pinned. See [`docs/nfx/m2-plan.md`](docs/nfx/m2-plan.md) before you touch
 
 - The JSON schemas in `spec/schemas/` must keep agreeing with the vectors
   (`python3 spec/schemas/check.py`).
-- Frozen documents change only by a `specver` bump (NFX-01 §4). Typos and clarifications
-  that change no behaviour may be fixed in place, with a line in the document's
-  changelog; the status model is in [`spec/README.md`](spec/README.md). Documents marked
-  Draft may change in place.
+- Frozen documents change only by a `specver` bump (NFX-01 §4); the maintainer has made
+  three recorded exceptions, additive MAYs amended into NFX-04 in place (its changelog
+  says why). Typos and clarifications that change no behaviour may be fixed in place,
+  with a line in the document's changelog; the status model is in
+  [`spec/README.md`](spec/README.md). Documents marked Draft may change in place.
 
 ## Checks
 
-Run everything CI runs with one command:
+Run everything `ci.yml`'s check job runs with one command:
 
 ```sh
 PYTHON=path/to/venv/bin/python crates/ci/check.sh
 ```
 
-CI runs this same script. In order, it:
+The check job runs this same script. In order, it:
 
 1. runs the locked-paths check first, before any unpinned code runs;
 2. recomputes the spec test vectors and compares them with the files on disk;
 3. checks the JSON schemas against the vectors;
-4. runs `cargo fmt --check`, `cargo clippy` with warnings denied, and `cargo test`;
-5. packages a real clip with ffmpeg, only if `ffmpeg` is on `PATH`
+4. checks that the cached crate sources match `Cargo.lock`, then runs
+   `cargo fetch --locked`;
+5. runs `cargo fmt --check`, `cargo clippy` with warnings denied, and `cargo test`;
+6. packages a real clip with ffmpeg, only if `ffmpeg` is on `PATH`
    (`NFX_FFMPEG` and `NFX_FFPROBE` point at other binaries);
-6. runs `cargo deny check`;
-7. runs the `nfx-proto`, `nfx-pay-wire` and `nfx-wasm` tests for `wasm32` under Node
-   (`NFX_SKIP_WASM=1` skips this step).
+7. runs `cargo deny check`;
+8. runs the `nfx-proto`, `nfx-pay-wire` and `nfx-wasm` tests for `wasm32` under Node
+   (`NFX_SKIP_WASM=1` skips this step);
+9. runs the locked-paths check once more, then builds and tests the money crates alone
+   and checks that they were built only from their pinned files and dependencies.
 
 It needs:
 
@@ -87,13 +95,17 @@ It needs:
   `wasm32` step, unless you skip it with `NFX_SKIP_WASM=1`.
 
 The versions CI uses are pinned in `.github/workflows/ci.yml`. A clean test build is
-heavy; CI sets `CARGO_BUILD_JOBS=2` and `CARGO_PROFILE_TEST_DEBUG=0` to keep it light,
-and you can do the same.
+heavy; CI sets `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_PROFILE_TEST_DEBUG=0` and
+`CARGO_INCREMENTAL=0` to keep it light (and `CARGO_BUILD_JOBS=2` for the lock's own
+builds), and you can do the same.
 
 ## Code rules
 
 - **No hand-written crypto.** Use libraries (RustCrypto, iroh, nostr-sdk, libsodium);
-  never implement hashing, signatures, key derivation or encryption yourself.
+  never implement hashing, signatures, key derivation or encryption yourself. One
+  exception is recorded where it lives: `crates/nfx-proto/src/nip44.rs` writes HMAC-SHA256
+  and HKDF out over RustCrypto's `sha2` (the `hmac` crate would change the money crates'
+  pinned dependency closure), checked against RFC 4231, RFC 5869 and the NIP-44 vectors.
 - **`nfx-proto` is pure:** no I/O, no clock (callers pass `now`) and no RNG, so the same
   code builds and verifies natively and under `wasm32`.
 - The workspace forbids `unsafe` code (`unsafe_code = "forbid"`).
@@ -109,10 +121,12 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 ```
 
 Types used in this repository: `feat`, `fix`, `docs`, `spec` (changes under `spec/`),
-`spike` (spike code and results), `test`, `refactor`, `build`, `ci`, `chore` and
-`merge` (merge commits). The scope is a crate or area, for example `nfxd`, `nfx-proto`,
-`crates` or `web`, and may be omitted. A real subject from the history:
-`spec: freeze NFX-02..06 at M1 (2026-09-24)`.
+`spike` (spike code and results), `test`, `refactor`, `build`, `ci`, `chore`, `deps`,
+`release` and `merge` (merge commits). The scope is a crate or area, for example
+`nutflixd`, `nfx-proto`, `crates` or `web`, and may be omitted. Much of the history, and
+most of it since 2026-11-19, names the crate or area in place of a type (`nfx-pay: …`,
+`relay: …`, `stun: …`, `player: …`); either form is fine. A real subject from the
+history: `spec: freeze NFX-02..06 at M1 (2026-09-24)`.
 
 Subject line: imperative mood, no trailing full stop, ideally under 72 characters.
 

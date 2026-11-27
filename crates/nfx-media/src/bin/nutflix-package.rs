@@ -1,4 +1,4 @@
-//! `nfx-package <input> --video <namespace:video-id> --out <dir> [--renditions <size>[,<size>…]]
+//! `nutflix-package <input> --video <namespace:video-id> --out <dir> [--renditions <size>[,<size>…]]
 //! [--max-height N] [--preset P] [--no-thumb] [--keep-work]`
 //!
 //! Packages a video as NFX-05 content into `<dir>/store` (files named by sha256) and
@@ -25,7 +25,7 @@ use nfx_proto::namespace::VideoAddr;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: nfx-package <input> --video <namespace:video-id> --out <dir> [--renditions <size>[,<size>...]] [--max-height N] [--preset P] [--no-thumb] [--keep-work]\n\nDefault: one rendition, 720p, or the source's own size when it is smaller.\nA size is the short side as displayed: 720p is 1280x720, or 720x1280 in portrait.\n--renditions picks sizes the source offers instead: 2160p, 1440p, 1080p, 720p, 480p and\n360p when it is that large, and its own size (e.g. 1000p); never upscaled.\n--renditions 1080p,720p,360p is the old three-size ladder."
+        "usage: nutflix-package <input> --video <namespace:video-id> --out <dir> [--renditions <size>[,<size>...]] [--max-height N] [--preset P] [--no-thumb] [--keep-work]\n\nDefault: one rendition, 720p, or the source's own size when it is smaller.\nA size is the short side as displayed: 720p is 1280x720, or 720x1280 in portrait.\n--renditions picks sizes the source offers instead: 2160p, 1440p, 1080p, 720p, 480p and\n360p when it is that large, and its own size (e.g. 1000p); never upscaled.\n--renditions 1080p,720p,360p is the old three-size ladder."
     );
     ExitCode::from(2)
 }
@@ -58,7 +58,7 @@ fn main() -> ExitCode {
         Some(Some(list)) => match Renditions::parse(&list) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("nfx-package: {e}");
+                eprintln!("nutflix-package: {e}");
                 return ExitCode::from(2);
             }
         },
@@ -98,7 +98,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("nfx-package: {e}");
+            eprintln!("nutflix-package: {e}");
             ExitCode::FAILURE
         }
     }

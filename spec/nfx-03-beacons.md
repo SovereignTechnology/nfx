@@ -199,5 +199,5 @@ edit in this spec is ever required to grow the relay set.
   names only public addresses and configured external ones, in `addrs` and in its tickets;
   private, shared, loopback, link-local and unique-local addresses go only to relays reached at
   such an address, in a beacon signed apart and dated a second later. Until now nothing said
-  which addresses a seeder names, and nfxd named every interface address unless an external one
+  which addresses a seeder names, and nutflixd named every interface address unless an external one
   was configured.

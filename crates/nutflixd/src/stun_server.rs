@@ -1,4 +1,4 @@
-//! `nfxd stun`: a STUN server and nothing else, so anyone can run one for a network (NFX-10
+//! `nutflixd stun`: a STUN server and nothing else, so anyone can run one for a network (NFX-10
 //! §1). No store, no videos, no iroh: the Binding responder of [`crate::stun`] (RFC 8489
 //! Binding only, no TURN, no authentication, rate-limited per source, per prefix and in all,
 //! and nothing about a client is logged) on one UDP socket.
@@ -50,7 +50,7 @@ pub struct Announce {
     pub networks: Vec<Namespace>,
 }
 
-/// What `nfxd stun` runs.
+/// What `nutflixd stun` runs.
 #[derive(Clone)]
 pub struct StunConfig {
     /// The UDP address to answer on.
@@ -72,7 +72,7 @@ pub struct Announced {
     pub relays: usize,
 }
 
-/// A running `nfxd stun`.
+/// A running `nutflixd stun`.
 pub struct StunServer {
     addr: SocketAddr,
     public: Option<SocketAddr>,

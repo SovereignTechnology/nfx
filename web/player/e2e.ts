@@ -1,14 +1,14 @@
 /**
  * A2 test player, end to end, on this machine only (loopback, ephemeral ports):
  *
- *   ffmpeg test clip → nfx-package → nfxd (embedded scoped relay + origin + seeding)
- *   → nfxd publish → the player in headless Chromium (fresh context, never a real
+ *   ffmpeg test clip → nutflix-package → nutflixd (embedded scoped relay + origin + seeding)
+ *   → nutflixd publish → the player in headless Chromium (fresh context, never a real
  *   profile) plays it with every file verified by nfx-proto (WASM):
  *   - by origin and root, from a secure context and from an insecure one (no WebCrypto;
  *     `http://player.test` mapped to loopback);
  *   - by manifest address over Nostr, with an origin hint, and with no hint at all, the
  *     origin then coming from a verified beacon's `https` endpoint (a throwaway
- *     self-signed TLS proxy in front of nfxd's origin);
+ *     self-signed TLS proxy in front of nutflixd's origin);
  *   - by an address nobody published: it must fail, not guess.
  *   Then the same player against a lying origin that flips a byte in every segment must
  *   reject them and never play.
@@ -27,7 +27,7 @@
  *
  *   A hostile beacon (nfx #85): a third video in 720p and 360p, served whole by an honest
  *   origin (a plain NFX-05 §6 server over the store, behind TLS) that no honest beacon names.
- *   A second nfxd, under a stranger's key, seeds it in 360p only and names that origin in its
+ *   A second nutflixd, under a stranger's key, seeds it in 360p only and names that origin in its
  *   `https` endpoint with `renditions: ["360p"]`, a narrowing claim. By address, the page
  *   must still offer 720p and 360p (each with its rendition id) and play; asked for 720p alone
  *   (`&renditions=720p`), it must play 720p from that origin rather than skip it.
@@ -43,7 +43,7 @@
  *   shown and dropped) is read. The source's frame rate is kept (60 fps stays 60).
  *
  * Usage: npm run build && npm run e2e
- * Needs `cargo` (builds nfxd and nfx-package) and ffmpeg (`NFX_FFMPEG`, else PATH).
+ * Needs `cargo` (builds nutflixd and nutflix-package) and ffmpeg (`NFX_FFMPEG`, else PATH).
  * Every process it starts runs in its own process group, and only those are killed.
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
@@ -188,7 +188,7 @@ function selfSigned(): { key: Buffer; cert: Buffer } {
 }
 
 /** An https front for the origin, with the throwaway certificate; the upstream is set once
- * nfxd has printed its origin. */
+ * nutflixd has printed its origin. */
 async function tlsProxy(): Promise<{ url: string; setUpstream: (u: string) => void; requests: string[] }> {
   let upstream = '';
   const requests: string[] = [];
@@ -307,18 +307,18 @@ interface HashListFile {
 }
 
 async function main(): Promise<void> {
-  run('cargo', ['build', '--locked', '--manifest-path', join(crates, 'Cargo.toml'), '-p', 'nfxd', '-p', 'nfx-media', '--bins']);
+  run('cargo', ['build', '--locked', '--manifest-path', join(crates, 'Cargo.toml'), '-p', 'nutflixd', '-p', 'nfx-media', '--bins']);
   const clip = join(work, 'clip.mp4');
   run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '8', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', clip]);
   const pkg = join(work, 'pkg');
-  run(bin('nfx-package'), [clip, '--video', 'nfx:mainnet:1:player-e2e', '--out', pkg, '--max-height', '720', '--preset', 'veryfast']);
+  run(bin('nutflix-package'), [clip, '--video', 'nfx:mainnet:1:player-e2e', '--out', pkg, '--max-height', '720', '--preset', 'veryfast']);
   const meta = JSON.parse(readFileSync(join(pkg, 'nfx.json'), 'utf8')) as { root: string; video: string };
   // A second video in two renditions, from another clip (so no file is shared with the
   // first), its files in the same store: the node holds it in 360p only.
   const clip2 = join(work, 'clip2.mp4');
   run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=660:sample_rate=48000', '-t', '8', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', clip2]);
   const pkg2 = join(work, 'pkg2');
-  run(bin('nfx-package'), [clip2, '--video', 'nfx:mainnet:1:player-e2e-held', '--out', pkg2, '--renditions', '720p,360p', '--preset', 'veryfast']);
+  run(bin('nutflix-package'), [clip2, '--video', 'nfx:mainnet:1:player-e2e-held', '--out', pkg2, '--renditions', '720p,360p', '--preset', 'veryfast']);
   const meta2 = JSON.parse(readFileSync(join(pkg2, 'nfx.json'), 'utf8')) as { root: string; video: string };
   for (const f of readdirSync(join(pkg2, 'store'))) {
     if (!existsSync(join(pkg, 'store', f))) cpSync(join(pkg2, 'store', f), join(pkg, 'store', f));
@@ -332,7 +332,7 @@ async function main(): Promise<void> {
   const clip3 = join(work, 'clip3.mp4');
   run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=25', '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000', '-t', '8', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', clip3]);
   const pkg3 = join(work, 'pkg3');
-  run(bin('nfx-package'), [clip3, '--video', 'nfx:mainnet:1:player-e2e-hostile', '--out', pkg3, '--renditions', '720p,360p', '--preset', 'veryfast']);
+  run(bin('nutflix-package'), [clip3, '--video', 'nfx:mainnet:1:player-e2e-hostile', '--out', pkg3, '--renditions', '720p,360p', '--preset', 'veryfast']);
   const meta3 = JSON.parse(readFileSync(join(pkg3, 'nfx.json'), 'utf8')) as { root: string; video: string };
   const list3 = JSON.parse(readFileSync(join(pkg3, 'store', meta3.root), 'utf8')) as HashListFile;
   if (list3.renditions.map((r) => r.id).sort().join() !== '360p,720p') throw new Error(`video 3 renditions: ${JSON.stringify(list3.renditions)}`);
@@ -347,7 +347,7 @@ async function main(): Promise<void> {
     run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=3840x2160:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=990:sample_rate=48000', '-t', '6', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', clip4]);
   }
   const pkg4 = join(work, 'pkg4');
-  run(bin('nfx-package'), [clip4, '--video', 'nfx:mainnet:1:player-e2e-4k', '--out', pkg4, '--renditions', '2160p,720p', '--preset', 'veryfast']);
+  run(bin('nutflix-package'), [clip4, '--video', 'nfx:mainnet:1:player-e2e-4k', '--out', pkg4, '--renditions', '2160p,720p', '--preset', 'veryfast']);
   const meta4 = JSON.parse(readFileSync(join(pkg4, 'nfx.json'), 'utf8')) as { root: string; video: string };
   const list4 = JSON.parse(readFileSync(join(pkg4, 'store', meta4.root), 'utf8')) as HashListFile;
   if (list4.renditions.map((r) => r.id).sort().join() !== '2160p,720p') throw new Error(`video 4 renditions: ${JSON.stringify(list4.renditions)}`);
@@ -356,7 +356,7 @@ async function main(): Promise<void> {
   }
 
   const key = join(work, 'node.key');
-  const pubkey = run(bin('nfxd'), ['key', 'new', key]).split('\n')[0]!;
+  const pubkey = run(bin('nutflixd'), ['key', 'new', key]).split('\n')[0]!;
   const a = `38504:${pubkey}:${meta.video}`;
   const a2 = `38504:${pubkey}:${meta2.video}`;
   const a3 = `38504:${pubkey}:${meta3.video}`;
@@ -364,30 +364,30 @@ async function main(): Promise<void> {
   const tls = await tlsProxy();
   const whole = await staticOrigin(join(pkg3, 'store'), [meta3.root]);
   const node = await start(
-    bin('nfxd'),
+    bin('nutflixd'),
     ['run', '--key', key, '--store', join(pkg, 'store'), '--seed', a, '--seed', `${a2}#360p`, '--seed', a4, '--embed-relay', '127.0.0.1:0', '--origin', '127.0.0.1:0', '--https-url', tls.url],
     [/embedded relay: (ws:\/\/\S+)/, /origin: (http:\/\/\S+?)\/?\s/],
   );
   const relay = node.matches[0]![1]!;
   const origin = node.matches[1]![1]!.replace(/\/$/, '');
   tls.setUpstream(origin);
-  const published = run(bin('nfxd'), ['publish', '--key', key, '--relay', relay, '--package', pkg, '--title', 'Player e2e']).trim();
+  const published = run(bin('nutflixd'), ['publish', '--key', key, '--relay', relay, '--package', pkg, '--title', 'Player e2e']).trim();
   if (published !== a) throw new Error(`published ${published}, expected ${a}`);
-  const published2 = run(bin('nfxd'), ['publish', '--key', key, '--relay', relay, '--package', pkg2, '--title', 'Player e2e, held renditions']).trim();
+  const published2 = run(bin('nutflixd'), ['publish', '--key', key, '--relay', relay, '--package', pkg2, '--title', 'Player e2e, held renditions']).trim();
   if (published2 !== a2) throw new Error(`published ${published2}, expected ${a2}`);
-  const published4 = run(bin('nfxd'), ['publish', '--key', key, '--relay', relay, '--package', pkg4, '--title', 'Player e2e, 4K']).trim();
+  const published4 = run(bin('nutflixd'), ['publish', '--key', key, '--relay', relay, '--package', pkg4, '--title', 'Player e2e, 4K']).trim();
   if (published4 !== a4) throw new Error(`published ${published4}, expected ${a4}`);
-  const published3 = run(bin('nfxd'), ['publish', '--key', key, '--relay', relay, '--package', pkg3, '--title', 'Player e2e, a hostile beacon']).trim();
+  const published3 = run(bin('nutflixd'), ['publish', '--key', key, '--relay', relay, '--package', pkg3, '--title', 'Player e2e, a hostile beacon']).trim();
   if (published3 !== a3) throw new Error(`published ${published3}, expected ${a3}`);
   // The stranger: another key, its own copy of the store and state, the creator's relay. It
   // seeds video 3 in 360p only and names the honest origin, which it does not run, as
   // serving 360p alone.
   const strangerKey = join(work, 'stranger.key');
-  run(bin('nfxd'), ['key', 'new', strangerKey]);
+  run(bin('nutflixd'), ['key', 'new', strangerKey]);
   const strangerStore = join(work, 'stranger-store');
   cpSync(join(pkg3, 'store'), strangerStore, { recursive: true });
   const seeding3 = new RegExp(`${a3.replace(/[^0-9A-Za-z]/g, (c) => `\\${c}`)}: Seeding`);
-  const stranger = start(bin('nfxd'), ['run', '--key', strangerKey, '--store', strangerStore, '--relay', relay, '--seed', `${a3}#360p`, '--https-url', whole.url], [seeding3]);
+  const stranger = start(bin('nutflixd'), ['run', '--key', strangerKey, '--store', strangerStore, '--relay', relay, '--seed', `${a3}#360p`, '--https-url', whole.url], [seeding3]);
   stranger.catch(() => {}); // awaited below; a failure before then must not go unhandled
   await new Promise<void>((ok, fail) => {
     const timer = setTimeout(() => fail(new Error('never seeding')), 60_000);
@@ -678,7 +678,7 @@ async function main(): Promise<void> {
       await p.close();
     }
     // The creator withdraws the video (NFX-02 §6): resolving it now fails, never plays.
-    run(bin('nfxd'), ['delete', '--key', key, '--relay', relay, '--a', a]);
+    run(bin('nutflixd'), ['delete', '--key', key, '--relay', relay, '--a', a]);
     const gone = await context.newPage();
     await gone.goto(q(`&origin=${encodeURIComponent(origin)}`));
     await gone.waitForFunction(() => (window as any).__nfx.errors.length > 0, null, { timeout: 30_000 });
