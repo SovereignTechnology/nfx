@@ -26,6 +26,9 @@
     "e2e-nostr.ts",
     "e2e-nostr-node.ts",
     "e2e-peer-first.ts",
+    "e2e-keep.ts",
+    "e2e-keep-fixture.ts",
+    "keep-unit.ts",
     "e2e-nat/driver.ts"
   ]
 }

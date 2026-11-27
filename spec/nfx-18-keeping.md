@@ -135,7 +135,7 @@ and readable by every page of its origin. On top of §§2–4:
   list everything it keeps.
 - At most one tab of an origin seeds at a time.
 
-NFX-10 is to carry the browser rules in a section of its own; until then, this section states them.
+NFX-10 §7 carries these rules for pages, with where a page takes each file from.
 
 ## 6. The user
 
@@ -207,3 +207,4 @@ A client claims "NFX-18" beside a level (NFX-11 §8) when it:
 ## Changelog
 
 - Draft 2026-11-26 — initial (decision record 0110).
+- Draft 2026-11-26 — §5 points to NFX-10 §7, which now carries the browser rules.

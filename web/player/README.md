@@ -10,7 +10,7 @@ amended 2026-11-09); nfx imports nothing from it.
 ## The library
 
 ```ts
-import { init, resolveManifest, watchEndpoints, selectStun, open } from './player.js';
+import { init, resolveManifest, watchEndpoints, selectStun, open, openKeepStore } from './player.js';
 
 await init();                                   // or init({ wasmUrl }) if the WASM is elsewhere
 const m = await resolveManifest(a, relays);     // NFX-02 over Nostr, deletions applied
@@ -30,7 +30,8 @@ const session = await open(videoElement, {
   // or: signaling: { kind: 'trackers', urls: ['wss://tracker.example'] },
   segmentSource: 'peers-then-https',            // optional: 'https-first' (default), or 'peers-only'
   iceServers: [{ urls: 'stun:stun.example:3478' }], // optional, STUN only
-  onEvent: (ev) => {},                          // log, origin, verified, rejected, levels, playing, mesh, waiting, resumed, rescue, error
+  onEvent: (ev) => {},                          // log, origin, verified, rejected, levels, playing, mesh, waiting, resumed, rescue, keep, error
+  keep: { store },                              // optional: keep what plays past a minimum (below); none = nothing kept
   signal,                                       // optional: aborts open(), or ends the session
 });
 session.levels; session.setLevel(-1); session.stats(); // each level has its rendition `id`
@@ -57,6 +58,46 @@ At the start of a session with a mesh the library checks once whether the browse
 gathers a UDP candidate. If it gathers none (WebRTC is off, or kept to a proxy, by a setting
 or an extension), no peer can connect: `stats().mesh.webrtc` is `blocked` and a `mesh` event
 says why, so a page can tell the viewer instead of showing an origin as the only source.
+
+### Keeping what is watched (NFX-18, NFX-10 §7)
+
+Off unless a page asks for it. A page opens the keep store once and passes it to each session
+that should keep what it plays:
+
+```ts
+import { openKeepStore, open } from './player.js';
+
+const store = await openKeepStore({ capBytes: 2 * 1024 ** 3 }); // IndexedDB `nfx-web-keep`; default cap 2 GiB
+const session = await open(videoElement, { ...options, keep: { store, minimumSeconds: 60 } });
+session.stats().keep;     // state, seconds played, files written, read from the store, refused, renditions held
+await store.list();       // every kept video: root, reasons, renditions (held or filling), bytes, when played
+await store.remove(root); // everything of one video
+```
+
+- **Nothing is written before the minimum** (`minimumSeconds`: default 60, 30 to 3600, down
+  to 1 on a loopback page for tests). Seconds that actually played count; a seek counts
+  nothing. A session that ends sooner writes nothing, and what it fetched goes with it. From
+  the minimum on, every file the session fetched, and every one it fetches later, is
+  verified and written, one transaction per file (its bytes and its index entry together),
+  without playback waiting for it. Nothing is fetched over HTTPS for keeping.
+- **Replaying.** The keep store is the first place a session asks for every file, before
+  the network: the hash list, the playlists, the init and, with or without a mesh, the
+  segments. A rendition whose playlist and init the store holds is offered whatever the
+  origin answers, so a kept video plays again with its origin gone, as far as it was kept.
+  Every read is checked against its sha256 again: other code of the page's origin can write
+  the store. A file that fails is dropped (`refused`) and fetched again like a missing one.
+- **The cap.** At the cap, videos kept only because they were watched go, least recently
+  played first, never one playing in any tab of the origin (each holds a Web Lock, shared,
+  while it plays; a video to go is first taken by the same lock, exclusive, and held until
+  its deletion commits). Nothing goes for a file that would not fit even then. `downloaded`
+  is part of the store's records for a later version; this one keeps only `watched`.
+- **The mesh.** With a mesh, the engine's segment storage is the session's: segments in RAM
+  as the engine's own storage keeps them (its usage counts RAM only, so prefetch is
+  unchanged), the store behind it. Only segments in RAM, and those of renditions the store
+  holds whole, are announced to peers. Seeding kept videos outside a play is not part of
+  this version.
+- A page that keeps must tell its user, before it seeds, what NFX-18 §6 says; keeping alone
+  shares nothing.
 
 ### Where the bytes come from (stats for nerds, nfx #99)
 
@@ -198,16 +239,18 @@ npm run build:lib      # the library: out-lib/player.js (minified) and its decla
 npm run typecheck
 npm run unit           # sanitisers, the beacon endpoint book and availability, open()'s option checks, levels and probes, the remote candidate filter, relays' NIP-11 and STUN, where segments come from, the WebRTC check
 npm run unit:policy    # the engine's choice of source with peers first, over every input
+npm run unit:keep      # the keep store, the session's part in keeping, and the tiers before HTTP
 npm run e2e            # the test page end to end (cargo, ffmpeg, openssl, Chromium), held renditions and a hostile beacon included
 npm run e2e:mesh       # the mesh, the bridge, the library's lifecycle, trackers from a beacon
 eval "$(bash e2e-strfry.sh /var/tmp/strfry)"   # the stock relay, strfry at a pinned commit
 npm run e2e:nostr      # two browsers over Nostr only (strfry, no tracker), the origin cut
 npm run e2e:nostr-node # a browser and nfxd's mesh endpoint (full ICE) over strfry, the origin cut
 npm run e2e:peer-first # peers first: segments from nfxd's mesh endpoint from the first one, rescues, a browser with WebRTC blocked
+npm run e2e:keep       # keeping: nothing under the minimum, a replay with the origin refusing everything, a tampered stored file
 ```
 
 The suites build `nfxd` and `nfx-package` and run headless Chromium in fresh contexts, on
-loopback only.
+loopback only (`e2e:keep` in a persistent profile in a temporary directory, started twice).
 
 `e2e-nat/run.sh` is the same mesh through NATs (nfx #71): one browser behind each of two
 nftables routers in network namespaces, signaling only through strfry and taking STUN only

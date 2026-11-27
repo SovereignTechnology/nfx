@@ -29,6 +29,11 @@
  * fetched over HTTP), `&level=<n>` (pin a level), and `&segmentSource=<peers-then-https|
  * peers-only|https-first>` with `&peerWaitMs=<ms>` (where the mesh takes segments from).
  *
+ * Keeping (NFX-18, NFX-10 §7) is off unless the URL says `&keep=1` on a loopback host: the page then opens the
+ * keep store (`&keepCap=<bytes>`) and keeps what it plays past the minimum
+ * (`&keepMinimum=<s>`, default 60), and replays it from there first. Test hooks:
+ * `__nfxKeep` (the store's `idle`, `list` and `usage`) and `__nfxDestroy()`.
+ *
  * Which renditions it offers (NFX-03 §5, NFX-10 §1): by address, each beacon-named origin
  * goes to the library with the renditions its `https` endpoint names, as a hint, and the
  * library offers what the origin it plays from answers that it holds (nfx #85). The page
@@ -47,6 +52,9 @@ import {
   MAX_ICE_SERVERS,
   MAX_RELAYS,
   MAX_TRACKERS,
+  type KeepOptions,
+  type KeepStats,
+  type KeepStore,
   type MeshStats,
   type SegmentSource,
   type OpenCommon,
@@ -58,6 +66,7 @@ import {
   type StunFallback,
   init,
   open,
+  openKeepStore,
   relayUrl,
   resolveManifest,
   selectStun,
@@ -95,6 +104,9 @@ interface State {
   waits: string[];
   rescues: string[];
   blocked: string | null;
+  /** Keeping: the `keep` events in order (`state` or `state:why`), and the session's stats. */
+  keepEvents: string[];
+  readonly keep: KeepStats | null;
   readonly mesh: MeshStats | null;
   /** The stats panel (nfx #99). */
   readonly nerd: NerdPanel;
@@ -123,6 +135,10 @@ const st: State = {
   waits: [],
   rescues: [],
   blocked: null,
+  keepEvents: [],
+  get keep(): KeepStats | null {
+    return session?.stats().keep ?? null;
+  },
   get mesh(): MeshStats | null {
     return session?.stats().mesh ?? null;
   },
@@ -133,6 +149,18 @@ const st: State = {
 (window as unknown as { __nfx: State }).__nfx = st;
 /** For automation: change where the playing session takes its segments from. */
 (window as unknown as { __nfxSegmentSource: (source: SegmentSource) => void }).__nfxSegmentSource = (source) => session?.setSegmentSource(source);
+/** For automation: end the session (what it kept stays kept). */
+(window as unknown as { __nfxDestroy: () => void }).__nfxDestroy = () => {
+  session?.destroy();
+  session = null;
+};
+/** The keep store, with `&keep=1`. */
+let keepStore: KeepStore | null = null;
+(window as unknown as { __nfxKeep: unknown }).__nfxKeep = {
+  idle: () => keepStore?.idle(),
+  list: () => keepStore?.list() ?? [],
+  usage: () => keepStore?.usage() ?? 0,
+};
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const nerd = nerdPanel({
@@ -186,6 +214,9 @@ const onEvent = (e: PlayerEvent): void => {
     case 'mesh':
       st.blocked = e.why;
       break;
+    case 'keep':
+      if (st.keepEvents.length < 100) st.keepEvents.push(e.why ? `${e.state}:${e.why}` : e.state);
+      break;
     case 'error':
       st.errors.push(e.message);
       break;
@@ -234,6 +265,25 @@ const whole = (v: string | null, max: number): number | undefined => {
   const n = Number(v);
   return v !== null && Number.isSafeInteger(n) && n >= 0 && n <= max ? n : undefined;
 };
+/**
+ * `&keep=1`: keep what plays (`&keepMinimum=<s>`, `&keepCap=<bytes>`), passed as given so the library refuses a bad value.
+ * Honoured on a loopback host only: this page shows no NFX-18 §6 notice, so a link must not turn keeping on elsewhere.
+ */
+const keepWanted =
+  params.get('keep') === '1' && ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+const keepMinimum = params.has('keepMinimum') ? Number(params.get('keepMinimum')) : undefined;
+const keepCap = params.has('keepCap') ? Number(params.get('keepCap')) : undefined;
+/** Open the keep store when the URL asks for it; a browser that refuses plays without keeping. */
+async function openKeep(): Promise<void> {
+  if (!keepWanted || keepStore !== null) return;
+  try {
+    keepStore = await openKeepStore(keepCap === undefined ? {} : { capBytes: keepCap });
+  } catch (e) {
+    log(`keep store: ${e instanceof Error ? e.message : String(e)}; playing without keeping`);
+  }
+}
+const keepOption = (): { keep?: KeepOptions } =>
+  keepStore === null ? {} : { keep: { store: keepStore, ...(keepMinimum === undefined ? {} : { minimumSeconds: keepMinimum }) } };
 const common = {
   iceServers,
   onEvent,
@@ -246,7 +296,8 @@ const common = {
 
 /** Open a session, and show it in `__nfx`. */
 async function play(opts: Parameters<typeof open>[1]): Promise<void> {
-  const s = await open($<HTMLVideoElement>('v'), opts);
+  await openKeep();
+  const s = await open($<HTMLVideoElement>('v'), { ...opts, ...keepOption() });
   session = s;
   st.renditions = opts.renditions ? [...opts.renditions] : null;
   const stats = s.stats();
