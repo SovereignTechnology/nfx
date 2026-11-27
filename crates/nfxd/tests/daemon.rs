@@ -2481,15 +2481,9 @@ fn port_of(url: &str) -> u16 {
     nostr_sdk::prelude::Url::parse(url).unwrap().port().unwrap()
 }
 
-/// The direct addresses the next beacon `watch` hears names in its iroh endpoint: its
-/// `addrs`, and those inside each of its tickets.
-async fn next_iroh_addresses(
-    watch: &mut nfx_node::nostr::BeaconWatch,
-) -> (Vec<String>, Vec<Vec<SocketAddr>>) {
-    let beacon = tokio::time::timeout(WAIT, watch.next())
-        .await
-        .expect("a beacon")
-        .expect("a beacon");
+/// The direct addresses `beacon`'s iroh endpoint names: its `addrs`, and those inside each
+/// of its tickets.
+fn iroh_addresses(beacon: &nfx_proto::beacon::Beacon) -> (Vec<String>, Vec<Vec<SocketAddr>>) {
     beacon
         .content
         .endpoints
@@ -2508,6 +2502,14 @@ async fn next_iroh_addresses(
             _ => None,
         })
         .expect("an iroh endpoint")
+}
+
+/// [`iroh_addresses`] of the next beacon `watch` hears.
+async fn next_iroh_addresses(
+    watch: &mut nfx_node::nostr::BeaconWatch,
+) -> (Vec<String>, Vec<Vec<SocketAddr>>) {
+    let beacon = next_beacon(watch).await;
+    iroh_addresses(&beacon)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2559,14 +2561,16 @@ async fn a_relay_reached_at_a_public_address_never_hears_a_private_address() {
     until_state(&seeder, &a, &VideoState::Seeding).await;
 
     // The relay on this host hears the loopback address, in `addrs` and in every ticket.
-    let (addrs, tickets) = next_iroh_addresses(&mut on_host_beacons).await;
+    let full = next_beacon(&mut on_host_beacons).await;
+    let (addrs, tickets) = iroh_addresses(&full);
     assert!(addrs.contains(&private.to_string()), "{addrs:?}");
     assert!(!tickets.is_empty());
     for t in &tickets {
         assert!(t.contains(&private), "{t:?}");
     }
     // The other relay hears no address that is not public, in either place.
-    let (addrs, tickets) = next_iroh_addresses(&mut world_beacons).await;
+    let public = next_beacon(&mut world_beacons).await;
+    let (addrs, tickets) = iroh_addresses(&public);
     for addr in &addrs {
         assert!(
             nfx_node::node::is_public(&addr.parse().unwrap()),
@@ -2577,6 +2581,36 @@ async fn a_relay_reached_at_a_public_address_never_hears_a_private_address() {
     for t in &tickets {
         assert!(t.iter().all(nfx_node::node::is_public), "{t:?}");
     }
+
+    // One period's twins, the full one a second newer: a viewer that reads both relays keeps
+    // it whichever arrives first, as a reader keeps a seeder's newest beacon; a viewer of the
+    // public relay only keeps the public one.
+    assert_eq!(full.seeder, public.seeder);
+    assert_eq!(full.created_at, public.created_at + 1);
+    let viewer = std::sync::Arc::new(
+        nfx_node::node::Node::spawn(nfx_node::node::NodeConfig {
+            no_portmapper: true,
+            ..nfx_node::node::NodeConfig::default()
+        })
+        .await
+        .unwrap(),
+    );
+    let names = |pull: &nfx_node::origin::SwarmPull| {
+        pull.peers(&a)
+            .iter()
+            .any(|p| p.ip_addrs().any(|ip| *ip == private))
+    };
+    for (first, second) in [(&public, &full), (&full, &public)] {
+        let both = nfx_node::origin::SwarmPull::new(viewer.clone());
+        both.learn(first);
+        both.learn(second);
+        assert!(names(&both), "lost the full beacon: {:?}", both.peers(&a));
+    }
+    let world_only = nfx_node::origin::SwarmPull::new(viewer.clone());
+    world_only.learn(&public);
+    assert!(!world_only.peers(&a).is_empty());
+    assert!(!names(&world_only), "{:?}", world_only.peers(&a));
+    viewer.close().await.unwrap();
     on_host.shutdown().await;
     world.shutdown().await;
     seeder.shutdown().await;

@@ -358,6 +358,16 @@ impl Drop for AbortOnDrop {
 const MAX_SENT_ENVELOPE: usize = MAX_ENVELOPE_BYTES - 64;
 /// A gossip send not done by then is dropped: gossip never holds up a relay beacon.
 const GOSSIP_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+/// How much later than its public twin a full beacon is dated (NFX-03 §4 as amended
+/// 2026-11-26). Readers keep a seeder's newest beacon and ignore one that is not newer, so a
+/// viewer that reads both a relay on the seeder's networks and a public one keeps the full
+/// beacon, whichever arrives first; a viewer of public relays only never sees it. It stays
+/// older than the next period's public beacon.
+const FULL_BEACON_LEAD: u64 = 1;
+const _: () = assert!(
+    BEACON_TTL / 2 > FULL_BEACON_LEAD,
+    "the beacon period must exceed the full beacon's lead"
+);
 
 /// A swarm member's envelope (NFX-06 §4): a `here` becomes a gossip-ranked pull source
 /// for `manifest`, and a `bye` withdraws it. This node's own envelopes are ignored.
@@ -387,12 +397,13 @@ async fn gossip_send(
     pubkey: &str,
     beacon: BeaconContent,
     secret: &[u8; 32],
+    created_at: u64,
 ) {
     let env = Envelope {
         op,
         pubkey: pubkey.to_owned(),
         beacon,
-        created_at: unix_now(),
+        created_at,
     };
     if let Ok(wire) = envelope_wire(&env, secret)
         && wire.len() <= MAX_SENT_ENVELOPE
@@ -519,7 +530,9 @@ impl Shared {
     /// networks (its embedded relay, one on the LAN or a tailnet) gets the full one, signed
     /// apart only when it says more (NFX-03 §4 as amended 2026-11-26,
     /// [`nfx_node::relay_class`]). The lookup answerer holds the beacon for the world.
-    /// `None` when it is due nowhere now; an error when no relay took it, or every relay
+    /// The public beacon is dated `created`, the full one a second later
+    /// ([`FULL_BEACON_LEAD`]), so that a viewer reading relays of both kinds keeps the full
+    /// one. `None` when it is due nowhere now; an error when no relay took it, or every relay
     /// asked to slow down.
     async fn announce(
         &self,
@@ -528,8 +541,8 @@ impl Shared {
         seeded: &Seeded,
         manifest: &Verified<Manifest>,
         held: Option<&[String]>,
+        created: u64,
     ) -> Result<Option<usize>> {
-        let created = unix_now();
         let public = self.beacon(seeded, manifest, held, RelayClass::Public);
         let event = sign_beacon(keys, &manifest.a_tag(), &public, created, BEACON_TTL).await?;
         // A signed beacon can answer a lookup whether or not it is due anywhere now. Lookup
@@ -557,7 +570,10 @@ impl Shared {
             if content == public {
                 None
             } else {
-                Some(sign_beacon(keys, &manifest.a_tag(), &content, created, BEACON_TTL).await?)
+                // Strictly newer than its public twin: readers keep a seeder's newest beacon
+                // and ignore one that is not newer, whichever relay delivers first.
+                let dated = created + FULL_BEACON_LEAD;
+                Some(sign_beacon(keys, &manifest.a_tag(), &content, dated, BEACON_TTL).await?)
             }
         };
         let (to_public, to_private) = match &full {
@@ -745,6 +761,8 @@ impl Shared {
         };
         let _answering = Answering(self.lookup.clone(), a.to_owned());
         let mut announce = tokio::time::interval(Duration::from_secs(BEACON_TTL / 2));
+        // When the newest public beacon was dated: no later than any beacon to come.
+        let mut newest_public = unix_now();
         let mut gossip = tokio::time::interval(GOSSIP_EVERY);
         let mut check = tokio::time::interval(self.deletion_check_every);
         loop {
@@ -752,7 +770,11 @@ impl Shared {
                 _ = announce.tick() => {
                     // A refused or unreachable relay is retried at the next tick (beacons are
                     // hints), but it shows: a node that cannot announce is invisible.
-                    let sent = self.announce(a, &keys, &seeded, manifest, held.as_deref()).await;
+                    let created = unix_now();
+                    newest_public = created;
+                    let sent = self
+                        .announce(a, &keys, &seeded, manifest, held.as_deref(), created)
+                        .await;
                     match sent {
                         Ok(Some(_)) => self.set(a, VideoState::Seeding),
                         // Not this video's turn on any relay: it stands as it was.
@@ -762,10 +784,20 @@ impl Shared {
                 }
                 _ = gossip.tick(), if announcer.is_some() => {
                     if let Some(announcer) = &announcer {
-                        // A swarm's members are whoever joined it: the beacon for the world.
+                        // A swarm's members are whoever joined it: the beacon for the world,
+                        // dated as the newest public beacon, so that a viewer holding the full
+                        // one (a second newer) never takes it for a newer source.
                         let content =
                             self.beacon(&seeded, manifest, held.as_deref(), RelayClass::Public);
-                        gossip_send(announcer, Op::Here, &pubkey, content, &secret).await;
+                        gossip_send(
+                            announcer,
+                            Op::Here,
+                            &pubkey,
+                            content,
+                            &secret,
+                            newest_public,
+                        )
+                        .await;
                     }
                 }
                 _ = check.tick() => {
@@ -779,7 +811,15 @@ impl Shared {
                                 held.as_deref(),
                                 RelayClass::Public,
                             );
-                            gossip_send(announcer, Op::Bye, &pubkey, content, &secret).await;
+                            gossip_send(
+                                announcer,
+                                Op::Bye,
+                                &pubkey,
+                                content,
+                                &secret,
+                                unix_now(),
+                            )
+                            .await;
                         }
                         self.forget_swarms(manifest).await;
                         self.share.forget(a);

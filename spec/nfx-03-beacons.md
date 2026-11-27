@@ -96,7 +96,9 @@ ignore tags they do not know (NFX-01 §4). No payments, no media.
   (fc00::/7), documentation and other special-purpose addresses go only in a beacon sent to a
   relay the seeder reaches at an address of its own host or networks (loopback, private,
   shared, link-local or unique-local), such as one it embeds or one on its LAN or VPN; when the
-  two differ, it signs one beacon for each. The class is that of the address the connection to
+  two differ, it signs one beacon for each, and dates the one for its own networks a second
+  after the other, so that a reader that keeps a seeder's newest beacon (§5) and reads relays
+  of both kinds keeps it, whichever arrives first. The class is that of the address the connection to
   the relay reached, not of the relay URL's host name, and a relay whose class is not known is
   treated as public. Readers are unchanged: a beacon that names fewer addresses is as valid,
   and a reader on the seeder's own network learns the others from the beacon on that network's
@@ -196,5 +198,6 @@ edit in this spec is ever required to grow the relay set.
   issue #132). §4: an `iroh` endpoint sent to a relay the seeder reaches at a public address
   names only public addresses and configured external ones, in `addrs` and in its tickets;
   private, shared, loopback, link-local and unique-local addresses go only to relays reached at
-  such an address, in a beacon signed apart. Until now nothing said which addresses a seeder
-  names, and nfxd named every interface address unless an external one was configured.
+  such an address, in a beacon signed apart and dated a second later. Until now nothing said
+  which addresses a seeder names, and nfxd named every interface address unless an external one
+  was configured.

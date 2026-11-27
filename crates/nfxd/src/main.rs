@@ -55,8 +55,9 @@
 //! never a private, shared (CGNAT, tailnet), loopback, link-local, unique-local, documentation
 //! or other special-purpose address. Only a relay it reaches at an address of its own host or
 //! networks (loopback, private, shared, link-local or unique-local: its `--embed-relay`, a
-//! relay on the LAN or the tailnet) gets a beacon that also names those, signed apart, so a
-//! viewer on the same LAN or tailnet still dials the node directly without an iroh relay. The
+//! relay on the LAN or the tailnet) gets a beacon that also names those, signed apart and dated
+//! a second later, so a viewer on the same LAN or tailnet keeps it over the public one and still
+//! dials the node directly without an iroh relay. The
 //! class comes from the address each relay connection reached, not from the URL's host name,
 //! and a relay whose class is not known is treated as public, as is an `--embed-relay` on
 //! `0.0.0.0` or `[::]` (every interface). Lookup answers (NFX-17) and gossip envelopes carry the

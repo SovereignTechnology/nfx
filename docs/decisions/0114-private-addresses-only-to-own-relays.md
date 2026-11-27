@@ -34,7 +34,12 @@ changelog). The money lock is not involved.
    the iroh relay, public direct addresses (`nfx_node::node::is_public`) and the operator's
    external addresses, in `addrs` and in every ticket. A relay on the seeder's own networks hears
    every address, as before. When the two differ, the seeder signs two beacons, each sent only
-   to its own audience. With `--iroh-external` set, both are the public one, as before.
+   to its own audience, and dates the full one a second after the public one. Readers (nfx's
+   `BeaconWatch` and `SwarmPull`, nutflix-pear's) keep a seeder's newest beacon and ignore one
+   that is not strictly newer, so a viewer reading both kinds of relay keeps the full one
+   whichever arrives first, and no reader has to change. The period (30 s) is longer than that
+   second, so the next period's public beacon is still newer than this one's full beacon. With
+   `--iroh-external` set, both are the public one, as before.
 3. **By the address reached, not the name.** The class is read from each relay connection's
    socket (`nfx_node::relay_class::ClassifyingTransport`), never from the URL's host name: a
    MagicDNS or LAN name can resolve to a private address, and any name to a public one. A relay
@@ -44,7 +49,9 @@ changelog). The money lock is not involved.
    public address carries it, even one that reconnected there after the beacon was routed.
 4. **Everything else for the world.** A lookup answer (NFX-17) embeds, and re-signs from, the
    public beacon: its answers go to every relay. A gossip envelope (NFX-06 §4) reaches every
-   member of a video's swarm, whoever that is, so it carries the public beacon too.
+   member of a video's swarm, whoever that is, so it carries the public beacon too, dated as
+   the newest public beacon rather than when it is sent, so that a viewer holding the full
+   beacon does not take the envelope for a newer source.
 5. **What stays.** iroh's own NAT traversal still tells a peer that is already connected all of
    its candidates, and the mesh endpoint's ICE candidates go, encrypted, to the peers it
    signals with (NFX-10 §6). Those reach a peer, not a relay's readers. nfxd's `gossip peer:`
@@ -55,6 +62,10 @@ changelog). The money lock is not involved.
 - A seeder behind a NAT names nothing of its LAN, VPN or tailnet on public relays, with no flag.
   A viewer on its own network still reads the full beacon from a relay there.
 - Each beacon period costs a second signature and event where a seeder has both audiences.
+- A viewer reading both kinds of relay can still hold the public beacon for a while: when a
+  period's beacon reaches a public relay but not the private one (a relay paused after a
+  refusal, or videos taking turns past 10), or when a lookup answer re-signs a beacon that was
+  about to expire. The next full beacon puts the private addresses back.
 - A relay that looks private but is published to the internet (an embedded relay on loopback
   behind a TLS proxy, a private address behind a DNAT, a `ws://127.0.0.1` port in front of a
   tunnel, a resolver handing out private stand-in addresses for a VPN or a proxy) hears the
