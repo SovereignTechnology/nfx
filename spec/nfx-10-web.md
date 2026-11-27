@@ -767,8 +767,11 @@ under which every pair present connects, does not apply in it:
 **Telling newcomers.** Relays keep no ephemeral event, so a newcomer hears of a room's
 members only at their next presence, up to 30 s away. A session that serves start-up files
 and has room for another video-room connection sends its presence again, out of turn, when
-it first sees a peer's `connect` in the video room: a node at most once per 5 s per room, a
-page at most once per 30 s per room, since most members of a busy room are pages.
+it first sees a peer's `connect` in the video room: a node at most once per 10 s per room, a
+page at most once per 30 s per room, since most members of a busy room are pages. No presence
+goes out within 10 s of the session's last one in that room, out of turn or not (NFX-04 §2
+admits one per 10 s per key, room and type): one due sooner is sent when the 10 s have passed,
+and it serves every newcomer seen meanwhile.
 
 **Ending a connection.** A video-room connection exists to carry the file channel. The side
 that asked closes it once it holds what it wanted from that peer, none of its requests is

@@ -63,8 +63,8 @@ every namespace, room key and manifest.
      at least 2). Started viewers do not connect to each other through it. Glare between two
      sessions that both want files follows §6.6.
    - Relays keep no ephemeral event, so a member that serves sends its presence out of turn when it
-     first sees a newcomer: a node at most every 5 s per room (as nfxd already does in stream rooms,
-     `crates/nfx-node/src/mesh/mod.rs:1758-1767`), a page at most every 30 s.
+     first sees a newcomer: a node at most every 10 s per room, a page at most every 30 s, and never
+     within 10 s of its last presence there (NFX-04 §2's limit); one due sooner waits for the 10 s.
    - **Both kinds of room, side by side.** The video room replaces the need for a source found some
      other way before the first file; it replaces nothing else. Once the hash list verifies, a page
      joins the stream rooms of its levels as before.
@@ -248,8 +248,9 @@ every namespace, room key and manifest.
 - **Rust**: nfx-proto codec and derivation over the vectors; nfx-node's file server (shared budget,
   256 KiB window, twice per file, scope to the video, `segment` refused, `busy` over the global
   budget) and mesh (joins the video room per served video, never offers there, answers within its
-  sub-limit, out-of-turn presence at most every 5 s, idle close at 20 s); a daemon test in which a
-  native requester takes the hash list and an init over a real connection.
+  sub-limit, out-of-turn presence at most every 10 s and deferred, never dropped, inside it, idle
+  close at 20 s); a daemon test in which a native requester takes the hash list and an init over a
+  real connection.
 - **Web library, unit**: the codec over the vectors; the requester (hello within 3 s, hedge at 2 s,
   give-up at 4 s, `missing` and `busy` move on, a mismatch drops the peer, late data after `cancel`
   ignored); the tiers (`null` and deadlines fall through, a provider's bytes are verified again, no
