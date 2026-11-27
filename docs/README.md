@@ -56,6 +56,7 @@ to rely on. Labels and statuses are as of 2026-11-26.
 | [ADR 0108](decisions/0108-stun-at-your-own-relays.md) | Record | STUN at your own relays |
 | [ADR 0109](decisions/0109-browsers-take-segments-from-peers-first.md) | Record | Browsers take segments from peers first |
 | [ADR 0110](decisions/0110-keep-and-seed-what-is-watched.md) | Record | Keep and seed what is watched |
+| [ADR 0114](decisions/0114-private-addresses-only-to-own-relays.md) | Record | Private addresses only to relays on the seeder's own networks |
 | [NFX-01](../spec/nfx-01-networks.md) | Spec | Networks and versions |
 | [NFX-02](../spec/nfx-02-manifest.md) | Spec | Catalog manifest (kind 38504) |
 | [NFX-03](../spec/nfx-03-beacons.md) | Spec | Availability beacons (kind 20464) |
@@ -77,7 +78,7 @@ ADRs 0002, 0005 and 0007 came from the demo and stay here as records. The demo's
 and 0004, its plans, spikes, reviews, vendored copies and code left with the mirror on
 2026-10-11 (ADR 0008's amendment of that date) and are in the demo's own repository, now
 [`nutflix-pear`](https://github.com/SovereignTechnology/nutflix-pear) (`docs/decisions/`).
-ADRs 0006, 0008 and 0100 to 0110 are nfx's own.
+ADRs 0006, 0008, 0100 to 0110 and 0114 are nfx's own (0111 to 0113 are in pull requests not merged yet).
 
 ### Statements overtaken since the records were written
 

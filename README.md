@@ -132,6 +132,14 @@ nutflixd run --key node.key --store pkg/store --seed "$A" --embed-relay 127.0.0.
 Here `203.0.113.7:7843` stands for the public address and port forwarded to the host's UDP
 port 7843. Tickets and beacons then name that address and leave out the host's private ones.
 
+Without `--iroh-external`, a node names its private addresses (LAN, VPN, tailnet, loopback) only
+to relays it reaches at such an address: its `--embed-relay`, or a relay on the same LAN or
+tailnet, so a viewer there still dials it directly. A relay it reaches at a public address gets
+beacons that name only its iroh relay and its public addresses. What counts is the address the
+connection reached, not the relay's host name, and an `--embed-relay` on `0.0.0.0` counts as
+public. `--public-addrs-only` leaves private addresses out everywhere, for a node whose loopback
+or private relay is published to the internet (behind a TLS proxy or a DNAT).
+
 `--embed-tracker` and `--bridge <ip:port>` add the browser mesh (NFX-10): the bridge serves
 the video to browsers over WebRTC, and its address is the one candidate they are told. Behind
 a DNAT, bind `--bridge` to the host's own address and pass the public one as

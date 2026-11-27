@@ -16,7 +16,7 @@ rust-forward), `zizmor.yml`, `nightly.yml` (advisories, miri), `release.yml` and
 dormant twin: it runs nothing. What the sections below say of the private
 GitLab project, of GitLab CI and of its shared runner is as it stood before that.
 
-Updated 2026-11-26 · `main` = `2119bea` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
+Updated 2026-11-27 · `main` = `56b913e` · plan: ADR 0008 + `spec/` · Phase A and M1 complete · NFX-02..06 Frozen (M1)
 
 ## Since 2026-11-09
 
@@ -78,6 +78,11 @@ Merged after the 0.1.4 release commit (`226fd79`), so in no release's notes:
   watches or downloads and seed the renditions it holds, behind a notice and one switch;
   NFX-12 gains an optional `renditions` on the `hyperdht` endpoint. Spec and vectors only: no
   node or viewer does it yet.
+- **2026-11-27, private addresses only to a node's own relays** (#134, `56b913e`; decision
+  record [0114](../decisions/0114-private-addresses-only-to-own-relays.md), NFX-03 §4): a
+  beacon, ticket or lookup answer sent to a relay reached at a public address names only
+  public and configured external addresses; the full list goes only to relays reached at a
+  private one. `nutflixd run --public-addrs-only` is for an embedded relay behind a proxy.
 
 ## Since 2026-10-25
 

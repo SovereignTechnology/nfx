@@ -88,6 +88,21 @@ ignore tags they do not know (NFX-01 §4). No payments, no media.
     a reader that does not ignores it (NFX-01 §4) and reads the origin as serving every
     rendition. Such an origin still serves the hash list and every meta file, so a player
     can read the master playlist, and answers `404` for another rendition's files.
+- **Which addresses an `iroh` endpoint names** (amended 2026-11-26, decision record 0114).
+  `addrs`, and the direct addresses inside each ticket (NFX-06 §2), are where the seeder can be
+  dialled. A beacon sent to a relay the seeder reaches at a public address SHOULD name there
+  only public unicast addresses and the addresses the operator configured as external, as
+  given. Private (RFC 1918), shared (100.64.0.0/10), loopback, link-local, unique-local
+  (fc00::/7), documentation and other special-purpose addresses go only in a beacon sent to a
+  relay the seeder reaches at an address of its own host or networks (loopback, private,
+  shared, link-local or unique-local), such as one it embeds or one on its LAN or VPN; when the
+  two differ, it signs one beacon for each, and dates the one for its own networks a second
+  after the other, so that a reader that keeps a seeder's newest beacon (§5) and reads relays
+  of both kinds keeps it, whichever arrives first. The class is that of the address the connection to
+  the relay reached, not of the relay URL's host name, and a relay whose class is not known is
+  treated as public. Readers are unchanged: a beacon that names fewer addresses is as valid,
+  and a reader on the seeder's own network learns the others from the beacon on that network's
+  relay.
 - `chunks`: `"all"` or an integer count of hash-list entries currently held (a seeder of
   some renditions counts the files above). Partial seeders are legal; clients prefer
   `"all"` but MAY fetch from partials.
@@ -179,3 +194,10 @@ edit in this spec is ever required to grow the relay set.
   beacon per key, bounded. A reader without the field reads such an origin as serving every
   rendition and may then meet `404` for one it does not; the `iroh` and `webrtc` endpoints
   already said which renditions they serve. Vectors: `beacon-renditions.json`.
+- 2026-11-26 (publisher rule, no `specver` bump: readers are unchanged; decision record 0114,
+  issue #132). §4: an `iroh` endpoint sent to a relay the seeder reaches at a public address
+  names only public addresses and configured external ones, in `addrs` and in its tickets;
+  private, shared, loopback, link-local and unique-local addresses go only to relays reached at
+  such an address, in a beacon signed apart and dated a second later. Until now nothing said
+  which addresses a seeder names, and nutflixd named every interface address unless an external one
+  was configured.

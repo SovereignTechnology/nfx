@@ -27,6 +27,11 @@
 //!   WebRTC with full ICE, through NATs ([`nfx_node::mesh`]), or behind a DNAT through the
 //!   public address it is told ([`Config::mesh_public`]). Discovery is by room alone, so
 //!   beacons carry nothing for it.
+//! - **addresses** (NFX-03 §4 as amended 2026-11-26, decision record 0114): a relay this node
+//!   reaches at a public address hears beacons naming only its iroh relay, public addresses
+//!   and [`Config::iroh_external`]; its private, loopback and link-local addresses go only to
+//!   relays it reaches at such an address, in a beacon signed apart
+//!   ([`nfx_node::relay_class`]). Lookup answers and gossip envelopes carry the public beacon.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -43,6 +48,7 @@ use nfx_node::node::{Node, NodeConfig};
 use nfx_node::nostr::{BEACON_TTL, ManifestQuery, Relays, sign_beacon};
 use nfx_node::origin::{Origin, SwarmPull, serve};
 use nfx_node::relay::{MayAdmit, ScopedRelay};
+use nfx_node::relay_class::{Classifier, RelayClass, RelayClasses};
 use nfx_node::relay_share::RelayShare;
 use nfx_node::seed::Seeded;
 use nfx_node::store::{ContentStore as _, FsStore};
@@ -145,8 +151,14 @@ pub struct Config {
     /// Never ask the local gateway to open a port (see `NodeConfig::no_portmapper`).
     pub no_portmapper: bool,
     /// Publish no direct address that is not public in tickets and beacons (see
-    /// `NodeConfig::public_addrs_only`): for a viewer on a home network.
+    /// `NodeConfig::public_addrs_only`), not even to a relay on this host's own networks: for
+    /// a viewer on a home network. Off, only relays reached at a private address hear private
+    /// ones ([`nfx_node::relay_class`]).
     pub public_addrs_only: bool,
+    /// How a relay's address is classed ([`nfx_node::relay_class::Classifier`]). The default
+    /// is the only one meant for use: a test gives another to treat a loopback relay as one
+    /// reached at a public address.
+    pub relay_classifier: Classifier,
     /// Embed a WebTorrent tracker for the browser mesh (NFX-10 §2) listening here. It
     /// admits exactly the per-rendition swarms of the videos this node seeds or holds.
     pub embed_tracker: Option<SocketAddr>,
@@ -361,6 +373,16 @@ impl Drop for AbortOnDrop {
 const MAX_SENT_ENVELOPE: usize = MAX_ENVELOPE_BYTES - 64;
 /// A gossip send not done by then is dropped: gossip never holds up a relay beacon.
 const GOSSIP_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+/// How much later than its public twin a full beacon is dated (NFX-03 §4 as amended
+/// 2026-11-26). Readers keep a seeder's newest beacon and ignore one that is not newer, so a
+/// viewer that reads both a relay on the seeder's networks and a public one keeps the full
+/// beacon, whichever arrives first; a viewer of public relays only never sees it. It stays
+/// older than the next period's public beacon.
+const FULL_BEACON_LEAD: u64 = 1;
+const _: () = assert!(
+    BEACON_TTL / 2 > FULL_BEACON_LEAD,
+    "the beacon period must exceed the full beacon's lead"
+);
 
 /// A swarm member's envelope (NFX-06 §4): a `here` becomes a gossip-ranked pull source
 /// for `manifest`, and a `bye` withdraws it. This node's own envelopes are ignored.
@@ -390,12 +412,13 @@ async fn gossip_send(
     pubkey: &str,
     beacon: BeaconContent,
     secret: &[u8; 32],
+    created_at: u64,
 ) {
     let env = Envelope {
         op,
         pubkey: pubkey.to_owned(),
         beacon,
-        created_at: unix_now(),
+        created_at,
     };
     if let Ok(wire) = envelope_wire(&env, secret)
         && wire.len() <= MAX_SENT_ENVELOPE
@@ -516,9 +539,32 @@ impl Shared {
         Some(swarm.split())
     }
 
-    /// Send video `a`'s beacon to the relays whose turn it is ([`RelayShare`]). `None` when it
-    /// is due nowhere now; an error when no relay took it, or every relay asked to slow down.
-    async fn announce(&self, a: &str, event: &nfx_proto::event::Event) -> Result<Option<usize>> {
+    /// Sign video `a`'s beacon and send it to the relays whose turn it is ([`RelayShare`]).
+    /// A relay reached at a public address gets the beacon for the world, which names no
+    /// private, loopback or link-local address of this node; a relay on this host's own
+    /// networks (its embedded relay, one on the LAN or a tailnet) gets the full one, signed
+    /// apart only when it says more (NFX-03 §4 as amended 2026-11-26,
+    /// [`nfx_node::relay_class`]). The lookup answerer holds the beacon for the world.
+    /// The public beacon is dated `created`, the full one a second later
+    /// ([`FULL_BEACON_LEAD`]), so that a viewer reading relays of both kinds keeps the full
+    /// one. `None` when it is due nowhere now; an error when no relay took it, or every relay
+    /// asked to slow down.
+    async fn announce(
+        &self,
+        a: &str,
+        keys: &Keys,
+        seeded: &Seeded,
+        manifest: &Verified<Manifest>,
+        held: Option<&[String]>,
+        created: u64,
+    ) -> Result<Option<usize>> {
+        let public = self.beacon(seeded, manifest, held, RelayClass::Public);
+        let event = sign_beacon(keys, &manifest.a_tag(), &public, created, BEACON_TTL).await?;
+        // A signed beacon can answer a lookup whether or not it is due anywhere now. Lookup
+        // answers go to every relay, so they get the beacon for the world.
+        if let Some(lookup) = &self.lookup {
+            lookup.serve(a, event.clone(), public.clone());
+        }
         let now = tokio::time::Instant::now();
         let all = self.relays.urls().await;
         let turn = self.share.beacon(a, self.announced(), &all, now);
@@ -531,9 +577,47 @@ impl Shared {
             }
             return Ok(None);
         }
-        let answers = self.relays.publish_to(event, &turn.to).await?;
+        let split = self.relays.classes().partition(turn.to);
+        let full = if split.private.is_empty() {
+            None
+        } else {
+            let content = self.beacon(seeded, manifest, held, RelayClass::Private);
+            if content == public {
+                None
+            } else {
+                // Strictly newer than its public twin: readers keep a seeder's newest beacon
+                // and ignore one that is not newer, whichever relay delivers first.
+                let dated = created + FULL_BEACON_LEAD;
+                Some(sign_beacon(keys, &manifest.a_tag(), &content, dated, BEACON_TTL).await?)
+            }
+        };
+        let (to_public, to_private) = match &full {
+            // Nothing private to say: one beacon for every relay due.
+            None => ([split.public, split.private].concat(), Vec::new()),
+            Some(_) => (split.public, split.private),
+        };
+        let (public_answers, private_answers) =
+            tokio::join!(self.relays.publish_to(&event, &to_public), async {
+                match &full {
+                    Some(full) => self.relays.publish_private(full, &to_private).await,
+                    None => Ok(BTreeMap::new()),
+                }
+            });
         // A refusal's pause runs from its answer, not from before a slow publish.
         let replied = tokio::time::Instant::now();
+        let mut answers = BTreeMap::new();
+        let mut failed = None;
+        for sent in [public_answers, private_answers] {
+            match sent {
+                Ok(by_url) => answers.extend(by_url),
+                Err(e) => failed = failed.or(Some(e)),
+            }
+        }
+        if answers.is_empty()
+            && let Some(e) = failed
+        {
+            return Err(e.into());
+        }
         for (url, answer) in &answers {
             self.share.answered(
                 url,
@@ -543,9 +627,12 @@ impl Shared {
         }
         let accepted = answers.values().filter(|r| r.is_ok()).count();
         if accepted == 0 {
+            let ids = match &full {
+                Some(full) => format!("{} or {}", event.id, full.id),
+                None => event.id.clone(),
+            };
             return Err(nfx_node::NodeError::Relay(format!(
-                "no relay accepted beacon {} ({} refused)",
-                event.id,
+                "no relay accepted beacon {ids} ({} refused)",
                 answers.len()
             ))
             .into());
@@ -689,32 +776,20 @@ impl Shared {
         };
         let _answering = Answering(self.lookup.clone(), a.to_owned());
         let mut announce = tokio::time::interval(Duration::from_secs(BEACON_TTL / 2));
+        // When the newest public beacon was dated: no later than any beacon to come.
+        let mut newest_public = unix_now();
         let mut gossip = tokio::time::interval(GOSSIP_EVERY);
         let mut check = tokio::time::interval(self.deletion_check_every);
         loop {
             tokio::select! {
                 _ = announce.tick() => {
-                    let content = self.beacon(&seeded, manifest, held.as_deref());
                     // A refused or unreachable relay is retried at the next tick (beacons are
-                    // hints), but it shows: a node that cannot announce is invisible. A signed
-                    // beacon can answer a lookup either way.
-                    let sent = match sign_beacon(
-                        &keys,
-                        &manifest.a_tag(),
-                        &content,
-                        nfx_node::unix_now(),
-                        BEACON_TTL,
-                    )
-                    .await
-                    {
-                        Ok(event) => {
-                            if let Some(lookup) = &self.lookup {
-                                lookup.serve(a, event.clone(), content);
-                            }
-                            self.announce(a, &event).await
-                        }
-                        Err(e) => Err(e.into()),
-                    };
+                    // hints), but it shows: a node that cannot announce is invisible.
+                    let created = unix_now();
+                    newest_public = created;
+                    let sent = self
+                        .announce(a, &keys, &seeded, manifest, held.as_deref(), created)
+                        .await;
                     match sent {
                         Ok(Some(_)) => self.set(a, VideoState::Seeding),
                         // Not this video's turn on any relay: it stands as it was.
@@ -724,8 +799,20 @@ impl Shared {
                 }
                 _ = gossip.tick(), if announcer.is_some() => {
                     if let Some(announcer) = &announcer {
-                        let content = self.beacon(&seeded, manifest, held.as_deref());
-                        gossip_send(announcer, Op::Here, &pubkey, content, &secret).await;
+                        // A swarm's members are whoever joined it: the beacon for the world,
+                        // dated as the newest public beacon, so that a viewer holding the full
+                        // one (a second newer) never takes it for a newer source.
+                        let content =
+                            self.beacon(&seeded, manifest, held.as_deref(), RelayClass::Public);
+                        gossip_send(
+                            announcer,
+                            Op::Here,
+                            &pubkey,
+                            content,
+                            &secret,
+                            newest_public,
+                        )
+                        .await;
                     }
                 }
                 _ = check.tick() => {
@@ -733,8 +820,21 @@ impl Shared {
                     // manifest (a restart) is not one.
                     if matches!(self.relays.deleted(manifest, CONNECT_TIMEOUT).await, Ok(true)) {
                         if let Some(announcer) = &announcer {
-                            let content = self.beacon(&seeded, manifest, held.as_deref());
-                            gossip_send(announcer, Op::Bye, &pubkey, content, &secret).await;
+                            let content = self.beacon(
+                                &seeded,
+                                manifest,
+                                held.as_deref(),
+                                RelayClass::Public,
+                            );
+                            gossip_send(
+                                announcer,
+                                Op::Bye,
+                                &pubkey,
+                                content,
+                                &secret,
+                                unix_now(),
+                            )
+                            .await;
                         }
                         self.forget_swarms(manifest).await;
                         self.share.forget(a);
@@ -747,17 +847,20 @@ impl Shared {
     }
 
     /// This node's beacon for a seeded video, held in the renditions `held` names (every
-    /// one when `None`). Every endpoint names only what it serves: the iroh tickets are the
-    /// held renditions' (and `meta`), the origin's `https` endpoint lists the held
-    /// renditions, the bridge's `webrtc` endpoint the swarms it joined, and `chunks` counts
-    /// the files held.
+    /// one when `None`), for readers of `class`. Every endpoint names only what it serves: the
+    /// iroh tickets are the held renditions' (and `meta`), the origin's `https` endpoint lists
+    /// the held renditions, the bridge's `webrtc` endpoint the swarms it joined, and `chunks`
+    /// counts the files held. Only the iroh endpoint names this node's own addresses, and for
+    /// [`RelayClass::Public`] it names no private one ([`Node::addr_for`]); the other
+    /// endpoints are the operator's, as given.
     fn beacon(
         &self,
         seeded: &Seeded,
         manifest: &Manifest,
         held: Option<&[String]>,
+        class: RelayClass,
     ) -> BeaconContent {
-        let mut endpoints = vec![self.node.beacon_endpoint(seeded)];
+        let mut endpoints = vec![self.node.beacon_endpoint_for(seeded, class)];
         if let Some(url) = &self.https_url {
             endpoints.push(Endpoint::Https {
                 url: url.clone(),
@@ -1176,7 +1279,15 @@ impl Daemon {
             }
             _ => None,
         };
-        let relays = Arc::new(Relays::connect(&relays, CONNECT_TIMEOUT).await?);
+        let classes = RelayClasses::new(cfg.relay_classifier.clone());
+        // An embedded relay on every interface is reached here at loopback, but anyone who can
+        // reach the host reads it: it hears what a public relay hears.
+        if let (Some(url), Some(bind)) = (&relay_url, cfg.embed_relay)
+            && bind.ip().is_unspecified()
+        {
+            classes.pin_public(url);
+        }
+        let relays = Arc::new(Relays::connect_with(&relays, CONNECT_TIMEOUT, classes).await?);
         let store = Arc::new(FsStore::open(&cfg.store)?);
         let pull = Arc::new(SwarmPull::new(node.clone()));
         let bridge = match (cfg.bridge, &tracker) {
