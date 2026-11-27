@@ -15,8 +15,9 @@
  *
  * This file is plain logic over a transactional backend (`KeepBackend`): ./idb.ts is
  * IndexedDB, and keep-unit.ts drives it over one in memory. Nothing in a transaction waits for
- * anything but the backend (IndexedDB commits a transaction that waits on anything else), so
- * every sha256 is computed before one starts.
+ * anything but the backend (IndexedDB commits a transaction that waits on anything else): the
+ * sha256 of new bytes is computed before one starts, and a stored copy is checked inside one
+ * synchronously.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -55,10 +56,20 @@ export interface Claim {
   release: () => void;
 }
 
-/** A hold on a root as playing (`KeeperDeps.hold`): `granted` once other tabs see it. */
+/** A hold on a root as playing (`KeeperDeps.hold`): `granted` true once other tabs see it, false if refused. */
 export interface Hold {
-  granted: Promise<void>;
+  granted: Promise<boolean>;
   release: () => void;
+}
+
+/** What `protect` gives a session: `release`, and whether other tabs see it play (`shared`). */
+export interface Protection {
+  release: () => void;
+  /**
+   * Whether the hold was granted in time. When false, a removal another tab has started may
+   * still delete the video, so the session must not read or write the store.
+   */
+  shared: boolean;
 }
 
 export interface KeeperDeps {
@@ -73,9 +84,11 @@ export interface KeeperDeps {
   claim?: (roots: readonly string[]) => Promise<Claim>;
   /** Hold `root` as playing for other tabs to see, until `release`. */
   hold?: (root: string) => Hold;
+  /** How long `protect` waits for `hold` to be granted (default `HOLD_WAIT_MS`). */
+  holdWaitMs?: number;
 }
 
-/** How long `protect` waits for other tabs to see a hold before it goes on anyway. */
+/** How long `protect` waits for other tabs to see a hold; past it the session keeps nothing. */
 export const HOLD_WAIT_MS = 3_000;
 
 /** The video record (the `videos` store, by root). */
@@ -195,13 +208,14 @@ export class Keeper implements KeepStore {
   }
 
   /**
-   * Mark `root` as playing until the returned function is called (idempotent): at once for
-   * this page, and for other tabs once they can see it (or after `HOLD_WAIT_MS`), so a store
-   * read after this resolves sees no removal another tab started.
+   * Mark `root` as playing until `release` (idempotent): at once for this page, and for other
+   * tabs once its hold is granted. With `shared`, no removal another tab started can delete the
+   * video while it plays; without it (not granted within `holdWaitMs`, or refused) the session
+   * must leave the store alone.
    */
-  async protect(root: string): Promise<() => void> {
+  async protect(root: string): Promise<Protection> {
     this.#playing.set(root, (this.#playing.get(root) ?? 0) + 1);
-    const hold = this.#deps.hold?.(root) ?? { granted: Promise.resolve(), release: (): void => {} };
+    const hold = this.#deps.hold?.(root) ?? { granted: Promise.resolve(true), release: (): void => {} };
     let done = false;
     const release = (): void => {
       if (done) return;
@@ -212,9 +226,12 @@ export class Keeper implements KeepStore {
       else this.#playing.set(root, n);
     };
     let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([hold.granted.catch(() => {}), new Promise<void>((r) => (timer = setTimeout(r, HOLD_WAIT_MS)))]);
+    const shared = await Promise.race([
+      hold.granted.catch(() => false),
+      new Promise<boolean>((r) => (timer = setTimeout(() => r(false), this.#deps.holdWaitMs ?? HOLD_WAIT_MS))),
+    ]);
     clearTimeout(timer);
-    return release;
+    return { release, shared };
   }
 
   /** A mark for `removedSince`: the removals of `root` committed so far. */
@@ -312,7 +329,14 @@ export class Keeper implements KeepStore {
     const now = this.#deps.now();
     return this.#backend.run(STORES, 'readwrite', async (tx): Promise<PutResult> => {
       const k = key(f.root, f.sha256);
-      if (isFile(await tx.get('files', k))) return { kind: 'already' };
+      if (isFile(await tx.get('files', k))) {
+        if (this.#intact(await tx.get('bytes', k), f.sha256)) return { kind: 'already' };
+        // The entry's bytes are gone or wrong: put right in place. The entry, its size, the
+        // usage and the video's counts already stand for this file.
+        await tx.put('bytes', k, data);
+        const v = await tx.get('videos', f.root);
+        return { kind: 'stored', renditions: isVideo(v) ? v.renditions.map((r) => ({ ...r, reasons: [...r.reasons] })) : [] };
+      }
       const meta = await tx.get('meta', 'usage');
       let usage = typeof meta === 'number' && Number.isFinite(meta) && meta >= 0 ? meta : 0;
       if (usage + size > this.capBytes) {
@@ -393,20 +417,35 @@ export class Keeper implements KeepStore {
     if (!(got instanceof ArrayBuffer)) {
       // An entry whose bytes are gone (or are not bytes) goes too, so the file is stored again
       // when it next arrives.
-      if (isFile(entry)) await this.drop(root, sha256);
+      if (isFile(entry)) await this.#dropBroken(root, sha256);
       return { bytes: null, refused: false };
     }
     const bytes = new Uint8Array(got);
     if (this.#deps.sha256(bytes) === sha256) return { bytes, refused: false };
-    await this.drop(root, sha256);
+    await this.#dropBroken(root, sha256);
     return { bytes: null, refused: true };
+  }
+
+  /** Whether `value` is the bytes of the file `sha256`. */
+  #intact(value: unknown, sha256: string): boolean {
+    return value instanceof ArrayBuffer && this.#deps.sha256(new Uint8Array(value)) === sha256;
+  }
+
+  /** `drop`, unless the copy has been put right since it was read (a write that came first). */
+  #dropBroken(root: string, sha256: string): Promise<void> {
+    return this.#dropIf(root, sha256, true);
   }
 
   /** Remove one file of `root`; a rendition it belonged to (every one, for a shared file) is filling again. */
   drop(root: string, sha256: string): Promise<void> {
+    return this.#dropIf(root, sha256, false);
+  }
+
+  #dropIf(root: string, sha256: string, onlyBroken: boolean): Promise<void> {
     return this.enqueue(() =>
       this.#backend.run(STORES, 'readwrite', async (tx) => {
         const k = key(root, sha256);
+        if (onlyBroken && this.#intact(await tx.get('bytes', k), sha256)) return;
         const f = await tx.get('files', k);
         await tx.delete('bytes', k);
         if (!isFile(f)) return;

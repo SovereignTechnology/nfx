@@ -250,7 +250,7 @@ async function storeChecks(): Promise<void> {
   eq('store: list, most recently played first', await roots(), [r1, r3, r2]);
   const r4 = await fill('four', 6_000);
   eq('store: at the cap, the least recently played watched video goes', (await roots()).sort(), [r1, r3, r4].sort());
-  const release = await keeper.protect(r3);
+  const { release } = await keeper.protect(r3);
   const r5 = await fill('five', 7_000);
   eq('store: never one that plays: the next least recent goes', (await roots()).sort(), [r3, r4, r5].sort());
   release();
@@ -262,7 +262,7 @@ async function storeChecks(): Promise<void> {
   const w1 = video('w1');
   const b2 = blob('w1', 9_000);
   await kd.put({ root: w1.root, video: 'w1', sha256: sha(b2), role: 'segment', rendition: '360p', bytes: b2, reason: 'watched' });
-  const stop = await kd.protect(w1.root);
+  const { release: stop } = await kd.protect(w1.root);
   const b3 = blob('w2', 9_000);
   const w2 = video('w2');
   eq('store: nothing evictable (downloaded, playing): full', (await kd.put({ root: w2.root, video: 'w2', sha256: sha(b3), role: 'segment', rendition: '360p', bytes: b3, reason: 'watched' })).kind, 'full');
@@ -311,10 +311,10 @@ async function storeChecks(): Promise<void> {
   const putR = () => kr.put({ root: rv.root, video: 'rv', sha256: sha(rb), role: 'segment', rendition: '360p', bytes: rb, reason: 'watched' });
   await putR();
   const markA = kr.removalMark(rv.root);
-  const relA = await kr.protect(rv.root);
+  const { release: relA } = await kr.protect(rv.root);
   await kr.remove(rv.root);
   const markB = kr.removalMark(rv.root);
-  const relB = await kr.protect(rv.root);
+  const { release: relB } = await kr.protect(rv.root);
   eq('store: removed for a session that started before the removal', kr.removedSince(rv.root, markA), true);
   eq('store: not for one that started after it, while the first still plays', kr.removedSince(rv.root, markB), false);
   await putR();
@@ -351,6 +351,13 @@ async function storeChecks(): Promise<void> {
   eq('store: an entry without its bytes reads as a miss', [gone.bytes, gone.refused], [null, false]);
   eq('store: and goes, entry and usage', [br.data.get('files')!.has(k0), await kr.usage()], [false, 0]);
   eq('store: so the file is stored again when it comes', (await putR()).kind, 'stored');
+  // A write that comes while the entry is still there without its bytes puts them right in
+  // place, and a repair read after it leaves the good copy alone.
+  br.data.get('bytes')!.delete(k0);
+  const usageBefore = await kr.usage();
+  eq('store: bytes gone under a standing entry: a write puts them back', (await putR()).kind, 'stored');
+  eq('store: in place: one entry, the same usage', [br.data.get('files')!.has(k0), br.data.get('bytes')!.has(k0), await kr.usage()], [true, true, usageBefore]);
+  eq('store: and a read after it gets the bytes', sha((await kr.read(rv.root, sha(rb))).bytes!), sha(rb));
 
   // close() takes nothing new, and what is queued still commits.
   let unblock: (() => void) | undefined;
@@ -521,6 +528,67 @@ async function sessionChecks(): Promise<void> {
   eq('replay: a request\'s own check refuses: a miss', await two.s.readFile(v.root, () => false), null);
   eq('replay: and the stored copy stays, not counted as refused', [(await keeper.storedShas(v.root)).has(v.root), two.s.stats().refused], [true, 2]);
   two.s.close();
+
+  // A hold other tabs never see (not granted in time, or refused): the store is left alone.
+  for (const [what, granted] of [
+    ['never granted', new Promise<boolean>(() => {})],
+    ['refused', Promise.resolve(false)],
+  ] as const) {
+    const bn = new MemBackend();
+    const kn = new Keeper(bn, 1 << 20, { sha256: sha, now: () => 1, hold: () => ({ granted, release: () => {} }), holdWaitMs: 20 });
+    await kn.put({ root: v.root, video: v.list.video, sha256: v.initSha, role: 'init', rendition: '360p', bytes: v.init, reason: 'watched' });
+    const sn = new KeepSession({ keeper: kn, root: v.root, minimumSeconds: 1, sha256: sha });
+    await sn.start();
+    sn.learnList(v.list);
+    const eln = new FakeVideo();
+    sn.attach(eln);
+    eln.play(3);
+    sn.delivered(want(v.root, v.masterSha, 'playlist-master', 'm3u8'), v.master, 'https://o.test');
+    await kn.idle();
+    await flush();
+    eq(`session: a hold ${what}: failed`, sn.stats().state, 'failed');
+    eq(`session: a hold ${what}: nothing read from the store, nothing written`, [await sn.readFile(v.initSha), bn.count('files')], [null, 1]);
+    sn.close();
+  }
+
+  // A file of a held rendition whose bytes are gone: whichever comes first, the read or the
+  // file from another tier, it ends stored and the rendition held again.
+  const be4 = new MemBackend();
+  const k4 = new Keeper(be4, 1 << 24, { sha256: sha, now: () => 1 });
+  const members4 = [v.root, v.masterSha, v.playlistSha, v.initSha, ...v.segShas];
+  const all4: [Uint8Array, 'hashlist' | 'playlist-master' | 'playlist' | 'init' | 'segment'][] = [
+    [v.hashList, 'hashlist'], [v.master, 'playlist-master'], [v.playlist, 'playlist'], [v.init, 'init'], ...v.segs.map((x): [Uint8Array, 'segment'] => [x, 'segment']),
+  ];
+  for (const [b, role] of all4) {
+    await k4.put({ root: v.root, video: v.list.video, sha256: sha(b), role, rendition: role === 'init' || role === 'segment' ? '360p' : null, bytes: b, reason: 'watched', completes: [{ id: '360p', members: members4 }] });
+  }
+  const s4 = new KeepSession({ keeper: k4, root: v.root, minimumSeconds: 1, sha256: sha });
+  await s4.start();
+  s4.learnList(v.list);
+  s4.learnPlaylist(new TextDecoder().decode(v.playlist), '360p');
+  const el4 = new FakeVideo();
+  s4.attach(el4);
+  el4.play(2);
+  await flush();
+  eq('lost: held, keeping', [s4.stats().held, s4.stats().state], [['360p'], 'keeping']);
+  const seg1Key = `${v.root}/${v.segShas[1]}`;
+  // The read first: a miss, the rendition not held; then HTTP's copy: stored, held again.
+  be4.data.get('bytes')!.delete(seg1Key);
+  eq('lost: the read first: a miss', await s4.readFile(v.segShas[1]!), null);
+  eq('lost: and the rendition is not held', s4.stats().held, []);
+  s4.delivered(want(v.root, v.segShas[1]!, 'segment', 'm4s', '360p'), v.segs[1]!, 'https://o.test');
+  await k4.idle();
+  await flush();
+  eq('lost: then the file from HTTP: stored, held again', [(await k4.storedShas(v.root)).has(v.segShas[1]!), s4.stats().held], [true, ['360p']]);
+  // HTTP's copy first (the keep tier slow), the read after: put right in place, nothing lost.
+  be4.data.get('bytes')!.delete(seg1Key);
+  s4.delivered(want(v.root, v.segShas[1]!, 'segment', 'm4s', '360p'), v.segs[1]!, 'https://o.test');
+  await k4.idle();
+  await flush();
+  eq('lost: HTTP first: the bytes are back', be4.data.get('bytes')!.has(seg1Key), true);
+  eq('lost: and the read after it gets them', sha((await s4.readFile(v.segShas[1]!))!), v.segShas[1]);
+  eq('lost: still held', s4.stats().held, ['360p']);
+  s4.close();
 
   // A segment the engine stored before the minimum, and let go before it: still written at the minimum.
   const k3 = new Keeper(new MemBackend(), 1 << 24, { sha256: sha, now: () => 1 });

@@ -163,12 +163,17 @@ export class KeepSession implements FileProvider {
   /** Read what the store holds of the video, and mark it as playing (never evicted while it plays). */
   async start(): Promise<void> {
     this.#removalMark = this.#keeper.removalMark(this.#root);
-    const release = await this.#keeper.protect(this.#root);
+    const { release, shared } = await this.#keeper.protect(this.#root);
     if (this.#closed) {
       release();
       return;
     }
     this.#release = release;
+    if (!shared) {
+      // Another tab may be removing this video: it is neither read from the store nor kept.
+      this.#setState('failed', 'other tabs could not be told this video plays; not kept this time');
+      return;
+    }
     try {
       this.#stored = await this.#keeper.storedShas(this.#root);
       const v = await this.#keeper.video(this.#root);
@@ -358,8 +363,7 @@ export class KeepSession implements FileProvider {
       return null;
     }
     if (got.bytes === null) {
-      if (got.refused) this.#refusedFile(sha);
-      else this.#stored.delete(sha);
+      this.#lost(sha, got.refused);
       return null;
     }
     if (verify && !verify(got.bytes)) {
@@ -370,10 +374,16 @@ export class KeepSession implements FileProvider {
     return got.bytes;
   }
 
-  #refusedFile(sha: string): void {
+  /** A file the store no longer holds (gone, or `refused`: it did not verify): fetched again, and its renditions not held. */
+  #lost(sha: string, refused: boolean): void {
     this.#stored.delete(sha);
-    this.#refused += 1;
-    this.#log(`keep: the stored copy of ${sha.slice(0, 12)}… did not verify; dropped, to be fetched again`);
+    if (refused) {
+      this.#refused += 1;
+      this.#log(`keep: the stored copy of ${sha.slice(0, 12)}… did not verify; dropped, to be fetched again`);
+    } else this.#log(`keep: ${sha.slice(0, 12)}… is no longer in the store; to be fetched again`);
+    // Not held until the file is stored again (the store made its renditions filling).
+    const at = this.#at.get(sha);
+    this.#held = at === undefined ? [] : this.#held.filter((id) => id !== at.rendition);
     void this.#keeper.video(this.#root).then(
       (v) => {
         this.#held = v === null ? [] : v.renditions.filter((r) => r.state === 'held').map((r) => r.id);
@@ -394,6 +404,10 @@ export class KeepSession implements FileProvider {
   delivered(want: FileWant, bytes: Uint8Array, _source: string): void {
     // With the mesh, segments come through the engine's storage instead.
     if (want.role === 'segment' && this.meshOn) return;
+    // Another tier won this file, so the store did not serve it in time: its copy may be gone
+    // (a read still repairing it), and it is offered to the store again; one still there is
+    // `already`, and held again.
+    this.#stored.delete(want.sha256);
     this.#arrived({ sha256: want.sha256, bytes, role: want.role });
   }
 

@@ -139,19 +139,23 @@ export async function claimRoots(roots: readonly string[]): Promise<Claim> {
   return { held, release: () => releases.forEach((r) => r()) };
 }
 
-/** Hold `root` as playing (a shared Web Lock) until `release`; `granted` once the lock is held. */
+/**
+ * Hold `root` as playing (a shared Web Lock) until `release`. `granted` is true once the lock
+ * is held, false if the request fails. Without Web Locks there is no other tab to tell, and
+ * it is true at once.
+ */
 export function holdPlaying(root: string): Hold {
   const l = locks();
-  if (l === null) return { granted: Promise.resolve(), release: () => {} };
+  if (l === null) return { granted: Promise.resolve(true), release: () => {} };
   let release!: () => void;
   const until = new Promise<void>((r) => (release = r));
-  let granted!: () => void;
-  const isGranted = new Promise<void>((r) => (granted = r));
+  let granted!: (held: boolean) => void;
+  const isGranted = new Promise<boolean>((r) => (granted = r));
   void l
     .request(`${PLAYING_LOCK_PREFIX}${root}`, { mode: 'shared' }, () => {
-      granted();
+      granted(true);
       return until;
     })
-    .catch(() => granted());
+    .catch(() => granted(false));
   return { granted: isGranted, release };
 }
