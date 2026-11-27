@@ -5,7 +5,8 @@
 #   a PR that touches this     the same build and sums, no release (a dry run)
 #
 # What ships: `nutflixd` and `nutflix-package` for linux-x64 (glibc, built in ci.yml's pinned
-# rust:1.98.0-bookworm image), LICENSE and README, in one tarball, and SHA256SUMS. The Tauri
+# rust:1.98.0-bookworm image), LICENSE and README, in one tarball, nutflixd-<version>-linux-x64.tar.gz
+# (nfx-<version>-linux-x64.tar.gz up to 0.1.4), and SHA256SUMS. The Tauri
 # desktop viewer and the browser player are built from source for now.
 #
 # No job holds a key or signs anything. Only `draft-release` can write (contents: write), only
@@ -70,7 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
-          name="nfx-${V}-linux-x64"
+          name="nutflixd-${V}-linux-x64"
           mkdir -p "dist/$name"
           install -m 0755 crates/target/release/nutflixd crates/target/release/nutflix-package "dist/$name/"
           install -m 0644 LICENSE README.md "dist/$name/"

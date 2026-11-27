@@ -15,8 +15,10 @@ are specified as drafts.
 **Names:** `nutflixd` was `nfxd` and `nutflix-package` was `nfx-package` until 2026-11-26, and
 this repository was `nfx` on GitHub (on Nostr its identifier still is); the protocol is still NFX.
 Releases up to 0.1.4 carry the old binary names with the same commands and flags, so with one of
-those read `nfxd` for `nutflixd`. Records written before the change (reviews, decision records,
-release notes, spikes) keep the old names.
+those read `nfxd` for `nutflixd`. A release's tarball is `nutflixd-<version>-linux-x64.tar.gz` and its
+signed release notice carries `d` = `nutflixd` from 0.1.5; up to 0.1.4 they are
+`nfx-<version>-linux-x64.tar.gz` and `d` = `nfx`. Records written before the change (reviews,
+decision records, release notes, spikes) keep the old names.
 
 **Status (2026-11-26):** this tree is NFX 0.1.4 plus what has merged since. A release is a
 prebuilt node and packager for linux-x64 on the
