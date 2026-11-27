@@ -4,7 +4,10 @@ Date: 2026-11-27
 
 ## Status
 
-Proposed 2026-11-27, for the maintainer's decision. Nothing changes until it is accepted.
+Proposed 2026-11-27. **The maintainer chose option A the same day** ("Decisions" below):
+stored beacons, with ask/tell withdrawn, adopted once the measurements meet the adoption criteria
+in "What relays do that this cannot assume". Until then no spec text changes, and this record
+stays Proposed.
 
 It reopens decision record 0105, which chose seeder lookup (NFX-17, kind 20465) and rejected
 stored beacons for one reason: NFX-03 §2 and NFX-04 §7, then frozen, said beacons are never
@@ -17,6 +20,31 @@ consequences" and "Code consequences" list what accepting it would change. The r
 it depends on is only partly known: "What relays do today" says what was read, and "What relays
 do that this cannot assume" what must be measured first. The number is taken by whichever of
 this record and a parallel one merges first; the other renumbers.
+
+## Decisions (the maintainer, 2026-11-27)
+
+1. **Design: A**, adopted once the measurements pass.
+2. **NFX-17 meanwhile: left as it is, with the answerer on.** nfx 0.1.4 is being re-cut from
+   the merge of #134 (nutflix #148), not from 226fd79, which will not be tagged. So 0.1.4
+   carries the lookup code (4b6095c) and decision record 0111. The nfxd it ships answers asks
+   by default (`--no-lookup` turns that off), and no change flips the default. **The withdrawal
+   therefore retires a released behaviour**, not unreleased code:
+   - readers stop asking first (the web player's `ask` option, pear). They lose nothing, since
+     a stored record answers the same question without a publish;
+   - a later nfxd release stops answering, and its embedded relay stops admitting kind 20465
+     (`--embed-relay-lookup`). Its release notes say so;
+   - 0.1.4 nodes keep answering until their operators upgrade. New readers never ask, so this
+     only costs those nodes their ask subscriptions, within NFX-17 §3's budgets;
+   - NFX-11 keeps 20465 registered as withdrawn until 0.10.0, so the kind is not reused.
+3. **Lifetime 600 s, republished every 300 s** (Proposal §3).
+4. **nutflix-pear:** merge #166, hold #167, split #168. Its beacon half merges and its
+   answering half is held ("The pending nutflix-pear pull requests").
+5. **M3 is approved as written:** a throwaway key, namespace `nfx:lab-stored-beacons:1`, at most
+   about 600 events per relay, stopping at the first refusal, on the eight relays listed.
+6. **Records for videos kept only because they were watched** (NFX-18): scoped relays, plus
+   general relays whose NIP-11 `supported_nips` lists 40.
+7. **Kind 20464:** as Migration step 6. Sending it becomes optional one release after every
+   reference reader reads 30464; readers keep reading it until 0.10.0.
 
 ## Context
 
@@ -80,7 +108,7 @@ alone. A stored beacon is the periodic beacon, so it does not apply.
     5-45 s, and `nos.lol` 17 aged 11-250 s. `relay.damus.io`, `nostr.mom`, `relay.ditto.pub` and
     `relay.snort.social` returned none: either they keep no ephemeral events or none were there.
   - For kind 20464: none, on any of these relays. No released seeder sends beacons to general
-    relays yet; 0111 landed after nfx 0.1.4.
+    relays yet; 0111 first ships in the re-cut nfx 0.1.4.
   - For kind 30464, the kind proposed below: none, on the 8 public relays above.
 
 So some general relays already hand recent ephemeral beacons to a new `REQ`, and others do not.
@@ -456,10 +484,9 @@ A sketch only.
   - `lookup.rs` (`Answerer`) and the relay's `seeder_lookup` are left as they are while parked.
 - **nfxd.**
   - `--embed-relay-stored-beacons` for the embedded relay, off by default like the other MAYs.
-  - **Before nfx 0.1.5 is tagged, the lookup answerer goes off by default, or out**: today a node
-    with a key answers asks unless `--no-lookup` is given (`crates/nfxd/src/main.rs`, the
-    `--no-lookup` text), so 0.1.5 would otherwise ship the answering surface this record may
-    withdraw. No released nfxd answers yet: 0.1.4 (226fd79) predates the lookup code (4b6095c).
+  - **The lookup answerer stays on by default** (the maintainer, 2026-11-27): a node with a key
+    answers asks unless `--no-lookup` is given (`crates/nfxd/src/main.rs`), and the re-cut
+    0.1.4 ships it. The withdrawal turns it off in a later release ("Decisions", item 2).
 - **Web player.**
   - `watchEndpoints` (`web/player/src/resolve.ts`) subscribes to both kinds, with `since` and the
     creator's `authors` filter, from page open.
@@ -479,9 +506,11 @@ A sketch only.
    - Readers read both kinds.
    - Seeders send both kinds on scoped relays: 20464 every 30 s for old readers, 30464 every
      300 s.
-   - On general relays seeders send only 30464. No released seeder has sent beacons there (0111
-     landed after 0.1.4), so no old reader depends on kind 20464 there. A live subscriber gets
-     each new record as it is sent, so nothing is lost.
+   - On general relays, the re-cut 0.1.4 can already send 20464 under 0111's share, so its
+     readers may depend on it there. **Open, for the stored-beacon text:** keep 20464 there
+     too, with both kinds inside the share's 20 beacons a minute, or send only 30464 and let
+     0.1.4 readers fall back to scoped relays' beacons. Either way a live subscriber gets each
+     new record as it is sent.
 3. **Old readers** (nfx before this change, nutflix-pear desktop 0.1.4 and earlier, pinned web
    builds and nsites) keep reading kind 20464 on scoped relays and see no difference.
 4. **Old seeders** send only 20464 on scoped relays. New readers read it, and wait for it, as
@@ -522,7 +551,7 @@ A sketch only.
 **A, gated on the measurements.**
 
 - Park NFX-17 now. Turn nfxd's answerer off by default before 0.1.5, and hold the unreleased
-  pear lookup work.
+  pear lookup work. (The maintainer chose to leave the answerer on: "Decisions", item 2.)
 - Write the stored-beacon text as Draft, with its vectors.
 - Run M1 and M4 in the lab, repeat M2 (read only), and run M3 on the maintainer's go.
 - Withdraw ask/tell when the adoption criteria are met. Move NFX-17 §§4.2-4.3 to NFX-03 §5
