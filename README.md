@@ -12,7 +12,7 @@ mesh (browsers) and an HTTP origin, which a public deployment puts behind TLS an
 The optional Hypercore profile (NFX-12) and payments (Cashu ecash, per delivered chunk)
 are specified as drafts.
 
-**Status (2026-11-25):** NFX 0.1.4 is the latest release: `nfxd` and `nfx-package` for
+**Status (2026-11-27):** NFX 0.1.4 is the latest release: `nfxd` and `nfx-package` for
 linux-x64 on the [Releases page](https://github.com/SovereignTechnology/nfx/releases), free video
 only ([release notes](docs/nfx/releases/v0.1.4.md); earlier: [0.1.3](docs/nfx/releases/v0.1.3.md),
 [0.1.2](docs/nfx/releases/v0.1.2.md), [0.1.1](docs/nfx/releases/v0.1.1.md),
