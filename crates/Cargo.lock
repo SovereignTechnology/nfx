@@ -3045,6 +3045,7 @@ dependencies = [
 name = "nfx-node"
 version = "0.1.4"
 dependencies = [
+ "async-wsocket",
  "base64 0.23.1",
  "bytes",
  "getrandom 0.4.3",
@@ -3068,6 +3069,7 @@ dependencies = [
  "str0m",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-happy-eyeballs",
  "tokio-tungstenite",
  "tungstenite",
 ]
@@ -3134,6 +3136,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "iroh",
+ "iroh-blobs",
  "iroh-relay",
  "n0-future",
  "nfx-node",

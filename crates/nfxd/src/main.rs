@@ -7,7 +7,7 @@
 //!              [--description <md>] [--alt <text>] [--tag <t>]…
 //! nfxd delete --key <file> --relay <url>… --a <a>…   withdraw your own videos (NFX-02 §6)
 //! nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]… [--iroh-relay <url>]… [--iroh-relay-ca <pem>]… [--relay-only]
-//!          [--iroh-bind <ip:port> [--iroh-external <ip:port>]…]
+//!          [--iroh-bind <ip:port> [--iroh-external <ip:port>]…] [--public-addrs-only]
 //!          [--seed <a>[#<id>,…]]… [--fetch <a>[#<id>,…]]… [--pull <a>[#<id>,…]]… [--origin <addr:port>]
 //!          [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>] [--embed-relay-lookup]]
 //!          [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]…
@@ -49,16 +49,34 @@
 //! for a network whose relays use a private CA, such as a test network. It changes which
 //! relay certificates are trusted, never how peers authenticate each other.
 //!
+//! **What a beacon names, and where** (NFX-03 §4 as amended 2026-11-26, decision record 0114).
+//! A relay this node reaches at a public address gets beacons whose iroh endpoint (`addrs` and
+//! every ticket) names only the iroh relay, public direct addresses and any `--iroh-external`:
+//! never a private, shared (CGNAT, tailnet), loopback, link-local, unique-local, documentation
+//! or other special-purpose address. Only a relay it reaches at an address of its own host or
+//! networks (loopback, private, shared, link-local or unique-local: its `--embed-relay`, a
+//! relay on the LAN or the tailnet) gets a beacon that also names those, signed apart and dated
+//! a second later, so a viewer on the same LAN or tailnet keeps it over the public one and still
+//! dials the node directly without an iroh relay. The
+//! class comes from the address each relay connection reached, not from the URL's host name,
+//! and a relay whose class is not known is treated as public, as is an `--embed-relay` on
+//! `0.0.0.0` or `[::]` (every interface). Lookup answers (NFX-17) and gossip envelopes carry the
+//! beacon for the world. A proxy, a tunnel or a DNAT that publishes a loopback or private relay
+//! to the internet (an `--embed-relay 127.0.0.1:…` behind a TLS proxy, say) makes it look
+//! private: `--public-addrs-only` then leaves every address that is not public out of every
+//! beacon, its own networks' included. (Peers that are already connected still
+//! learn every address from iroh's own NAT traversal, and the `gossip peer:` lines on stderr
+//! list them all.)
+//!
 //! `--iroh-bind` binds the iroh endpoint's UDP socket to a fixed `ip:port` (`0.0.0.0:<port>`
 //! for every interface) instead of a random port, so a NAT or a firewall can forward it. It
 //! replaces the default socket of that address family only. `--iroh-external` (repeatable, at
 //! most 4, needs `--iroh-bind`) names an address where internet peers reach that socket, such
 //! as the public address of a DNAT in front of the host. It is advertised as given in tickets
-//! and beacons, and with any set, `run` advertises no other direct address that is not public:
-//! private, shared, loopback, link-local, unique-local, documentation and other special-purpose
-//! addresses are left out, so a host's interface addresses behind the DNAT never reach a relay.
-//! (Peers that are already connected still learn them from iroh's own NAT traversal.) Neither
-//! works with `--relay-only`.
+//! and beacons, and with any set, `run` advertises no other direct address that is not public
+//! to any relay, its own networks' included: private, shared, loopback, link-local,
+//! unique-local, documentation and other special-purpose addresses are left out, so a host's
+//! interface addresses behind the DNAT never reach a relay. Neither works with `--relay-only`.
 //!
 //! An `--iroh-relay` is extra reachability, never a requirement: a node never stops seeding
 //! for want of one. With `--iroh-external` it seeds at once. Without, it waits at most 60 s to
@@ -211,7 +229,7 @@ const USAGE: &str = "usage:
   nfxd key show <file>
   nfxd publish --key <file> --relay <url>... --package <dir> --title <text> [--description <md>] [--alt <text>] [--tag <t>]...
   nfxd delete --key <file> --relay <url>... --a <a>...
-  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>] [--embed-relay-lookup]] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port|host:port>]... [--mesh-max-peers <n>] [--mesh-stun-from-nostr=false]]
+  nfxd run [--key <file>] --store <dir> [--state <dir>] [--relay <url>]... [--iroh-relay <url>]... [--iroh-relay-ca <pem>]... [--relay-only] [--iroh-bind <ip:port> [--iroh-external <ip:port>]...] [--public-addrs-only] [--seed <a>[#<id>,...]]... [--fetch <a>[#<id>,...]]... [--pull <a>[#<id>,...]]... [--origin <addr:port>] [--https-url <url>] [--embed-relay <addr:port> [--embed-relay-mesh] [--embed-relay-stun-ads] [--embed-relay-stun-port <port>] [--embed-relay-lookup]] [--embed-tracker <addr:port> [--bridge <ip:port> [--bridge-public <ip:port>] [--bridge-max-peers <n>] [--tracker-url <wss url>]]] [--namespace <ns>]... [--allow-creator <hex>]... [--gossip [--gossip-peer <id>@<ip:port|relay-url>]...] [--rating-root <npub|hex> --general-relay <url>... [--rating-trusted <npub|hex>]...] [--stun <ip:port> [--stun-public <ip:port>]] [--mesh-relay <wss url>... [--mesh-bind <ip:port> [--mesh-public <ip:port>]] [--mesh-stun <ip:port|host:port>]... [--mesh-max-peers <n>] [--mesh-stun-from-nostr=false]]
   nfxd stun --bind <ip:port> [--public <ip:port>] [--announce --key <file> --relay <url>... --network <ns>...]
 
   --mesh-relay runs the mesh endpoint (NFX-10 §6): browsers meet this node in the rooms of
@@ -236,6 +254,9 @@ const USAGE: &str = "usage:
   answer, verified, rate-limited, never stored. Off by default.
   --no-lookup stops this node answering viewers who ask who seeds a video; they then wait for
   its periodic beacon.
+  Beacons name this node's private addresses (LAN, VPN, tailnet, loopback) only on relays it
+  reaches at such an address, such as its --embed-relay; any other relay hears only its iroh
+  relay, public addresses and --iroh-external. --public-addrs-only leaves them out everywhere.
   --embed-relay-stun-port <port> (1024 to 65535) says in the relay's NIP-11 document
   (nfx.stun_port) that the host of its URL answers STUN on that UDP port, so pages that
   signal through it (with --embed-relay-mesh) ask it: the relay already sees their address.
@@ -468,6 +489,7 @@ async fn run(args: &[String]) -> Result<()> {
     let embed_relay_stun_ads = args.iter().any(|a| a == "--embed-relay-stun-ads");
     let embed_relay_lookup = args.iter().any(|a| a == "--embed-relay-lookup");
     let no_lookup = args.iter().any(|a| a == "--no-lookup");
+    let public_addrs_only = args.iter().any(|a| a == "--public-addrs-only");
     // On by default; `--mesh-stun-from-nostr=true` says so, `=false` turns it off.
     let no_mesh_stun_from_nostr = args.iter().any(|a| a == "--mesh-stun-from-nostr=false");
     let bare = [
@@ -477,6 +499,7 @@ async fn run(args: &[String]) -> Result<()> {
         "--embed-relay-stun-ads",
         "--embed-relay-lookup",
         "--no-lookup",
+        "--public-addrs-only",
         "--mesh-stun-from-nostr=false",
         "--mesh-stun-from-nostr=true",
     ];
@@ -610,8 +633,11 @@ async fn run(args: &[String]) -> Result<()> {
         // `run` seeds only what `--seed` names, and a seeder may use the portmapper.
         seed_watched: false,
         no_portmapper: false,
-        // An operator's seeder publishes what it has, as before; `--iroh-external` narrows it.
-        public_addrs_only: false,
+        // An operator's seeder tells relays on its own networks what it has; any other relay
+        // hears only public addresses and `--iroh-external` (nfx_node::relay_class), unless
+        // `--public-addrs-only` keeps private ones from every relay.
+        public_addrs_only,
+        relay_classifier: nfx_node::relay_class::Classifier::default(),
     };
     let daemon = Daemon::start(cfg).await?;
     if let Some(url) = &daemon.relay_url {
