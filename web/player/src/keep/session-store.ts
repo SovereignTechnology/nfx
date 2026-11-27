@@ -32,7 +32,11 @@ export const KEEP_DEADLINE_MS = 1_500;
 export const DEFAULT_MINIMUM_S = 60;
 export const MIN_MINIMUM_S = 30;
 export const MAX_MINIMUM_S = 3_600;
-/** The most bytes held in RAM for keeping before the minimum, beyond what the engine holds. */
+/**
+ * The most bytes held in RAM for keeping before the minimum. A segment the engine stores is
+ * held here too (the same bytes, not a copy), so one the engine lets go before the minimum is
+ * still written once it is reached; it never counts in the engine's usage.
+ */
 export const PENDING_MAX_BYTES = 256 * 1024 ** 2;
 
 const BYTES_PER_MIB = 1_048_576;
@@ -117,6 +121,8 @@ export class KeepSession implements FileProvider {
   #played = 0;
   #closed = false;
   #release: (() => void) | null = null;
+  /** The store's removals of the root when this session started (`Keeper.removedSince`). */
+  #removalMark = 0;
   #detach: (() => void) | null = null;
   /** Whether segments come through the engine (`storeSegment`), not `delivered`. */
   meshOn = false;
@@ -156,7 +162,13 @@ export class KeepSession implements FileProvider {
 
   /** Read what the store holds of the video, and mark it as playing (never evicted while it plays). */
   async start(): Promise<void> {
-    this.#release = this.#keeper.protect(this.#root);
+    this.#removalMark = this.#keeper.removalMark(this.#root);
+    const release = await this.#keeper.protect(this.#root);
+    if (this.#closed) {
+      release();
+      return;
+    }
+    this.#release = release;
     try {
       this.#stored = await this.#keeper.storedShas(this.#root);
       const v = await this.#keeper.video(this.#root);
@@ -287,7 +299,7 @@ export class KeepSession implements FileProvider {
     void this.#keeper
       .enqueue(async (): Promise<PutResult | null> => {
         if (this.#state !== 'keeping') return null;
-        if (this.#keeper.removedWhilePlaying(this.#root)) {
+        if (this.#keeper.removedSince(this.#root, this.#removalMark)) {
           this.#setState('removed', 'the page removed this video from the store');
           return null;
         }
@@ -331,7 +343,11 @@ export class KeepSession implements FileProvider {
       );
   }
 
-  /** `sha` from the store, checked again (and by `verify`), or null; bytes that fail are dropped and counted. */
+  /**
+   * `sha` from the store, checked again, or null; bytes that fail their sha256 are dropped and
+   * counted. Bytes `verify` refuses (a request's own check, such as a hash list's binding to a
+   * manifest) are a miss for that request only: they are the file, and stay.
+   */
   async readFile(sha: string, verify?: (bytes: Uint8Array) => boolean): Promise<Uint8Array | null> {
     if (!this.#stored.has(sha)) return null;
     let got: { bytes: Uint8Array | null; refused: boolean };
@@ -347,8 +363,7 @@ export class KeepSession implements FileProvider {
       return null;
     }
     if (verify && !verify(got.bytes)) {
-      await this.#keeper.drop(this.#root, sha).catch(() => {});
-      this.#refusedFile(sha);
+      this.#log(`keep: the stored ${sha.slice(0, 12)}… is not what this request asks for; not used here`);
       return null;
     }
     this.#fromStore += 1;
@@ -436,9 +451,9 @@ export class KeepSession implements FileProvider {
     return this.#stored.has(sha);
   }
 
-  /** A segment the engine stored, verified as one of the session's playlists'. */
+  /** A segment the engine stored, verified as one of the session's playlists': held before the minimum, written after. */
   segmentStored(sha: string, bytes: Uint8Array): void {
-    if (this.#state === 'keeping') this.#arrived({ sha256: sha, bytes, role: 'segment' });
+    this.#arrived({ sha256: sha, bytes, role: 'segment' });
   }
 
   note(m: string): void {

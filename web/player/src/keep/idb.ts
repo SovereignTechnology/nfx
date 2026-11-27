@@ -1,6 +1,7 @@
 /**
  * The keep store's backend in a browser: IndexedDB (database `nfx-web-keep`, one per page
- * origin), and Web Locks to tell other tabs of the origin which videos play. No worker, and
+ * origin), and Web Locks to tell other tabs of the origin which videos play, and to take a
+ * video for removal only while no tab plays it. No worker, and
  * nothing that needs a change to the page's Content-Security-Policy.
  *
  * Stores: `videos` (a record per kept video, by hash list root), `files` (an entry per file,
@@ -10,7 +11,7 @@
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
-import { type KeepBackend, type KeepTx, STORES, type StoreName } from './store';
+import { type Claim, type Hold, type KeepBackend, type KeepTx, STORES, type StoreName } from './store';
 
 export const KEEP_DB = 'nfx-web-keep';
 const VERSION = 1;
@@ -108,24 +109,49 @@ function locks(): LockManager | null {
   return typeof navigator !== 'undefined' && 'locks' in navigator && navigator.locks ? navigator.locks : null;
 }
 
-/** Roots another tab (or this one) of the origin holds as playing. */
-export async function lockedRoots(): Promise<ReadonlySet<string>> {
+/**
+ * Take each of `roots` for removal: an exclusive Web Lock on its playing name, asked without
+ * waiting, so a root any tab plays (`holdPlaying`, shared) is not taken. The ones taken stay
+ * taken until `release`: a tab that starts playing one meanwhile waits for the release, and
+ * then reads the store as the removal left it.
+ */
+export async function claimRoots(roots: readonly string[]): Promise<Claim> {
   const l = locks();
-  if (l === null) return new Set();
-  const snap = await l.query();
-  const out = new Set<string>();
-  for (const x of [...(snap.held ?? []), ...(snap.pending ?? [])]) {
-    if (typeof x.name === 'string' && x.name.startsWith(PLAYING_LOCK_PREFIX)) out.add(x.name.slice(PLAYING_LOCK_PREFIX.length));
+  if (l === null) return { held: new Set(roots), release: () => {} };
+  const held = new Set<string>();
+  const releases: (() => void)[] = [];
+  for (const root of roots) {
+    let release!: () => void;
+    const until = new Promise<void>((r) => (release = r));
+    const got = await new Promise<boolean>((resolve) => {
+      void l
+        .request(`${PLAYING_LOCK_PREFIX}${root}`, { mode: 'exclusive', ifAvailable: true }, (lock) => {
+          resolve(lock !== null);
+          return lock === null ? undefined : until;
+        })
+        .catch(() => resolve(false));
+    });
+    if (got) {
+      held.add(root);
+      releases.push(release);
+    } else release();
   }
-  return out;
+  return { held, release: () => releases.forEach((r) => r()) };
 }
 
-/** Hold `root` as playing (a shared Web Lock) until the returned function is called. */
-export function holdPlaying(root: string): () => void {
+/** Hold `root` as playing (a shared Web Lock) until `release`; `granted` once the lock is held. */
+export function holdPlaying(root: string): Hold {
   const l = locks();
-  if (l === null) return () => {};
+  if (l === null) return { granted: Promise.resolve(), release: () => {} };
   let release!: () => void;
   const until = new Promise<void>((r) => (release = r));
-  void l.request(`${PLAYING_LOCK_PREFIX}${root}`, { mode: 'shared' }, () => until).catch(() => {});
-  return release;
+  let granted!: () => void;
+  const isGranted = new Promise<void>((r) => (granted = r));
+  void l
+    .request(`${PLAYING_LOCK_PREFIX}${root}`, { mode: 'shared' }, () => {
+      granted();
+      return until;
+    })
+    .catch(() => granted());
+  return { granted: isGranted, release };
 }

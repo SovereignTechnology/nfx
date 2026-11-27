@@ -87,9 +87,10 @@ await store.remove(root); // everything of one video
   Every read is checked against its sha256 again: other code of the page's origin can write
   the store. A file that fails is dropped (`refused`) and fetched again like a missing one.
 - **The cap.** At the cap, videos kept only because they were watched go, least recently
-  played first, never one playing in any tab of the origin (each holds a Web Lock while it
-  plays). `downloaded` is part of the store's records for a later version; this one keeps
-  only `watched`.
+  played first, never one playing in any tab of the origin (each holds a Web Lock, shared,
+  while it plays; a video to go is first taken by the same lock, exclusive, and held until
+  its deletion commits). Nothing goes for a file that would not fit even then. `downloaded`
+  is part of the store's records for a later version; this one keeps only `watched`.
 - **The mesh.** With a mesh, the engine's segment storage is the session's: segments in RAM
   as the engine's own storage keeps them (its usage counts RAM only, so prefetch is
   unchanged), the store behind it. Only segments in RAM, and those of renditions the store

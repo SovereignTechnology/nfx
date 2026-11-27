@@ -7,9 +7,11 @@
  * returned, so it is fetched again like any missing file.
  *
  * At the cap, videos kept only because they were watched go, the least recently played first,
- * never one a session plays (here, or in another tab of the origin, by its Web Lock). A video
- * kept for another reason (`downloaded`) is never removed to make room: the store says it is
- * full instead.
+ * never one a session plays (here, or in another tab of the origin: each video to go is taken
+ * first by an exclusive Web Lock asked without waiting, which a tab that plays it holds shared,
+ * and kept until the deletion commits). A video kept for another reason (`downloaded`) is never
+ * removed to make room, and nothing is removed for a file that would not fit even then: the
+ * store says it is full instead.
  *
  * This file is plain logic over a transactional backend (`KeepBackend`): ./idb.ts is
  * IndexedDB, and keep-unit.ts drives it over one in memory. Nothing in a transaction waits for
@@ -47,15 +49,34 @@ export interface KeepBackend {
   close(): void;
 }
 
+/** Roots taken for removal (`KeeperDeps.claim`), until `release`. */
+export interface Claim {
+  held: ReadonlySet<string>;
+  release: () => void;
+}
+
+/** A hold on a root as playing (`KeeperDeps.hold`): `granted` once other tabs see it. */
+export interface Hold {
+  granted: Promise<void>;
+  release: () => void;
+}
+
 export interface KeeperDeps {
   sha256: (bytes: Uint8Array) => string;
   /** ms since the epoch */
   now: () => number;
-  /** Roots another tab of this origin plays now (their Web Locks). */
-  lockedRoots?: () => Promise<ReadonlySet<string>>;
-  /** Hold `root` as playing for other tabs to see, until the returned function is called. */
-  hold?: (root: string) => () => void;
+  /**
+   * Take each of `roots` for removal unless a tab of this origin plays it, without waiting;
+   * the ones taken stay taken until `release`. Without it, every root is taken (no other tab
+   * can be seen).
+   */
+  claim?: (roots: readonly string[]) => Promise<Claim>;
+  /** Hold `root` as playing for other tabs to see, until `release`. */
+  hold?: (root: string) => Hold;
 }
+
+/** How long `protect` waits for other tabs to see a hold before it goes on anyway. */
+export const HOLD_WAIT_MS = 3_000;
 
 /** The video record (the `videos` store, by root). */
 interface VideoRecord {
@@ -119,6 +140,9 @@ const key = (root: string, sha: string): string => `${root}/${sha}`;
 const lower = (root: string): string => `${root}/`;
 const upper = (root: string): string => `${root}/~`;
 
+/** Thrown inside a transaction to undo its evictions when the file still would not fit. */
+class StillFull extends Error {}
+
 /** The default cap, and the smallest a page may set. */
 export const DEFAULT_CAP_BYTES = 2 * 1024 ** 3;
 export const MIN_CAP_BYTES = 16 * 1024 ** 2;
@@ -151,11 +175,18 @@ export class Keeper implements KeepStore {
   readonly #deps: KeeperDeps;
   /** Roots a session of this page plays, counted: never evicted. */
   readonly #playing = new Map<string, number>();
-  /** Roots removed by the page while a session played them: that session keeps nothing more. */
-  readonly #removed = new Set<string>();
+  /**
+   * How many times the page removed each root, counted once each removal commits: a session
+   * that took its mark before a removal keeps nothing more (`removedSince`), and one that
+   * starts after it keeps as any other.
+   */
+  readonly #removals = new Map<string, number>();
   /** Every write, one after another. */
   #queue: Promise<unknown> = Promise.resolve();
-  #closed = false;
+  /** No new work is taken (`close`); what is queued still runs. */
+  #closing = false;
+  /** The backend is closed: nothing more runs. */
+  #shut = false;
 
   constructor(backend: KeepBackend, capBytes: number, deps: KeeperDeps) {
     this.#backend = backend;
@@ -163,38 +194,49 @@ export class Keeper implements KeepStore {
     this.#deps = deps;
   }
 
-  /** Mark `root` as playing until the returned function is called (idempotent). */
-  protect(root: string): () => void {
+  /**
+   * Mark `root` as playing until the returned function is called (idempotent): at once for
+   * this page, and for other tabs once they can see it (or after `HOLD_WAIT_MS`), so a store
+   * read after this resolves sees no removal another tab started.
+   */
+  async protect(root: string): Promise<() => void> {
     this.#playing.set(root, (this.#playing.get(root) ?? 0) + 1);
-    this.#removed.delete(root);
-    const unhold = this.#deps.hold?.(root) ?? ((): void => {});
+    const hold = this.#deps.hold?.(root) ?? { granted: Promise.resolve(), release: (): void => {} };
     let done = false;
-    return () => {
+    const release = (): void => {
       if (done) return;
       done = true;
-      unhold();
+      hold.release();
       const n = (this.#playing.get(root) ?? 1) - 1;
-      if (n <= 0) {
-        this.#playing.delete(root);
-        this.#removed.delete(root);
-      } else this.#playing.set(root, n);
+      if (n <= 0) this.#playing.delete(root);
+      else this.#playing.set(root, n);
     };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([hold.granted.catch(() => {}), new Promise<void>((r) => (timer = setTimeout(r, HOLD_WAIT_MS)))]);
+    clearTimeout(timer);
+    return release;
   }
 
-  /** Whether the page removed `root` while it played. */
-  removedWhilePlaying(root: string): boolean {
-    return this.#removed.has(root);
+  /** A mark for `removedSince`: the removals of `root` committed so far. */
+  removalMark(root: string): number {
+    return this.#removals.get(root) ?? 0;
   }
 
-  /** Run `fn` after every write queued before it. */
+  /** Whether the page removed `root` after `mark` was taken. */
+  removedSince(root: string, mark: number): boolean {
+    return this.removalMark(root) > mark;
+  }
+
+  /** Run `fn` after every write queued before it. Refused once the store is closing. */
   enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.#closing) return Promise.reject(new Error('nfx: the keep store is closed'));
     const run = this.#queue.then(fn);
     this.#queue = run.catch(() => {});
     return run;
   }
 
   #check(): void {
-    if (this.#closed) throw new Error('nfx: the keep store is closed');
+    if (this.#closing) throw new Error('nfx: the keep store is closed');
   }
 
   /**
@@ -203,13 +245,69 @@ export class Keeper implements KeepStore {
    * one playing here or in another tab, nor `f`'s own.
    */
   async put(f: PutFile): Promise<PutResult> {
-    this.#check();
+    // Called from the queue: a write queued before `close` still runs.
+    if (this.#shut) throw new Error('nfx: the keep store is closed');
     if (!SHA.test(f.root) || !SHA.test(f.sha256)) return { kind: 'refused' };
     if (this.#deps.sha256(f.bytes) !== f.sha256) return { kind: 'refused' };
     const size = f.bytes.byteLength;
     if (size > this.capBytes) return { kind: 'full' };
-    // Other tabs' playing roots are asked before the transaction: it may wait on nothing else.
-    const locked = (await this.#deps.lockedRoots?.().catch(() => new Set<string>())) ?? new Set<string>();
+    // Videos to go are taken before the transaction (it may wait on nothing else), and kept
+    // taken until it has committed.
+    const claim = await this.#claimVictims(f.root, size);
+    try {
+      return await this.#store(f, size, claim);
+    } catch (e) {
+      if (e instanceof StillFull) return { kind: 'full' };
+      throw e;
+    } finally {
+      claim?.release();
+    }
+  }
+
+  /** Whether `v` may go to make room for a file of `root`: kept only as watched, and not playing here. */
+  #evictable(v: VideoRecord, root: string): boolean {
+    return v.root !== root && !this.#playing.has(v.root) && v.reasons.every((r) => r === 'watched');
+  }
+
+  /** Least recently played first. */
+  static #byUse(a: VideoRecord, b: VideoRecord): number {
+    return a.usedAt - b.usedAt || (a.root < b.root ? -1 : 1);
+  }
+
+  /**
+   * When a file of `size` would pass the cap: the videos that may go for it, taken (`claim`)
+   * in eviction order until they would free enough, a video another tab plays left out; none
+   * when nothing needs to go. Null only when no `claim` is given (every video may then go).
+   */
+  async #claimVictims(root: string, size: number): Promise<Claim | null> {
+    const claim = this.#deps.claim;
+    if (claim === undefined) return null;
+    const { usage, videos } = await this.#backend.run(['videos', 'meta'], 'readonly', async (tx) => ({
+      usage: await tx.get('meta', 'usage'),
+      videos: await tx.values('videos'),
+    }));
+    const used = typeof usage === 'number' && Number.isFinite(usage) && usage >= 0 ? usage : 0;
+    if (used + size <= this.capBytes) return { held: new Set(), release: () => {} };
+    const candidates = videos
+      .filter(isVideo)
+      .filter((v) => this.#evictable(v, root))
+      .sort(Keeper.#byUse);
+    const held = new Set<string>();
+    const releases: (() => void)[] = [];
+    let freed = 0;
+    for (const v of candidates) {
+      if (used - freed + size <= this.capBytes) break;
+      const c = await claim([v.root]).catch((): Claim => ({ held: new Set(), release: () => {} }));
+      releases.push(c.release);
+      if (c.held.has(v.root)) {
+        held.add(v.root);
+        freed += v.bytes;
+      }
+    }
+    return { held, release: () => releases.forEach((r) => r()) };
+  }
+
+  async #store(f: PutFile, size: number, claim: Claim | null): Promise<PutResult> {
     const data = f.bytes.slice().buffer;
     const now = this.#deps.now();
     return this.#backend.run(STORES, 'readwrite', async (tx): Promise<PutResult> => {
@@ -218,15 +316,23 @@ export class Keeper implements KeepStore {
       const meta = await tx.get('meta', 'usage');
       let usage = typeof meta === 'number' && Number.isFinite(meta) && meta >= 0 ? meta : 0;
       if (usage + size > this.capBytes) {
+        // Chosen before anything is deleted: when even all of them would not free enough,
+        // nothing goes.
         const victims = (await tx.values('videos'))
           .filter(isVideo)
-          .filter((v) => v.root !== f.root && !this.#playing.has(v.root) && !locked.has(v.root) && v.reasons.every((r) => r === 'watched'))
-          .sort((a, b) => a.usedAt - b.usedAt || (a.root < b.root ? -1 : 1));
+          .filter((v) => this.#evictable(v, f.root) && (claim === null || claim.held.has(v.root)))
+          .sort(Keeper.#byUse);
+        const going: string[] = [];
+        let freeing = 0;
         for (const v of victims) {
-          if (usage + size <= this.capBytes) break;
-          usage -= await this.#evict(tx, v.root);
+          if (usage - freeing + size <= this.capBytes) break;
+          going.push(v.root);
+          freeing += v.bytes;
         }
-        if (usage + size > this.capBytes) return { kind: 'full' };
+        if (usage - freeing + size > this.capBytes) return { kind: 'full' };
+        for (const root of going) usage -= await this.#evict(tx, root);
+        // A record that said more than its files hold: undo every eviction (the transaction aborts).
+        if (usage + size > this.capBytes) throw new StillFull();
       }
       const held = await tx.get('videos', f.root);
       const video: VideoRecord = isVideo(held)
@@ -282,8 +388,14 @@ export class Keeper implements KeepStore {
    */
   async read(root: string, sha256: string): Promise<ReadResult> {
     this.#check();
-    const got = await this.#backend.run(['bytes'], 'readonly', (tx) => tx.get('bytes', key(root, sha256)));
-    if (!(got instanceof ArrayBuffer)) return { bytes: null, refused: false };
+    const k = key(root, sha256);
+    const [got, entry] = await this.#backend.run(['bytes', 'files'], 'readonly', async (tx) => [await tx.get('bytes', k), await tx.get('files', k)] as const);
+    if (!(got instanceof ArrayBuffer)) {
+      // An entry whose bytes are gone (or are not bytes) goes too, so the file is stored again
+      // when it next arrives.
+      if (isFile(entry)) await this.drop(root, sha256);
+      return { bytes: null, refused: false };
+    }
     const bytes = new Uint8Array(got);
     if (this.#deps.sha256(bytes) === sha256) return { bytes, refused: false };
     await this.drop(root, sha256);
@@ -361,28 +473,30 @@ export class Keeper implements KeepStore {
   async remove(root: string): Promise<void> {
     this.#check();
     if (typeof root !== 'string' || !SHA.test(root)) throw new TypeError('nfx: a root is 64 lowercase hex');
-    if (this.#playing.has(root)) this.#removed.add(root);
-    await this.enqueue(() =>
-      this.#backend.run(STORES, 'readwrite', async (tx) => {
+    await this.enqueue(async () => {
+      await this.#backend.run(STORES, 'readwrite', async (tx) => {
         const freed = await this.#evict(tx, root);
         const meta = await tx.get('meta', 'usage');
         const usage = typeof meta === 'number' && Number.isFinite(meta) ? meta : freed;
         await tx.put('meta', 'usage', Math.max(0, usage - freed));
-      }),
-    );
+      });
+      // Counted once committed, and before any write queued after it runs.
+      this.#removals.set(root, this.removalMark(root) + 1);
+    });
   }
 
-  async idle(): Promise<void> {
-    for (;;) {
-      const q = this.#queue;
-      await q;
-      if (q === this.#queue) return;
-    }
+  /** Resolves once every write queued before the call has finished (later ones are not waited for). */
+  idle(): Promise<void> {
+    return this.#queue.then(() => {});
   }
 
+  /** Takes no new work; what is queued finishes, then the backend closes. */
   close(): void {
-    if (this.#closed) return;
-    this.#closed = true;
-    void this.idle().then(() => this.#backend.close());
+    if (this.#closing) return;
+    this.#closing = true;
+    void this.#queue.then(() => {
+      this.#shut = true;
+      this.#backend.close();
+    });
   }
 }

@@ -282,6 +282,8 @@ async function main(): Promise<void> {
 
   let ctx = await launch();
   let kept: KeptFile[] = [];
+  /** The played rendition's segments, all kept in b: a replay reads each from the store. */
+  let keptSegmentCount = 0;
   try {
     // ---- 0. the store over real IndexedDB ----
     const fp = await ctx.newPage();
@@ -328,6 +330,7 @@ async function main(): Promise<void> {
     const playlistText = playlistSha ? await (await fetch(`${origin}/${root}/${playlistSha}.m3u8`)).text() : '';
     const segmentsOfPlayed = playlistText.split('\n').filter((l) => l.trim() !== '' && !l.startsWith('#')).length;
     const keptSegments = kept.filter((f) => f.role === 'segment' && f.rendition === playedRendition).length;
+    keptSegmentCount = keptSegments;
     fail('kept', [
       full.v.errors.length !== 0 ? `errors ${JSON.stringify(full.v.errors)}` : '',
       full.v.keep?.state !== 'keeping' ? `state ${full.v.keep?.state}` : '',
@@ -375,7 +378,9 @@ async function main(): Promise<void> {
         r.v.errors.length !== 0 ? `errors ${JSON.stringify(r.v.errors)}` : '',
         !r.v.playing ? 'never played' : '',
         !(r.v.t >= CLIP_S - 1) ? `stopped at ${r.v.t} s` : '',
-        !(r.v.keep?.fromStore > 0) ? 'nothing from the store' : '',
+        // Every segment from the store (the player's fetches are `no-store`, so none can come
+        // from the HTTP cache past the gate), plus at least the hash list, playlist and init.
+        !(r.v.keep?.fromStore >= keptSegmentCount + 3) ? `${r.v.keep?.fromStore} files from the store, ${keptSegmentCount} segments kept` : '',
         r.v.keep?.refused !== 0 ? `${r.v.keep?.refused} refused` : '',
         res.askedKept.length !== 0 ? `the origin was asked for kept files: ${res.askedKept.join(' ')}` : '',
         g.log().some((x) => !x.refused) ? 'the gate let a request through' : '',

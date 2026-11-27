@@ -98,7 +98,7 @@ import { MAX_REMOTE_CANDIDATES as SDP_MAX_REMOTE_CANDIDATES, filterRemoteSdp as 
 import { NostrSignaler } from './signal-nostr';
 import { StunFallbackBook } from './stun-fallback';
 import { resolveManifest as resolveOverRelays, watchEndpoints as watchBeacons } from './resolve';
-import { holdPlaying, lockedRoots, openIdbBackend } from './keep/idb';
+import { claimRoots, holdPlaying, openIdbBackend } from './keep/idb';
 import { DEFAULT_MINIMUM_S, KeepSession, MAX_MINIMUM_S, MIN_MINIMUM_S } from './keep/session-store';
 import { DEFAULT_CAP_BYTES, Keeper, MIN_CAP_BYTES } from './keep/store';
 import { contentHash } from './levels';
@@ -257,7 +257,7 @@ export async function openKeepStore(options: KeepStoreOptions = {}): Promise<Kee
   if (!(Number.isSafeInteger(cap) && cap >= MIN_CAP_BYTES)) throw new TypeError(`nfx: capBytes must be a whole number of bytes, at least ${MIN_CAP_BYTES}`);
   await loadWasm();
   const backend = await openIdbBackend();
-  return new Keeper(backend, cap, { sha256: sha256Hex, now: () => Date.now(), lockedRoots, hold: holdPlaying });
+  return new Keeper(backend, cap, { sha256: sha256Hex, now: () => Date.now(), claim: claimRoots, hold: holdPlaying });
 }
 
 /** Whether the page is served from a loopback host (tests), where a keep minimum below 30 s is allowed. */
@@ -488,17 +488,7 @@ async function openWith(
     let picked: Selection;
     // A rendition whose playlist and init the keep store holds is held here, whatever the origin answers.
     const local = new Set<string>();
-    const httpProbe = initProbe(loaded);
-    const probe: Probe =
-      keep === null
-        ? httpProbe
-        : async (id, probeSignal) => {
-            if (await keptHere(keep, loaded, id)) {
-              local.add(id);
-              return 200;
-            }
-            return httpProbe(id, probeSignal);
-          };
+    const probe = initProbe(loaded, keep, local);
     try {
       // A RangeError (an id the hash list lacks) ends open(), before any probe: every
       // origin serves the same list.
@@ -535,57 +525,54 @@ async function openWith(
 }
 
 /**
- * Whether the keep store holds rendition `id` as an origin would answer for it (./probe.ts):
- * its media playlist, read and verified, names an init that is read and verified too.
- */
-async function keptHere(keep: KeepSession, anchor: Anchor, id: string): Promise<boolean> {
-  const r = anchor.renditions.find((x) => x.id === id);
-  if (r === undefined) return false;
-  const base = `${anchor.origin}/${anchor.root}/`;
-  const playlistUrl = `${base}${r.playlist}.m3u8`;
-  const bytes = await keep.readFile(r.playlist, verifies(anchor, playlistUrl));
-  if (bytes === null) return false;
-  let text: string;
-  try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch {
-    return false;
-  }
-  keep.learnPlaylist(text, id);
-  const init = initUrl(text, playlistUrl);
-  if (init === null || !init.startsWith(base) || !CONTENT_NAME.test(init.slice(base.length))) return false;
-  const sha = contentHash(init);
-  return sha !== null && (await keep.readFile(sha, verifies(anchor, init))) !== null;
-}
-
-/**
  * How to ask the origin `anchor` came from whether it holds a rendition (./probe.ts): its
  * media playlist, fetched and verified against the hash list, names its init (NFX-05 §3),
  * and a GET of that init must answer 200 or 206. Every URL is one the hash list names,
  * under `<origin>/<root>/`: the playlist's content name, and the init's, read from bytes
  * that verified.
+ *
+ * With `keep`, each of the two comes from the keep store when it holds it, verified, and
+ * from the origin otherwise: a rendition both come from the store for is held here (added to
+ * `local`, NFX-10 §7.3); one the origin served either for is the origin's answer.
  */
 /** `<sha256>.<ext>`: a content name (NFX-05 §3), with no path, query or fragment. */
 const CONTENT_NAME = /^[0-9a-f]{64}\.[0-9A-Za-z]{1,8}$/;
 
-function initProbe(anchor: Anchor): Probe {
+function initProbe(anchor: Anchor, keep: KeepSession | null = null, local: Set<string> = new Set()): Probe {
   const base = `${anchor.origin}/${anchor.root}/`;
+  const decode = (bytes: Uint8Array): string | null => {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      return null;
+    }
+  };
   return async (id, signal) => {
     const r = anchor.renditions.find((x) => x.id === id);
     if (r === undefined) throw new Error('not a rendition of the hash list');
     const playlistUrl = `${base}${r.playlist}.m3u8`;
-    let text: string;
-    try {
-      const bytes = await anchor.fetchChecked(playlistUrl, Math.min(r.playlistSize ?? MAX_HASH_LIST_BYTES, MAX_HASH_LIST_BYTES), signal);
-      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    } catch (e) {
-      throw new Error(`playlist: ${message(e)}`);
+    const kept = keep === null ? null : await keep.readFile(r.playlist, verifies(anchor, playlistUrl));
+    let text = kept === null ? null : decode(kept);
+    const playlistHere = text !== null;
+    if (text === null) {
+      try {
+        const bytes = await anchor.fetchChecked(playlistUrl, Math.min(r.playlistSize ?? MAX_HASH_LIST_BYTES, MAX_HASH_LIST_BYTES), signal);
+        text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      } catch (e) {
+        throw new Error(`playlist: ${message(e)}`);
+      }
     }
+    keep?.learnPlaylist(text, id);
     // A content name right under `<origin>/<root>/` (NFX-05 §3), and one the hash list names:
     // nothing else is ever requested, whatever the playlist holds.
     const init = initUrl(text, playlistUrl);
     if (init === null || !init.startsWith(base) || !CONTENT_NAME.test(init.slice(base.length))) throw new Error('its playlist names no init');
     anchor.expected(init); // throws for a file the hash list does not name
+    const initSha = keep === null ? null : contentHash(init);
+    if (keep !== null && initSha !== null && (await keep.readFile(initSha, verifies(anchor, init))) !== null) {
+      if (playlistHere) local.add(id);
+      return 200;
+    }
     return probeStatus((url, req) => fetch(url, req), init, signal);
   };
 }

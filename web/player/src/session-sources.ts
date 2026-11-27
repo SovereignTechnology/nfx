@@ -392,8 +392,12 @@ export class SessionSources {
       signal?.addEventListener('abort', onAbort, { once: true });
       const run = async (tier: FileProvider | null, last: boolean): Promise<FetchResult | null> => {
         if (tier === null) {
+          // Timed from the round's start, as the providers' answers are: a keep tier waited for
+          // first is time the file took, not time its transfer took less.
+          const waited = Math.max(0, env.now() - began);
           try {
-            return await fetchFile(spec, http, ctl.signal);
+            const r = await fetchFile(spec, http, ctl.signal);
+            return waited === 0 ? r : { ...r, firstByteMs: r.firstByteMs + waited, totalMs: r.totalMs + waited };
           } catch {
             return null;
           }

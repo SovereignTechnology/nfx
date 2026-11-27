@@ -725,7 +725,8 @@ NFX-18's.
 - A page MUST NOT write anything of a play before the minimum of NFX-18 §2.1. It counts
   seconds of media actually played; a seek counts nothing. What a shorter play fetched is
   dropped from memory when the play ends. A shorter play adds no reason and removes none
-  (NFX-18 §2.1): a video kept before stays kept, and its stored files stay.
+  (NFX-18 §2.1): a video kept before stays kept, and a shorter play evicts none of its
+  stored files. A stored file that fails its sha256 is still dropped (§7.1).
 - Once a play reaches the minimum, the page writes every file it fetched for the play and
   every file it fetches later, each verified before it is stored. It fetches nothing over
   HTTPS for keeping (NFX-18 §2.1, decision record 0109).
@@ -922,9 +923,9 @@ declines segments), then HTTP origins; with `peers-only`, the file channel alone
   UDP candidate. Playlists, init segments and the hash list still come from an origin.
 - Draft 2026-11-26 (ADR 0110): new §7 carries NFX-18 §5's rules for browsers: storage of the
   page's origin, within a cap; files stored by root and sha256 and verified on every read;
-  nothing written before NFX-18's minimum of play; files taken from the keep store, then the
-  file channel, then HTTP, each tier with a deadline but the last that can answer, a file
-  failed only when every tier has; kept files served through the mesh only, one session key
+  nothing written before NFX-18's minimum of play; files taken from the keep store first, the
+  tiers after it as the session's `segmentSource` orders them (§7.3), each tier with a
+  deadline but the last that can answer, a file failed only when every tier has; kept files served through the mesh only, one session key
   per kept video seeded, one tab seeding at a time. §2 says which stored segments a page
   announces, §6.4 adds the seeding keys, §6.7 what seeding and storage expose. Nothing on
   the wire changes.
