@@ -38,6 +38,14 @@ A scoped relay for namespace(s) `N…`:
   `expiration`, never returning it after (NIP-40); and refuses one that names none of its
   namespaces as out of scope. A creator allow-list (§8) does not apply to it: an
   announcement names no video;
+- MAY accept kind **20465** seeder lookup asks and tells (NFX-17) whose `n` tag ∈ `N…`.
+  One that does handles them as ephemerals (forward to live subscribers, never persist,
+  never return one to a later `REQ`); admits only an event that passes NFX-17 §2, a tell's
+  embedded beacon included, and whose video's creator its allow-list (§8) admits; and
+  refuses every other kind-20465 event, one with a `t` it does not know included, as out of
+  scope. Until an event is verified it applies only size and shape checks and limits keyed
+  on the connection: a limit keyed on `pubkey`, `p` or `a` is charged only after full
+  verification, since those values are unauthenticated until then (NFX-17 §5);
 - MUST implement **NIP-40** and prune expired beacons;
 - MUST reject every other kind with `OK false "blocked: out of scope"` and SHOULD do
   the same for in-scope kinds whose `n` tag is absent/foreign;
@@ -55,6 +63,7 @@ A scoped relay for namespace(s) `N…`:
 | `created_at` | ≤ now + 15 min (reject later ones: a far-future revision outranks, and in a capped store outlives, every real one) |
 | Mesh signaling, when admitted (§1) | presence (`connect`, `disconnect`) ≤ 1 per 10 s per (`pubkey`, `P`, `t`); offers and answers ≤ 64 per 30 s per `pubkey`; ≤ 36 KiB hard. Freshness is NFX-10 §6.5's (60 s back, 30 s ahead), not the row above |
 | STUN service announcements, when admitted (§1) | ≤ 12 per hour per `pubkey`; ≤ 2 KiB hard; ≤ 1024 held at once while live, a new one (not one that replaces a held one) refused while full; `created_at` as the row above |
+| Seeder lookup, when admitted (§1) | asks ≤ 1 KiB hard, ≤ 2 per 10 s per (`pubkey`, `a`), ≤ 30 per 10 s per `a`; tells ≤ 36 KiB hard, ≤ 2 per 10 s per (`pubkey`, `p`, `a`), ≤ 160 per 30 s per `pubkey`; ≤ 96 lookup events per 10 s per connection; an event id already verified and carried in the last 120 s is dropped and charged nothing. Freshness is NFX-17 §2's, not the `created_at` row above |
 
 The 20 s beacon floor leaves slack under NFX-03's republish rule (TTL 60 → republish
 at 30 s). Being scoped is the rate limiter that makes beacon traffic viable: the relay
@@ -77,6 +86,8 @@ A relay that admits mesh signaling (§1) adds `25050` to `kinds` and `"signaling
 `roles`. A page or node that wants a scoped relay for signaling reads this document; one
 that does not list 25050 refuses it. A relay that admits STUN service announcements (§1)
 adds `33478` to `kinds` and `"stun"` to `roles`; one that does not list 33478 refuses them.
+A relay that admits seeder lookup (§1) adds `20465` to `kinds` and `"lookup"` to `roles`;
+one that does not list 20465 refuses it.
 
 A relay whose own host answers STUN Binding requests (NFX-10 §1: Binding only, no
 authentication) MAY say so with `"stun_port"` in the `nfx` object: an integer from 1024 to
@@ -205,3 +216,16 @@ redundancy comes from many operators).
   changes; a relay, seeder or reader that ignores the new allowances is as conformant as
   before; no reader of NFX-02, -03 or -05 changes behaviour. A bump would have re-derived
   every room key and republished every manifest, for no reader's benefit.
+- **Amended in place 2026-11-26, a fifth exception to the freeze rule (the maintainer's
+  decision, sovtech, 2026-11-22; decision record 0105).** §1: a scoped relay MAY carry
+  kind-20465 seeder lookup asks and tells (NFX-17) for its namespaces, as ephemerals, after
+  NFX-17 §2's checks (a tell's embedded beacon verified in full) and its creator allow-list;
+  limits keyed on a key or video are charged only after verification. §2: their sizes and
+  rates. §3: such a relay lists 20465 and the role `lookup`. Why in place and not a `specver`
+  bump, as for #96, #104 and 0108: the change is additive and a MAY; no artifact changes; a
+  relay that does not admit 20465 is exactly as conformant as before; no reader of NFX-02,
+  -03 or -05 changes behaviour, and a viewer that does not ask still finds seeders by their
+  beacons. Like a beacon, a lookup event carries `n`, so the relay scopes it to its networks.
+  A bump would have re-derived every room key and republished every manifest, for no
+  reader's benefit. The decision and the alternatives considered (a version bump; lookups on
+  general relays only) are in issue #140.
