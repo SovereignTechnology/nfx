@@ -37,8 +37,8 @@ const SLACK: Duration = Duration::from_secs(1);
 /// One relay's key, however its URL is spelled (a trailing slash, letter case): the form
 /// nostr-sdk's `RelayUrl` gives without its trailing slash, so every caller with its own
 /// client (the beacon loop, NFX-17's answerer) counts against the same share. A string that
-/// does not parse keys as itself.
-fn key(url: &str) -> String {
+/// does not parse keys as itself. [`crate::relay_class`] keys relays the same way.
+pub fn key(url: &str) -> String {
     nostr_sdk::prelude::RelayUrl::parse(url).map_or_else(
         |_| url.to_owned(),
         |u| u.as_str_without_trailing_slash().to_owned(),

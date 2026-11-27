@@ -22,6 +22,7 @@ use nfx_proto::{KIND_BEACON, KIND_MANIFEST, KIND_RATING, Verified};
 use nostr_sdk::prelude as ns;
 use nostr_sdk::prelude::{AsyncGetPublicKey, AsyncSignEvent, FinalizeEventAsync as _};
 
+use crate::relay_class::RelayClasses;
 use crate::{NodeError, Result, unix_now};
 
 /// Beacon lifetime used by [`Relays::announce`]; republish every `BEACON_TTL / 2` (NFX-03 §3).
@@ -203,15 +204,29 @@ impl ManifestQuery {
     }
 }
 
-/// A set of Nostr relays.
+/// A set of Nostr relays. Each connection is classed by the address it reached
+/// ([`crate::relay_class`]), so a caller can tell a relay on this host's own networks from
+/// any other.
 pub struct Relays {
     client: ns::Client,
+    classes: RelayClasses,
 }
 
 impl Relays {
     /// Add `urls` and connect, waiting at most `timeout` for the connections.
     pub async fn connect(urls: &[String], timeout: Duration) -> Result<Self> {
-        let client = ns::Client::default();
+        Self::connect_with(urls, timeout, RelayClasses::default()).await
+    }
+
+    /// As [`Relays::connect`], counting the connections in `classes`.
+    pub async fn connect_with(
+        urls: &[String],
+        timeout: Duration,
+        classes: RelayClasses,
+    ) -> Result<Self> {
+        let client = ns::Client::builder()
+            .websocket_transport(classes.transport())
+            .build();
         for url in urls {
             client
                 .add_relay(url.as_str())
@@ -219,7 +234,13 @@ impl Relays {
                 .map_err(NodeError::relay)?;
         }
         client.connect().and_wait(timeout).await;
-        Ok(Self { client })
+        Ok(Self { client, classes })
+    }
+
+    /// Each relay's class, from the address its connection reached.
+    #[must_use]
+    pub fn classes(&self) -> &RelayClasses {
+        &self.classes
     }
 
     /// How many relays are connected now.
@@ -291,6 +312,28 @@ impl Relays {
             .map(|(url, why)| (url.to_string(), Err(why)))
             .collect();
         answers.extend(out.success.into_keys().map(|url| (url.to_string(), Ok(()))));
+        Ok(answers)
+    }
+
+    /// Send `event`, which names this node's private addresses, to those of `urls` that are on
+    /// this host's own networks now ([`RelayClasses::class`]). It is marked private-only first,
+    /// so no connection to a public address carries it even if one of them reconnects there
+    /// before it leaves. Answers as [`Relays::publish_to`]; a URL that is public now is
+    /// answered with an error and sent nothing.
+    pub async fn publish_private(
+        &self,
+        event: &Event,
+        urls: &[String],
+    ) -> Result<BTreeMap<String, core::result::Result<(), String>>> {
+        self.classes.mark_private_only(&event.id);
+        let split = self.classes.partition(urls.iter().cloned());
+        let mut answers = self.publish_to(event, &split.private).await?;
+        for url in split.public {
+            answers.insert(
+                url,
+                Err("not sent: the relay is not reached at a private address now".into()),
+            );
+        }
         Ok(answers)
     }
 

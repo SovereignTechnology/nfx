@@ -24,6 +24,8 @@ bytes.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client"] }
 hyper-util.workspace = true
+# The daemon tests read the addresses inside beacons' tickets.
+iroh-blobs.workspace = true
 iroh-relay = { workspace = true, features = ["server", "test-utils"] }
 n0-future.workspace = true
 

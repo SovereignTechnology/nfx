@@ -2441,3 +2441,276 @@ async fn with_mesh_public_the_mesh_offers_that_address_and_not_the_bound_one() {
     assert_eq!(status.candidates, [format!("host {public}")]);
     node.shutdown().await;
 }
+
+/// A UDP port free on loopback now, for `iroh_bind`: a node bound there names
+/// `127.0.0.1:<port>`, an address that is not public, as its IPv4 direct address.
+fn loopback_iroh_port() -> u16 {
+    std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// A classifier that takes the relay on `port` for one reached at a public address (every
+/// relay in these tests is on loopback), and classes every other one as nfxd does.
+fn public_port(port: u16) -> nfx_node::relay_class::Classifier {
+    use nfx_node::relay_class::{Classifier, RelayClass, class_of};
+    Classifier::new(move |peer: &SocketAddr| {
+        if peer.port() == port {
+            RelayClass::Public
+        } else {
+            class_of(peer)
+        }
+    })
+}
+
+/// Wait until `daemon`'s node names `addr` (iroh reports a bound address shortly after
+/// binding), so that its first beacon does.
+async fn until_named(daemon: &Daemon, addr: SocketAddr) {
+    tokio::time::timeout(WAIT, async {
+        while !daemon.node().addr().ip_addrs().any(|a| *a == addr) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the node never named {addr}: {:?}", daemon.node().addr()));
+}
+
+fn port_of(url: &str) -> u16 {
+    nostr_sdk::prelude::Url::parse(url).unwrap().port().unwrap()
+}
+
+/// The direct addresses `beacon`'s iroh endpoint names: its `addrs`, and those inside each
+/// of its tickets.
+fn iroh_addresses(beacon: &nfx_proto::beacon::Beacon) -> (Vec<String>, Vec<Vec<SocketAddr>>) {
+    beacon
+        .content
+        .endpoints
+        .iter()
+        .find_map(|e| match e {
+            nfx_proto::beacon::Endpoint::Iroh { addrs, tickets, .. } => Some((
+                addrs.clone(),
+                tickets
+                    .values()
+                    .map(|t| {
+                        let t: iroh_blobs::ticket::BlobTicket = t.parse().unwrap();
+                        t.addr().ip_addrs().copied().collect()
+                    })
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .expect("an iroh endpoint")
+}
+
+/// [`iroh_addresses`] of the next beacon `watch` hears.
+async fn next_iroh_addresses(
+    watch: &mut nfx_node::nostr::BeaconWatch,
+) -> (Vec<String>, Vec<Vec<SocketAddr>>) {
+    let beacon = next_beacon(watch).await;
+    iroh_addresses(&beacon)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_reached_at_a_public_address_never_hears_a_private_address() {
+    use nostr_sdk::prelude as ns;
+    // The seeder's own embedded relay (loopback: on this host) and a general relay the
+    // seeder takes for one reached at a public address.
+    let general = ns::LocalRelay::builder().build();
+    general.run().await.unwrap();
+    let general_url = general.url().await.to_string();
+
+    let seed_dir = tmp("public-beacons");
+    let (event, manifest, _) = vector_package(&seed_dir);
+    let a = manifest.a_tag();
+    let port = loopback_iroh_port();
+    let private: SocketAddr = (Ipv4Addr::LOCALHOST, port).into();
+    let seeder = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: seed_dir.join("store"),
+        relays: vec![general_url.clone()],
+        seed: vec![a.clone()],
+        embed_relay: Some("127.0.0.1:0".parse().unwrap()),
+        iroh_bind: Some(private),
+        relay_classifier: public_port(port_of(&general_url)),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let embedded = seeder.relay_url.clone().unwrap();
+    let namespace = manifest.addr.namespace();
+    let on_host = Relays::connect(std::slice::from_ref(&embedded), Duration::from_secs(10))
+        .await
+        .unwrap();
+    let mut on_host_beacons = on_host
+        .watch_beacons(namespace, std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    let world = Relays::connect(std::slice::from_ref(&general_url), Duration::from_secs(10))
+        .await
+        .unwrap();
+    let mut world_beacons = world
+        .watch_beacons(namespace, std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    // The manifest only once the node names its address: then its first beacon does too.
+    until_named(&seeder, private).await;
+    on_host.publish(&event).await.unwrap();
+    world.publish(&event).await.unwrap();
+    until_state(&seeder, &a, &VideoState::Seeding).await;
+
+    // The relay on this host hears the loopback address, in `addrs` and in every ticket.
+    let full = next_beacon(&mut on_host_beacons).await;
+    let (addrs, tickets) = iroh_addresses(&full);
+    assert!(addrs.contains(&private.to_string()), "{addrs:?}");
+    assert!(!tickets.is_empty());
+    for t in &tickets {
+        assert!(t.contains(&private), "{t:?}");
+    }
+    // The other relay hears no address that is not public, in either place.
+    let public = next_beacon(&mut world_beacons).await;
+    let (addrs, tickets) = iroh_addresses(&public);
+    for addr in &addrs {
+        assert!(
+            nfx_node::node::is_public(&addr.parse().unwrap()),
+            "{addrs:?}"
+        );
+    }
+    assert!(!tickets.is_empty());
+    for t in &tickets {
+        assert!(t.iter().all(nfx_node::node::is_public), "{t:?}");
+    }
+
+    // One period's twins, the full one a second newer: a viewer that reads both relays keeps
+    // it whichever arrives first, as a reader keeps a seeder's newest beacon; a viewer of the
+    // public relay only keeps the public one.
+    assert_eq!(full.seeder, public.seeder);
+    assert_eq!(full.created_at, public.created_at + 1);
+    let viewer = std::sync::Arc::new(
+        nfx_node::node::Node::spawn(nfx_node::node::NodeConfig {
+            no_portmapper: true,
+            ..nfx_node::node::NodeConfig::default()
+        })
+        .await
+        .unwrap(),
+    );
+    let names = |pull: &nfx_node::origin::SwarmPull| {
+        pull.peers(&a)
+            .iter()
+            .any(|p| p.ip_addrs().any(|ip| *ip == private))
+    };
+    for (first, second) in [(&public, &full), (&full, &public)] {
+        let both = nfx_node::origin::SwarmPull::new(viewer.clone());
+        both.learn(first);
+        both.learn(second);
+        assert!(names(&both), "lost the full beacon: {:?}", both.peers(&a));
+    }
+    let world_only = nfx_node::origin::SwarmPull::new(viewer.clone());
+    world_only.learn(&public);
+    assert!(!world_only.peers(&a).is_empty());
+    assert!(!names(&world_only), "{:?}", world_only.peers(&a));
+    viewer.close().await.unwrap();
+    on_host.shutdown().await;
+    world.shutdown().await;
+    seeder.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_embedded_relay_on_every_interface_hears_only_public_addresses() {
+    // The node reaches it at loopback, but anyone who can reach the host reads it.
+    let seed_dir = tmp("embedded-everywhere");
+    let (event, manifest, _) = vector_package(&seed_dir);
+    let a = manifest.a_tag();
+    let private: SocketAddr = (Ipv4Addr::LOCALHOST, loopback_iroh_port()).into();
+    let seeder = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: seed_dir.join("store"),
+        seed: vec![a.clone()],
+        embed_relay: Some("0.0.0.0:0".parse().unwrap()),
+        iroh_bind: Some(private),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let embedded = seeder.relay_url.clone().unwrap();
+    let client = Relays::connect(std::slice::from_ref(&embedded), Duration::from_secs(10))
+        .await
+        .unwrap();
+    let mut beacons = client
+        .watch_beacons(manifest.addr.namespace(), std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    until_named(&seeder, private).await;
+    client.publish(&event).await.unwrap();
+    until_state(&seeder, &a, &VideoState::Seeding).await;
+    let (addrs, tickets) = next_iroh_addresses(&mut beacons).await;
+    assert!(!addrs.contains(&private.to_string()), "{addrs:?}");
+    for addr in &addrs {
+        assert!(
+            nfx_node::node::is_public(&addr.parse().unwrap()),
+            "{addrs:?}"
+        );
+    }
+    for t in &tickets {
+        assert!(t.iter().all(nfx_node::node::is_public), "{t:?}");
+    }
+    client.shutdown().await;
+    seeder.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_relay_that_refuses_its_beacon_is_paused_whichever_beacon_it_was() {
+    use nostr_sdk::prelude as ns;
+    // Two general relays that refuse every event as rate-limited: one on loopback (on this
+    // host), one the seeder takes for a relay reached at a public address. Each is sent its
+    // own beacon, and each refusal pauses its relay: by the next beacon period every relay has
+    // asked the node to slow down. The manifest is stored on them directly.
+    let limited = || {
+        ns::LocalRelay::builder()
+            .rate_limit(ns::RateLimit {
+                max_reqs: 500,
+                notes_per_minute: 0,
+            })
+            .build()
+    };
+    let (on_host, world) = (limited(), limited());
+    on_host.run().await.unwrap();
+    world.run().await.unwrap();
+    let seed_dir = tmp("refused-beacons");
+    let (event, manifest, _) = vector_package(&seed_dir);
+    let a = manifest.a_tag();
+    let world_url = world.url().await.to_string();
+    let private: SocketAddr = (Ipv4Addr::LOCALHOST, loopback_iroh_port()).into();
+    let seeder = Daemon::start(Config {
+        keys: Some(Keys::generate()),
+        store: seed_dir.join("store"),
+        relays: vec![on_host.url().await.to_string(), world_url.clone()],
+        seed: vec![a.clone()],
+        iroh_bind: Some(private),
+        relay_classifier: public_port(port_of(&world_url)),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    // The manifest only once the node names its private address, so that the first period
+    // already signs two beacons.
+    until_named(&seeder, private).await;
+    let stored = ns::Event::from_json(serde_json::to_string(&event).unwrap()).unwrap();
+    on_host.add_event(stored.clone()).await.unwrap();
+    world.add_event(stored).await.unwrap();
+    // The first period: both refuse, two beacons (one for each class).
+    let refused = |s: &VideoState| match s {
+        VideoState::Unannounced(why) => why.contains(" or ") && why.contains("(2 refused)"),
+        _ => false,
+    };
+    until_matches(&seeder, &a, WAIT, refused).await;
+    // The next: both are paused, the private one by the full beacon's answer, the other by
+    // the public one's.
+    let paused = |s: &VideoState| match s {
+        VideoState::Unannounced(why) => why.contains("every relay asked this node to slow down"),
+        _ => false,
+    };
+    until_matches(&seeder, &a, WAIT, paused).await;
+    seeder.shutdown().await;
+}

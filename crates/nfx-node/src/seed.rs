@@ -11,6 +11,7 @@ use nfx_proto::hashlist::HashList;
 use nfx_proto::namespace::VideoAddr;
 
 use crate::node::Node;
+use crate::relay_class::RelayClass;
 use crate::store::ContentStore;
 use crate::video::{check_held, held_files, meta_members, rendition_members};
 use crate::{NodeError, Result};
@@ -126,10 +127,19 @@ impl Node {
 
     /// The NFX-03 iroh endpoint for a seeded video. Its tickets name the node's address
     /// as it is now ([`Node::addr`]), not as it was when seeding started: a relay reached
-    /// later, or an address that changed, is in the next beacon.
+    /// later, or an address that changed, is in the next beacon. This is the endpoint for a
+    /// relay on this host's own networks; [`Node::beacon_endpoint_for`] gives any other's.
     #[must_use]
     pub fn beacon_endpoint(&self, seeded: &Seeded) -> BeaconEndpoint {
-        let addr = self.addr();
+        self.beacon_endpoint_for(seeded, RelayClass::Private)
+    }
+
+    /// The iroh endpoint for a seeded video, for readers of `class`: its `addrs` and every
+    /// ticket name [`Node::addr_for`] that class, so a beacon for a relay reached at a public
+    /// address names no private, loopback or link-local address (NFX-03 §4).
+    #[must_use]
+    pub fn beacon_endpoint_for(&self, seeded: &Seeded, class: RelayClass) -> BeaconEndpoint {
+        let addr = self.addr_for(class);
         let ticket = |t: &BlobTicket| BlobTicket::new(addr.clone(), t.hash(), t.format());
         let mut tickets: BTreeMap<String, String> = seeded
             .renditions
