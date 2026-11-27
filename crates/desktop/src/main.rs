@@ -24,8 +24,8 @@
 //! never printed), `settings.json` (relays, share, ratings), and `store/` (content by
 //! sha256).
 //!
-//! Test mode (`NUTFLIX_DESKTOP_TEST` = `{"a", "relays", "iroh_relays", "share", "rating_root",
-//! "general_relays"}` JSON, optional `NUTFLIX_DESKTOP_DATA` = data directory): the page plays
+//! Test mode (`NUTFLIX_VIEWER_TEST` = `{"a", "relays", "iroh_relays", "share", "rating_root",
+//! "general_relays"}` JSON, optional `NUTFLIX_VIEWER_DATA` = data directory): the page plays
 //! that address by itself, reports each step on stdout as JSON lines and exits with
 //! `RESULT PASS|FAIL`.
 
@@ -501,9 +501,9 @@ fn load_settings(path: &Path) -> Settings {
 }
 
 fn main() {
-    let test: Option<TestConfig> = std::env::var("NUTFLIX_DESKTOP_TEST")
+    let test: Option<TestConfig> = std::env::var("NUTFLIX_VIEWER_TEST")
         .ok()
-        .map(|j| serde_json::from_str(&j).expect("NUTFLIX_DESKTOP_TEST is JSON"));
+        .map(|j| serde_json::from_str(&j).expect("NUTFLIX_VIEWER_TEST is JSON"));
     if test.is_some() {
         std::thread::spawn(|| {
             std::thread::sleep(Duration::from_secs(240));
@@ -518,7 +518,7 @@ fn main() {
                 .build(),
         )
         .setup(move |app| {
-            let dir = match std::env::var_os("NUTFLIX_DESKTOP_DATA") {
+            let dir = match std::env::var_os("NUTFLIX_VIEWER_DATA") {
                 Some(d) => PathBuf::from(d),
                 None => app.path().app_data_dir()?,
             };

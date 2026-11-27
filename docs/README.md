@@ -82,7 +82,7 @@ ADRs 0006, 0008 and 0100 to 0110 are nfx's own.
 ### Statements overtaken since the records were written
 
 - **Names.** Records written before 2026-11-26 say `nfxd` for `nutflixd`, `nfx-package` for
-  `nutflix-package`, `nfx-desktop` for `nutflix-desktop` (the viewer's package), and call this
+  `nutflix-package`, `nfx-desktop` for `nutflix-viewer` (the viewer's package), and call this
   repository `nfx` (still its identifier on Nostr). The commands and flags they quote are unchanged;
   the protocol is still NFX.
 - **`nfx/nfx-10-m1-plan.md`**: its header says the work is built on branch

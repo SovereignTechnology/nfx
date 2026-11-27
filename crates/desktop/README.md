@@ -46,7 +46,7 @@ Needs WebKitGTK plus these GStreamer plugins (spike S2):
 
 ## Data
 
-The data directory is the app's data dir, or `NUTFLIX_DESKTOP_DATA`:
+The data directory is the app's data dir, or `NUTFLIX_VIEWER_DATA`:
 
 | Path | What |
 |---|---|

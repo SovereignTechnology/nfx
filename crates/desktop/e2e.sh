@@ -18,10 +18,10 @@ case ${NFX_E2E_DISPLAY:=gnome-shell} in
 esac
 here=$(cd "$(dirname "$0")" && pwd)
 crates=$(cd "$here/.." && pwd)
-work=$(mktemp -d "${TMPDIR:-/tmp}/nutflix-desktop-e2e-XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/nutflix-viewer-e2e-XXXXXX")
 # A display name of this run's own: a fixed one would find the socket a killed compositor
 # left behind, and the app would dial a dead display.
-display="nutflix-desktop-e2e-${work##*-}"
+display="nutflix-viewer-e2e-${work##*-}"
 runtime=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 chmod 700 "$work"
 pids=()
@@ -82,9 +82,9 @@ start_app() { # share tag [more JSON fields]
       [ -S "$XDG_RUNTIME_DIR/$4" ] || { echo "the headless compositor never started"; exit 1; }
       export WAYLAND_DISPLAY="$4" GDK_BACKEND=wayland
     fi
-    NUTFLIX_DESKTOP_TEST="$1" NUTFLIX_DESKTOP_DATA="$2" "$3"
+    NUTFLIX_VIEWER_TEST="$1" NUTFLIX_VIEWER_DATA="$2" "$3"
     echo "EXIT $?"
-  ' _ "$json" "$work/app-$2" "$here/target/release/nutflix-desktop" "$display-$2" \
+  ' _ "$json" "$work/app-$2" "$here/target/release/nutflix-viewer" "$display-$2" \
     "$NFX_E2E_DISPLAY" "$work/xdisplay-$2" > "$work/app-$2.log" 2>&1 &
   pids+=($!)
 }
