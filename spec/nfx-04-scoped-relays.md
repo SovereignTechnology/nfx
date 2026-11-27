@@ -89,9 +89,13 @@ so.
 ## 4. Serving the catalog side
 
 Manifests are low-churn and also belong on the open web of relays: publishers SHOULD
-mirror kind 38504 to a handful of general public relays. Catalog reads SHOULD go to
-public relays first, scoped relays as fallback; beacons NEVER to public relays
-(NFX-03 §7).
+mirror kind 38504 to a handful of general public relays, among them the ones clients read
+by default. Beacons MAY go to general public relays too, within NFX-03 §7's per-relay
+bound. Catalog and beacon reads SHOULD query public and scoped relays together and merge
+the answers (a manifest's newest revision per address, NFX-02; a beacon's newest live one
+per key, NFX-03 §2), so that no single relay, scoped or public, is required: a relay that
+is down or empty costs only its share of the answers. A client SHOULD tell "no relay
+answered" apart from "no videos".
 
 ## 5. Client query patterns (normative)
 
@@ -125,7 +129,9 @@ all:
 - It MAY listen privately (loopback, a LAN or a tailnet) and then SHOULD NOT announce
   itself. When it is publicly reachable it announces per §6 like any other operator.
 - Its host still publishes beacons to the network's other scoped relays (NFX-03 §3):
-  an embedded relay adds a relay, it never becomes the only place a seeder speaks.
+  an embedded relay adds a relay, it never becomes the only place a seeder speaks. A
+  seeder whose scoped relays are all run by one operator, or on one host, SHOULD also
+  publish its manifests and beacons to general public relays (§4, NFX-03 §7).
 - Nothing about embedding is visible on the wire; clients cannot and need not tell an
   embedded relay from a standalone one.
 
@@ -186,3 +192,16 @@ redundancy comes from many operators).
   conformant as before, and so is a reader that ignores it; no reader of NFX-02, -03 or -05
   changes behaviour. A bump would have re-derived every room key and republished every
   manifest, for no reader's benefit. The reasons are in decision record 0108.
+- **Amended in place 2026-11-26, a fourth exception to the freeze rule (the maintainer's
+  decision, sovtech, 2026-11-26: the spec is not locked yet; decision record 0111).** §4:
+  beacons MAY go to general public relays within NFX-03 §7's bound (was: never); catalog
+  and beacon reads SHOULD query public and scoped relays together and merge (was: public
+  first, scoped as fallback); manifests SHOULD be mirrored to the relays clients read by
+  default; a client SHOULD tell "no relay answered" apart from "no videos". §7: a seeder
+  whose scoped relays are all one operator's or on one host SHOULD also publish to general
+  relays. Why: on 2026-11-26 the network's one scoped relay was unreachable for 45 minutes,
+  and clients listed no video and found no seeder, because manifests and beacons lived only
+  there. Why in place and not a `specver` bump, as for #96, #104 and 0108: no artifact
+  changes; a relay, seeder or reader that ignores the new allowances is as conformant as
+  before; no reader of NFX-02, -03 or -05 changes behaviour. A bump would have re-derived
+  every room key and republished every manifest, for no reader's benefit.
